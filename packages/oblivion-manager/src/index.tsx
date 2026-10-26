@@ -5,13 +5,7 @@ import { ControlError, request } from "./control"
 import { preview } from "./preview"
 import { theme } from "./theme"
 import { connectChat } from "./chat"
-import { clipboardClient, createManagerClipboard, serveClipboard } from "./clipboard"
-
-if (process.argv[2] === "--clipboard-client") {
-  const output = await clipboardClient(process.argv[3]).catch(() => { process.exit(1) })
-  process.stdout.write(output)
-  process.exit(0)
-}
+import { createManagerClipboard } from "./clipboard"
 
 const demonstration = process.argv.includes("--preview")
 if (!demonstration && (process.platform !== "linux" || process.getuid?.() !== 1000)) {
@@ -27,8 +21,7 @@ const renderer = await createCliRenderer({
   useMouse: true, targetFps: 60, gatherStats: false,
 })
 const clipboard = createManagerClipboard(renderer)
-const closeClipboard = demonstration ? () => {} : await serveClipboard(clipboard)
-const exit = () => { closeClipboard(); clipboard.dispose(); renderer.destroy(); process.exit(0) }
+const exit = () => { clipboard.dispose(); renderer.destroy(); process.exit(0) }
 
 async function helper(mode: string) {
   await renderer.suspend()

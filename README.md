@@ -100,7 +100,7 @@ Read [SECURITY.md](SECURITY.md) before testing Oblivion with sensitive data.
 | Area | Status |
 | --- | --- |
 | amd64 live USB boot | Tested on physical hardware |
-| arm64 image and Mac VM lab | In active development |
+| arm64 live image | Built; physical and generic-hypervisor validation continues |
 | General and per-session LUKS2 persistence | Implemented and tested |
 | Offline Documents VM | Implemented |
 | Tor and SOCKS5 gateway | Implemented; hardening and UX work continue |
@@ -126,12 +126,21 @@ bun install --frozen-lockfile
 # Canonical lint and type check
 bun run check
 
-# amd64 live image
+# Intel and AMD 64-bit PCs (`amd64` / `x86_64`)
 bun run build:iso
 
-# arm64 live image
+# Apple Silicon and other 64-bit ARM systems (`arm64` / `aarch64`)
 OBLIVION_ARCH=arm64 bun run build:iso
 ```
+
+Intel and AMD use the same `amd64` image; 32-bit x86 is not supported. To run
+Oblivion from QEMU or VirtualBox without a physical USB, prepare a writable
+virtual USB and follow the nested-virtualization requirements in the
+[development guide](docs/DEVELOPMENT.md#run-from-a-virtual-machine).
+
+On Apple Silicon, the native VM path is the `arm64` image in UTM using the Apple
+Virtualization backend. Full sessions require macOS 15 and an M3 or newer chip;
+M1/M2 and VirtualBox ARM cannot expose the nested virtualization Oblivion needs.
 
 Build output is written under `artifacts/`, which is intentionally ignored by Git. The hardware helper creates a dedicated SSH key outside the repository for development images:
 

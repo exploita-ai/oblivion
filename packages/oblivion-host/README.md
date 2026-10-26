@@ -109,7 +109,7 @@ general existence/incomplete flags, pending session IDs and available/planned
 session bytes. Pending IDs and available space are exposed only with a writable
 general; the read-only profile cannot discard attempts.
 
-Service ordering, dedicated accounts, console behavior and Mac reproduction are
+Service ordering, dedicated accounts, console behavior and VM reproduction are
 part of the host trust boundary described in the
 [architecture guide](../../docs/ARCHITECTURE.md). Units must be
 integrated into the live image; do not install their fixed UIDs on a normal

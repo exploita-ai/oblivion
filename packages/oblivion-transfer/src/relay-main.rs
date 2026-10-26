@@ -42,7 +42,7 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(not(target_os = "linux"))]
 fn execute() -> Result<(), Box<dyn std::error::Error>> {
-    // The Mac laboratory tests the relay library with explicit lifetime pipes.
+    // Non-Linux tests exercise the relay library with explicit lifetime pipes.
     // This product binary never silently substitutes them for Linux pidfds.
     Err("linux_required".into())
 }

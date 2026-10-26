@@ -489,9 +489,9 @@ RUN --mount=type=bind,source=artifacts/oblivion-beta-iso/image/oblivion-developm
 FROM scratch AS hardware-iso
 COPY --from=hardware-pack /out/ /
 
-# Fresh guests plus operator diagnostics for the visible ARM laboratory.
+# Fresh guests plus operator diagnostics for a development-only image.
 # Unlike hardware-pack, this target never reuses guests from an older ISO.
-FROM live-pack-tools AS mac-lab-pack
+FROM live-pack-tools AS diagnostic-pack
 COPY --from=hardware-host / /host/
 COPY --from=live-session / /session/
 COPY --from=gateway-system / /gateway/
@@ -504,8 +504,8 @@ COPY script/oblivion/display/ /sources/display/
 COPY script/oblivion/hardware/ /sources/hardware/
 RUN sh /sources/live-pack.sh
 
-FROM scratch AS mac-lab-iso
-COPY --from=mac-lab-pack /out/ /
+FROM scratch AS diagnostic-iso
+COPY --from=diagnostic-pack /out/ /
 
 # Storage-only USB lifecycle lab. The runner attaches a disposable copy of a
 # real ISO as writable USB; no physical device or host filesystem is exposed.

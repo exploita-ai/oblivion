@@ -63,8 +63,8 @@ class VM:
         self.peer = None
         self.process = subprocess.Popen([
             "qemu-system-" + args.architecture,
-            # QEMU's per-mapping DONTDUMP flag is Linux-only. The Mac laboratory
-            # still inherits RLIMIT_CORE=0; it is not a production isolation proof.
+            # QEMU's per-mapping DONTDUMP flag is Linux-only. Other hosts still
+            # inherit RLIMIT_CORE=0; this is not a production isolation proof.
             "-machine", ("virt" if args.architecture == "aarch64" else "q35") + (",dump-guest-core=off,mem-merge=off" if platform.system() == "Linux" else ""),
             "-accel", args.accelerator,
             "-cpu", "host" if args.accelerator in ("hvf", "kvm") else "cortex-a72" if args.architecture == "aarch64" else "max",

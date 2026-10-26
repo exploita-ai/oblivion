@@ -5,7 +5,7 @@ project is not yet ready for sensitive or irreplaceable data.
 
 ## Implemented
 
-- amd64 Debian live boot and an arm64 Mac VM image
+- amd64 and arm64 Debian live images
 - encrypted general settings vault
 - separate LUKS2 volume and password for each persistent session
 - RAM-backed ephemeral mode
@@ -22,7 +22,7 @@ project is not yet ready for sensitive or irreplaceable data.
 - boot, encrypted persistence and a real provider response on physical amd64
   hardware
 - lock and reopen flows on the physical USB candidate
-- arm64 boot, keyboard, time zone, manager navigation and chat in the Mac VM
+- arm64 component builds and automated guest laboratories in CI
 - automated storage, gateway, transfer and session lifecycle laboratories
 
 Validation results belong to the commit that produced them. GitHub Actions
@@ -42,9 +42,12 @@ artifacts instead of storing historical snapshots in this repository.
 ## Known limitations
 
 - cloud inference exposes approved context and output to the provider
-- arm64 currently targets virtual-machine development, not booting Apple Silicon
-  Macs directly from USB
-- nested virtualization is not a supported release target
+- running Oblivion inside another VM requires nested KVM; on Apple Silicon the
+  native target is UTM with Apple Virtualization on macOS 15 and M3 or newer
+- generic ARM hypervisors that do not expose nested virtualization can boot the
+  manager but cannot open sessions
+- arm64 does not yet have the same physical and outer-VM validation coverage as
+  amd64
 - the image is larger and contains more Debian tooling than the final minimal
   profile should contain
 - an unlocked system holds plaintext data and credentials in RAM

@@ -34,8 +34,8 @@ pub fn harden() -> io::Result<()> {
         {
             return Err(io::Error::other("invalid_descriptors"));
         }
-        // Darwin exposes the constant but rejects SO_ACCEPTCONN. The Mac lab
-        // still validates socket type/family; production is Linux-only.
+        // Darwin exposes the constant but rejects SO_ACCEPTCONN. Cross-platform
+        // tests still validate socket type/family; production is Linux-only.
         #[cfg(target_os = "linux")]
         if !control {
             let mut accepting = 0;

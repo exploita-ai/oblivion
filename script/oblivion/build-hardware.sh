@@ -15,6 +15,6 @@ fi
 ssh-keygen -y -f "$key" > "$out/authorized_key.pub"
 # The console handshake lives in the session guest as well as the host. Build
 # both from the same sources; reusing the old ISO would preserve the black screen.
-OBLIVION_IMAGE_TARGET=mac-lab-iso OBLIVION_ISO_OUTPUT="$image" sh script/oblivion/build-live.sh
+OBLIVION_IMAGE_TARGET=diagnostic-iso OBLIVION_ISO_OUTPUT="$image" sh script/oblivion/build-live.sh
 printf 'ISO: %s/oblivion-hardware-test-%s.iso\n' "$image" "${OBLIVION_ARCH:-amd64}"
 printf 'Private SSH key (not in ISO): %s\n' "$key"

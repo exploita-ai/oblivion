@@ -1,10 +1,6 @@
 import { expect, test } from "bun:test"
 import { testRender } from "@opentui/solid"
-import { mkdtemp, rm, stat } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import { createConnection } from "node:net"
-import { createManagerClipboard, clipboardClient, serveClipboard } from "../src/clipboard"
+import { createManagerClipboard } from "../src/clipboard"
 import { ChatViewport, type ChatFrame } from "../src/chat"
 
 test("host selection copies explicitly, paste remains text and session close clears it", async () => {
@@ -34,30 +30,4 @@ test("host selection copies explicitly, paste remains text and session close cle
     await app.mockInput.pressKey("v", { ctrl: true })
     expect(Buffer.from(inputs).toString()).not.toContain("Copy this text")
   } finally { clipboard.dispose(); await app.dispose() }
-})
-
-test("Mac lab clipboard socket is private and accepts only explicit text operations", async () => {
-  const app = await testRender(() => <text>Selected text only</text>, { width: 80, height: 24 })
-  await app.renderer.setupTerminal()
-  const clipboard = createManagerClipboard(app.renderer)
-  const directory = await mkdtemp(join(tmpdir(), "oblivion-clipboard-"))
-  const path = join(directory, "clipboard.sock")
-  const close = await serveClipboard(clipboard, path)
-  const pasted: string[] = []
-  app.renderer.keyInput.on("paste", (event) => pasted.push(new TextDecoder().decode(event.bytes)))
-  try {
-    expect((await stat(path)).mode & 0o777).toBe(0o600)
-    expect(await clipboardClient("copy", path)).toBe("")
-    const send = (value: object) => new Promise<string>((resolve, reject) => {
-      const socket = createConnection(path)
-      let result = ""
-      socket.on("connect", () => socket.end(JSON.stringify(value)))
-      socket.on("data", (bytes) => { result += bytes.toString() })
-      socket.on("end", () => resolve(result)); socket.on("error", reject)
-    })
-    expect(await send({ action: "paste", text: "ciao è\nsecond line" })).toBe('{"text":""}')
-    expect(pasted).toEqual(["ciao è\nsecond line"])
-    expect(await send({ action: "exec", text: "invalid" })).toContain("clipboard_request_failed")
-    expect(pasted).toHaveLength(1)
-  } finally { close(); clipboard.dispose(); await app.dispose(); await rm(directory, { recursive: true, force: true }) }
 })
