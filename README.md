@@ -2,11 +2,11 @@
   <img src="assets/oblivion-logo.svg" width="900" alt="Oblivion — private by design">
 </p>
 
-<h1 align="center">A hardened live environment for high-privacy LLM coding</h1>
+<h1 align="center">A private live environment for AI conversations, discovery and creation</h1>
 
 <p align="center">
-  Boot from USB. Unlock an isolated workspace. Run a full coding agent.<br>
-  Shut down and leave the live runtime behind.
+  Boot from USB. Talk, explore, work with documents, or use a full coding agent.<br>
+  Lock the session and leave the live runtime behind.
 </p>
 
 <p align="center">
@@ -21,15 +21,26 @@
   <a href="#why-oblivion">Why Oblivion</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="#privacy-model">Privacy model</a> ·
+  <a href="#tor-and-network-privacy">Tor</a> ·
+  <a href="#remote-inference-providers">Providers</a> ·
+  <a href="#where-oblivion-runs">Platforms</a> ·
   <a href="#build-from-source">Build</a> ·
   <a href="#join-the-project">Contribute</a>
 </p>
 
 ---
 
-Oblivion is a minimal Debian live system built around an [OpenCode](https://github.com/anomalyco/opencode)-derived coding agent. It gives every persistent session its own VM and LUKS2-encrypted volume, keeps the live runtime in memory, and routes session traffic through a dedicated Tor or SOCKS5 gateway with no direct fallback.
+Oblivion is a minimal Debian live system for private AI conversations, research,
+document work and coding. It is built around an
+[OpenCode](https://github.com/anomalyco/opencode)-derived agent, gives every
+persistent session its own VM and LUKS2-encrypted volume, keeps the live runtime
+in memory, and routes session traffic through a dedicated Tor or SOCKS5 gateway
+with no direct fallback.
 
-It is not another chat wrapper. The agent keeps its coding tools and works with the documents you explicitly place inside its isolated session.
+It is not only a coding tool and it is not another chat wrapper. A session can
+hold several conversations and a shared document workspace: use it to think,
+learn, investigate, write, build, or let the full agent operate on files you
+explicitly place inside that isolated workspace.
 
 > [!WARNING]
 > Oblivion is pre-beta research software. It has not received an independent security audit. The current images are development candidates, not a promise of anonymity or a safe place for irreplaceable secrets.
@@ -84,6 +95,50 @@ Documents mode starts the session VM without a network device, provider token, o
 
 These are implementation goals backed by automated and VM-level tests. They are not a formal proof.
 
+## Tor and network privacy
+
+Tor is the default remote-inference route. Oblivion runs it inside a dedicated
+gateway VM rather than letting the session VM use the host connection. Provider
+traffic and network access explicitly allowed for agent tools cross that gateway;
+direct session egress has no fallback path. An explicit SOCKS5 proxy can replace
+Tor when the user controls or trusts another route.
+
+Tor provides **network anonymity, not content secrecy from the AI provider**.
+It hides the user's public IP from the destination and prevents a single Tor
+relay from seeing both ends of the circuit. HTTPS still protects the request
+from the exit relay, but the selected provider must receive the prompt,
+documents included as context, tool results and generated response in order to
+perform inference. See the Tor Project's explanations of
+[what Tor protects](https://support.torproject.org/about-tor/introduction/protections/)
+and [Tor with HTTPS](https://support.torproject.org/about-tor/security/https-encryption-and-tor/).
+
+Operational consequences are visible in the UI:
+
+- `TOR READY` is shown only after bootstrap and isolation checks succeed.
+- A configured proxy is not considered ready until SOCKS5 negotiation succeeds.
+- Stale observations expire instead of leaving a reassuring green state behind.
+- Oblivion does not contact a public “what is my IP” service automatically.
+- Tor can be slower, can take time to bootstrap, and some providers or websites
+  may block exit relays.
+
+## Remote inference providers
+
+Provider privacy is a separate boundary from Oblivion's local encryption. A
+provider necessarily processes the content sent for a request. “Zero retention”
+below describes each provider's published policy; it is not a technical property
+that Oblivion can independently prove.
+
+| Provider | Oblivion status | Published handling of inference content | Account and payment notes |
+| --- | --- | --- | --- |
+| [Abliteration.ai](https://abliteration.ai/) | **Integrated now** | Its [data-handling policy](https://abliteration.ai/data-handling) says core API prompts, completions and images are processed in memory, not stored and not used for training. Operational telemetry and billing metadata are retained. Optional web search/fetch is outside that zero-retention boundary. | Account and billing data are retained; its current privacy policy describes Stripe payment processing. |
+| [Refuseless](https://refuseless.com/) | **Integration planned** | Its [privacy policy](https://refuseless.com/privacy) says prompts and outputs are not saved or used for training. It may route some requests to third-party model providers and explicitly says it cannot guarantee their retention policy in every case. | OpenAI-compatible API. Accepts card or BTC, ETH, USDT, USDC and XMR according to its [pricing page](https://refuseless.com/pricing). Signup uses email/password or Google; login and billing records are retained. A no-KYC guarantee is **not stated** in its public policy. |
+
+The current production gateway deliberately allowlists one provider endpoint and
+one protocol surface. Refuseless will be marked supported only after its adapter,
+destination policy, credential handling, streaming cancellation and leak tests
+land in the repository. Oblivion will not silently route a request through an
+unreviewed provider.
+
 ## What Oblivion cannot protect
 
 - Prompts, selected documents, tool results, and model output are visible to the cloud provider you use.
@@ -95,6 +150,72 @@ These are implementation goals backed by automated and VM-level tests. They are 
 
 Read [SECURITY.md](SECURITY.md) before testing Oblivion with sensitive data.
 
+## Where Oblivion runs
+
+The physical live-USB path and the VM evaluation path have different security
+properties. On a direct USB boot the computer's installed OS is not running. In
+a VM, the outer OS and hypervisor can observe input, display, memory and storage.
+
+| Host | CPU | Outer OS / hypervisor | Image | Current support |
+| --- | --- | --- | --- | --- |
+| PC booted directly from USB | Intel or AMD 64-bit (`x86_64`) with VT-x/AMD-V | Installed OS is not running | `amd64` | **Primary target; tested on physical hardware** |
+| Linux workstation/server | `x86_64` with nested KVM | Linux + QEMU/KVM | `amd64` | Development/evaluation target |
+| Linux ARM host | `aarch64` with nested KVM | Linux + QEMU/KVM | `arm64` | Supported design; hardware validation pending |
+| Windows PC | Intel or AMD 64-bit with nested virtualization | Windows + VirtualBox | `amd64` | Supported design; physical validation pending |
+| Apple Silicon Mac | M3 or newer | macOS 15+ + UTM Apple Virtualization | `arm64` | Native Mac evaluation target; end-to-end validation in progress |
+| Apple Silicon Mac | M1 or M2 | macOS + UTM | `arm64` | Manager may boot; full sessions are unsupported because nested virtualization is unavailable |
+| Intel Mac | Intel 64-bit | Hypervisor exposing nested VT-x | `amd64` | Unverified |
+| 32-bit x86 or ARM, Windows on ARM without nested KVM | — | — | — | Unsupported |
+
+Full sessions require nested hardware virtualization because Oblivion starts
+separate gateway, session and transfer VMs. There is deliberately no slow
+software-emulation fallback. See the detailed
+[virtual-machine guide](docs/DEVELOPMENT.md#run-from-a-virtual-machine).
+
+### Live USB requirements
+
+- A 64-bit Intel/AMD PC with UEFI and hardware virtualization enabled in
+  firmware; the current physical candidate is `amd64`.
+- A dedicated writable USB drive: **8 GB minimum, 16 GB or more recommended**.
+  The image uses free space after the read-only live system for encrypted data.
+- **8 GB system RAM recommended** for the live host and nested VMs. More memory
+  is useful for large repositories and will be required for future local models.
+- Secure Boot disabled for current development images; signed Secure Boot
+  releases are not available yet.
+- A Debian-supported Ethernet or Wi-Fi adapter. Firmware coverage is broad but
+  not universal, so hardware reports are welcome.
+- Optional second removable media for explicit document import/export. Session
+  filesystems are never shared directly with the host or another session.
+
+Writing the ISO destroys the previous contents of the selected USB. Verify the
+device identity before writing it and never test persistence on irreplaceable
+media.
+
+## Future: the Oblivion local inference engine
+
+Cloud mode can minimize local traces and network metadata, but it cannot be
+fully air-gapped: approved context still leaves the machine for inference. The
+planned **Oblivion Local Inference Engine** completes the offline architecture
+by adding a dedicated inference VM that never receives a network device.
+
+The intended design keeps the existing boundaries rather than embedding a
+model server in the trusted host:
+
+```text
+encrypted model media
+        │ explicit, verified import
+        ▼
+local inference VM ── private channel ── session VM
+        │
+        └── no NIC, no cloud credential, no provider request
+```
+
+Model weights, runtime and accelerator access will need their own signed
+manifests, memory-erasure tests, update process and hardware matrix. Local mode
+will be called air-gapped only after tests prove that the inference path boots
+and operates with every external network interface absent—not merely blocked by
+a UI setting.
+
 ## Project status
 
 | Area | Status |
@@ -104,6 +225,8 @@ Read [SECURITY.md](SECURITY.md) before testing Oblivion with sensitive data.
 | General and per-session LUKS2 persistence | Implemented and tested |
 | Offline Documents VM | Implemented |
 | Tor and SOCKS5 gateway | Implemented; hardening and UX work continue |
+| Abliteration.ai remote inference | Integrated |
+| Refuseless remote inference | Planned; adapter and gateway audit required |
 | Multiple chats per encrypted session | Implemented; persistence recovery under test |
 | Import/export | Implemented with manifest and recovery checks |
 | Reproducible signed releases | Not yet available |
@@ -121,7 +244,7 @@ Development currently requires macOS or Linux, [Bun 1.4.4](https://bun.sh), Dock
 ```sh
 git clone https://github.com/exploita-ai/oblivion.git
 cd oblivion
-bun install --frozen-lockfile
+bun install --frozen-lockfile --os '*' --cpu '*' --libc '*'
 
 # Canonical lint and type check
 bun run check
@@ -186,6 +309,26 @@ Oblivion is an independent project derived from OpenCode v2 and is not affiliate
 ## Join the project
 
 Oblivion is being built in public. Contributions are welcome across the TUI, Debian image, isolation boundary, network gateway, reproducible builds, hardware support, documentation, and security testing.
+
+### What we want to build next
+
+- Finish the minimal Debian package, service, binary and host-egress audit.
+- Add and test the Refuseless adapter without weakening the provider allowlist.
+- Build the offline Oblivion Local Inference Engine and its verified model-import
+  workflow.
+- Add OnionShare-based, explicitly authorized file exchange without introducing
+  a shared session filesystem.
+- Design a disposable browser VM with per-session network rules, download
+  quarantine and no access to other session volumes.
+- Publish reproducible images, signed checksums, provenance and an auditable
+  release profile with every debug path removed.
+- Expand the physical hardware matrix for Wi-Fi, graphics, keyboards, UEFI and
+  nested virtualization.
+- Commission an independent security review before recommending sensitive use.
+
+Roadmap items are design directions, not shipped security claims. Proposals
+should explain which VM owns the feature, what data crosses each boundary, how
+failure is revoked, and what evidence can verify the result.
 
 - Read the [contribution guide](CONTRIBUTING.md) before opening a pull request.
 - Explore the [architecture](docs/ARCHITECTURE.md) and current [project status](docs/STATUS.md).
