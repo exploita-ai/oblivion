@@ -20,9 +20,10 @@ for (const ephemeral of [false, true]) {
       expect(rows.findIndex((row) => row.includes("Add API key N"))).toBeLessThan(rows.findIndex((row) => row.includes("Personal")))
       await app.mockInput.pressKey("n"); await app.renderOnce()
       expect(app.captureCharFrame()).not.toMatch(/Save encrypted|Keep in RAM|› Storage/)
-      await app.mockInput.pressEnter(); await app.mockInput.typeText("synthetic-test-key-secret")
+      await app.mockInput.pressArrow("down"); await app.mockInput.pressEnter(); await app.mockInput.pressEnter()
+      await app.mockInput.typeText("synthetic-test-key-secret")
       await app.mockInput.pressEnter(); await app.mockInput.pressEnter(); await app.renderOnce()
-      expect(commands).toEqual([{ action: ephemeral ? "temporary" : "add", name: "Personal", key: "synthetic-test-key-secret" }])
+      expect(commands).toEqual([{ action: ephemeral ? "temporary" : "add", provider: "refuseless", name: "Personal", key: "synthetic-test-key-secret" }])
       expect(app.captureCharFrame()).not.toContain("synthetic-test-key-secret")
     } finally { await app.dispose() }
   })

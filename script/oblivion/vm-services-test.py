@@ -80,7 +80,7 @@ def key_command(action, **fields):
 
 
 def stored_key():
-    path = Path("/run/oblivion/general/profile/abliteration.keys.json")
+    path = Path("/run/oblivion/general/profile/provider.keys.json")
     if not path.exists():
         return path.with_name("abliteration.key").read_bytes()
     selected = status()["api_keys"]["selected"]
@@ -399,7 +399,7 @@ with socket.socket(socket.AF_UNIX) as client:
     assert status()["api_key_present"] is False
     send(b"a", "API key Abliteration - salvata")
     send(API_KEY + b"\r", "API Abliteration: configurata")
-    key_file = Path("/run/oblivion/general/profile/abliteration.keys.json")
+    key_file = Path("/run/oblivion/general/profile/provider.keys.json")
     assert stored_key() == API_KEY
     assert key_file.stat().st_uid == 0 and key_file.stat().st_mode & 0o777 == 0o600
     assert API_KEY.decode() not in command("status")
@@ -521,7 +521,7 @@ with socket.socket(socket.AF_UNIX) as client:
     for secret in [b"too short", b"invalid-key with-spaces", b"invalid-key-with-newline\n"]:
         assert command("set-api-key", secret=secret, success=False) == "invalid_api_key"
         assert stored_key() == API_KEY
-    pending_key = key_file.with_name("abliteration.keys.json.pending")
+    pending_key = key_file.with_name("provider.keys.json.pending")
     pending_key.symlink_to(key_file)
     assert command("set-api-key", secret=NEXT_API_KEY, success=False) == "file_unavailable"
     pending_key.unlink()

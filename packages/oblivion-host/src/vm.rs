@@ -1,6 +1,7 @@
 use crate::storage::{Error, Result, require};
 use oblivion_host::channel::{self, Channel};
 use oblivion_transport::policy::Tools;
+use oblivion_transport::provider::Provider;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
@@ -129,7 +130,16 @@ impl Config {
         Ok(())
     }
 
-    pub fn start(&self, token: Option<&str>, tools: Option<Tools>) -> Result<()> {
+    pub fn start(
+        &self,
+        token: Option<&str>,
+        provider: Option<Provider>,
+        tools: Option<Tools>,
+    ) -> Result<()> {
+        require(
+            token.is_some() == provider.is_some(),
+            "invalid_provider_grant",
+        )?;
         self.launch(Role::Session, token.is_some(), false)?;
         if let Some(token) = token {
             let stream = UnixStream::connect("/run/oblivion-session/token.sock")
@@ -147,6 +157,15 @@ impl Config {
             require(&ready == b"token\n", "invalid_session_ready")?;
             channel
                 .write_all(token.as_bytes())
+                .map_err(|_| Error("session_channel_failed"))?;
+            channel
+                .write_all(
+                    format!(
+                        "{}\n",
+                        provider.ok_or(Error("invalid_provider_grant"))?.id()
+                    )
+                    .as_bytes(),
+                )
                 .map_err(|_| Error("session_channel_failed"))?;
             channel
                 .read_exact(&mut ready)

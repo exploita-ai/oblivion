@@ -3,6 +3,7 @@ use oblivion_host::terminal::{self, ACTION, BRAND, CLEAR, FEEDBACK, LOGO, RESET,
 use oblivion_host::{egress, keys, network, persistence};
 mod transfer_menu;
 use oblivion_transport::policy::{Action, Rule};
+use oblivion_transport::provider::Provider;
 use oblivion_transport::{Authentication, Metadata, Transport};
 use serde::Deserialize;
 
@@ -897,6 +898,7 @@ fn key_menu(terminal: &mut Terminal, choosing: bool) -> Result<bool> {
                 continue;
             };
             keys::Command::Temporary {
+                provider: Provider::AbliterationAi,
                 name,
                 key: zeroize::Zeroizing::new(std::str::from_utf8(&bytes)?.to_owned()),
             }
@@ -924,6 +926,7 @@ fn key_menu(terminal: &mut Terminal, choosing: bool) -> Result<bool> {
                     continue;
                 };
                 keys::Command::Add {
+                    provider: Provider::AbliterationAi,
                     name,
                     key: zeroize::Zeroizing::new(std::str::from_utf8(&bytes)?.to_owned()),
                 }

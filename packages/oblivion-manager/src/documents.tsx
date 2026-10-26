@@ -172,7 +172,7 @@ export function Documents(props: {
             <text fg={theme.text.base}>{offer()?.manifest.entries.length} entries · {offer()?.manifest.bytes.toLocaleString("en-US")} bytes</text>
             <SelectList theme={palette} focused={props.focused !== false && focus() === "files"} disabled={!!busy()} onFocus={() => focusArea("files")}
               items={(offer()?.manifest.entries ?? []).map((entry) => ({ title: `${entry.kind === "directory" ? "/" : " "} ${entry.path}` }))} />
-            <text fg={theme.text.muted}>{offer()?.export ? "Readable copies leave the encrypted session." : "Verified imports become available to chat; using them as context may send their contents to Abliteration."}</text>
+            <text fg={theme.text.muted}>{offer()?.export ? "Readable copies leave the encrypted session." : "Verified imports become available to chat; using them as context may send their contents to the selected inference provider."}</text>
             <SelectList theme={palette} height={2} focused={props.focused !== false && focus() === "actions"} disabled={!!busy()} onFocus={() => focusArea("actions")}
               items={[{ title: "Confirm copy" }, { title: "Cancel" }]} onSelect={(index) => {
               if (index === 1) { void run("Cancel transfer", home); return }

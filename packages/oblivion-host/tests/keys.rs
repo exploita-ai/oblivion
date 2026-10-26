@@ -1,4 +1,5 @@
 use oblivion_host::keys::{Archive, Command, Keyring, LEGACY};
+use oblivion_transport::provider::Provider;
 use zeroize::Zeroizing;
 
 const FIRST: &str = "synthetic-first-api-key";
@@ -9,6 +10,7 @@ fn ram_default_is_global_and_opening_override_does_not_change_it() {
     let mut temporary = Archive::empty();
     temporary
         .change(Command::Add {
+            provider: Provider::Refuseless,
             name: "Temporary".into(),
             key: Zeroizing::new(SECOND.into()),
         })
@@ -41,12 +43,14 @@ fn named_keys_roundtrip_without_disclosing_secrets_in_status() {
     let mut archive = Archive::empty();
     archive
         .change(Command::Add {
+            provider: Provider::AbliterationAi,
             name: "Personale".into(),
             key: Zeroizing::new(FIRST.into()),
         })
         .unwrap();
     archive
         .change(Command::Add {
+            provider: Provider::Refuseless,
             name: "Lavoro".into(),
             key: Zeroizing::new(SECOND.into()),
         })
@@ -55,6 +59,8 @@ fn named_keys_roundtrip_without_disclosing_secrets_in_status() {
     let status = archive.status(None);
     assert_eq!(status.entries.len(), 2);
     assert_ne!(status.entries[0].id, status.entries[1].id);
+    assert_eq!(status.entries[0].provider, Provider::AbliterationAi);
+    assert_eq!(status.entries[1].provider, Provider::Refuseless);
     assert_eq!(status.selected.as_ref(), Some(&status.entries[0].id));
     assert_eq!(archive.key(&status.entries[1].id), Some(SECOND));
     let public = serde_json::to_string(&status).unwrap();
@@ -63,10 +69,31 @@ fn named_keys_roundtrip_without_disclosing_secrets_in_status() {
 }
 
 #[test]
+fn version_one_archives_migrate_to_abliteration_without_losing_the_key() {
+    let archive = Archive::legacy(Zeroizing::new(FIRST.into())).unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_slice(&archive.encode().unwrap()).unwrap();
+    legacy["version"] = serde_json::json!(1);
+    legacy["entries"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("provider");
+    let migrated = Archive::decode(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert_eq!(migrated.key(LEGACY), Some(FIRST));
+    assert_eq!(
+        migrated.status(None).entries[0].provider,
+        Provider::AbliterationAi
+    );
+    let encoded: serde_json::Value = serde_json::from_slice(&migrated.encode().unwrap()).unwrap();
+    assert_eq!(encoded["version"], 2);
+    assert_eq!(encoded["entries"][0]["provider"], "abliteration-ai");
+}
+
+#[test]
 fn selection_overrides_default_without_rotating_after_removal() {
     let mut archive = Archive::legacy(Zeroizing::new(FIRST.into())).unwrap();
     archive
         .change(Command::Add {
+            provider: Provider::Refuseless,
             name: "Seconda".into(),
             key: Zeroizing::new(SECOND.into()),
         })
@@ -168,6 +195,7 @@ fn temporary_keys_are_marked_and_never_encoded_into_the_saved_archive() {
     let mut temporary = Archive::empty();
     temporary
         .change(Command::Add {
+            provider: Provider::Refuseless,
             name: "Temporanea".into(),
             key: Zeroizing::new(SECOND.into()),
         })
@@ -196,6 +224,7 @@ fn removing_a_temporary_key_never_rotates_to_the_saved_account() {
     let mut temporary = Archive::empty();
     temporary
         .change(Command::Add {
+            provider: Provider::Openrouter,
             name: "RAM".into(),
             key: Zeroizing::new(SECOND.into()),
         })
@@ -217,6 +246,7 @@ fn removing_a_temporary_key_never_rotates_to_the_saved_account() {
         keyring
             .saved
             .change(Command::Temporary {
+                provider: Provider::Openrouter,
                 name: "RAM".into(),
                 key: Zeroizing::new(SECOND.into()),
             })

@@ -1,5 +1,6 @@
 use oblivion_host::{egress, keys, network, persistence, settings, transfers};
 use oblivion_transport::policy::{Policy, Session, Tools};
+use oblivion_transport::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
@@ -356,6 +357,7 @@ pub fn main() -> Result<()> {
             require(api_key_present()?, "api_key_missing")?;
             config.start_gateway()?;
             crate::gateway::ready()?;
+            let provider = selected_provider()?;
             let (saved, selected) = policy_profiles()?;
             let tools = selected
                 .or(saved)
@@ -367,7 +369,7 @@ pub fn main() -> Result<()> {
             let result = (|| {
                 crate::vm::stop(false)?;
                 let token = crate::gateway::prepare()?;
-                vm.start(Some(&token), tools)?;
+                vm.start(Some(&token), Some(provider), tools)?;
                 write_session_info(&id, "chat")
             })();
             if result.is_err() {
@@ -505,6 +507,7 @@ pub fn main() -> Result<()> {
                 } else {
                     require(status.entries.is_empty(), "api_key_missing")?;
                     keys::Command::Add {
+                        provider: Provider::AbliterationAi,
                         name: "Predefinita".to_owned(),
                         key,
                     }
@@ -658,7 +661,12 @@ pub fn main() -> Result<()> {
                 } else {
                     None
                 };
-                vm.start(token.as_deref().map(String::as_str), tools)
+                let provider = if token.is_some() {
+                    Some(selected_provider()?)
+                } else {
+                    None
+                };
+                vm.start(token.as_deref().map(String::as_str), provider, tools)
             })();
             if result.is_err() && config.gateway.is_some() {
                 crate::gateway::revoke()?;
@@ -951,10 +959,18 @@ impl Config {
                 require(keyring.key(&id).is_some(), "api_key_missing")?;
                 Some(id)
             }
-            keys::Command::Temporary { name, key } => {
+            keys::Command::Temporary {
+                provider,
+                name,
+                key,
+            } => {
                 keyring
                     .temporary
-                    .change(keys::Command::Add { name, key })
+                    .change(keys::Command::Add {
+                        provider,
+                        name,
+                        key,
+                    })
                     .map_err(Error)?;
                 let id = keyring
                     .temporary
@@ -1240,9 +1256,10 @@ fn read_api_keys() -> Result<keys::Archive> {
     if !profile_directory()? {
         return Ok(keys::Archive::empty());
     }
-    let path = Path::new(PROFILE).join("abliteration.keys.json");
-    if let Some(archive) = read_key_archive(&path)? {
-        return Ok(archive);
+    for name in ["provider.keys.json", "abliteration.keys.json"] {
+        if let Some(archive) = read_key_archive(&Path::new(PROFILE).join(name))? {
+            return Ok(archive);
+        }
     }
     let path = Path::new(PROFILE).join("abliteration.key");
     match fs::symlink_metadata(&path) {
@@ -1289,19 +1306,36 @@ fn api_key_present() -> Result<bool> {
     Ok(read_keyring()?.status(key_selection()?).selected.is_some())
 }
 
-fn read_api_key() -> Result<Zeroizing<Vec<u8>>> {
+pub(crate) struct ApiKey {
+    pub provider: Provider,
+    pub secret: Zeroizing<Vec<u8>>,
+}
+
+fn read_api_key() -> Result<ApiKey> {
     let archive = read_keyring()?;
     let id = archive
         .status(key_selection()?)
         .selected
         .ok_or(Error("api_key_missing"))?;
-    Ok(Zeroizing::new(
-        archive
-            .key(&id)
-            .ok_or(Error("api_key_missing"))?
-            .as_bytes()
-            .to_vec(),
-    ))
+    Ok(ApiKey {
+        provider: archive.provider(&id).ok_or(Error("api_key_missing"))?,
+        secret: Zeroizing::new(
+            archive
+                .key(&id)
+                .ok_or(Error("api_key_missing"))?
+                .as_bytes()
+                .to_vec(),
+        ),
+    })
+}
+
+fn selected_provider() -> Result<Provider> {
+    let keyring = read_keyring()?;
+    let id = keyring
+        .status(key_selection()?)
+        .selected
+        .ok_or(Error("api_key_missing"))?;
+    keyring.provider(&id).ok_or(Error("api_key_missing"))
 }
 
 // Absence uses the saved default. An empty selection explicitly disables it;
@@ -1600,10 +1634,15 @@ pub(crate) fn save_tor_state(state: &oblivion_tor_state::State) -> Result<()> {
 
 fn save_api_keys(archive: &keys::Archive) -> Result<()> {
     let directory = Path::new(PROFILE);
-    let path = directory.join("abliteration.keys.json");
-    let pending = directory.join("abliteration.keys.json.pending");
+    let path = directory.join("provider.keys.json");
+    let pending = directory.join("provider.keys.json.pending");
     let mut legacy = Vec::new();
-    for name in ["abliteration.key", "abliteration.key.pending"] {
+    for name in [
+        "abliteration.key",
+        "abliteration.key.pending",
+        "abliteration.keys.json",
+        "abliteration.keys.json.pending",
+    ] {
         let file = directory.join(name);
         match fs::symlink_metadata(&file) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

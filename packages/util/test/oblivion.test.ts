@@ -43,6 +43,7 @@ test("compiled Oblivion disables logs, OTLP and heap snapshots despite environme
               TMPDIR: directory,
               TEMP: directory,
               OBLIVION_PROFILE: String(!profile),
+              OBLIVION_PROVIDER: "refuseless",
               OPENCODE_PRINT_LOGS: "1",
               OPENCODE_LOG_LEVEL: "DEBUG",
               OTEL_EXPORTER_OTLP_ENDPOINT: `${server.url.origin}/${profile}`,
@@ -57,7 +58,10 @@ test("compiled Oblivion disables logs, OTLP and heap snapshots despite environme
           child.exited,
         ])
         expect(code, stderr).toBe(0)
-        expect(JSON.parse(stdout)).toEqual({ oblivion: profile })
+        expect(JSON.parse(stdout)).toEqual({
+          oblivion: profile,
+          provider: profile ? "refuseless" : "abliteration-ai",
+        })
         return { profile, directory, stderr, files: await fs.readdir(directory, { recursive: true }) }
       }),
     )

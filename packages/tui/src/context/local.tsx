@@ -45,11 +45,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const models = () =>
       data.location.model
         .list(location.ref)
-        ?.filter((model) => !Oblivion.enabled || model.providerID === "abliteration-ai")
+        ?.filter((model) => !Oblivion.enabled || model.providerID === Oblivion.providerID)
     const providers = () =>
       data.location.provider
         .list(location.ref)
-        ?.filter((provider) => !Oblivion.enabled || provider.id === "abliteration-ai")
+        ?.filter((provider) => !Oblivion.enabled || provider.id === Oblivion.providerID)
 
     function isModelValid(model: ModelPreferenceModel) {
       return !!models()?.some((item) => item.providerID === model.providerID && item.id === model.modelID)

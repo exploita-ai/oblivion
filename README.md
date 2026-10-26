@@ -131,13 +131,16 @@ that Oblivion can independently prove.
 | Provider | Oblivion status | Published handling of inference content | Account and payment notes |
 | --- | --- | --- | --- |
 | [Abliteration.ai](https://abliteration.ai/) | **Integrated now** | Its [data-handling policy](https://abliteration.ai/data-handling) says core API prompts, completions and images are processed in memory, not stored and not used for training. Operational telemetry and billing metadata are retained. Optional web search/fetch is outside that zero-retention boundary. | Account and billing data are retained; its current privacy policy describes Stripe payment processing. |
-| [Refuseless](https://refuseless.com/) | **Integration planned** | Its [privacy policy](https://refuseless.com/privacy) says prompts and outputs are not saved or used for training. It may route some requests to third-party model providers and explicitly says it cannot guarantee their retention policy in every case. | OpenAI-compatible API. Accepts card or BTC, ETH, USDT, USDC and XMR according to its [pricing page](https://refuseless.com/pricing). Signup uses email/password or Google; login and billing records are retained. A no-KYC guarantee is **not stated** in its public policy. |
+| [Refuseless](https://refuseless.com/) | **Integrated now** | Its [privacy policy](https://refuseless.com/privacy) says prompts and outputs are not saved or used for training. It may route some requests to third-party model providers and explicitly says it cannot guarantee their retention policy in every case. | OpenAI-compatible API. Accepts card or BTC, ETH, USDT, USDC and XMR according to its [pricing page](https://refuseless.com/pricing). Signup uses email/password or Google; login and billing records are retained. A no-KYC guarantee is **not stated** in its public policy. |
+| [OpenRouter](https://openrouter.ai/) | **Integrated with mandatory ZDR routing** | Oblivion overwrites every request with `zdr: true`, `data_collection: deny` and `allow_fallbacks: false`. OpenRouter [documents ZDR at endpoint level](https://openrouter.ai/docs/guides/features/zdr); a model with no eligible ZDR endpoint fails closed instead of falling back. | OpenRouter and the selected upstream still process the request. ZDR does not cover optional server tools or plugins; Oblivion does not enable those provider-side features. |
 
-The current production gateway deliberately allowlists one provider endpoint and
-one protocol surface. Refuseless will be marked supported only after its adapter,
-destination policy, credential handling, streaming cancellation and leak tests
-land in the repository. Oblivion will not silently route a request through an
-unreviewed provider.
+The production gateway allowlists exactly one endpoint for the provider selected
+for that chat opening. The real API key remains in the gateway VM; the session
+receives only a revocable local capability and the provider identifier. Refuseless
+uses OpenCode's OpenAI-compatible adapter, while OpenRouter uses OpenCode's native
+adapter. Provider routing fields supplied by a model or client cannot weaken the
+gateway's OpenRouter ZDR policy. Oblivion will not silently route a request through
+an unreviewed provider.
 
 ## What Oblivion cannot protect
 
@@ -226,7 +229,8 @@ a UI setting.
 | Offline Documents VM | Implemented |
 | Tor and SOCKS5 gateway | Implemented; hardening and UX work continue |
 | Abliteration.ai remote inference | Integrated |
-| Refuseless remote inference | Planned; adapter and gateway audit required |
+| Refuseless remote inference | Integrated through the fixed provider gateway |
+| OpenRouter remote inference | Integrated; ZDR-only endpoints enforced per request |
 | Multiple chats per encrypted session | Implemented; persistence recovery under test |
 | Import/export | Implemented with manifest and recovery checks |
 | Reproducible signed releases | Not yet available |
@@ -313,7 +317,7 @@ Oblivion is being built in public. Contributions are welcome across the TUI, Deb
 ### What we want to build next
 
 - Finish the minimal Debian package, service, binary and host-egress audit.
-- Add and test the Refuseless adapter without weakening the provider allowlist.
+- Expand audited provider support without weakening the per-opening endpoint allowlist.
 - Build the offline Oblivion Local Inference Engine and its verified model-import
   workflow.
 - Add OnionShare-based, explicitly authorized file exchange without introducing

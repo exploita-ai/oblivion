@@ -315,7 +315,7 @@ export const layer = (options?: Options) =>
         return Service.of({
           get: () =>
             bundledSnapshot.pipe(
-              Effect.map((catalog) => catalog.filter((item) => item.info.id === "abliteration-ai")),
+              Effect.map((catalog) => catalog.filter((item) => item.info.id === Oblivion.providerID)),
               Effect.orDie,
             ),
           refresh: () => Effect.void,

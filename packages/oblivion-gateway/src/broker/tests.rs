@@ -9,6 +9,7 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
+use oblivion_transport::provider::Provider;
 use rcgen::generate_simple_self_signed;
 use rustls::{
     ServerConfig,
@@ -82,6 +83,7 @@ impl Fixture {
         ));
         let socks = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let credentials = Credentials {
+            provider: Provider::AbliterationAi,
             api_key: KEY.to_owned().into(),
             session_token: token.to_owned().into(),
             socks: socks.local_addr().unwrap(),

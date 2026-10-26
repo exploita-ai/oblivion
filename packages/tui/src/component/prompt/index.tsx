@@ -319,7 +319,7 @@ export function Prompt(props: PromptProps) {
     toast.show({
       variant: "warning",
       message: Oblivion.enabled
-        ? "Abliteration is unavailable for this session"
+        ? "The inference provider is unavailable for this session"
         : "Connect an integration to send prompts",
       duration: 3000,
     })

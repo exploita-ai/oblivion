@@ -41,17 +41,17 @@ test.skipIf(!Oblivion.enabled).each([100, 44])("Oblivion limits the actual app s
         return json({
           location,
           data: [
-            { id: "abliteration-ai", name: "Abliteration" },
+            { id: Oblivion.providerID, name: "Allowed provider" },
             { id: "other", name: "Other" },
           ],
         })
       if (url.pathname === "/api/model")
         return json({
           location,
-          data: ["abliteration-ai", "other"].map((providerID) => ({
+          data: [Oblivion.providerID, "other"].map((providerID) => ({
             id: "fixture",
             providerID,
-            name: providerID === "abliteration-ai" ? "Allowed model" : "Excluded model",
+            name: providerID === Oblivion.providerID ? "Allowed model" : "Excluded model",
             variants: [],
             cost: [],
             time: { released: 0 },

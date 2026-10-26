@@ -1,4 +1,5 @@
 pub mod policy;
+pub mod provider;
 
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddrV4};

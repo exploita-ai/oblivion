@@ -136,7 +136,7 @@ test("welcome keyboard settings apply only temporarily, then ephemeral access us
   } finally { await app.dispose() }
 })
 
-test("USB setup submits confirmation and passwords, then opens the saved-settings wizard", async () => {
+test("encrypted storage setup submits confirmation and passwords, then opens the saved-settings wizard", async () => {
   const base = preview(() => {})
   const initial = status.parse(JSON.parse(await base.request({ operation: "status" })))
   let current = { ...initial, general_present: false, general_open: false, general_mounted: false, sessions: [] }
@@ -161,6 +161,10 @@ test("USB setup submits confirmation and passwords, then opens the saved-setting
   try {
     await app.renderOnce()
     expect(app.captureCharFrame()).toContain("ACCESS / First-time setup")
+    expect(app.captureCharFrame()).toContain("Create encrypted storage")
+    expect(app.captureCharFrame().match(/Keyboard (?:& time zone|\/ Time)/g)).toHaveLength(1)
+    expect(app.captureCharFrame()).not.toContain("Test keyboard")
+    expect(app.captureCharFrame()).not.toContain("USB")
     await app.mockInput.pressEnter()
     await app.mockInput.pressArrow("down")
     await app.mockInput.pressEnter()
@@ -210,7 +214,7 @@ test("controller errors retain their specific message and allow another unlock a
   } finally { app.renderer.destroy(); await app.renderer.closed }
 })
 
-test("USB setup without explicit confirmation never reports a completed preparation", async () => {
+test("encrypted storage setup without explicit confirmation never reports a completed preparation", async () => {
   const runtime = preview(() => {})
   const initial = status.parse(JSON.parse(await runtime.request({ operation: "status" })))
   initial.general_present = false
@@ -225,7 +229,7 @@ test("USB setup without explicit confirmation never reports a completed preparat
     await app.mockInput.pressKey("TAB")
     await app.mockInput.pressEnter()
     await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("Choose 'Use this USB's free space'")
+    expect(app.captureCharFrame()).toContain("Choose 'Use the available free space'")
     expect(app.captureCharFrame()).not.toContain("completed.")
     expect(app.captureCharFrame()).not.toContain("Could not complete")
   } finally { app.renderer.destroy(); await app.renderer.closed }
@@ -285,8 +289,8 @@ test("starting chat without keys opens an inline form and keeps offline document
     await app.renderOnce()
     await app.mockInput.pressKey("F6")
     await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("Add an Abliteration API key")
-    expect(app.captureCharFrame()).toContain("SESSION / aaaaaaaa / Add an Abliteration API key")
+    expect(app.captureCharFrame()).toContain("Add provider API key")
+    expect(app.captureCharFrame()).toContain("SESSION / aaaaaaaa / Add provider API key")
     await app.mockInput.pressEscape()
     await app.mockInput.pressKey("F7")
     await app.renderOnce()

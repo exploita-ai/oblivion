@@ -1,5 +1,6 @@
 use oblivion_gateway::egress::Tools;
 use oblivion_transport::Transport;
+use oblivion_transport::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -18,6 +19,7 @@ const FRAME_LIMIT: usize = 512 * 1024;
 #[serde(tag = "operation", rename_all = "kebab-case", deny_unknown_fields)]
 enum Request {
     Configure {
+        provider: Provider,
         api_key: Zeroizing<String>,
         #[serde(default)]
         transport: Transport,
@@ -84,6 +86,7 @@ pub fn run() -> io::Result<()> {
 
 fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
     let mut key = None;
+    let mut provider = None;
     let mut transport = None;
     let mut tor = None;
     let mut firewall = None;
@@ -145,6 +148,7 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                 continue;
             }
             Request::Configure {
+                provider: selected_provider,
                 api_key,
                 transport: selected,
             } => {
@@ -157,6 +161,7 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                 crate::network::configure(&selected)?;
                 firewall = Some(crate::network::snapshot()?);
                 transport = Some(selected);
+                provider = Some(selected_provider);
                 key = Some(api_key);
             }
             Request::Grant { token, tools } => {
@@ -172,10 +177,17 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                 let transport = transport
                     .as_ref()
                     .ok_or_else(|| io::Error::other("not_configured"))?;
+                let provider = provider.ok_or_else(|| io::Error::other("not_configured"))?;
                 if matches!(transport, Transport::Tor {}) && tor.is_none() {
                     return Err(io::Error::other("tor_not_initialized"));
                 }
-                *api = Some(Grant::start(key, &token, transport, tools.as_ref())?);
+                *api = Some(Grant::start(
+                    provider,
+                    key,
+                    &token,
+                    transport,
+                    tools.as_ref(),
+                )?);
             }
             Request::Revoke {} | Request::Shutdown {} => {
                 if let Some(mut current) = api.take() {
@@ -217,7 +229,7 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
         channel.write(
             &serde_json::to_vec(&Reply {
                 ok: true,
-                configured: key.is_some(),
+                configured: key.is_some() && provider.is_some(),
                 active: api.is_some(),
             })?,
             api,
@@ -236,6 +248,7 @@ struct Grant {
 
 impl Grant {
     fn start(
+        provider: Provider,
         key: &str,
         token: &str,
         transport: &Transport,
@@ -243,6 +256,7 @@ impl Grant {
     ) -> io::Result<Self> {
         #[derive(Serialize)]
         struct EgressCredentials<'a> {
+            provider: Provider,
             transport: &'a Transport,
             session_token: &'a str,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -251,6 +265,7 @@ impl Grant {
         let egress = Process::start(
             Role::Egress,
             Zeroizing::new(serde_json::to_vec(&EgressCredentials {
+                provider,
                 transport,
                 session_token: token,
                 tools,
@@ -258,6 +273,7 @@ impl Grant {
         )?;
         #[derive(Serialize)]
         struct ApiCredentials<'a> {
+            provider: Provider,
             api_key: &'a str,
             session_token: &'a str,
             socks: &'static str,
@@ -265,6 +281,7 @@ impl Grant {
         let api = Process::start(
             Role::Api,
             Zeroizing::new(serde_json::to_vec(&ApiCredentials {
+                provider,
                 api_key: key,
                 session_token: token,
                 socks: "127.0.0.1:9051",

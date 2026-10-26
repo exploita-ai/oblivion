@@ -20,7 +20,7 @@ export function preview(exit: () => void): Runtime {
     sessions: ["a".repeat(32), "b".repeat(32), "c".repeat(32)], incomplete_sessions: [],
     available_bytes: 2095181824, session_bytes: 536870912, vm_state: "inactive", laboratory_emulation: false,
     recovery_required: false, api_key_present: true,
-    api_keys: { entries: [{ id: "d".repeat(32), name: "Personal", temporary: false }], default: "d".repeat(32), selected: "d".repeat(32) },
+    api_keys: { entries: [{ id: "d".repeat(32), provider: "abliteration-ai", name: "Personal", temporary: false }], default: "d".repeat(32), selected: "d".repeat(32) },
     egress: { saved: { mode: "tor" }, selected: { mode: "tor" }, temporary: false },
     network_policy: { enabled: false, temporary: false, policy: { version: 1, rules: [] } },
     gateway_state: "active", gateway_vm_state: "active", gateway_network: true,
@@ -87,11 +87,11 @@ export function preview(exit: () => void): Runtime {
       if (input.operation === "create") { const id = crypto.randomUUID().replaceAll("-", ""); state = { ...state, sessions: [...state.sessions, id] }; return id }
       if (input.operation === "open-documents-ephemeral") { state = { ...state, session_open: true, session_mode: "documents", active_session: "ephemeral", network_status: { label: "OFFLINE · NO NETWORK DEVICE", host_link: "CONNECTED", age_ms: 0, direct_blocked: true } }; return "" }
       if (input.operation === "api-keys") {
-        const value = z.object({ action: z.enum(["add", "temporary", "select", "default", "rename", "replace", "remove"]), id: z.string().optional(), name: z.string().optional() }).parse(JSON.parse(new TextDecoder().decode(input.payload)))
+        const value = z.object({ action: z.enum(["add", "temporary", "select", "default", "rename", "replace", "remove"]), id: z.string().optional(), provider: z.enum(["abliteration-ai", "refuseless", "openrouter"]).optional(), name: z.string().optional() }).parse(JSON.parse(new TextDecoder().decode(input.payload)))
         const keys = state.api_keys ?? { entries: [], default: null, selected: null }
         if (value.action === "add" || value.action === "temporary") {
           const id = crypto.randomUUID().replaceAll("-", "")
-          state = { ...state, api_keys: { ...keys, default: keys.default ?? id, entries: [...keys.entries, { id, name: value.name ?? "Preview", temporary: value.action === "temporary" }] } }
+          state = { ...state, api_keys: { ...keys, default: keys.default ?? id, entries: [...keys.entries, { id, provider: value.provider ?? "abliteration-ai", name: value.name ?? "Preview", temporary: value.action === "temporary" }] } }
           return ""
         }
         state = { ...state, api_keys: { entries: keys.entries.filter((entry) => value.action !== "remove" || entry.id !== value.id).map((entry) => entry.id === value.id && value.action === "rename" ? { ...entry, name: value.name ?? entry.name } : entry), default: value.action === "default" ? value.id ?? null : value.action === "remove" && keys.default === value.id ? null : keys.default, selected: value.action === "select" ? value.id ?? null : value.action === "remove" && keys.selected === value.id ? null : keys.selected } }

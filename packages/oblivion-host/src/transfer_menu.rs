@@ -206,7 +206,7 @@ fn copy(terminal: &mut Terminal, started: &Started, path: String, export: bool) 
         if export {
             view.push_str(&format!("\r\n The copy will leave the encrypted session volume.\r\n Existing files will not be overwritten.\r\n {ACTION}[E] Confirm export  [Up/Down] Scroll\r\n [Esc] Cancel  [B] Lock everything{RESET}"));
         } else {
-            view.push_str(&format!("\r\n After confirmation, verified files will be available to the chat.\r\n Using them as context may send their contents to Abliteration.\r\n\r\n {ACTION}[I] Import into chat  [Up/Down] Scroll\r\n [Esc] Cancel  [B] Lock everything{RESET}"));
+            view.push_str(&format!("\r\n After confirmation, verified files will be available to the chat.\r\n Using them as context may send their contents to the selected inference provider.\r\n\r\n {ACTION}[I] Import into chat  [Up/Down] Scroll\r\n [Esc] Cancel  [B] Lock everything{RESET}"));
         }
         terminal.write(&view)?;
         let input = terminal.input(1000)?;

@@ -630,12 +630,12 @@ if SOCKS:
     stopped()
     assert command("enter-ephemeral", success=False) == "gateway_unavailable"
     assert not Path("/run/oblivion/ephemeral.luks").exists()
-    saved_keys = Path("/run/oblivion/general/profile/abliteration.keys.json").read_bytes()
+    saved_keys = Path("/run/oblivion/general/profile/provider.keys.json").read_bytes()
     temporary_command = json.dumps({"action": "temporary", "name": "Solo RAM", "key": RAM_KEY.decode()}).encode()
     command("api-keys", secret=temporary_command)
     ready()
     assert status()["api_keys"]["entries"][0]["temporary"]
-    assert Path("/run/oblivion/general/profile/abliteration.keys.json").read_bytes() == saved_keys
+    assert Path("/run/oblivion/general/profile/provider.keys.json").read_bytes() == saved_keys
     check("an empty saved key archive leaves the ephemeral gateway stopped; a new RAM-only key starts it without writing the read-only profile")
     assert status()["general_readonly"] and status()["sessions"] == []
     assert tor_state.read_bytes() == saved_tor_state

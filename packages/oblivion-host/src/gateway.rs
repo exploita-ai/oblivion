@@ -3,6 +3,7 @@ use crate::vm::{self, Role};
 use oblivion_host::channel::Channel;
 use oblivion_transport::Transport;
 use oblivion_transport::policy::Tools;
+use oblivion_transport::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -178,7 +179,7 @@ fn request(request: &Request<'_>, active: bool) -> Result<()> {
 
 pub fn serve(
     config: &vm::Config,
-    key: Zeroizing<Vec<u8>>,
+    key: crate::storage::ApiKey,
     transport: Transport,
     network: bool,
 ) -> Result<()> {
@@ -195,7 +196,7 @@ pub fn serve(
     stopped
 }
 
-fn connected(key: Zeroizing<Vec<u8>>, transport: Transport, network: bool) -> Result<()> {
+fn connected(key: crate::storage::ApiKey, transport: Transport, network: bool) -> Result<()> {
     let tor = matches!(transport, Transport::Tor {});
     let stream = UnixStream::connect(format!("{}/control.sock", Role::Gateway.runtime()))
         .map_err(|_| Error("gateway_channel_unavailable"))?;
@@ -208,14 +209,16 @@ fn connected(key: Zeroizing<Vec<u8>>, transport: Transport, network: bool) -> Re
     #[derive(Serialize)]
     struct Configure<'a> {
         operation: &'static str,
+        provider: Provider,
         api_key: &'a str,
         transport: &'a Transport,
     }
     let request = Zeroizing::new(
         serde_json::to_vec(&Configure {
             operation: "configure",
+            provider: key.provider,
             transport: &transport,
-            api_key: std::str::from_utf8(&key).map_err(|_| Error("invalid_api_key"))?,
+            api_key: std::str::from_utf8(&key.secret).map_err(|_| Error("invalid_api_key"))?,
         })
         .map_err(|_| Error("gateway_encode_failed"))?,
     );

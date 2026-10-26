@@ -83,7 +83,7 @@ function DialogConnectedModels(props: {
   )
   const models = createMemo(() =>
     (data.location.model.list(location.ref) ?? []).filter(
-      (model) => !Oblivion.enabled || model.providerID === "abliteration-ai",
+      (model) => !Oblivion.enabled || model.providerID === Oblivion.providerID,
     ),
   )
 

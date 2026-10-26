@@ -1,6 +1,7 @@
 use oblivion_transport::Transport;
 pub use oblivion_transport::policy::Tools;
 use oblivion_transport::policy::{Action, Destination};
+use oblivion_transport::provider::Provider;
 use serde::Deserialize;
 use std::{
     io,
@@ -20,12 +21,12 @@ use zeroize::Zeroizing;
 
 const USER: &[u8] = b"oblivion-api";
 const TOOLS_USER: &[u8] = b"oblivion-tools";
-const HOST: &[u8] = b"api.abliteration.ai";
 const HANDSHAKE: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
+    pub provider: Provider,
     pub transport: Transport,
     pub session_token: Zeroizing<String>,
     #[serde(default)]
@@ -165,7 +166,7 @@ impl Egress {
             (Some(destination), true) => self.credentials.tools.as_ref().is_some_and(|tools| {
                 tools.policy.decision(&tools.session, destination) == Action::Allow
             }),
-            (Some(_), false) => host.as_bytes() == HOST && port == 443,
+            (Some(_), false) => host == self.credentials.provider.host() && port == 443,
             _ => false,
         };
         // Ask is closed until the trusted manager approval channel is wired.

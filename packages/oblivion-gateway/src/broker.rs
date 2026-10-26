@@ -10,6 +10,7 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
+use oblivion_transport::provider::Provider;
 use reqwest::{
     Client, ClientBuilder, Proxy,
     header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue},
@@ -26,7 +27,6 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-const ORIGIN: &str = "https://api.abliteration.ai/v1/chat/completions";
 const REQUEST_LIMIT: usize = 16 * 1024 * 1024;
 const RESPONSE_LIMIT: usize = 64 * 1024 * 1024;
 type Body = UnsyncBoxBody<Bytes, io::Error>;
@@ -34,6 +34,7 @@ type Body = UnsyncBoxBody<Bytes, io::Error>;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
+    pub provider: Provider,
     pub api_key: Zeroizing<String>,
     pub session_token: Zeroizing<String>,
     pub socks: SocketAddr,
@@ -42,6 +43,7 @@ pub struct Credentials {
 // One process/instance per grant; it cannot be rearmed for a different session.
 // Revocation drops the listener, every HTTP task, and their upstream streams.
 pub struct Broker {
+    provider: Provider,
     client: Client,
     authorization: Zeroizing<String>,
     slots: Arc<Semaphore>,
@@ -96,6 +98,7 @@ impl Broker {
 
     fn with_client(credentials: Credentials, client: Client) -> Self {
         Self {
+            provider: credentials.provider,
             client,
             authorization: Zeroizing::new(format!("Bearer {}", credentials.session_token.as_str())),
             slots: Arc::new(Semaphore::new(4)),
@@ -191,13 +194,13 @@ impl Broker {
         let Ok(Ok(body)) = body else {
             return error(StatusCode::PAYLOAD_TOO_LARGE, "body_limit");
         };
-        let Ok(body) = request::validate(&body.to_bytes()) else {
+        let Ok(body) = request::validate(self.provider, &body.to_bytes()) else {
             return error(StatusCode::BAD_REQUEST, "request_denied");
         };
         let upstream = tokio::select! {
             biased;
             _ = self.cancelled.cancelled() => return error(StatusCode::FORBIDDEN, "session_closed"),
-            response = self.client.post(ORIGIN)
+            response = self.client.post(self.provider.origin())
                 .header(CONTENT_TYPE, "application/json")
                 .header("accept", "text/event-stream")
                 .body(body).send() => response,

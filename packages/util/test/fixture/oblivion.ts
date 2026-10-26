@@ -12,4 +12,4 @@ await Effect.gen(function* () {
       throw new Error("Expected explicit snapshot refusal")
   }
 }).pipe(Effect.provide(Observability.layer()), Effect.runPromise)
-process.stdout.write(JSON.stringify({ oblivion: Oblivion.enabled }))
+process.stdout.write(JSON.stringify({ oblivion: Oblivion.enabled, provider: Oblivion.providerID }))

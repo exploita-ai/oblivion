@@ -1,13 +1,23 @@
 use super::*;
-use oblivion_transport::{Authentication, Metadata};
+use oblivion_transport::{Authentication, Metadata, provider::Provider};
 use serde_json::{Value, json};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use tokio::sync::oneshot;
 
 const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const HOST: &[u8] = b"api.abliteration.ai";
 
 fn configuration(endpoint: SocketAddrV4, authenticated: bool) -> Credentials {
+    provider_configuration(Provider::AbliterationAi, endpoint, authenticated)
+}
+
+fn provider_configuration(
+    provider: Provider,
+    endpoint: SocketAddrV4,
+    authenticated: bool,
+) -> Credentials {
     Credentials {
+        provider,
         session_token: Zeroizing::new(TOKEN.into()),
         tools: None,
         transport: Transport::Socks5 {
@@ -40,6 +50,19 @@ async fn configured_fixture(
     TcpListener,
     tokio::task::JoinHandle<io::Result<()>>,
 ) {
+    configured_provider_fixture(authenticated, tools, Provider::AbliterationAi).await
+}
+
+async fn configured_provider_fixture(
+    authenticated: bool,
+    tools: Option<Tools>,
+    provider: Provider,
+) -> (
+    Arc<Egress>,
+    TcpStream,
+    TcpListener,
+    tokio::task::JoinHandle<io::Result<()>>,
+) {
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -49,7 +72,8 @@ async fn configured_fixture(
     let egress = Arc::new(Egress {
         credentials: Credentials {
             tools,
-            ..configuration(
+            ..provider_configuration(
+                provider,
                 SocketAddrV4::new(Ipv4Addr::LOCALHOST, upstream.local_addr().unwrap().port()),
                 authenticated,
             )
@@ -59,6 +83,39 @@ async fn configured_fixture(
     let server = tokio::spawn(egress.clone().serve(listener));
     let client = TcpStream::connect(address).await.unwrap();
     (egress, client, upstream, server)
+}
+
+#[tokio::test]
+async fn api_role_is_pinned_to_the_selected_provider_hostname() {
+    use futures_util::FutureExt;
+    timeout(Duration::from_secs(5), async {
+        for provider in [
+            Provider::AbliterationAi,
+            Provider::Refuseless,
+            Provider::Openrouter,
+        ] {
+            let (egress, mut client, upstream, server) =
+                configured_provider_fixture(false, None, provider).await;
+            assert_eq!(authenticate(&mut client, TOKEN.as_bytes()).await, [1, 0]);
+            request(&mut client, b"example.com", 443).await;
+            let mut reply = [0; 10];
+            client.read_exact(&mut reply).await.unwrap();
+            assert_eq!(reply[1], 2);
+            assert!(upstream.accept().now_or_never().is_none());
+            egress.revoke();
+            server.await.unwrap().unwrap();
+
+            let (egress, mut client, upstream, server) =
+                configured_provider_fixture(false, None, provider).await;
+            assert_eq!(authenticate(&mut client, TOKEN.as_bytes()).await, [1, 0]);
+            request(&mut client, provider.host().as_bytes(), 443).await;
+            let _ = upstream.accept().await.unwrap();
+            egress.revoke();
+            server.await.unwrap().unwrap();
+        }
+    })
+    .await
+    .unwrap();
 }
 
 async fn authenticate(client: &mut TcpStream, token: &[u8]) -> [u8; 2] {
@@ -333,13 +390,13 @@ fn tools_configuration_validates_session_and_policy_at_the_private_boundary() {
     ] {
         assert!(
             serde_json::from_value::<Credentials>(json!({
-                "transport": {"mode": "tor"}, "session_token": TOKEN, "tools": invalid,
+                "provider": "abliteration-ai", "transport": {"mode": "tor"}, "session_token": TOKEN, "tools": invalid,
             }))
             .is_err()
         );
     }
     let credentials: Credentials = serde_json::from_value(json!({
-        "transport": {"mode": "tor"}, "session_token": TOKEN,
+        "provider": "abliteration-ai", "transport": {"mode": "tor"}, "session_token": TOKEN,
     }))
     .unwrap();
     assert!(credentials.tools.is_none());

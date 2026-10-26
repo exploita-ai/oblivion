@@ -239,7 +239,7 @@ with filler.open("wb", buffering=0) as stream:
 result = subprocess.run(["systemctl", "start", OWNER], capture_output=True, timeout=100)
 assert result.returncode != 0
 stopped()
-assert not state.exists() and json.loads((profile / "abliteration.keys.json").read_text())["entries"][0]["key"].encode() == KEY
+assert not state.exists() and json.loads((profile / "provider.keys.json").read_text())["entries"][0]["key"].encode() == KEY
 filler.unlink()
 run("systemctl", "start", OWNER)
 ready()

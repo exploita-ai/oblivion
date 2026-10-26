@@ -1,6 +1,7 @@
 import { z } from "zod"
 
 const identifier = z.string().regex(/^[a-f0-9]{32}$/)
+export const provider = z.enum(["abliteration-ai", "refuseless", "openrouter"])
 const transport = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("tor") }),
   z.object({ mode: z.literal("socks5"), endpoint: z.string(), authenticated: z.boolean() }),
@@ -46,7 +47,7 @@ export const status = z.object({
   recovery_required: z.boolean(),
   api_key_present: z.boolean().nullable(),
   api_keys: z.object({
-    entries: z.array(z.object({ id: identifier, name: z.string(), temporary: z.boolean() })),
+    entries: z.array(z.object({ id: identifier, provider, name: z.string(), temporary: z.boolean() })),
     default: identifier.nullable(),
     selected: identifier.nullable(),
   }).nullable(),

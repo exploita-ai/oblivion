@@ -24,6 +24,16 @@ export type Runtime = {
   exit: () => void
 }
 
+const providers = [
+  { value: "abliteration-ai", label: "Abliteration.ai" },
+  { value: "refuseless", label: "Refuseless" },
+  { value: "openrouter", label: "OpenRouter · ZDR enforced" },
+]
+
+function providerName(id: string) {
+  return providers.find((provider) => provider.value === id)?.label ?? id
+}
+
 export function App(props: { runtime: Runtime; preview?: boolean; initial?: Status; documentsOnly?: boolean }) {
   const [state, setState] = createSignal(props.initial)
   const [page, setPage] = createSignal(0)
@@ -142,7 +152,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   function unlock(ephemeral = false) {
     setForm({
       title: ephemeral ? "Ephemeral mode" : "Unlock Oblivion",
-      description: ephemeral ? "Read saved settings without changing the USB. New conversations and files live in RAM and are removed when closed." : "Unlock your settings and session list. Each session keeps its own password.",
+      description: ephemeral ? "Use your saved settings without writing to persistent storage. New conversations and files live in RAM and are removed when closed." : "Unlock your settings and session list. Each session keeps its own password.",
       fields: [{ id: "password", label: "Oblivion password", secret: true }], submit: ephemeral ? "Start ephemeral mode" : "Unlock Oblivion",
       run: async (values) => {
         await command(ephemeral ? "unlock-ephemeral" : "unlock", values.password)
@@ -214,12 +224,12 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
     const plan = state()?.persistence?.plan
     if (!plan) return
     setForm({
-      title: "Prepare encrypted storage",
-      description: `Boot USB: /dev/${plan.device} · ${capacity(plan.disk_bytes)}. Use ${capacity(plan.sectors * 512)} of unpartitioned space for Oblivion. Previous data in that free space will be overwritten.`,
-      fields: [{ id: "confirmUSB", label: "Confirm this USB", choices: [{ value: "no", label: "Cancel preparation" }, { value: "yes", label: "Use this USB's free space" }] }, { id: "password", label: "New Oblivion password", secret: true }, { id: "confirm", label: "Repeat Oblivion password", secret: true }],
-      submit: "Prepare encrypted USB",
+      title: "Create encrypted storage",
+      description: `System storage: /dev/${plan.device} · ${capacity(plan.disk_bytes)}. Reserve ${capacity(plan.sectors * 512)} of available unpartitioned space for Oblivion. Existing data in that space will be overwritten.`,
+      fields: [{ id: "confirmStorage", label: "Confirm storage", choices: [{ value: "no", label: "Cancel setup" }, { value: "yes", label: "Use the available free space" }] }, { id: "password", label: "New Oblivion password", secret: true }, { id: "confirm", label: "Repeat Oblivion password", secret: true }],
+      submit: "Create encrypted storage",
       run: async (values) => {
-        if (values.confirmUSB !== "yes") throw new ControlError("usb_confirmation_required")
+        if (values.confirmStorage !== "yes") throw new ControlError("storage_confirmation_required")
         validatePassword(values)
         await command("prepare-usb", { plan, password: values.password })
         await command("unlock", values.password)
@@ -231,11 +241,24 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   }
 
   function addKey() {
-    setForm({ title: "Add an Abliteration API key", description: persistent() ? "Saved automatically in encrypted storage. Secrets stay hidden." : "Kept in RAM for this ephemeral workspace. Secrets stay hidden.", fields: [{ id: "name", label: "Name", value: "Personal" }, { id: "key", label: "API key", secret: true, description: "Paste your Abliteration key. It stays hidden.", validate: validateKey }], submit: "Add key", run: async (values) => { await command("api-keys", { action: persistent() ? "add" : "temporary", name: values.name, key: values.key }); if (state()?.session_open && state()?.session_mode !== "chat") { await refresh(); await launchChat() } } })
+    setForm({
+      title: "Add provider API key",
+      description: persistent() ? "Saved automatically in encrypted storage. Secrets stay hidden." : "Kept in RAM for this ephemeral workspace. Secrets stay hidden.",
+      fields: [
+        { id: "provider", label: "Provider", value: "abliteration-ai", choices: providers },
+        { id: "name", label: "Key name", value: "Personal" },
+        { id: "key", label: "API key", secret: true, description: "Paste the complete key from the selected provider. It stays hidden.", validate: validateKey },
+      ],
+      submit: "Add key",
+      run: async (values) => {
+        await command("api-keys", { action: persistent() ? "add" : "temporary", provider: values.provider, name: values.name, key: values.key })
+        if (state()?.session_open && state()?.session_mode !== "chat") { await refresh(); await launchChat() }
+      },
+    })
   }
 
   function editKey(action: "rename" | "replace", id: string, name: string) {
-    setForm({ title: action === "rename" ? "Rename API key" : "Replace API key", description: action === "rename" ? "Choose a name you will recognize when starting a chat." : `Replace the secret for “${name}”. The existing key is kept if you cancel.`, fields: action === "rename" ? [{ id: "name", label: "Name", value: name }] : [{ id: "key", label: "New API key", secret: true, validate: validateKey }], submit: action === "rename" ? "Save name" : "Replace key", run: async (values) => { await command("api-keys", { action, id, ...(action === "rename" ? { name: values.name } : { key: values.key }) }) } })
+    setForm({ title: action === "rename" ? "Rename API key" : "Replace API key", description: action === "rename" ? "Choose a name you will recognize when starting a chat." : `Replace the secret for “${name}”. Its provider stays unchanged.`, fields: action === "rename" ? [{ id: "name", label: "Name", value: name }] : [{ id: "key", label: "New API key", secret: true, validate: validateKey }], submit: action === "rename" ? "Save name" : "Replace key", run: async (values) => { await command("api-keys", { action, id, ...(action === "rename" ? { name: values.name } : { key: values.key }) }) } })
   }
 
   function transport(socks: boolean) {
@@ -247,7 +270,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   }
 
   function addRule() {
-    setForm({ title: "Add a web access rule", description: "Control tool access to public destinations. Provider access uses the dedicated Abliteration route.", fields: [{ id: "destination", label: "Domain or public IP", description: "For example example.org or *.example.org" }, { id: "port", label: "Port", value: "443" }, { id: "action", label: "Action", choices: [{ value: "deny", label: "Block" }, { value: "allow", label: "Allow" }] }], submit: "Add rule", run: async (values) => { await command("network-policy", { action: "put", rule: { destination: values.destination, port: Number(values.port), action: values.action }, save: persistent() }) } })
+    setForm({ title: "Add a web access rule", description: "Control tool access to public destinations. Inference providers use a separate fixed gateway route.", fields: [{ id: "destination", label: "Domain or public IP", description: "For example example.org or *.example.org" }, { id: "port", label: "Port", value: "443" }, { id: "action", label: "Action", choices: [{ value: "deny", label: "Block" }, { value: "allow", label: "Allow" }] }], submit: "Add rule", run: async (values) => { await command("network-policy", { action: "put", rule: { destination: values.destination, port: Number(values.port), action: values.action }, save: persistent() }) } })
   }
 
   async function changeConnection(value: object) {
@@ -257,7 +280,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   function startChat() {
     const entries = state()?.api_keys?.entries ?? []
     if (!entries.length) { addKey(); setFeedback("info"); setNotice("Add an API key to start chat. Your session documents are still available."); return }
-    setForm({ title: "Start chat", description: "Choose a key for this opening. Documents remain available if the network is not ready.", fields: [{ id: "key", label: "Abliteration API key", value: state()?.api_keys?.selected ?? state()?.api_keys?.default ?? entries[0].id, choices: entries.map((key) => ({ value: key.id, label: `${key.name}${key.id === state()?.api_keys?.default ? " (default)" : ""}` })) }], submit: "Connect and start chat", run: async (values) => {
+    setForm({ title: "Start chat", description: "Choose a provider and key for this opening. Documents remain available if the protected route is not ready.", fields: [{ id: "key", label: "Provider and API key", value: state()?.api_keys?.selected ?? state()?.api_keys?.default ?? entries[0].id, choices: entries.map((key) => ({ value: key.id, label: `${providerName(key.provider)} · ${key.name}${key.id === state()?.api_keys?.default ? " (default)" : ""}` })) }], submit: "Connect and start chat", run: async (values) => {
       await launchChat(values.key)
     } })
   }
@@ -265,8 +288,8 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   function chatKeyFields(): Field[] {
     const entries = state()?.api_keys?.entries ?? []
     if (entries.length < 2) return []
-    return [{ id: "key", label: "API key for this chat", value: state()?.api_keys?.default ?? entries[0].id,
-      choices: entries.map((key) => ({ value: key.id, label: `${key.name}${key.id === state()?.api_keys?.default ? " (default)" : ""}` })) }]
+    return [{ id: "key", label: "Provider and API key", value: state()?.api_keys?.default ?? entries[0].id,
+      choices: entries.map((key) => ({ value: key.id, label: `${providerName(key.provider)} · ${key.name}${key.id === state()?.api_keys?.default ? " (default)" : ""}` })) }]
   }
 
   async function launchChat(key?: string) {
@@ -388,13 +411,11 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
     if (networkVisible()) return networkItems()
     if (current.recovery_required) return [{ name: "Complete recovery and lock", description: "Cleanup is required before another session can open.", run: () => void perform("Recover and lock", async () => { await command("lock"); setSession(undefined) }) }, { name: "Force stop and lock", description: "Use only if graceful recovery fails. Unsaved work may be lost.", run: () => confirm("Force stop and lock", "Force the failed session VM to stop, then lock its encrypted volume and persistent settings. Unfinished writes may be lost.", async () => { await command("force-close"); await command("lock"); setSession(undefined) }) }]
     if (!current.general_mounted && current.general_present && !current.general_incomplete) return [
-      { name: "Unlock Oblivion", badge: "PERSISTENT", description: "Unlock your saved settings and sessions. Each session has its own password. Changes are saved encrypted on the USB.", run: () => unlock() },
-      { name: "Ephemeral mode", badge: "RAM ONLY", description: "Use your saved settings read-only. New chats, documents and changes stay in RAM and are lost when closed. The USB stays unchanged.", run: () => unlock(true) },
+      { name: "Unlock Oblivion", badge: "PERSISTENT", description: "Unlock your saved settings and sessions. Each session has its own password. Changes are saved inside encrypted storage.", run: () => unlock() },
+      { name: "Ephemeral mode", badge: "RAM ONLY", description: "Use your saved settings read-only. New chats, documents and changes stay in RAM and are lost when closed. Persistent storage stays unchanged.", run: () => unlock(true) },
     ]
     if (!current.general_mounted) return [
-      ...(current.general_incomplete ? [{ name: "Discard incomplete preparation", description: "Remove only the unfinished Oblivion setup attempt.", run: () => confirm("Discard incomplete preparation", "This removes unfinished encrypted storage. Completed storage is preserved.", async () => { await command("discard-general-pending") }) }] : [{ name: "Set up encrypted USB", description: current.persistence?.unavailable ? "The boot USB is not ready for encrypted storage." : "Prepare the free space on your boot USB.", disabled: current.persistence?.unavailable ?? undefined, run: prepare }]),
-      { name: "Keyboard and time zone", description: "Choose the keyboard before entering your password.", run: () => void perform("Load settings", setup) },
-      { name: "Test keyboard", description: "Check symbols using a harmless sample.", run: keyboardTest },
+      ...(current.general_incomplete ? [{ name: "Discard incomplete preparation", description: "Remove only the unfinished Oblivion setup attempt.", run: () => confirm("Discard incomplete preparation", "This removes unfinished encrypted storage. Completed storage is preserved.", async () => { await command("discard-general-pending") }) }] : [{ name: "Create encrypted storage", description: current.persistence?.unavailable ? "No compatible persistent storage is available." : "Protect sessions, documents, API keys and preferences in one encrypted space.", disabled: current.persistence?.unavailable ?? undefined, run: prepare }]),
     ]
     if (page() === 0 && session()) {
       if (!current.session_open) return [
@@ -416,13 +437,13 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
         { name: "Set as default", description: `Use “${entry.name}” for future chats. You can choose another key each time you start a chat.`, disabled: unavailable(), run: () => void perform("Set default key", async () => { await command("api-keys", { action: "default", id: entry.id }) }) },
         ...(!readonly ? [
           { name: "Rename", description: "Change this key’s display name. Its secret stays unchanged.", disabled: unavailable(), run: () => editKey("rename", entry.id, entry.name) },
-          { name: "Replace secret", description: "Enter a new Abliteration key under the same name.", disabled: unavailable(), run: () => editKey("replace", entry.id, entry.name) },
+          { name: "Replace secret", description: `Enter a new ${providerName(entry.provider)} key under the same name.`, disabled: unavailable(), run: () => editKey("replace", entry.id, entry.name) },
           { name: "Remove key", description: "Remove this key from Oblivion. This does not revoke it at the provider.", disabled: unavailable(), run: () => confirm("Remove API key", `Remove “${entry.name}” from Oblivion?`, async () => { await command("api-keys", { action: "remove", id: entry.id }); setKeyID(undefined); setSelection(0) }) },
         ] : []),
       ]
     }
     if (category() === "API keys") return [
-      ...(current.api_keys?.entries ?? []).map((entry) => ({ name: entry.name, description: `${entry.id === current.api_keys?.selected ? "Selected · " : ""}${entry.id === current.api_keys?.default ? "Default · " : ""}${entry.temporary ? "RAM only" : "Saved encrypted"}`, badge: `${entry.id === current.api_keys?.default ? "Default · " : ""}${entry.temporary ? "RAM only" : "Saved encrypted"}`, disabled: unavailable(), run: () => { setKeyID(entry.id); setSelection(0) } })),
+      ...(current.api_keys?.entries ?? []).map((entry) => ({ name: entry.name, description: `${providerName(entry.provider)} · ${entry.id === current.api_keys?.selected ? "Selected · " : ""}${entry.id === current.api_keys?.default ? "Default · " : ""}${entry.temporary ? "RAM only" : "Saved encrypted"}`, badge: `${providerName(entry.provider)}${entry.id === current.api_keys?.default ? " · Default" : ""}`, disabled: unavailable(), run: () => { setKeyID(entry.id); setSelection(0) } })),
     ]
     if (category() === "Keyboard & time zone") return [
       { name: "Edit preferences", description: "Choose a layout, variant and time zone from the installed Debian catalog.", disabled: current.session_open ? "Close the active session first; its keyboard and time zone are applied at VM startup." : undefined, run: () => void perform("Load settings", setup) },
@@ -520,7 +541,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
         <Show when={documents()} fallback={<Show when={wizard()} fallback={<Show when={form()} fallback={
           <Show when={debugVisible()} fallback={<Show when={page() === 4 && state()?.general_mounted && !state()?.session_open} fallback={<Show when={networkVisible()} fallback={
           <Menu details={!(page() === 2 && !keyID())} toolbar={pageActions()} actionsFocused={focus() === "actions"} focusActions={() => setFocus("actions")} empty={page() === 2 ? "No API keys. Add your first key above." : "No sessions. Create a session above."} title={!state()?.general_mounted ? state()?.general_present ? "Welcome back" : "Welcome to Oblivion" : page() === 0 ? session() ? `Session ${state()?.session_titles[session()!] ?? session()!.slice(0, 8)}` : "Your protected sessions" : keyID() ? state()?.api_keys?.entries.find((entry) => entry.id === keyID())?.name ?? "API key" : page() === 2 ? "Saved API keys" : category()}
-            description={!state()?.general_mounted ? state()?.general_present ? "Persistent: keep chats, documents and settings encrypted on USB.\nEphemeral: work in RAM; new data is lost when closed and the USB stays unchanged.\nBoth modes use your configured Tor or SOCKS5 route for online AI." : "Prepare your USB to keep encrypted sessions and preferences." : page() === 0 ? session() ? `${state()?.general_readonly ? "Ephemeral · RAM only" : "Persistent · Separate encrypted volume"} · ${state()?.session_mode === "chat" ? "Chat running" : state()?.session_open ? "Documents open · Offline" : "Locked"}` : "Enter to unlock a session · N to create a new workspace" : category() === "API keys" ? "Select a key to manage it. Secrets stay hidden." : category() === "Network" ? "Choose your connection and the route used by your sessions." : category() === "Keyboard & time zone" ? `${state()?.settings?.current.keyboard ?? "us"} · ${state()?.settings?.current.timezone ?? "UTC"} · Interface: English` : `${capacity(state()?.available_bytes ?? 0)} free · ${state()?.general_readonly ? "Read-only storage" : "Encrypted storage"}`}
+            description={!state()?.general_mounted ? state()?.general_present ? "Persistent: keep chats, documents and settings in encrypted storage.\nEphemeral: work in RAM; new data is lost when closed and persistent storage stays unchanged.\nBoth modes use your configured Tor or SOCKS5 route for online AI." : "Create the encrypted space that protects your sessions, documents, API keys and preferences." : page() === 0 ? session() ? `${state()?.general_readonly ? "Ephemeral · RAM only" : "Persistent · Separate encrypted volume"} · ${state()?.session_mode === "chat" ? "Chat running" : state()?.session_open ? "Documents open · Offline" : "Locked"}` : "Enter to unlock a session · N to create a new workspace" : category() === "API keys" ? "Select a key to manage it. Secrets stay hidden." : category() === "Network" ? "Choose your connection and the route used by your sessions." : category() === "Keyboard & time zone" ? `${state()?.settings?.current.keyboard ?? "us"} · ${state()?.settings?.current.timezone ?? "UTC"} · Interface: English` : `${capacity(state()?.available_bytes ?? 0)} free · ${state()?.general_readonly ? "Read-only storage" : "Encrypted storage"}`}
             items={items()} selected={selection()} disabled={blocked()} actions={!welcome()} back={state()?.general_mounted ? back : undefined} focused={focus() === "content" && !blocked()} focus={() => setFocus("content")} change={setSelection} choose={choose} />
           }><NetworkPage toolbar={pageActions()} tab={networkTab()} changeTab={(tab) => { setNetworkTab(tab); setSelection(0); setNotice("") }}
             description={networkDescription()} items={items()} selected={selection()} change={setSelection} choose={choose}
@@ -565,12 +586,13 @@ function explain(error: unknown) {
     network_connection_failed: "Could not connect. Check the Wi-Fi password and signal, then retry.",
     network_profile_save_failed: "The connection changed, but encrypted saving failed. Check storage before restarting.",
     network_operation_failed: "The network operation failed. Refresh status and try again.",
-    invalid_api_key: "This key has an invalid format. Use the complete Abliteration key, without spaces.",
+    invalid_api_key: "This key has an invalid format. Use the complete provider key, without spaces.",
     invalid_password: "The password was not accepted. Check the keyboard layout and try again.",
     volume_unlock_failed: "The volume could not be unlocked. Check your password and keyboard layout, then retry.",
     password_too_short: "Use a password of at least 16 bytes.",
     passwords_do_not_match: "The two passwords do not match. Try again.",
-    usb_confirmation_required: "Choose 'Use this USB's free space' to prepare storage, or press Esc to cancel.",
+    storage_confirmation_required: "Choose 'Use the available free space' to create encrypted storage, or press Esc to cancel.",
+    usb_confirmation_required: "Choose 'Use the available free space' to create encrypted storage, or press Esc to cancel.",
     gateway_not_ready: "The network route is still connecting. Wait, then retry Start chat.",
     chat_start_cancelled: "Connection cancelled. Your session documents remain open offline.",
     gateway_connect_timeout: "The protected connection is taking too long. Check Network, then retry Start chat. Documents remain offline.",

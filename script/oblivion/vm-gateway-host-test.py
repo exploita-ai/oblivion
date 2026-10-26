@@ -145,13 +145,13 @@ check("general unlock without an API key leaves gateway services and VM stopped"
 
 command("set-api-key", secret=KEY)
 first, _ = ready()
-assert json.loads(Path("/run/oblivion/general/profile/abliteration.keys.json").read_text())["entries"][0]["key"].encode() == KEY
+assert json.loads(Path("/run/oblivion/general/profile/provider.keys.json").read_text())["entries"][0]["key"].encode() == KEY
 check("saving the protected credential starts a distinct UID 1101 gateway VM and completes private configuration")
 
 command("set-api-key", secret=NEXT)
 second, _ = ready()
 assert second != first and not Path(f"/proc/{first}").exists()
-assert json.loads(Path("/run/oblivion/general/profile/abliteration.keys.json").read_text())["entries"][0]["key"].encode() == NEXT
+assert json.loads(Path("/run/oblivion/general/profile/provider.keys.json").read_text())["entries"][0]["key"].encode() == NEXT
 command("clear-api-key")
 stopped()
 assert status()["api_key_present"] is False

@@ -11,7 +11,13 @@ printf 'token\n' >&3
 dd bs=64 count=1 iflag=fullblock status=none <&3 > /run/oblivion-api/token
 test "$(wc -c < /run/oblivion-api/token)" = 64
 LC_ALL=C grep -Eq '^[a-f0-9]{64}$' /run/oblivion-api/token
-chmod 0640 /run/oblivion-api/token
+IFS= read -r provider <&3
+case "$provider" in
+    abliteration-ai|refuseless|openrouter) ;;
+    *) exit 1 ;;
+esac
+printf '%s\n' "$provider" > /run/oblivion-api/provider
+chmod 0640 /run/oblivion-api/token /run/oblivion-api/provider
 busybox sysctl -q -w net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1
 for address in /sys/class/net/*/address; do
     if [ "$(cat "$address")" = 52:54:00:6f:00:03 ]; then

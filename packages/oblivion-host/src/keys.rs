@@ -1,3 +1,4 @@
+use oblivion_transport::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use zeroize::Zeroizing;
@@ -9,10 +10,14 @@ pub const LEGACY: &str = "00000000000000000000000000000000";
 #[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Command {
     Temporary {
+        #[serde(default)]
+        provider: Provider,
         name: String,
         key: Zeroizing<String>,
     },
     Add {
+        #[serde(default)]
+        provider: Provider,
         name: String,
         key: Zeroizing<String>,
     },
@@ -39,6 +44,8 @@ pub enum Command {
 #[serde(deny_unknown_fields)]
 pub struct Entry {
     pub id: String,
+    #[serde(default)]
+    pub provider: Provider,
     pub name: String,
     key: Zeroizing<String>,
 }
@@ -55,6 +62,7 @@ pub struct Archive {
 #[serde(deny_unknown_fields)]
 pub struct Info {
     pub id: String,
+    pub provider: Provider,
     pub name: String,
     #[serde(default)]
     pub temporary: bool,
@@ -95,12 +103,19 @@ impl Keyring {
         self.saved.key(id).or_else(|| self.temporary.key(id))
     }
 
+    pub fn provider(&self, id: &str) -> Option<Provider> {
+        self.saved
+            .provider(id)
+            .or_else(|| self.temporary.provider(id))
+    }
+
     pub fn status(&self, selection: Option<Option<String>>) -> Status {
         let mut status = self.saved.status(None);
         status
             .entries
             .extend(self.temporary.entries.iter().map(|entry| Info {
                 id: entry.id.clone(),
+                provider: entry.provider,
                 name: entry.name.clone(),
                 temporary: true,
             }));
@@ -119,7 +134,7 @@ impl Keyring {
 impl Archive {
     pub fn empty() -> Self {
         Self {
-            version: 1,
+            version: 2,
             default: None,
             entries: Vec::new(),
         }
@@ -128,10 +143,11 @@ impl Archive {
     pub fn legacy(key: Zeroizing<String>) -> Result<Self, &'static str> {
         valid_key(&key)?;
         Ok(Self {
-            version: 1,
+            version: 2,
             default: Some(LEGACY.to_owned()),
             entries: vec![Entry {
                 id: LEGACY.to_owned(),
+                provider: Provider::AbliterationAi,
                 name: "Importata".to_owned(),
                 key,
             }],
@@ -142,8 +158,8 @@ impl Archive {
         if bytes.len() > LIMIT {
             return Err("key_archive_too_large");
         }
-        let archive: Self = serde_json::from_slice(bytes).map_err(|_| "invalid_key_archive")?;
-        if archive.version != 1 || archive.entries.len() > 64 {
+        let mut archive: Self = serde_json::from_slice(bytes).map_err(|_| "invalid_key_archive")?;
+        if !matches!(archive.version, 1 | 2) || archive.entries.len() > 64 {
             return Err("invalid_key_archive");
         }
         let mut ids = std::collections::HashSet::new();
@@ -161,6 +177,7 @@ impl Archive {
         {
             return Err("invalid_key_archive");
         }
+        archive.version = 2;
         Ok(archive)
     }
 
@@ -180,6 +197,7 @@ impl Archive {
                 .iter()
                 .map(|entry| Info {
                     id: entry.id.clone(),
+                    provider: entry.provider,
                     name: entry.name.clone(),
                     temporary: false,
                 })
@@ -196,9 +214,20 @@ impl Archive {
             .map(|entry| entry.key.as_str())
     }
 
+    pub fn provider(&self, id: &str) -> Option<Provider> {
+        self.entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.provider)
+    }
+
     pub fn change(&mut self, command: Command) -> Result<(), &'static str> {
         match command {
-            Command::Add { name, key } => {
+            Command::Add {
+                provider,
+                name,
+                key,
+            } => {
                 valid_name(&name)?;
                 valid_key(&key)?;
                 if self.entries.len() >= 64 {
@@ -215,7 +244,12 @@ impl Archive {
                 if self.entries.is_empty() {
                     self.default = Some(id.clone());
                 }
-                self.entries.push(Entry { id, name, key });
+                self.entries.push(Entry {
+                    id,
+                    provider,
+                    name,
+                    key,
+                });
             }
             Command::Replace { id, key } => {
                 valid_key(&key)?;
