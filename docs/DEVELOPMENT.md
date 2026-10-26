@@ -25,7 +25,7 @@ do not need separate images. 32-bit x86 is not supported.
 Install the JavaScript workspace and run the canonical checks:
 
 ```sh
-bun install --frozen-lockfile
+bun install --frozen-lockfile --os '*' --cpu '*' --libc '*'
 bun run check
 bun run typecheck:tsc
 ```
@@ -91,7 +91,7 @@ successful compatibility result.
 | Linux arm64 with QEMU/KVM and nested KVM | `arm64` | Supported design; hardware validation required |
 | Windows x86_64 with VirtualBox nested VT-x/AMD-V | `amd64` | Supported design; physical validation required |
 | Intel Mac with a hypervisor exposing nested VT-x | `amd64` | Unverified |
-| Apple Silicon M3 or newer, macOS 15+, UTM with Apple Virtualization | `arm64` | Native Mac VM target; end-to-end validation required |
+| Apple Silicon M3 or newer, macOS 15+, UTM with Apple Virtualization | `arm64` | Native Mac VM target; nested KVM validated on M4 Pro |
 | Apple Silicon M1/M2 | `arm64` | Manager may boot, but Apple does not expose nested virtualization |
 | Apple Silicon with VirtualBox, VMware, Parallels or UTM's QEMU backend | `arm64` | Full sessions are currently unsupported |
 | Windows on ARM with VirtualBox | `arm64` | Manager may boot, but VirtualBox does not expose nested virtualization to ARM guests |
@@ -136,6 +136,13 @@ document nested Linux virtualization on macOS 15 with M3 or newer, and its
 states that removable raw images are supported. Apple independently documents
 [M3 as the minimum chip](https://developer.apple.com/documentation/virtualization/vzgenericplatformconfiguration/isnestedvirtualizationsupported)
 for nested virtualization.
+
+The current ARM candidate was exercised with UTM 5.0.8 on an Apple M4 Pro and
+macOS 15.7.3. The test verified an `aarch64` live boot, KVM API version 12, an
+unprivileged nested `aarch64` guest boot, RAM-backed runtime filesystems, no
+swap, LUKS2 creation and wrong-password rejection, and a production Documents
+VM with KVM enabled and no network device. This validates that configuration;
+it is not a claim about every Apple Silicon model or UTM release.
 
 ### QEMU/KVM on Linux
 

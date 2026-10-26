@@ -162,7 +162,7 @@ a VM, the outer OS and hypervisor can observe input, display, memory and storage
 | Linux workstation/server | `x86_64` with nested KVM | Linux + QEMU/KVM | `amd64` | Development/evaluation target |
 | Linux ARM host | `aarch64` with nested KVM | Linux + QEMU/KVM | `arm64` | Supported design; hardware validation pending |
 | Windows PC | Intel or AMD 64-bit with nested virtualization | Windows + VirtualBox | `amd64` | Supported design; physical validation pending |
-| Apple Silicon Mac | M3 or newer | macOS 15+ + UTM Apple Virtualization | `arm64` | Native Mac evaluation target; end-to-end validation in progress |
+| Apple Silicon Mac | M3 or newer | macOS 15+ + UTM Apple Virtualization | `arm64` | Native Mac evaluation target; nested KVM validated on M4 Pro |
 | Apple Silicon Mac | M1 or M2 | macOS + UTM | `arm64` | Manager may boot; full sessions are unsupported because nested virtualization is unavailable |
 | Intel Mac | Intel 64-bit | Hypervisor exposing nested VT-x | `amd64` | Unverified |
 | 32-bit x86 or ARM, Windows on ARM without nested KVM | — | — | — | Unsupported |
@@ -221,7 +221,7 @@ a UI setting.
 | Area | Status |
 | --- | --- |
 | amd64 live USB boot | Tested on physical hardware |
-| arm64 live image | Built; physical and generic-hypervisor validation continues |
+| arm64 live image | Built; boot, nested KVM and offline Documents validated in UTM on M4 Pro |
 | General and per-session LUKS2 persistence | Implemented and tested |
 | Offline Documents VM | Implemented |
 | Tor and SOCKS5 gateway | Implemented; hardening and UX work continue |
