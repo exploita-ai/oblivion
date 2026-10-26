@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" role="img" aria-labelledby="title description">
+  <title id="title">Oblivion</title>
+  <desc id="description">Oblivion geometric mark and wordmark in red on a dark background.</desc>
+  <rect width="1200" height="300" rx="28" fill="#09090b"/>
+  <g fill="#d32f2f">
+    <path d="M84 42h132l42 42v132l-42 42H84l-42-42V84zm32 50-24 24v68l24 24h68l24-24v-68l-24-24z"/>
+    <rect x="134" y="134" width="32" height="32" rx="4"/>
+    <rect x="18" y="134" width="34" height="32" rx="3"/>
+    <rect x="248" y="134" width="34" height="32" rx="3"/>
+  </g>
+  <text x="324" y="168" fill="#d32f2f" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="104" font-weight="800" letter-spacing="7">OBLIVION</text>
+  <rect x="329" y="198" width="74" height="5" rx="2.5" fill="#d32f2f"/>
+  <text x="424" y="210" fill="#a1a1aa" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="21" font-weight="600" letter-spacing="5">PRIVATE BY DESIGN</text>
+</svg>

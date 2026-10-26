@@ -1,12 +1,35 @@
-# OBLIVION
+<p align="center">
+  <img src="assets/oblivion-logo.svg" width="900" alt="Oblivion — private by design">
+</p>
 
-**A privacy-focused live environment for an AI coding agent.**
+<h1 align="center">A hardened live environment for high-privacy LLM coding</h1>
 
-[![CI](https://github.com/exploita-ai/oblivion/actions/workflows/oblivion-check.yml/badge.svg?branch=dev)](https://github.com/exploita-ai/oblivion/actions/workflows/oblivion-check.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-d32f2f.svg)](LICENSE)
-[![Status: pre-beta](https://img.shields.io/badge/status-pre--beta-d32f2f.svg)](#project-status)
+<p align="center">
+  Boot from USB. Unlock an isolated workspace. Run a full coding agent.<br>
+  Shut down and leave the live runtime behind.
+</p>
 
-Oblivion boots a minimal Debian system from USB, unlocks encrypted settings, and runs each protected workspace in its own VM and LUKS2 volume. The coding agent is derived from [OpenCode](https://github.com/anomalyco/opencode), but storage, networking, session lifecycle, and the host interface are controlled by Oblivion.
+<p align="center">
+  <a href="https://github.com/exploita-ai/oblivion/actions/workflows/oblivion-check.yml"><img alt="CI" src="https://github.com/exploita-ai/oblivion/actions/workflows/oblivion-check.yml/badge.svg?branch=dev"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-d32f2f.svg"></a>
+  <a href="#project-status"><img alt="Status: pre-beta" src="https://img.shields.io/badge/status-pre--beta-d32f2f.svg"></a>
+  <img alt="Platforms: amd64 and arm64" src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-27272a.svg">
+  <a href="https://github.com/exploita-ai/oblivion/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/exploita-ai/oblivion?style=flat&color=d32f2f"></a>
+</p>
+
+<p align="center">
+  <a href="#why-oblivion">Why Oblivion</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#privacy-model">Privacy model</a> ·
+  <a href="#build-from-source">Build</a> ·
+  <a href="#join-the-project">Contribute</a>
+</p>
+
+---
+
+Oblivion is a minimal Debian live system built around an [OpenCode](https://github.com/anomalyco/opencode)-derived coding agent. It gives every persistent session its own VM and LUKS2-encrypted volume, keeps the live runtime in memory, and routes session traffic through a dedicated Tor or SOCKS5 gateway with no direct fallback.
+
+It is not another chat wrapper. The agent keeps its coding tools and works with the documents you explicitly place inside its isolated session.
 
 > [!WARNING]
 > Oblivion is pre-beta research software. It has not received an independent security audit. The current images are development candidates, not a promise of anonymity or a safe place for irreplaceable secrets.
@@ -16,6 +39,14 @@ Oblivion boots a minimal Debian system from USB, unlocks encrypted settings, and
 Ordinary coding agents can leave conversations, logs, temporary files, credentials, and working copies across the host filesystem. Oblivion changes the boundary: the host OS is not running, the live system is disposable, and a protected session owns a separate encrypted workspace.
 
 The goal is not to turn an online model into an air-gapped model. The current cloud mode still sends the context you approve to the configured provider. A future local inference engine is planned for genuinely offline operation.
+
+| | Boundary | What Oblivion does |
+| --- | --- | --- |
+| **At rest** | USB storage | Separate LUKS2 volume and password for every persistent session |
+| **While running** | Live host | Read-only Debian base with runtime and temporary paths in RAM |
+| **Between sessions** | Workspaces | One open volume and one session VM at a time; no shared session filesystem |
+| **On the network** | Model traffic | Dedicated gateway VM with Tor or explicit SOCKS5 and no direct fallback |
+| **For documents** | Offline work | Files can be opened without a network device, API key, or agent process |
 
 ## Architecture
 
@@ -38,7 +69,7 @@ USB boot
 
 Documents mode starts the session VM without a network device, provider token, or agent process. Starting a chat reuses the unlocked session volume and replaces the offline VM with the networked chat VM. The host receives control messages and file metadata; it does not mount a session filesystem.
 
-## Current privacy properties
+## Privacy model
 
 - A general encrypted vault stores host settings and API keys.
 - Every persistent session has a different LUKS2 volume and password.
@@ -143,9 +174,16 @@ Never commit API keys, session volumes, captured traffic, generated images, or u
 
 Oblivion is an independent project derived from OpenCode v2 and is not affiliated with or endorsed by the OpenCode team. The retained agent code remains under its MIT license. See [NOTICE](NOTICE) and [LICENSE](LICENSE).
 
-## Contributing and security
+## Join the project
 
-Contributions are welcome while the architecture is still taking shape. Start with [CONTRIBUTING.md](CONTRIBUTING.md). Please report vulnerabilities privately through the repository's GitHub Security Advisory page as described in [SECURITY.md](SECURITY.md).
+Oblivion is being built in public. Contributions are welcome across the TUI, Debian image, isolation boundary, network gateway, reproducible builds, hardware support, documentation, and security testing.
+
+- Read the [contribution guide](CONTRIBUTING.md) before opening a pull request.
+- Explore the [architecture](docs/ARCHITECTURE.md) and current [project status](docs/STATUS.md).
+- Open an issue for bugs, hardware reports, UX feedback, or focused proposals.
+- Report vulnerabilities privately through GitHub Security Advisories as described in [SECURITY.md](SECURITY.md).
+
+If the mission resonates with you, star the repository and help us test Oblivion on real hardware.
 
 ## License
 
