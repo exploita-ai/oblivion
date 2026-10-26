@@ -1,0 +1,47 @@
+[Unit]
+Description=Oblivion fullscreen terminal
+Requires=oblivion-seat.service oblivion-terminal.socket
+After=oblivion-seat.service oblivion-terminal.socket systemd-udev-trigger.service
+Conflicts=getty@tty1.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=1104
+Group=1104
+ExecStart=/usr/bin/oblivion-cage -d -s -- /usr/bin/foot --log-level=none --config=/etc/oblivion/foot.ini -- /usr/bin/oblivion-display --client
+Restart=always
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=10
+RuntimeDirectory=oblivion-display
+RuntimeDirectoryMode=0700
+Environment=HOME=/run/oblivion-display XDG_RUNTIME_DIR=/run/oblivion-display
+Environment=XDG_CACHE_HOME=/run/oblivion-display/cache TMPDIR=/run/oblivion-display
+Environment=LIBSEAT_BACKEND=seatd WLR_RENDERER=pixman
+Environment=LANG=C.UTF-8 LC_ALL=C.UTF-8
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateDevices=yes
+BindReadOnlyPaths=/dev/dri /run/udev
+DeviceAllow=char-drm rw
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+LimitCORE=0
+MemorySwapMax=0
+StandardInput=null
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

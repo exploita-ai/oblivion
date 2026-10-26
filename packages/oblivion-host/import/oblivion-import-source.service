@@ -1,0 +1,26 @@
+[Unit]
+Description=Read selected files from the readonly external device
+Requires=dev-vdb.device
+After=dev-vdb.device
+
+[Service]
+Type=exec
+ExecStart=/usr/lib/oblivion/import/receive-source.sh
+UMask=0077
+NoNewPrivileges=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=128M
+TasksMax=8
+RuntimeMaxSec=420
+TimeoutStopSec=5
+KillMode=control-group
+Restart=no
+StandardInput=null
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

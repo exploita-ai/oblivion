@@ -1,0 +1,554 @@
+name: Oblivion checks
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - "packages/**"
+      - "script/**"
+      - "package.json"
+      - "bun.lock"
+      - ".gitleaks.toml"
+      - ".github/actions/setup-bun/**"
+      - ".github/workflows/oblivion-check.yml"
+  pull_request:
+    branches: [dev]
+    paths:
+      - "packages/**"
+      - "script/**"
+      - "package.json"
+      - "bun.lock"
+      - ".gitleaks.toml"
+      - ".github/actions/setup-bun/**"
+      - ".github/workflows/oblivion-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oblivion-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Scan the public source tree
+        run: >-
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo:ro"
+          ghcr.io/gitleaks/gitleaks@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9
+          detect --source=/repo --no-git --redact --config=/repo/.gitleaks.toml --exit-code=1
+
+  manager-import:
+    name: Manager USB import/export lifecycle x86
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Build manager and isolated import/export environments
+        run: >-
+          docker buildx build --platform linux/amd64 --progress plain
+          -f script/oblivion/Dockerfile.vm-lab --target artifacts
+          --build-arg HOST=export-host
+          --build-arg GUEST=manager-import-guest
+          --output type=local,dest=artifacts/ci/import-image .
+      - name: Install the VM laboratory
+        run: |
+          test -c /dev/kvm
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+          sudo usermod -a -G kvm "$(id -un)"
+          sg kvm -c 'test -r /dev/kvm && test -w /dev/kvm'
+      - name: Import, export, recover and exercise filesystem failures through the manager
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        # The outer host uses KVM; both inner VMs use explicit laboratory TCG.
+        run: >-
+          sg kvm -c 'python3 script/oblivion/run-vm-lab.py
+          --architecture x86_64 --accelerator kvm
+          --image artifacts/ci/import-image --output artifacts/ci/import-results'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: oblivion-manager-import-x86-${{ github.sha }}
+          path: |
+            artifacts/ci/import-results/*.json
+            artifacts/ci/import-results/*.log
+            artifacts/ci/import-image/SHA256SUMS
+            artifacts/ci/import-image/sources.sha256
+          retention-days: 7
+          if-no-files-found: error
+
+  transfer:
+    name: File copy engine ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64, qemu: aarch64, runner: ubuntu-24.04-arm }
+          - { arch: amd64, qemu: x86_64, runner: ubuntu-24.04 }
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Copy real files through streams and reject hostile inputs
+        run: >-
+          docker buildx build --platform linux/${{ matrix.arch }} --progress plain
+          -f script/oblivion/Dockerfile.transfer
+          --output type=local,dest=artifacts/ci/transfer .
+      - name: Build the isolated transfer guests and synthetic source disk
+        run: >-
+          docker buildx build --platform linux/${{ matrix.arch }} --progress plain
+          -f script/oblivion/Dockerfile.vm-lab --target transfer-vm-artifacts
+          --build-arg COPY_BINARY=artifacts/ci/transfer/oblivion-copy
+          --output type=local,dest=artifacts/ci/transfer-image .
+      - name: Install the VM laboratory
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-system-x86
+      - name: Copy through private VM ports and revoke on cancellation or VM death
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          python3 script/oblivion/run-transfer-vm-lab.py
+          --architecture ${{ matrix.qemu }} --accelerator tcg
+          --image artifacts/ci/transfer-image --bundle artifacts/ci/transfer
+          --output artifacts/ci/transfer-results
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: oblivion-transfer-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            artifacts/ci/transfer/
+            artifacts/ci/transfer-results/*.json
+            artifacts/ci/transfer-results/*.log
+            artifacts/ci/transfer-image/SHA256SUMS
+            artifacts/ci/transfer-image/sources.sha256
+            artifacts/ci/transfer-image/endpoint.sha256
+          retention-days: 7
+          if-no-files-found: error
+
+  repository:
+    name: Repository checks
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - name: Canonical check
+        run: bun run check
+      - name: Official TypeScript compiler
+        run: bun run typecheck:tsc
+      - name: Check the synthetic stream and web tools peer
+        working-directory: script/oblivion
+        run: PYTHONDONTWRITEBYTECODE=1 python3 test-stream-fixture.py
+      - name: Compile the real chat client with the Oblivion profile
+        working-directory: packages/cli
+        env:
+          OPENCODE_CHANNEL: oblivion-ci
+          TURBO_TELEMETRY_DISABLED: "1"
+        run: >-
+          bun run script/build.ts --single --skip-install --skip-web-ui --oblivion
+          --outdir="$GITHUB_WORKSPACE/artifacts/oblivion-build"
+      - name: Record and package the compiled client
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          root = Path("artifacts/oblivion-build")
+          with (root / "cli-linux-arm64/bin/opencode").open("rb") as binary:
+              digest = hashlib.file_digest(binary, "sha256").hexdigest()
+          (root / "build-evidence.json").write_text(json.dumps({
+              "source_commit": os.environ["GITHUB_SHA"], "profile": "oblivion",
+              "binary_sha256": digest, "scope": "CI laboratory build, not a signed release"
+          }, indent=2) + "\n")
+          PY
+          mkdir -p artifacts/ci
+          tar -czf artifacts/ci/cli.tar.gz -C artifacts/oblivion-build \
+            cli-linux-arm64/bin/opencode build-evidence.json
+          printf '%s\n' "$GITHUB_SHA" > artifacts/ci/source-commit.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oblivion-cli-arm64-${{ github.sha }}
+          path: |
+            artifacts/ci/cli.tar.gz
+            artifacts/ci/source-commit.txt
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+  linux:
+    name: Debian ARM64 builds
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    outputs:
+      network: ${{ steps.scope.outputs.network }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Select affected VM suites
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.before || github.event.pull_request.base.sha || '' }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          def network_configuration(source):
+              before, host, after = source.partition("\n  host:\n")
+              host_jobs, network, after = after.partition("\n  network:\n")
+              if any(job != "host-x64" for job in re.findall(r"(?m)^  ([\w-]+):$", host_jobs)):
+                  return None
+              return before + network + after if host and network else None
+
+          base = os.environ["BASE_SHA"]
+          network = True
+          # Unknown history and changes outside host drivers/jobs run the matrix.
+          host_only = {"script/oblivion/vm-services-test.py", "script/oblivion/run-vm-lab.py",
+                       "script/oblivion/run-tui-boot-lab.py", "script/oblivion/vm-session-network-test.py"}
+          if re.fullmatch(r"[0-9a-f]{40}", base) and base != "0" * 40:
+              fetched = subprocess.run(["git", "fetch", "--no-tags", "--depth=1", "origin", base], capture_output=True, timeout=30)
+              if fetched.returncode == 0:
+                  paths = subprocess.check_output(["git", "diff", "--name-only", "-z", base, "HEAD"]).decode().split("\0")
+                  relevant = [path for path in paths if path and path not in host_only and not path.startswith("docs/")]
+                  network = bool(relevant)
+                  workflow = ".github/workflows/oblivion-check.yml"
+                  if relevant == [workflow]:
+                      previous = subprocess.run(["git", "show", base + ":" + workflow], capture_output=True, text=True)
+                      before = network_configuration(previous.stdout) if previous.returncode == 0 else None
+                      after = network_configuration(Path(workflow).read_text())
+                      network = before is None or after is None or before != after
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("network=" + str(network).lower() + "\n")
+          PY
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      # Existing Docker stages run locked Rust tests and compile the real
+      # Linux modules. Only public sources and synthetic fixtures are used.
+      - name: Host services and manager
+        run: >-
+          docker buildx build --platform linux/arm64 --progress plain
+          -f script/oblivion/Dockerfile.vm-lab --target host-artifacts
+          --output type=local,dest=artifacts/ci/host .
+      - name: Gateway and transport laboratory image
+        run: >-
+          docker buildx build --platform linux/arm64 --progress plain
+          -f script/oblivion/Dockerfile.vm-lab --target transport-network-artifacts
+          --output type=local,dest=artifacts/ci/transport .
+      - name: Standalone gateway bundle
+        run: >-
+          docker buildx build --platform linux/arm64 --progress plain
+          -f script/oblivion/Dockerfile.vm-lab --target gateway-artifacts
+          --output type=local,dest=artifacts/ci/gateway .
+      - name: Package verified build outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for component in host gateway transport; do
+            (cd "artifacts/ci/$component" && sha256sum --check SHA256SUMS)
+            tar -czf "artifacts/ci/$component.tar.gz" -C "artifacts/ci/$component" .
+          done
+          printf '%s\n' "$GITHUB_SHA" > artifacts/ci/source-commit.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oblivion-host-arm64-${{ github.sha }}
+          path: |
+            artifacts/ci/host.tar.gz
+            artifacts/ci/source-commit.txt
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oblivion-gateway-arm64-${{ github.sha }}
+          path: |
+            artifacts/ci/gateway.tar.gz
+            artifacts/ci/source-commit.txt
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oblivion-transport-lab-arm64-${{ github.sha }}
+          path: |
+            artifacts/ci/transport.tar.gz
+            artifacts/ci/source-commit.txt
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+  host:
+    name: ARM64 compiled chat boot
+    needs: [repository, linux]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oblivion-cli-arm64-${{ github.sha }}
+          path: artifacts/ci/cli-input
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oblivion-gateway-arm64-${{ github.sha }}
+          path: artifacts/ci/gateway-input
+      - name: Verify and unpack current-commit inputs
+        run: |
+          test "$(cat artifacts/ci/cli-input/source-commit.txt)" = "$GITHUB_SHA"
+          test "$(cat artifacts/ci/gateway-input/source-commit.txt)" = "$GITHUB_SHA"
+          mkdir -p artifacts/oblivion-build
+          tar -xzf artifacts/ci/cli-input/cli.tar.gz -C artifacts/oblivion-build
+          mkdir -p artifacts/ci/gateway
+          tar -xzf artifacts/ci/gateway-input/gateway.tar.gz -C artifacts/ci/gateway
+          (cd artifacts/ci/gateway && sha256sum --check SHA256SUMS)
+      - name: Build the host and real chat guest laboratory
+        run: >-
+          docker buildx build --platform linux/arm64 --progress plain
+          -f script/oblivion/Dockerfile.vm-lab --target artifacts
+          --build-arg HOST=tui-host --build-arg GUEST=tui-guest
+          --build-arg OPENCODE_BUILD_EVIDENCE=artifacts/oblivion-build/build-evidence.json
+          --output type=local,dest=artifacts/ci/host-image .
+      - name: Install the VM laboratory tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-arm libarchive-tools squashfs-tools e2fsprogs
+      - name: Boot the compiled chat without nested emulation
+        run: >-
+          python3 -u script/oblivion/run-tui-boot-lab.py
+          --image artifacts/ci/host-image --output artifacts/ci/tui-boot
+      - name: Exercise gateway policies and private activation in a swap-free VM
+        run: >-
+          python3 -u script/oblivion/run-vm-lab.py
+          --arch aarch64 --accel tcg
+          --image artifacts/ci/host-image --gateway-bundle artifacts/ci/gateway
+          --output artifacts/ci/gateway-results
+      - name: Retain synthetic ARM64 boot evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oblivion-tui-arm64-evidence-${{ github.sha }}
+          path: |
+            artifacts/ci/tui-boot/summary.json
+            artifacts/ci/tui-boot/serial.log
+            artifacts/ci/gateway-results/summary.json
+            artifacts/ci/gateway-results/serial.log
+            artifacts/ci/gateway/SHA256SUMS
+            artifacts/ci/gateway/sources.sha256
+            artifacts/ci/host-image/SHA256SUMS
+            artifacts/ci/host-image/sources.sha256
+            artifacts/oblivion-build/build-evidence.json
+          retention-days: 7
+          if-no-files-found: warn
+
+  host-x64:
+    name: x86 host LUKS, manager and SOCKS streams
+    needs: repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Require hardware acceleration for the laboratory host
+        run: |
+          test "$(uname -m)" = x86_64
+          test -c /dev/kvm
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 libarchive-tools squashfs-tools e2fsprogs
+          sudo usermod -a -G kvm "$(id -un)"
+          sg kvm -c 'test -r /dev/kvm && test -w /dev/kvm'
+      - uses: ./.github/actions/setup-bun
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Compile the x86 chat client with the Oblivion profile
+        working-directory: packages/cli
+        env:
+          OPENCODE_CHANNEL: oblivion-ci
+          TURBO_TELEMETRY_DISABLED: "1"
+        run: >-
+          bun run script/build.ts --target=opencode-linux-x64-baseline --skip-install --skip-web-ui --oblivion
+          --outdir="$GITHUB_WORKSPACE/artifacts/oblivion-build"
+      - name: Record the compiled client provenance
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          root = Path("artifacts/oblivion-build")
+          with (root / "cli-linux-x64-baseline/bin/opencode").open("rb") as binary:
+              digest = hashlib.file_digest(binary, "sha256").hexdigest()
+          (root / "build-evidence.json").write_text(json.dumps({
+              "source_commit": os.environ["GITHUB_SHA"], "profile": "oblivion",
+              "binary_sha256": digest, "architecture": "x86_64",
+              "scope": "CI laboratory build, not a signed release"
+          }, indent=2) + "\n")
+          PY
+      - name: Build the x86 host bundle and real chat guest
+        run: |
+          docker buildx build --platform linux/amd64 --progress plain \
+            -f script/oblivion/Dockerfile.vm-lab --target host-artifacts \
+            --output type=local,dest=artifacts/ci/host .
+          docker buildx build --platform linux/amd64 --progress plain \
+            -f script/oblivion/Dockerfile.vm-lab --target artifacts \
+            --build-arg HOST=stream-host --build-arg GUEST=tui-guest \
+            --build-arg OPENCODE_BINARY=artifacts/oblivion-build/cli-linux-x64-baseline/bin/opencode \
+            --build-arg OPENCODE_BUILD_EVIDENCE=artifacts/oblivion-build/build-evidence.json \
+            --output type=local,dest=artifacts/ci/host-image .
+      - name: Boot the compiled x86 chat
+        run: >-
+          sg kvm -c 'python3 -u script/oblivion/run-tui-boot-lab.py --architecture x86_64 --accelerator kvm
+          --image artifacts/ci/host-image --output artifacts/ci/tui-boot'
+      - name: Exercise protected profiles and trusted manager
+        # KVM accelerates the Debian host. Its dedicated session VM still uses
+        # the explicit lab-only TCG backend; this is not a production KVM proof.
+        run: >-
+          sg kvm -c 'python3 -u script/oblivion/run-vm-lab.py --architecture x86_64 --accelerator kvm
+          --image artifacts/ci/host-image --services-bundle artifacts/ci/host
+          --output artifacts/ci/host-results'
+      - name: Build current-client session and external SOCKS gateway
+        run: >-
+          docker buildx build --platform linux/amd64 --progress plain
+          -f script/oblivion/Dockerfile.vm-lab --target stream-artifacts
+          --build-arg STREAM_GATEWAY=stream-gateway-base
+          --build-arg OPENCODE_BINARY=artifacts/oblivion-build/cli-linux-x64-baseline/bin/opencode
+          --build-arg OPENCODE_BUILD_EVIDENCE=artifacts/oblivion-build/build-evidence.json
+          --output type=local,dest=artifacts/ci/stream-images .
+      - name: Exercise saved SOCKS transport through real encrypted sessions
+        run: >-
+          sg kvm -c 'python3 -u script/oblivion/run-vm-lab.py --architecture x86_64 --accelerator kvm
+          --image artifacts/ci/host-image --services-bundle artifacts/ci/host
+          --gateway-image artifacts/ci/stream-images/gateway
+          --session-image artifacts/ci/stream-images/session --stream --stream-socks
+          --output artifacts/ci/stream-results'
+      - name: Retain synthetic x86 host evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oblivion-host-x64-evidence-${{ github.sha }}
+          path: |
+            artifacts/ci/tui-boot/summary.json
+            artifacts/ci/tui-boot/serial.log
+            artifacts/ci/host-results/summary.json
+            artifacts/ci/host-results/serial.log
+            artifacts/ci/stream-results/summary.json
+            artifacts/ci/stream-results/serial.log
+            artifacts/ci/stream-results/webtools-outside.pcap
+            artifacts/ci/stream-images/gateway/SHA256SUMS
+            artifacts/ci/stream-images/gateway/stream.json
+            artifacts/ci/stream-images/gateway/trust.diff
+            artifacts/ci/stream-images/session/SHA256SUMS
+            artifacts/ci/stream-images/session/build-evidence.json
+            artifacts/ci/stream-images/session/opencode.sha256
+            artifacts/ci/host-image/SHA256SUMS
+            artifacts/ci/host-image/sources.sha256
+            artifacts/ci/host/SHA256SUMS
+            artifacts/ci/host/sources.sha256
+            artifacts/oblivion-build/build-evidence.json
+          retention-days: 7
+          if-no-files-found: warn
+
+  network:
+    name: Network ${{ matrix.kind }} ${{ matrix.authentication }} ${{ matrix.fault }}
+    needs: linux
+    if: needs.linux.outputs.network == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        include:
+          - { kind: socks, authentication: required, fault: revoke }
+          - { kind: socks, authentication: required, fault: egress-crash }
+          - { kind: socks, authentication: required, fault: broker-crash }
+          - { kind: socks, authentication: required, fault: supervisor-crash }
+          - { kind: socks, authentication: required, fault: control-disconnect }
+          - { kind: socks, authentication: required, fault: reconfigure }
+          - { kind: socks, authentication: none, fault: revoke }
+          - { kind: socks, authentication: none, fault: egress-crash }
+          - { kind: socks, authentication: none, fault: broker-crash }
+          - { kind: socks, authentication: none, fault: supervisor-crash }
+          - { kind: socks, authentication: none, fault: control-disconnect }
+          - { kind: socks, authentication: none, fault: reconfigure }
+          - { kind: tools, authentication: required, fault: revoke }
+          - { kind: tools, authentication: none, fault: revoke }
+          - { kind: tools, authentication: required, fault: tools-crash }
+          - { kind: tools, authentication: required, fault: egress-crash }
+          - { kind: tor, authentication: isolation, fault: disconnect }
+          - { kind: tor, authentication: isolation, fault: shutdown }
+          - { kind: tor, authentication: isolation, fault: malformed }
+          - { kind: tor, authentication: isolation, fault: oversized }
+          - { kind: tor, authentication: isolation, fault: partial }
+          - { kind: tor, authentication: isolation, fault: duplicate-grant }
+          - { kind: tor, authentication: isolation, fault: supervisor-crash }
+          - { kind: tor, authentication: isolation, fault: broker-crash }
+          - { kind: tor, authentication: isolation, fault: egress-crash }
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oblivion-transport-lab-arm64-${{ github.sha }}
+          path: artifacts/ci
+      - name: Verify build provenance and image checksums
+        run: |
+          test "$(cat artifacts/ci/source-commit.txt)" = "$GITHUB_SHA"
+          mkdir artifacts/ci/transport
+          tar -xzf artifacts/ci/transport.tar.gz -C artifacts/ci/transport
+          cd artifacts/ci/transport
+          sha256sum --check SHA256SUMS
+      - name: Install software-emulated VM laboratory
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-arm
+      - name: Exercise transport and lifecycle fault in fresh VMs
+        shell: bash
+        env:
+          TEST_KIND: ${{ matrix.kind }}
+          TEST_AUTHENTICATION: ${{ matrix.authentication }}
+          TEST_FAULT: ${{ matrix.fault }}
+        run: |
+          set -euo pipefail
+          if [ "$TEST_KIND" = socks ] || [ "$TEST_KIND" = tools ]; then
+            tools=()
+            if [ "$TEST_KIND" = tools ]; then tools=(--tools); fi
+            timeout --kill-after=20s 240s python3 -u script/oblivion/run-transport-lab.py \
+              --accelerator tcg --image artifacts/ci/transport \
+              --output artifacts/ci/results/case \
+              --authentication "$TEST_AUTHENTICATION" --fault "$TEST_FAULT" "${tools[@]}"
+          else
+            timeout --kill-after=20s 240s python3 -u script/oblivion/run-network-lab.py \
+              --accelerator tcg --image artifacts/ci/transport \
+              --output artifacts/ci/results/case --control-fault "$TEST_FAULT"
+          fi
+      - name: Retain synthetic VM evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oblivion-network-evidence-${{ matrix.kind }}-${{ matrix.authentication }}-${{ matrix.fault }}-${{ github.sha }}
+          path: |
+            artifacts/ci/results/**/*.json
+            artifacts/ci/results/**/*.pcap
+            artifacts/ci/results/**/*.log
+            artifacts/ci/source-commit.txt
+          retention-days: 7
+          if-no-files-found: warn

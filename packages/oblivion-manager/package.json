@@ -1,0 +1,27 @@
+{
+  "name": "@oblivion/manager",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun src/index.tsx --preview",
+    "preview:ui": "bun script/preview-ui.tsx",
+    "build": "bun script/build.ts",
+    "test": "bun test --timeout 30000",
+    "typecheck": "bun check --no-script -b",
+    "typecheck:tsc": "tsc -b"
+  },
+  "dependencies": {
+    "@opentui/core": "catalog:",
+    "@opentui/solid": "catalog:",
+    "solid-js": "catalog:",
+    "zod": "catalog:",
+    "@opencode/tui-kit": "workspace:*",
+    "@opencode/theme": "workspace:*"
+  },
+  "devDependencies": {
+    "@tsconfig/bun": "catalog:",
+    "@types/bun": "catalog:",
+    "@typescript/native": "catalog:"
+  }
+}

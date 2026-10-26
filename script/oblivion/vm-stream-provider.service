@@ -1,0 +1,15 @@
+[Unit]
+Description=Oblivion synthetic stream provider (laboratory only)
+Requires=oblivion-gateway-network.service
+After=oblivion-gateway-network.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/lib/oblivion-stream-fixture/provider.py
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/console
+TTYReset=yes
+LimitCORE=0
+MemorySwapMax=0
+Restart=no

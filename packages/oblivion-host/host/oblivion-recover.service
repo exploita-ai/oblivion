@@ -1,0 +1,15 @@
+[Unit]
+Description=Oblivion verified storage recovery
+After=oblivion-controller.service
+Before=oblivion-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/oblivion-storage --config /etc/oblivion/controller.json recover
+TimeoutStartSec=90
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+StandardInput=null
+StandardOutput=null
+StandardError=null

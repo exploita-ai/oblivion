@@ -1,0 +1,7 @@
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-apt xorriso squashfs-tools initramfs-tools-core e2fsprogs \
+    && rm -rf /var/lib/apt/lists/*
+# Inspector only. Nothing from this image is copied into Oblivion runtime images.
+COPY script/oblivion/audit-image.py /audit-image.py
+ENTRYPOINT ["python3", "/audit-image.py"]

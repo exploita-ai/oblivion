@@ -1,0 +1,34 @@
+[Unit]
+Description=Oblivion private gateway owner
+After=local-fs.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/oblivion-storage --config /etc/oblivion/controller.json gateway-host-run
+ExecStopPost=-/usr/bin/systemctl stop oblivion-gateway-vm.service
+Restart=no
+KillMode=control-group
+TimeoutStartSec=90
+TimeoutStopSec=20
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/oblivion /run/oblivion/general/profile
+ReadOnlyPaths=/run/oblivion/general
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+StandardInput=null
+StandardOutput=null
+StandardError=null

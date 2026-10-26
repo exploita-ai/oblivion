@@ -1,0 +1,11 @@
+**
+!packages/
+packages/*
+!packages/oblivion-transfer/
+packages/oblivion-transfer/*
+!packages/oblivion-transfer/Cargo.toml
+!packages/oblivion-transfer/Cargo.lock
+!packages/oblivion-transfer/src/
+!packages/oblivion-transfer/src/**
+!packages/oblivion-transfer/tests/
+!packages/oblivion-transfer/tests/**

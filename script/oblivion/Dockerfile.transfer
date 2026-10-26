@@ -1,0 +1,20 @@
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS check
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends cargo rustc gcc libc6-dev ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /transfer
+COPY packages/oblivion-transfer/Cargo.toml packages/oblivion-transfer/Cargo.lock ./
+RUN cargo fetch --locked
+COPY packages/oblivion-transfer/src/ src/
+COPY packages/oblivion-transfer/tests/ tests/
+RUN --network=none mkdir /evidence \
+    && (cargo test --locked --offline > /evidence/tests.log 2>&1 || { cat /evidence/tests.log; exit 1; }) \
+    && cat /evidence/tests.log \
+    && (cargo build --locked --offline --release --bins > /evidence/build.log 2>&1 || { cat /evidence/build.log; exit 1; }) \
+    && cp target/release/oblivion-copy target/release/oblivion-copy-relay /evidence/ \
+    && rustc --version > /evidence/rustc.txt \
+    && find Cargo.toml Cargo.lock src tests -type f -print0 | sort -z | xargs -0 sha256sum > /evidence/sources.sha256 \
+    && cd /evidence && sha256sum * > SHA256SUMS
+
+FROM scratch AS artifacts
+COPY --from=check /evidence/ /

@@ -1,0 +1,31 @@
+[Unit]
+Description=Oblivion protected storage controller
+After=local-fs.target
+Wants=oblivion-manager.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+# A failed cleanup leaves the recovery latch. Start IPC so the trusted manager
+# can expose the failure and accept an explicit recovery action.
+ExecStartPre=-/usr/bin/oblivion-storage --config /etc/oblivion/controller.json recover
+ExecStart=/usr/bin/oblivion-storage --config /etc/oblivion/controller.json serve
+ExecStopPost=/usr/bin/oblivion-storage --config /etc/oblivion/controller.json recover
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+TimeoutStartSec=90
+TimeoutStopSec=90
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+NoNewPrivileges=yes
+StandardInput=null
+StandardOutput=null
+StandardError=null
+# Mounts must remain visible to the host and to independent recovery commands.
+# Do not give this privileged storage boundary a private mount namespace.
+
+[Install]
+WantedBy=multi-user.target

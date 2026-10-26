@@ -1,0 +1,13 @@
+[Unit]
+Description=Oblivion display terminal handoff
+
+[Socket]
+ListenStream=/run/oblivion-terminal.sock
+SocketUser=1104
+SocketGroup=1104
+SocketMode=0600
+Service=oblivion-manager.service
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

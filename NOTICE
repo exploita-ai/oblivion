@@ -1,0 +1,17 @@
+Oblivion
+========
+
+Oblivion is an independent project developed by Exploita AI.
+
+The coding-agent runtime is derived from OpenCode v2, originally published by
+Anomaly under the MIT License:
+
+    https://github.com/anomalyco/opencode
+
+Oblivion is not affiliated with or endorsed by Anomaly or the OpenCode team.
+The upstream copyright and license notice are preserved in LICENSE and in
+substantial retained source files.
+
+Third-party components retain their own notices. In particular, the Oblivion
+manager vendors selected components inspired by termcn; its license and
+provenance are stored with that source and copied into compiled manager assets.

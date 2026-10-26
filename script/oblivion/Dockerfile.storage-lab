@@ -1,0 +1,18 @@
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS build
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cargo rustc ca-certificates gcc libc6-dev cryptsetup-bin e2fsprogs \
+    util-linux busybox-static cpio kmod linux-image-arm64 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY packages/oblivion-tor-state/ /oblivion-tor-state/
+COPY packages/oblivion-transport/ /oblivion-transport/
+COPY packages/oblivion-transfer/ /oblivion-transfer/
+COPY packages/oblivion-host/ ./
+RUN cargo build --locked --release --bins --examples
+COPY script/oblivion/storage-lab-init.sh /lab/init
+COPY script/oblivion/storage-lab-test.sh /lab/storage-test
+COPY script/oblivion/storage-lab-pack.sh /lab/pack
+RUN sh /lab/pack
+FROM scratch AS artifacts
+COPY --from=build /out/ /

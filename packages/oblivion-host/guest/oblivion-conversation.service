@@ -1,0 +1,36 @@
+[Unit]
+Description=Oblivion session conversation
+ConditionKernelCommandLine=!oblivion.documents=1
+Requires=oblivion-vault.service oblivion-session-network.service
+After=oblivion-vault.service oblivion-session-network.service
+
+[Service]
+Type=simple
+User=1000
+Group=1000
+WorkingDirectory=/vault/workspace
+Environment=HOME=/vault/home
+Environment=XDG_CONFIG_HOME=/vault/config
+Environment=XDG_STATE_HOME=/vault/state
+Environment=XDG_DATA_HOME=/vault/state
+Environment=XDG_CACHE_HOME=/tmp/oblivion-cache
+Environment=TMPDIR=/tmp
+Environment=HISTFILE=/dev/null
+Environment=TERM=xterm-256color COLORTERM=truecolor
+ExecStart=/usr/libexec/oblivion
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/hvc0
+TTYReset=yes
+TTYVHangup=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+LimitCORE=0
+KillMode=control-group
+TimeoutStopSec=10s
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

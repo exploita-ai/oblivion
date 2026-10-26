@@ -1,0 +1,19 @@
+[Unit]
+Description=Confirm the offline session is ready
+ConditionKernelCommandLine=oblivion.documents=1
+Requires=oblivion-vault.service systemd-logind.service
+After=oblivion-vault.service systemd-logind.service systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/oblivion/guest/documents-ready.sh
+TimeoutStartSec=60
+RemainAfterExit=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+LimitCORE=0
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

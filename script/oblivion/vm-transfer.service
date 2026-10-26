@@ -1,0 +1,17 @@
+[Unit]
+Description=Oblivion synthetic file-copy VM fixture
+After=local-fs.target systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /usr/lib/oblivion-copy-lab/vm-transfer-guest.py
+StandardInput=null
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/console
+LimitCORE=0
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

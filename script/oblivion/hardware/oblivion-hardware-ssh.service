@@ -1,0 +1,21 @@
+[Unit]
+Description=Oblivion temporary LAN hardware test access
+After=NetworkManager.service
+
+[Service]
+Type=exec
+RuntimeDirectory=oblivion-hardware
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ExecStartPre=/usr/lib/oblivion/hardware/ssh_control.py prepare
+ExecStart=/usr/sbin/sshd -D -e -f /etc/oblivion/hardware/sshd_config
+# PAM places interactive sessions in logind scopes outside this service.
+ExecStopPost=-/usr/bin/loginctl terminate-user oblivion-test
+ExecStopPost=-/usr/sbin/nft delete table inet oblivion_hardware
+KillMode=control-group
+TimeoutStopSec=5
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+StandardOutput=null
+StandardError=journal

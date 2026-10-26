@@ -1,0 +1,29 @@
+[Unit]
+Description=Send explicitly selected session documents
+Requires=oblivion-vault.service
+After=oblivion-vault.service
+BindsTo=dev-%i.device
+
+[Service]
+Type=exec
+User=1000
+Group=1000
+ExecStart=/usr/lib/oblivion/guest/export-send.sh /dev/%I
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=yes
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=128M
+TasksMax=8
+RuntimeMaxSec=420
+TimeoutStopSec=5
+KillMode=control-group
+Restart=no
+StandardInput=null
+StandardOutput=null
+StandardError=null

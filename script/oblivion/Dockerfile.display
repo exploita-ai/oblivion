@@ -1,0 +1,19 @@
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS cage-build
+COPY script/oblivion/display/build-cage.sh script/oblivion/display/patch-cage.py /build-cage/
+RUN DEBIAN_FRONTEND=noninteractive sh /build-cage/build-cage.sh
+
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS packages
+RUN apt-get update && apt-get install -y --no-install-recommends --download-only libwlroots-0.18 foot seatd fonts-dejavu-mono libxkbcommon-tools \
+    && mkdir /out && cp /var/cache/apt/archives/*.deb /out/
+RUN apt-get install -y --no-install-recommends libwlroots-0.18 foot seatd fonts-dejavu-mono libxkbcommon-tools
+FROM packages AS validation
+COPY --from=cage-build /out/ /out/
+COPY script/oblivion/display/foot.ini /etc/oblivion/foot.ini
+RUN LANG=C.UTF-8 foot --log-level=info --check-config --config=/etc/oblivion/foot.ini \
+    && dpkg-query -W -f='${Package}\t${Version}\t${Installed-Size}\n' > /out/packages.tsv \
+    && test ! -x /usr/bin/Xwayland \
+    && /out/oblivion-cage -v \
+    && cd /out && sha256sum *.deb packages.tsv oblivion-cage LICENSE oblivion.patch cage-source.sha256 > SHA256SUMS
+
+FROM scratch AS artifacts
+COPY --from=validation /out/ /

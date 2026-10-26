@@ -1,0 +1,28 @@
+name: Feature request
+description: Propose a focused Oblivion improvement
+title: "feat: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or security problem should Oblivion solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Privacy and trust-boundary impact
+      description: What new data, process, device, or network path would this introduce?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

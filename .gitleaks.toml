@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "TUI keybinding fixtures use a `key` field with command-like values"
+paths = [
+  '''packages/tui/test/config\.test\.tsx''',
+  '''packages/tui/test/config-v2\.test\.tsx''',
+]

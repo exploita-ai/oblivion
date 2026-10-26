@@ -1,0 +1,42 @@
+{
+  "general_image": "/persist/oblivion/general.luks",
+  "general_mib": 2048,
+  "session_mib": 512,
+  "pbkdf_memory_kib": 262144,
+  "manager_uid": 1000,
+  "usb_persistence": true,
+  "network_profiles": true,
+  "gateway_network": true,
+  "vm": {
+    "root": "/usr/lib/oblivion/vm/qemu-root",
+    "kernel": "/usr/lib/oblivion/vm/session/kernel",
+    "initrd": "/usr/lib/oblivion/vm/session/initrd",
+    "filesystem": "/usr/lib/oblivion/vm/session/root.squashfs",
+    "memory_mib": 1024,
+    "cpus": 2
+  },
+  "gateway": {
+    "root": "/usr/lib/oblivion/vm/qemu-root",
+    "kernel": "/usr/lib/oblivion/vm/gateway/kernel",
+    "initrd": "/usr/lib/oblivion/vm/gateway/initrd",
+    "filesystem": "/usr/lib/oblivion/vm/gateway/root.squashfs",
+    "memory_mib": 768,
+    "cpus": 1
+  },
+  "import": {
+    "root": "/usr/lib/oblivion/vm/qemu-root",
+    "kernel": "/usr/lib/oblivion/vm/import/kernel",
+    "initrd": "/usr/lib/oblivion/vm/import/initrd",
+    "filesystem": "/usr/lib/oblivion/vm/import/root.squashfs",
+    "memory_mib": 512,
+    "cpus": 1
+  },
+  "export": {
+    "root": "/usr/lib/oblivion/vm/qemu-root",
+    "kernel": "/usr/lib/oblivion/vm/export/kernel",
+    "initrd": "/usr/lib/oblivion/vm/export/initrd",
+    "filesystem": "/usr/lib/oblivion/vm/export/root.squashfs",
+    "memory_mib": 512,
+    "cpus": 1
+  }
+}

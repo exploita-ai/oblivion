@@ -1,0 +1,45 @@
+[Unit]
+Description=Oblivion private gateway controller
+Requires=oblivion-gateway-network.service
+After=oblivion-gateway-network.service systemd-tmpfiles-setup.service
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/oblivion-gateway-control
+# Stop infrastructure traffic and remove egress permissions even after
+# abrupt supervisor death. All grant processes belong to this cgroup.
+ExecStopPost=-/usr/bin/systemctl kill --kill-whom=all --signal=SIGKILL oblivion-tor.service
+ExecStopPost=-/usr/sbin/nft -f /etc/oblivion/firewall.nft
+# Keep the default root identity. With User=root, systemd's seccomp setup drops
+# CAP_SETUID before exec under NoNewPrivileges, preventing the broker UID drop.
+# No ambient capabilities are granted to either process.
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_OVERRIDE CAP_CHOWN CAP_NET_ADMIN
+DevicePolicy=closed
+DeviceAllow=/dev/virtio-ports/oblivion.gateway rw
+ProtectSystem=strict
+# /run/tor must stay visible through the parent mount: Tor recreates that
+# RuntimeDirectory on restart. A bind here would pin the removed directory.
+ReadWritePaths=/var/lib/tor
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=512M
+TasksMax=64
+StandardInput=null
+StandardOutput=null
+StandardError=null
+Restart=no
+KillMode=control-group
+TimeoutStopSec=15

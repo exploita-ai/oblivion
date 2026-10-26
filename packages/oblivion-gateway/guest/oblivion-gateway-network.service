@@ -1,0 +1,14 @@
+[Unit]
+Description=Oblivion gateway network policy
+BindsTo=sys-subsystem-net-devices-inside0.device sys-subsystem-net-devices-outside0.device
+After=sys-subsystem-net-devices-inside0.device sys-subsystem-net-devices-outside0.device
+Before=oblivion-tor.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/oblivion-gateway-network
+RemainAfterExit=yes
+StandardOutput=null
+StandardError=null
+LimitCORE=0
+UMask=0077

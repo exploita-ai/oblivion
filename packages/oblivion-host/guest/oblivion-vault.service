@@ -1,0 +1,14 @@
+[Unit]
+Description=Prepare the dedicated session filesystem
+RequiresMountsFor=/vault
+Before=oblivion-conversation.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/oblivion/guest/prepare.sh
+RemainAfterExit=yes
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

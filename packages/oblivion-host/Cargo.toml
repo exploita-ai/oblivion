@@ -1,0 +1,40 @@
+[package]
+name = "oblivion-host"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[features]
+lab-emulation = []
+
+[dependencies]
+oblivion-tor-state = { path = "../oblivion-tor-state" }
+oblivion-transport = { path = "../oblivion-transport" }
+oblivion-transfer = { path = "../oblivion-transfer" }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+vt100 = { version = "=0.18.1", default-features = false }
+zeroize = { version = "1.9.1", features = ["serde"] }
+
+[[bin]]
+name = "oblivion-storage"
+path = "src/main.rs"
+
+[[bin]]
+name = "oblivion-control"
+path = "src/client.rs"
+
+[[bin]]
+name = "oblivion-manager"
+path = "src/manager.rs"
+
+[[bin]]
+name = "oblivion-console"
+path = "src/console_main.rs"
+
+[[bin]]
+name = "oblivion-display"
+path = "src/display_main.rs"

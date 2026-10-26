@@ -1,0 +1,27 @@
+[Unit]
+Description=Oblivion authorized document transfer
+After=local-fs.target
+
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/oblivion-storage --config /etc/oblivion/controller.json transfer-host-run
+ExecStopPost=/usr/bin/oblivion-storage --config /etc/oblivion/controller.json transfer-cleanup
+Restart=no
+RuntimeDirectory=oblivion-transfer-host
+RuntimeDirectoryMode=0711
+KillMode=control-group
+TimeoutStartSec=120
+TimeoutStopSec=20
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+StandardInput=null
+StandardOutput=null
+StandardError=null
+# The root controller creates/removes device-mapper mappings and starts confined
+# VM units. No external filesystem is mounted in this privileged process.

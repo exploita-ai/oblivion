@@ -1,0 +1,24 @@
+[Unit]
+Description=Oblivion hardware test network console
+After=NetworkManager.service systemd-user-sessions.service
+Conflicts=getty@tty2.service
+
+[Service]
+Type=exec
+ExecStart=/usr/lib/oblivion/hardware/console.py
+Restart=always
+RestartSec=2
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=journal
+TTYPath=/dev/tty2
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+Environment=TERM=linux
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+
+[Install]
+WantedBy=multi-user.target

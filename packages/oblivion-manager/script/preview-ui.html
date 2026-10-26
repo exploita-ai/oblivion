@@ -1,0 +1,43 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Oblivion · UI preview</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#08080b;color:#a3a3b0;font:13px system-ui}header{padding:14px 22px;border-bottom:1px solid #292932;display:flex;align-items:center;gap:12px;flex-wrap:wrap}strong{color:#d32f2f;letter-spacing:1px;margin-right:16px}button{background:#202028;color:#d0d0db;border:1px solid #393944;border-radius:5px;padding:6px 10px;cursor:pointer}button:hover{border-color:#d32f2f;color:white}main{padding:20px;overflow:auto}#screen{display:inline-block;outline:none;font:14px/20px Menlo,monospace;white-space:pre;background:#101014;box-shadow:0 16px 60px #0008}#screen:focus{box-shadow:0 0 0 1px #d32f2f,0 16px 60px #0008}p{margin:0 20px 16px;line-height:1.6}.line{height:20px}.line span{display:inline-block;height:20px;vertical-align:top}.box-glyph{position:relative;width:1ch}.box-glyph svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}footer{padding:0 22px 18px}#error{color:#ff9ca6}
+</style>
+<header><strong>OBLIVION / UX LAB</strong><button data-size="80,24">80 × 24</button><button data-size="120,36">120 × 36</button><button data-size="160,50">160 × 50</button><button data-reset="false">Reset manager</button><button data-reset="true">Oblivion locked</button></header>
+<main><div id="screen" tabindex="0" aria-label="Interactive terminal preview"></div></main>
+<p>Real OpenTUI components · Simulated sessions and files · No VM, USB writes or provider requests.<br>Click the terminal, then use your keyboard. <b>Tab</b> focus · <b>Enter</b> open · <b>Esc</b> back. Use dummy passwords and keys.</p><footer id="error"></footer>
+<script>
+const screen=document.querySelector('#screen');let queue=Promise.resolve();
+// Like a terminal's box-drawing renderer, extend strokes to cell edges.
+// Font glyphs alone leave gaps when browser line-height exceeds glyph height.
+const borders={'│':5,'─':10,'┌':6,'┐':12,'└':3,'┘':9,'├':7,'┤':13,'┬':14,'┴':11,'┼':15};
+function draw(frame){
+  screen.replaceChildren(...frame.lines.map(line=>{
+    const row=document.createElement('div');row.className='line';
+    for(const part of line){
+      for(const text of part.text.split(/([│─┌┐└┘├┤┬┴┼])/u).filter(Boolean)){
+        const span=document.createElement('span');span.textContent=text;
+        const ink=`rgb(${part.fg.join(',')})`;
+        span.style.color=ink;span.style.backgroundColor=`rgb(${part.bg.join(',')})`;span.style.fontWeight=part.bold?'bold':'normal';
+        if(borders[text]){
+          span.className='box-glyph';span.style.color='transparent';
+          const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+          svg.setAttribute('viewBox','0 0 10 20');svg.setAttribute('preserveAspectRatio','none');svg.setAttribute('aria-hidden','true');
+          const path=document.createElementNS('http://www.w3.org/2000/svg','path');
+          path.setAttribute('d',[[1,'M5 10V0'],[2,'M5 10H10'],[4,'M5 10V20'],[8,'M5 10H0']].filter(([bit])=>borders[text]&bit).map(([,segment])=>segment).join(' '));
+          path.setAttribute('stroke',ink);path.setAttribute('stroke-width','1');path.setAttribute('vector-effect','non-scaling-stroke');path.setAttribute('fill','none');
+          svg.append(path);span.append(svg);
+        }
+        row.append(span);
+      }
+    }
+    return row;
+  }));
+}
+function send(value){queue=queue.then(async()=>{const res=await fetch('/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(value)});if(!res.ok)throw Error('Preview input failed');draw(await res.json())}).catch(error=>document.querySelector('#error').textContent=error.message);return queue}
+const keys={Enter:'RETURN',Escape:'ESCAPE',Tab:'TAB',ArrowUp:'ARROW_UP',ArrowDown:'ARROW_DOWN',ArrowLeft:'ARROW_LEFT',ArrowRight:'ARROW_RIGHT',Backspace:'BACKSPACE',Delete:'DELETE',Home:'HOME',End:'END',PageUp:'PAGEUP',PageDown:'PAGEDOWN',F6:'F6',F7:'F7',F8:'F8'};
+screen.addEventListener('keydown',e=>{if(e.metaKey)return;if(!keys[e.key]&&e.key.length!==1)return;e.preventDefault();send({action:'key',key:keys[e.key]||e.key,ctrl:e.ctrlKey,shift:e.shiftKey})});
+screen.addEventListener('paste',e=>{e.preventDefault();send({action:'paste',text:e.clipboardData.getData('text').slice(0,1024)})});
+document.querySelectorAll('[data-size]').forEach(button=>button.onclick=()=>{const [width,height]=button.dataset.size.split(',').map(Number);send({action:'resize',width,height});screen.focus()});
+document.querySelectorAll('[data-reset]').forEach(button=>button.onclick=()=>{send({action:'reset',locked:button.dataset.reset==='true'});screen.focus()});
+fetch('/frame').then(res=>res.json()).then(draw).then(()=>screen.focus());
+</script></html>

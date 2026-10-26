@@ -1,0 +1,31 @@
+{
+  "general_image": "/persist/oblivion/general.luks",
+  "general_mib": 4096,
+  "session_mib": 512,
+  "pbkdf_memory_kib": 262144,
+  "manager_uid": 1000,
+  "vm": {
+    "root": "/usr/lib/oblivion/vm/qemu-root",
+    "kernel": "/usr/lib/oblivion/vm/kernel",
+    "initrd": "/usr/lib/oblivion/vm/initrd",
+    "filesystem": "/usr/lib/oblivion/vm/guest.squashfs",
+    "memory_mib": 1024,
+    "cpus": 2
+  },
+  "import": {
+    "root": "/usr/lib/oblivion/vm/qemu-root",
+    "kernel": "/usr/lib/oblivion/vm/kernel",
+    "initrd": "/usr/lib/oblivion/vm/initrd",
+    "filesystem": "/usr/lib/oblivion/vm/import.squashfs",
+    "memory_mib": 512,
+    "cpus": 1
+  },
+  "export": {
+    "root": "/usr/lib/oblivion/vm/qemu-root",
+    "kernel": "/usr/lib/oblivion/vm/kernel",
+    "initrd": "/usr/lib/oblivion/vm/initrd",
+    "filesystem": "/usr/lib/oblivion/vm/export.squashfs",
+    "memory_mib": 512,
+    "cpus": 1
+  }
+}

@@ -1,0 +1,33 @@
+[Unit]
+Description=Receive an explicitly approved document copy
+Requires=oblivion-vault.service
+After=oblivion-vault.service
+BindsTo=dev-%i.device
+
+[Service]
+Type=exec
+User=1001
+Group=1000
+ExecStart=/usr/lib/oblivion/guest/import-receive.sh /dev/%I
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=yes
+# One mount is necessary for the atomic rename from inbox to imports. Two
+# separate writable bind mounts make renameat fail with EXDEV. Unix ownership
+# still restricts UID 1001 to its own inbox/imports; chat directories are 0700.
+ReadWritePaths=/vault
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=128M
+TasksMax=8
+RuntimeMaxSec=420
+TimeoutStopSec=5
+KillMode=control-group
+Restart=no
+StandardInput=null
+StandardOutput=null
+StandardError=null
