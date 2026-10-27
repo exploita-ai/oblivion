@@ -5,6 +5,10 @@ root=$(pwd)
 bun=${OBLIVION_BUN:-bun}
 test "$("$bun" --version)" = 1.4.4 || { printf '%s\n' 'Bun 1.4.4 is required.' >&2; exit 1; }
 arch=${OBLIVION_ARCH:-amd64}
+image_name=${OBLIVION_IMAGE_NAME:-oblivion-development}
+case "$image_name" in
+    *[!a-zA-Z0-9._-]*|'') printf '%s\n' 'OBLIVION_IMAGE_NAME contains an unsupported character.' >&2; exit 1;;
+esac
 case "$arch" in
     amd64) out="$root/artifacts/oblivion-beta-iso"; target=opencode-linux-x64-baseline; client=cli-linux-x64-baseline; manager=bun-linux-x64;;
     arm64) out="$root/artifacts/oblivion-arm-iso"; target=opencode-linux-arm64; client=cli-linux-arm64; manager=bun-linux-arm64;;
@@ -40,7 +44,7 @@ manifest = ''.join(hashlib.sha256(Path(name).read_bytes()).hexdigest() + '  ' + 
     'source_manifest_sha256': hashlib.sha256(manifest.encode()).hexdigest(),
     'source_manifest': 'client-sources.sha256',
     'binary_sha256': digest, 'architecture': os.environ['OBLIVION_BUILD_ARCH'], 'profile': 'oblivion',
-    'scope': 'Development ISO build; not a signed release.'
+    'scope': os.environ.get('OBLIVION_BUILD_SCOPE', 'Development ISO build; not a signed release.')
 }, indent=2) + '\n')
 PY
 docker buildx build --platform "linux/$arch" --file script/oblivion/Dockerfile.vm-lab \
@@ -49,6 +53,7 @@ docker buildx build --platform "linux/$arch" --file script/oblivion/Dockerfile.v
     --build-arg "OPENCODE_BUILD_EVIDENCE=${out#"$root/"}/client-evidence.json" \
     --build-arg "MANAGER_BINARY=artifacts/oblivion-manager/$manager/oblivion-manager" \
     --build-arg "MANAGER_ASSETS=artifacts/oblivion-manager/$manager/assets" \
+    --build-arg "OBLIVION_IMAGE_NAME=$image_name" \
     --output "type=local,dest=$image" .
 cp "$out/client-sources.sha256" "$image/client-sources.sha256"
 (cd "$image" && shasum -a 256 client-sources.sha256 >> SHA256SUMS)

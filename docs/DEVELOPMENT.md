@@ -60,6 +60,21 @@ artifacts; generated evidence must not be committed as permanent documentation.
 Development images are not release images. They may contain diagnostics,
 temporary access keys or services that must be absent from a public build.
 
+## Release branches
+
+All normal development targets `dev`. Promote a fully reviewed commit to
+`main` only when it is a release candidate. GitHub Actions builds both image
+architectures for each `main` push without publishing them.
+
+After the `Oblivion checks` run for that exact `main` commit is green, a `v*`
+tag on the commit rebuilds both architectures and uploads them directly to a
+draft GitHub Release. The Release is made public as a pre-release only after
+both builds and checksum verification succeed. A tag outside `main` is rejected.
+
+Do not manually attach locally built ISOs to a Release. Until signed provenance
+is implemented, published SHA-256 files provide integrity checking rather than
+publisher authentication.
+
 ## Run from a virtual machine
 
 Oblivion persistence uses free space after the hybrid ISO on the writable boot

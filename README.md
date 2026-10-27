@@ -277,6 +277,20 @@ bun run build:hardware
 
 Do not distribute a development image as a release image.
 
+### Branches and release images
+
+Development and pull requests target `dev`. The `main` branch contains only
+release candidates: every push to `main` builds and verifies fresh `amd64` and
+`arm64` images, but does not publish them. A `v*` tag is accepted only when its
+commit belongs to `main` and the complete `Oblivion checks` workflow for that
+commit succeeded.
+
+An accepted tag creates a GitHub pre-release with both ISO files, per-image
+SHA-256 files and a combined `SHA256SUMS`. Images are uploaded directly to the
+GitHub Release, not retained as expiring Actions artifacts. Current checksums
+detect corruption but are not a cryptographic signature; signed provenance is
+still a release blocker.
+
 ## Repository map
 
 - `packages/oblivion-host` — trusted storage, VM lifecycle, manager bridge, console, display, and transfers.

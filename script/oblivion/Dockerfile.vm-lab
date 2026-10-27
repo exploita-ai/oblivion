@@ -445,6 +445,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     squashfs-tools $(if [ "$TARGETARCH" = arm64 ]; then printf grub-efi-arm64-bin; else printf 'grub-pc-bin grub-efi-amd64-bin'; fi) grub-common xorriso mtools python3 \
     && rm -rf /var/lib/apt/lists/*
 FROM live-pack-tools AS live-pack
+ARG OBLIVION_IMAGE_NAME=oblivion-development
 COPY --from=live-host / /host/
 COPY --from=live-session / /session/
 COPY --from=gateway-system / /gateway/
@@ -454,7 +455,7 @@ COPY --from=compiler /bundle/sources.sha256 /sources/host-sources.sha256
 COPY --from=gateway-compiler /gateway-bundle/sources.sha256 /sources/gateway-sources.sha256
 COPY script/oblivion/live-* script/oblivion/settings-catalog.py script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/Dockerfile.vm-lab /sources/
 COPY script/oblivion/display/ /sources/display/
-RUN sh /sources/live-pack.sh
+RUN OBLIVION_IMAGE_NAME="$OBLIVION_IMAGE_NAME" sh /sources/live-pack.sh
 
 FROM scratch AS beta-iso
 COPY --from=live-pack /out/ /

@@ -37,7 +37,7 @@ cp /session/usr/lib/oblivion/build-evidence.json /out/client-evidence.json
 cp /sources/host-sources.sha256 /sources/gateway-sources.sha256 /out/
 (cd /sources && find . -type f -print0 | sort -z | xargs -0 sha256sum) > /out/iso-sources.sha256
 cp /sources/live-grub.cfg /iso/boot/grub/grub.cfg
-name=oblivion-development
+name=${OBLIVION_IMAGE_NAME:-oblivion-development}
 if [ -f /host/etc/oblivion/hardware/authorized_key.pub ]; then
     name=oblivion-hardware-test
     cp /sources/hardware/grub.cfg /iso/boot/grub/grub.cfg

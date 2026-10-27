@@ -2,7 +2,7 @@ name: Oblivion checks
 
 on:
   push:
-    branches: [dev]
+    branches: [dev, main]
     paths:
       - "packages/**"
       - "script/**"
@@ -11,8 +11,9 @@ on:
       - ".gitleaks.toml"
       - ".github/actions/setup-bun/**"
       - ".github/workflows/oblivion-check.yml"
+      - ".github/workflows/oblivion-release.yml"
   pull_request:
-    branches: [dev]
+    branches: [dev, main]
     paths:
       - "packages/**"
       - "script/**"
@@ -21,6 +22,7 @@ on:
       - ".gitleaks.toml"
       - ".github/actions/setup-bun/**"
       - ".github/workflows/oblivion-check.yml"
+      - ".github/workflows/oblivion-release.yml"
   workflow_dispatch:
 
 permissions:
