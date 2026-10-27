@@ -158,6 +158,9 @@ jobs:
       - name: Check the synthetic stream and web tools peer
         working-directory: script/oblivion
         run: PYTHONDONTWRITEBYTECODE=1 python3 test-stream-fixture.py
+      - name: Check interactive and headless guest consoles
+        working-directory: script/oblivion
+        run: PYTHONDONTWRITEBYTECODE=1 python3 test-console.py
       - name: Compile the real chat client with the Oblivion profile
         working-directory: packages/cli
         env:
