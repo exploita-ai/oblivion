@@ -108,9 +108,14 @@ def production(drop_identity, binary="oblivion-api", proxy=None):
     try:
         config = {"session_token": TOKEN, "socks": "127.0.0.1:1"}
         if binary == "oblivion-api":
+            config["provider"] = "abliteration-ai"
             config["api_key"] = KEY
         if binary == "oblivion-egress":
-            config = {"transport": {"mode": "tor"}, "session_token": TOKEN}
+            config = {
+                "provider": "abliteration-ai",
+                "transport": {"mode": "tor"},
+                "session_token": TOKEN,
+            }
         control.sendall((json.dumps(config) + "\n").encode())
         assert control.recv(128) == b'{"ready":true}\n'
         status = Path(f"/proc/{pid}/status").read_text()

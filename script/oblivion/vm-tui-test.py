@@ -104,7 +104,7 @@ def status():
 def session_create(password):
     send(b"n", "Nuova sessione - password")
     send(password + b"\r", "Ripeti la password")
-    send(password + b"\r", "Conversazioni e documenti")
+    send(password + b"\r", "Conversations and documents")
     wait("/exit blocca")
 
 
@@ -169,7 +169,7 @@ try:
     send(b"\x1d", "Nuova sessione - password")
     assert not status()["session_open"]
     send(b"synthetic-session-password-b\r", "Ripeti la password")
-    send(b"synthetic-session-password-b\r", "Conversazioni e documenti")
+    send(b"synthetic-session-password-b\r", "Conversations and documents")
     send(b"OBLIVION_TUI_B_REQUEST", "OBLIVION_TUI_B_REQUEST")
     send(b"\r", "OBLIVION_TUI_B_REPLY")
     check("confirmed new-session action closes A before password entry and opens isolated B")

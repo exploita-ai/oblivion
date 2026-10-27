@@ -146,7 +146,7 @@ def reopen():
     send(GENERAL + b"\r", "Sessioni protette")
     assert not status()["session_open"]
     send(b"\r", "Password della sessione")
-    send(PASSWORD + b"\r", "Conversazioni e documenti")
+    send(PASSWORD + b"\r", "Conversations and documents")
     wait_screen("/exit blocca")
 
 
@@ -606,7 +606,7 @@ with socket.socket(socket.AF_UNIX) as client:
     send(b"\r", "Nuova sessione - password")
 
     send(PASSWORD + b"\r", "Ripeti la password")
-    send(PASSWORD + b"\r", "Conversazioni e documenti")
+    send(PASSWORD + b"\r", "Conversations and documents")
     wait_screen("/exit blocca")
     session_id = status()["sessions"][0]
     assert command("set-api-key", secret=NEXT_API_KEY, success=False) == "session_must_be_closed"
@@ -768,7 +768,7 @@ with socket.socket(socket.AF_UNIX) as client:
     send(RAM_API_KEY + b"\r", "Nuova sessione effimera")
     send(b"n", "Scegli la chiave per questa apertura")
     send(b"j", "> Volatile [RAM]")
-    send(b"\r", "Conversazioni e documenti")
+    send(b"\r", "Conversations and documents")
     wait_screen("/exit blocca")
     assert status()["session_open"] and status()["general_readonly"]
     assert command("enter-ephemeral", success=False) == "vm_already_running"
@@ -790,7 +790,7 @@ with socket.socket(socket.AF_UNIX) as client:
     assert file_digest("/data/general.luks") == encrypted_before
     send(b"n", "Scegli la chiave per questa apertura")
     send(b"j", "> Volatile [RAM]")
-    send(b"\r", "Conversazioni e documenti")
+    send(b"\r", "Conversations and documents")
     wait_screen("/exit blocca")
     assert subprocess.check_output(["cryptsetup", "luksUUID", str(ephemeral)]).strip() != first_ephemeral
     send(b"OBLIVION_TUI_B_REQUEST", "OBLIVION_TUI_B_REQUEST")
@@ -865,7 +865,7 @@ with socket.socket(socket.AF_UNIX) as client:
     assert not status()["incomplete_sessions"] and status()["available_bytes"] >= status()["session_bytes"]
     send(b"i", "Sessioni protette")
     send(b"\r", "Password della sessione")
-    send(PASSWORD + b"\r", "Conversazioni e documenti")
+    send(PASSWORD + b"\r", "Conversations and documents")
     wait_screen("/exit blocca")
     check("disk exhaustion is explicit, preserves existing archives and permits reopening after pending cleanup")
     terminal.reset()
