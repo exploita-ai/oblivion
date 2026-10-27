@@ -517,6 +517,24 @@ function App() {
   const plugins = usePlugin()
   const clipboard = useClipboard()
   const terminalEnvironment = useTuiTerminalEnvironment()
+  let startupReported = false
+  let startupDisposed = false
+  onCleanup(() => {
+    startupDisposed = true
+  })
+  createEffect(() => {
+    if (!Oblivion.enabled || startupReported || !plugins.ready() || client.connection.status() !== "connected") return
+    startupReported = true
+    // A connected transport alone does not prove the chat database is usable.
+    void client.api.session.list({ limit: 1 }).then(
+      () => {
+        if (!startupDisposed) OblivionTui.startup("started")
+      },
+      () => {
+        if (!startupDisposed) OblivionTui.startup("storage-failed")
+      },
+    )
+  })
   let paletteTimer: ReturnType<typeof setTimeout> | undefined
   const afterFrame = () => {
     // The native writer can still be flushing the frame when FRAME fires. Keep OSC probes behind visible app output.

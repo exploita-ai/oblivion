@@ -15,6 +15,8 @@ export type Operation =
   | "open-documents"
   | "open-documents-ephemeral"
   | "start-chat"
+  | "chat-ready"
+  | "chat-recover"
   | "browse"
   | "prepare-usb"
   | "unlock"

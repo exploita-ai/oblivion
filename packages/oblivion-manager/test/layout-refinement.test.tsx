@@ -12,16 +12,13 @@ for (const mode of ["open", "create", "ephemeral"] as const) {
     const initial = status.parse(JSON.parse(await fixture.request({ operation: "status" })))
     const operations: string[] = []
     const selected: string[] = []
-    let running = false
     const app = await testRender(() => <App initial={initial} runtime={{ ...fixture,
       request: async (input) => {
         operations.push(input.operation)
-        if (input.operation === "start-chat") { running = true; return "" }
         if (input.operation === "api-keys") selected.push(JSON.parse(new TextDecoder().decode(input.payload)).id)
-        const output = await fixture.request(input)
-        return input.operation === "status" && running ? JSON.stringify({ ...JSON.parse(output), session_mode: "chat" }) : output
+        return fixture.request(input)
       },
-      connectChat: (receive) => ({ input: () => {}, close: () => {}, resize: (cols, rows) => receive({ type: "frame", full: true, cols, rows, data: "\x1b[2J\x1b[HRestored conversation" }) }),
+      connectChat: (receive) => ({ input: () => {}, close: () => {}, resize: (cols, rows) => { receive({ type: "frame", full: true, cols, rows, data: "\x1b[2J\x1b[HRestored conversation" }); receive({ type: "startup", status: "started" }) } }),
     }} />, { width: 160, height: 50, kittyKeyboard: true })
     try {
       await app.renderOnce()

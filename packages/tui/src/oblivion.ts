@@ -63,3 +63,8 @@ export function request(action: Action) {
   // closing anything. This channel carries no password or administrative IPC.
   process.stdout.write(`\x1b]777;oblivion;${action}\x07`)
 }
+
+// Fixed application status only, never exceptions, paths or conversation text.
+export function startup(status: "started" | "storage-failed") {
+  process.stdout.write(`\x1b]777;oblivion;${status}\x07`)
+}

@@ -78,6 +78,7 @@ for line in sys.stdin:
             os.write(master, b"\x1b[8;21;80t")
             until(b"VISIBLE:21:80")
             os.write(master, b"quit\n")
+            until(console.FAILED)
             self.assertEqual(child.wait(timeout=5), 0)
         finally:
             if child.poll() is None:

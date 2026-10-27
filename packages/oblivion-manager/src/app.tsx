@@ -54,6 +54,8 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   const [documentsLocked, setDocumentsLocked] = createSignal(false)
   const [chatVisible, setChatVisible] = createSignal(false)
   const [connection, setConnection] = createSignal<ChatConnection>()
+  let startup: ReturnType<typeof Promise.withResolvers<void>> | undefined
+  onCleanup(() => startup?.reject(new ControlError("chat_start_cancelled")))
   let drawChat: ((frame: ChatFrame) => void) | undefined
   const [networkWait, setNetworkWait] = createSignal<AbortController>()
   onCleanup(() => networkWait()?.abort())
@@ -103,7 +105,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
     setState(status.parse(JSON.parse(await props.runtime.request({ operation: "status" }))))
     if (previous && previous !== state()?.active_session) props.runtime.clearClipboard?.()
     setObserved(performance.now())
-    if (state()?.session_mode !== "chat") detachChat()
+    if (!["chat", "starting"].includes(state()?.session_mode ?? "")) detachChat()
     if (!previous && state()?.active_session) { setSession(state()?.active_session ?? undefined); setDocuments(true) }
     if (previous && !state()?.active_session) { setDocuments(false); setSession(undefined) }
   }
@@ -196,10 +198,20 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
     })
   }
 
-  async function chat() {
+  async function chat(wait = false) {
     if (props.runtime.connectChat) {
+      const pending = wait ? Promise.withResolvers<void>() : undefined
+      startup = pending
+      const timeout = pending ? setTimeout(() => pending.reject(new ControlError("chat_start_timeout")), 60_000) : undefined
       if (!connection()) setConnection(props.runtime.connectChat((event) => {
         if (event.type === "frame") { drawChat?.(event); return }
+        if (event.type === "startup") {
+          if (event.status === "started") { startup?.resolve(); return }
+          const error = new ControlError(event.status === "storage-failed" ? "chat_storage_failed" : "chat_client_failed")
+          if (startup) { startup.reject(error); return }
+          detachChat(); setDocuments(true); setFeedback("error"); setNotice(explain(error))
+          return
+        }
         // Guest requests are hints. Only a fresh action in the host form locks.
         setChatVisible(false)
         confirm(event.action === "new" ? "Create another session" : event.action === "sessions" ? "Switch session" : "Close and lock session", "The chat requested this action. Confirm to stop the response and lock this session, or Esc to keep it open.", async () => {
@@ -207,9 +219,14 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
           if (event.action === "new") create()
         })
       }, () => {
+        if (startup) { startup.reject(new ControlError("chat_client_failed")); return }
         detachChat(); setDocuments(true); setFeedback("error"); setNotice("The chat display disconnected. Return to chat to reconnect, or close and lock the session.")
       }))
       setDocuments(false); setForm(undefined); setChatVisible(true); setFocus("content")
+      try { await pending?.promise } finally {
+        clearTimeout(timeout)
+        startup = undefined
+      }
       return
     }
     const action = await props.runtime.console()
@@ -307,7 +324,16 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
         setBusy(waiting ? `Connecting to ${state()?.egress?.selected?.mode === "socks5" ? "SOCKS5" : "Tor"}` : "Starting chat")
       },
     })
-    await chat()
+    setBusy("Starting chat")
+    try {
+      await chat(true)
+      await command("chat-ready")
+    } catch (error) {
+      detachChat()
+      await command("chat-recover")
+      setDocuments(true)
+      throw error
+    }
   }
 
   function sessionView(index: number) {
@@ -594,6 +620,10 @@ function explain(error: unknown) {
     passwords_do_not_match: "The two passwords do not match. Try again.",
     usb_confirmation_required: "Encrypted storage is not available for this system disk configuration.",
     gateway_not_ready: "The network route is still connecting. Wait, then retry Start chat.",
+    chat_storage_failed: "Chat storage could not be opened. Your original data was preserved. Use Documents or close the session and request recovery.",
+    chat_client_failed: "The chat application stopped before it was ready. Your original data was preserved. You can retry or close the session.",
+    chat_start_timeout: "Chat startup timed out. Documents are available after cleanup; your saved chats were not reset.",
+    chat_not_starting: "The session changed during startup. Check its current state before continuing.",
     chat_start_cancelled: "Connection cancelled. Your session documents remain open offline.",
     gateway_connect_timeout: "The protected connection is taking too long. Check Network, then retry Start chat. Documents remain offline.",
     gateway_unavailable: "The gateway is unavailable. Retry Start chat; documents remain available.",

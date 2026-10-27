@@ -19,6 +19,7 @@ import time
 import tty
 
 READY = b"\x1b]777;oblivion;ready\x07"
+FAILED = b"\x1b]777;oblivion;client-failed\x07"
 PREFIX = b"\x1b[8;"
 
 
@@ -81,9 +82,12 @@ def main(command):
                         data = os.read(key.fd, 65536)
                     except OSError as error:
                         if key.fd == master and error.errno == errno.EIO:
+                            os.write(1, FAILED)
                             return
                         raise
                     if not data:
+                        if key.fd == master:
+                            os.write(1, FAILED)
                         return
                     if key.fd == master:
                         os.write(1, data)

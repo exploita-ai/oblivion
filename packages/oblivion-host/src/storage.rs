@@ -162,6 +162,7 @@ pub fn main() -> Result<()> {
             | "enter-documents"
             | "enter-documents-ephemeral"
             | "start-chat"
+            | "chat-ready"
             | "discard-general-pending"
             | "discard-session-pending"
             | "set-api-key"
@@ -369,18 +370,24 @@ pub fn main() -> Result<()> {
             let result = (|| {
                 crate::vm::stop(false)?;
                 let token = crate::gateway::prepare()?;
-                vm.start(Some(&token), Some(provider), tools)?;
-                write_session_info(&id, "chat")
+                vm.start(Some(&token), Some(provider), tools)
             })();
             if result.is_err() {
-                crate::gateway::revoke()?;
-                crate::vm::stop(false)?;
-                vm.start_documents()?;
-                write_session_info(&id, "documents")?;
+                recover_chat(&config)?;
                 return result;
             }
             Ok(())
         }
+        "chat-ready" => {
+            require(
+                mapping_open("oblivion-session")? && !crate::vm::stopped()?,
+                "session_not_open",
+            )?;
+            let (id, mode) = session_info()?.ok_or(Error("session_not_open"))?;
+            require(mode == "starting", "chat_not_starting")?;
+            write_session_info(&id, "chat")
+        }
+        "chat-recover" => recover_chat(&config),
         "browse" => {
             require(
                 !recovery_required()?
@@ -2089,6 +2096,32 @@ pub(crate) fn require(condition: bool, code: &'static str) -> Result<()> {
 }
 
 // Display metadata is RAM-only. The kernel mapping remains the ownership interlock.
+// Keep the already-unlocked volume, but revoke the failed chat before returning
+// it to an offline guest. Any incomplete cleanup leaves recovery latched.
+fn recover_chat(config: &Config) -> Result<()> {
+    let (id, mode) = session_info()?.ok_or(Error("session_not_open"))?;
+    require(mode == "starting", "chat_not_starting")?;
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(RECOVERY)
+        .map_err(|_| Error("recovery_marker_failed"))?;
+    if crate::gateway::revoke().is_err() {
+        crate::gateway::shutdown()?;
+    }
+    crate::vm::stop(false)?;
+    config
+        .vm
+        .as_ref()
+        .ok_or(Error("vm_not_configured"))?
+        .start_documents()?;
+    write_session_info(&id, "documents")?;
+    fs::remove_file(RECOVERY).map_err(|_| Error("recovery_clear_failed"))
+}
+
 fn session_info() -> Result<Option<(String, String)>> {
     if !mapping_open("oblivion-session")? {
         return Ok(None);

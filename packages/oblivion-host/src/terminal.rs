@@ -178,6 +178,7 @@ pub struct Replies {
     bytes: Vec<u8>,
     request: Option<Action>,
     ready: bool,
+    startup: Option<&'static str>,
     synchronized_output: bool,
     synchronized_since: Option<Instant>,
 }
@@ -207,6 +208,9 @@ impl Replies {
     pub fn take_ready(&mut self) -> bool {
         std::mem::take(&mut self.ready)
     }
+    pub fn take_startup(&mut self) -> Option<&'static str> {
+        self.startup.take()
+    }
     pub fn take_request(&mut self) -> Option<Action> {
         self.request.take()
     }
@@ -223,6 +227,19 @@ impl vt100::Callbacks for Replies {
         }
         if params[2] == b"ready" {
             self.ready = true;
+            return;
+        }
+        let startup = match params[2] {
+            b"started" => Some("started"),
+            b"storage-failed" => Some("storage-failed"),
+            b"client-failed" => Some("client-failed"),
+            _ => None,
+        };
+        if let Some(status) = startup {
+            // A later generic process exit must not hide the storage diagnosis.
+            if !matches!(self.startup, Some("storage-failed" | "client-failed")) {
+                self.startup = Some(status);
+            }
             return;
         }
         self.request = match params[2] {

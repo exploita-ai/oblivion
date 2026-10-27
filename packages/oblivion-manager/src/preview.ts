@@ -83,6 +83,9 @@ export function preview(exit: () => void): Runtime {
         return JSON.stringify({ path: request.path, entries: request.path ? [{ name: "example.txt", directory: false, bytes: 42 }] : [{ name: "imports", directory: true, bytes: 0 }, { name: "workspace", directory: true, bytes: 0 }], next: null, skipped: 0 })
       }
       if (input.operation === "open-documents") { state = { ...state, session_open: true, session_mode: "documents", active_session: input.session ?? null, network_status: { label: "OFFLINE · NO NETWORK DEVICE", host_link: "CONNECTED", age_ms: 0, direct_blocked: true } }; return "" }
+      if (input.operation === "start-chat") { state = { ...state, session_mode: "starting" }; return "" }
+      if (input.operation === "chat-ready") { state = { ...state, session_mode: "chat" }; return "" }
+      if (input.operation === "chat-recover") { state = { ...state, session_mode: "documents" }; return "" }
       if (input.operation === "close") { state = { ...state, session_open: false, session_mode: null, active_session: null, api_keys: state.api_keys ? { ...state.api_keys, selected: null } : null, network_status: { label: "NOT STARTED", host_link: "CONNECTED", age_ms: 0, direct_blocked: false } }; return "" }
       if (input.operation === "create") { const id = crypto.randomUUID().replaceAll("-", ""); state = { ...state, sessions: [...state.sessions, id] }; return id }
       if (input.operation === "open-documents-ephemeral") { state = { ...state, session_open: true, session_mode: "documents", active_session: "ephemeral", network_status: { label: "OFFLINE · NO NETWORK DEVICE", host_link: "CONNECTED", age_ms: 0, direct_blocked: true } }; return "" }

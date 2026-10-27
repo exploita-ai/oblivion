@@ -11,6 +11,7 @@ extend({ oblivionChat: EmbeddedTerminalRenderable })
 
 const event = z.discriminatedUnion("type", [
   z.object({ type: z.literal("frame"), full: z.boolean(), cols: z.number().int().min(24).max(512), rows: z.number().int().min(5).max(297), data: z.string().max(16_000_000) }),
+  z.object({ type: z.literal("startup"), status: z.enum(["started", "storage-failed", "client-failed"]) }),
   z.object({ type: z.literal("request"), action: z.enum(["new", "sessions", "close"]) }),
 ])
 export type ChatEvent = z.infer<typeof event>

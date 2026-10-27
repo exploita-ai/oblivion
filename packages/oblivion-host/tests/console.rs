@@ -113,3 +113,17 @@ fn escape_expires_but_a_slow_paste_does_not_become_an_action() {
     assert_eq!(input.decode(b"\x1b[201~\x1b", now).0, b"\x1b[201~");
     assert!(input.decode(b"\x1d", now).1);
 }
+
+#[test]
+fn startup_reports_are_fixed_and_preserve_the_first_failure() {
+    let mut guest = parser(21, 80);
+    for byte in b"\x1b]777;oblivion;started\x07" {
+        guest.process(&[*byte]);
+    }
+    assert_eq!(guest.callbacks_mut().take_startup(), Some("started"));
+    assert_eq!(guest.callbacks_mut().take_startup(), None);
+    guest.process(b"\x1b]777;oblivion;storage-failed\x07\x1b]777;oblivion;client-failed\x07\x1b]777;oblivion;started\x07");
+    assert_eq!(guest.callbacks_mut().take_startup(), Some("storage-failed"));
+    guest.process(b"\x1b]777;oblivion;storage-failed;secret\x07");
+    assert_eq!(guest.callbacks_mut().take_startup(), None);
+}

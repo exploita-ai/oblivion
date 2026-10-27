@@ -126,6 +126,14 @@ pub fn bridge(mut stream: UnixStream) -> Result<()> {
                 let (rows, cols) = parser.screen().size();
                 stream.write_all(format!("\x1b[8;{rows};{cols}t").as_bytes())?;
             }
+            if let Some(status) = parser.callbacks_mut().take_startup() {
+                writeln!(
+                    output,
+                    "{}",
+                    serde_json::json!({"type":"startup", "status":status})
+                )?;
+                output.flush()?;
+            }
             if let Some(action) = parser.callbacks_mut().take_request() {
                 let action = match action {
                     terminal::Action::New => "new",
