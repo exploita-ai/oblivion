@@ -2,11 +2,11 @@
   <img src="assets/oblivion-logo.svg" width="900" alt="Oblivion — private by design">
 </p>
 
-<h1 align="center">A private live environment for AI conversations, discovery and creation</h1>
+<h1 align="center">A private live OS for AI conversations, discovery and creation</h1>
 
 <p align="center">
-  Boot from USB. Talk, explore, work with documents, or use a full coding agent.<br>
-  Lock the session and leave the live runtime behind.
+  Run Oblivion as a live OS on supported hardware or inside a virtual machine.<br>
+  Talk, explore, work with documents, or use a full coding agent—then lock the session and leave the disposable runtime behind.
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@
 
 ---
 
-Oblivion is a minimal Debian live system for private AI conversations, research,
+Oblivion is a minimal Debian live operating system for private AI conversations, research,
 document work and coding. It is built around an
 [OpenCode](https://github.com/anomalyco/opencode)-derived agent, gives every
 persistent session its own VM and LUKS2-encrypted volume, keeps the live runtime
@@ -47,13 +47,13 @@ explicitly place inside that isolated workspace.
 
 ## Why Oblivion
 
-Ordinary coding agents can leave conversations, logs, temporary files, credentials, and working copies across the host filesystem. Oblivion changes the boundary: the host OS is not running, the live system is disposable, and a protected session owns a separate encrypted workspace.
+Ordinary coding agents can leave conversations, logs, temporary files, credentials, and working copies across the host filesystem. Oblivion changes the boundary: during a direct bare-metal boot the installed OS is not running, the live system is disposable, and a protected session owns a separate encrypted workspace.
 
 The goal is not to turn an online model into an air-gapped model. The current cloud mode still sends the context you approve to the configured provider. A future local inference engine is planned for genuinely offline operation.
 
 | | Boundary | What Oblivion does |
 | --- | --- | --- |
-| **At rest** | USB storage | Separate LUKS2 volume and password for every persistent session |
+| **At rest** | Persistent storage | Separate LUKS2 volume and password for every persistent session |
 | **While running** | Live host | Read-only Debian base with runtime and temporary paths in RAM |
 | **Between sessions** | Workspaces | One open volume and one session VM at a time; no shared session filesystem |
 | **On the network** | Model traffic | Dedicated gateway VM with Tor or explicit SOCKS5 and no direct fallback |
@@ -62,8 +62,8 @@ The goal is not to turn an online model into an air-gapped model. The current cl
 ## Architecture
 
 ```text
-USB boot
-└── minimal read-only Debian live system
+Oblivion live OS (bare metal or supported VM)
+└── minimal read-only Debian base
     ├── tmpfs runtime (discarded on shutdown)
     ├── general LUKS2 vault
     │   └── Wi-Fi, API keys and host preferences
@@ -85,7 +85,7 @@ Documents mode starts the session VM without a network device, provider token, o
 - A general encrypted vault stores host settings and API keys.
 - Every persistent session has a different LUKS2 volume and password.
 - Only one session volume and one session VM may be open at a time.
-- Ephemeral mode keeps its working state in RAM and does not intentionally modify the USB vault.
+- Ephemeral mode keeps its working state in RAM and does not intentionally modify persistent storage.
 - Runtime paths and temporary files live on tmpfs in the live system.
 - Documents can be opened without starting the gateway or supplying an API key.
 - Session egress is mediated by a dedicated gateway VM using Tor or a configured SOCKS5 proxy.
@@ -155,13 +155,14 @@ Read [SECURITY.md](SECURITY.md) before testing Oblivion with sensitive data.
 
 ## Where Oblivion runs
 
-The physical live-USB path and the VM evaluation path have different security
-properties. On a direct USB boot the computer's installed OS is not running. In
-a VM, the outer OS and hypervisor can observe input, display, memory and storage.
+The direct bare-metal path and the VM path have different security properties.
+When a computer boots directly into Oblivion, its installed OS is not running.
+In a VM, the outer OS and hypervisor can observe input, display, memory and
+storage.
 
 | Host | CPU | Outer OS / hypervisor | Image | Current support |
 | --- | --- | --- | --- | --- |
-| PC booted directly from USB | Intel or AMD 64-bit (`x86_64`) with VT-x/AMD-V | Installed OS is not running | `amd64` | **Primary target; tested on physical hardware** |
+| PC booted directly into Oblivion | Intel or AMD 64-bit (`x86_64`) with VT-x/AMD-V | Installed OS is not running | `amd64` | **Primary target; tested from writable boot media** |
 | Linux workstation/server | `x86_64` with nested KVM | Linux + QEMU/KVM | `amd64` | Development/evaluation target |
 | Linux ARM host | `aarch64` with nested KVM | Linux + QEMU/KVM | `arm64` | Supported design; hardware validation pending |
 | Windows PC | Intel or AMD 64-bit with nested virtualization | Windows + VirtualBox | `amd64` | Supported design; physical validation pending |
@@ -175,12 +176,13 @@ separate gateway, session and transfer VMs. There is deliberately no slow
 software-emulation fallback. See the detailed
 [virtual-machine guide](docs/DEVELOPMENT.md#run-from-a-virtual-machine).
 
-### Live USB requirements
+### Bare-metal boot requirements
 
 - A 64-bit Intel/AMD PC with UEFI and hardware virtualization enabled in
   firmware; the current physical candidate is `amd64`.
-- A dedicated writable USB drive: **8 GB minimum, 16 GB or more recommended**.
-  The image uses free space after the read-only live system for encrypted data.
+- A dedicated writable boot drive: **8 GB minimum, 16 GB or more recommended**.
+  The current bare-metal persistence path uses USB storage and places encrypted
+  data in free space after the read-only live system.
 - **8 GB system RAM recommended** for the live host and nested VMs. More memory
   is useful for large repositories and will be required for future local models.
 - Secure Boot disabled for current development images; signed Secure Boot
@@ -190,9 +192,9 @@ software-emulation fallback. See the detailed
 - Optional second removable media for explicit document import/export. Session
   filesystems are never shared directly with the host or another session.
 
-Writing the ISO destroys the previous contents of the selected USB. Verify the
-device identity before writing it and never test persistence on irreplaceable
-media.
+Writing the ISO destroys the previous contents of the selected boot drive.
+Verify the device identity before writing it and never test persistence on
+irreplaceable media.
 
 ## Future: the Oblivion local inference engine
 
@@ -223,7 +225,7 @@ a UI setting.
 
 | Area | Status |
 | --- | --- |
-| amd64 live USB boot | Tested on physical hardware |
+| amd64 bare-metal boot | Tested on physical hardware using writable USB media |
 | arm64 live image | Built; boot, nested KVM and offline Documents validated in UTM on M4 Pro |
 | General and per-session LUKS2 persistence | Implemented and tested |
 | Offline Documents VM | Implemented |
@@ -261,8 +263,8 @@ OBLIVION_ARCH=arm64 bun run build:iso
 ```
 
 Intel and AMD use the same `amd64` image; 32-bit x86 is not supported. To run
-Oblivion from QEMU or VirtualBox without a physical USB, prepare a writable
-virtual USB and follow the nested-virtualization requirements in the
+Oblivion from QEMU or VirtualBox, prepare a writable virtual boot disk and
+follow the nested-virtualization requirements in the
 [development guide](docs/DEVELOPMENT.md#run-from-a-virtual-machine).
 
 On Apple Silicon, the native VM path is the `arm64` image in UTM using the Apple

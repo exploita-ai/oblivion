@@ -14,14 +14,14 @@ project is not yet ready for sensitive or irreplaceable data.
 - Tor and configurable SOCKS5 gateway modes with no intended direct fallback
 - multiple provider keys, a global default and a per-opening override
 - multiple chats sharing the documents of one encrypted session
-- bounded USB import/export with manifests, hashes and recovery paths
+- bounded removable-media import/export with manifests, hashes and recovery paths
 - full-screen host manager and retained OpenCode coding-agent TUI
 
 ## Validated so far
 
 - boot, encrypted persistence and a real provider response on physical amd64
   hardware
-- lock and reopen flows on the physical USB candidate
+- lock and reopen flows on the physical boot-media candidate
 - arm64 component builds and automated guest laboratories in CI
 - automated storage, gateway, transfer and session lifecycle laboratories
 
@@ -33,7 +33,7 @@ artifacts instead of storing historical snapshots in this repository.
 
 - complete the Debian package, service, binary and host-egress allowlist audit
 - produce a clean release profile with all debug access removed
-- repeat destructive persistence and recovery tests on a dedicated USB device
+- repeat destructive persistence and recovery tests on a dedicated physical boot drive
 - finish long-running Tor, proxy failure and network-revocation tests
 - verify multi-chat persistence and migration across image upgrades
 - make builds reproducible and publish signed checksums and provenance
@@ -59,7 +59,7 @@ artifacts instead of storing historical snapshots in this repository.
 1. Finish the public-source cleanup and automated secret checks.
 2. Reduce and lock the Debian role manifests and enabled services.
 3. Stabilize the manager, chat, Documents and multi-chat UX.
-4. Build and validate an amd64 beta USB candidate.
+4. Build and validate an amd64 beta boot image on physical hardware.
 5. Publish signed images only after the release profile passes the security
    gates above.
 

@@ -10,7 +10,7 @@
 - One-session-at-a-time VM controller with offline Documents and chat modes.
 - Tor and configurable SOCKS5 gateway with deny-by-default direct access.
 - OpenTUI host manager, OpenCode-derived coding agent, document import/export, and multiple chats per session.
-- Mac virtualization laboratory, physical USB validation flow, and machine-readable security evidence.
+- Mac virtualization laboratory, physical boot-media validation flow, and machine-readable security evidence.
 
 ### Security
 

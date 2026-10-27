@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "oblivion",
-  "description": "A privacy-focused live environment for the OpenCode coding agent",
+  "description": "A privacy-first live OS for AI conversations, research, documents, and coding agents",
   "version": "0.1.0",
   "private": true,
   "type": "module",

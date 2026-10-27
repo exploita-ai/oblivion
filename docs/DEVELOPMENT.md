@@ -1,8 +1,8 @@
 # Development
 
 Oblivion is built from the same source for two 64-bit architectures. Physical
-USB validation is currently performed on amd64 hardware; arm64 is built for ARM
-hardware and compatible virtual machines.
+boot-media validation is currently performed on amd64 hardware; arm64 is built
+for ARM hardware and compatible virtual machines.
 
 ## Image architectures
 
@@ -77,9 +77,9 @@ publisher authentication.
 
 ## Run from a virtual machine
 
-Oblivion persistence uses free space after the hybrid ISO on the writable boot
-USB. Mounting the ISO as a read-only virtual DVD is therefore not equivalent to
-writing it to a USB drive. Prepare a new sparse raw disk instead:
+Oblivion persistence uses free space after the hybrid ISO on its writable boot
+medium. Mounting the ISO as a read-only virtual DVD is therefore not equivalent
+to booting the complete writable image. Prepare a new sparse raw disk instead:
 
 ```sh
 bun run vm:disk -- \
@@ -89,8 +89,10 @@ bun run vm:disk -- \
 ```
 
 The helper accepts only a new output file and never opens a physical device.
-Attach the resulting raw image as a writable **USB mass-storage device**. Keep
-it private: after setup it contains the encrypted general vault and sessions.
+Attach the resulting raw image as the VM's writable boot disk. The current VM
+profile exposes it as a **USB mass-storage device** so the same persistence path
+used on physical hardware is exercised. Keep it private: after setup it
+contains the encrypted general vault and sessions.
 
 ### Nested virtualization is required
 
@@ -125,7 +127,7 @@ Use a Mac with an M3 or newer chip and macOS 15 or newer. UTM 4.6 and later
 enable nested virtualization by default for Linux guests using the **Apple
 Virtualization** backend. Do not select UTM's QEMU backend.
 
-Prepare the writable ARM virtual USB:
+Prepare the writable ARM virtual boot disk:
 
 ```sh
 bun run vm:disk -- \
@@ -222,8 +224,8 @@ QEMU laboratories on both architectures where practical.
 
 Writing an image to removable media is intentionally not automated by the
 normal build command. Resolve the target device by stable identity, unmount its
-partitions and verify its size before any destructive write. Never infer a USB
-target from a broad device glob.
+partitions and verify its size before any destructive write. Never infer a
+removable boot-drive target from a broad device glob.
 
 Physical release-candidate testing must cover at least:
 
