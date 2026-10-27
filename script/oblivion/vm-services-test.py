@@ -644,10 +644,12 @@ with socket.socket(socket.AF_UNIX) as client:
     assert status()["api_key_present"] is True
     assert command("set-api-key", secret=NEXT_API_KEY, success=False) == "general_not_writable"
     assert command("clear-api-key", success=False) == "general_not_writable"
+    saved_keys = key_file.read_bytes()
     for body in [key_command("add", name="No", key=NEXT_API_KEY.decode()), key_command("rename", id=first_key, name="No"),
-                 key_command("remove", id=first_key), key_command("default", id=first_key),
-                 key_command("replace", id=first_key, key=NEXT_API_KEY.decode())]:
+                 key_command("remove", id=first_key), key_command("replace", id=first_key, key=NEXT_API_KEY.decode())]:
         assert command("api-keys", secret=body, success=False) == "general_not_writable"
+    command("api-keys", secret=key_command("default", id=first_key))
+    assert status()["api_keys"]["default"] == first_key and key_file.read_bytes() == saved_keys
     command("api-keys", secret=key_command("select", id=first_key))
     assert status()["api_keys"]["selected"] == first_key
     assert command("egress", secret=TOR_SAVE, success=False) == "general_not_writable"
