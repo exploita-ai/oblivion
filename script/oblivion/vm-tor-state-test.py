@@ -77,6 +77,11 @@ def ready():
     return pid, owner
 
 
+def start_gateway():
+    run("systemctl", "start", OWNER)
+    return ready()
+
+
 def digest(path):
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -107,7 +112,7 @@ root = Path("/run/oblivion-gateway-qemu-root")
 root.mkdir(mode=0o755)
 run("mount", "-t", "tmpfs", "-o", "mode=0755,nodev,nosuid,size=512m", "tmpfs", str(root))
 shutil.copytree("/usr/lib/oblivion/vm/qemu-root", root, symlinks=True, dirs_exist_ok=True)
-(root / "run/oblivion-gateway-vm").mkdir(mode=0o755)
+(root / "run/oblivion-gateway-vm").mkdir(mode=0o755, exist_ok=True)
 root.chmod(0o755)
 run("mount", "-o", "remount,ro", str(root))
 # The old immutable host also predates the dedicated numeric account. Install
@@ -118,7 +123,8 @@ for name, entry in {
 }.items():
     source = Path("/etc") / name
     content = source.read_text()
-    assert not any(line.split(":")[2] == "1101" for line in content.splitlines())
+    if any(line.split(":")[2] == "1101" for line in content.splitlines()):
+        continue
     target = Path("/run") / ("oblivion-lab-" + name)
     target.write_text(content + entry)
     target.chmod(0o644)
@@ -181,7 +187,8 @@ def network_ready():
 
 
 command("set-api-key", secret=KEY)
-ready()
+stopped()
+start_gateway()
 assert not selective().startswith("Guard ")
 assert network_ready() # Explicit offline mode retains the local broker test path.
 check("fresh Tor state is saved with only version and LastWritten, root-owned inside the encrypted profile")
@@ -190,18 +197,21 @@ stopped()
 state.write_text(seed)
 state.chmod(0o600)
 command("set-api-key", secret=KEY)
-ready()
+stopped()
+start_gateway()
 command("lock")
 stopped()
 command("unlock", secret=GENERAL)
-ready()
+stopped()
+start_gateway()
 assert "rsa_id=0123456789ABCDEF0123456789ABCDEF01234567" in selective()
 command("lock")
 check("Tor imports a saved guard before networking and preserves its identity across two gateway VM lifetimes")
 
 before = digest("/data/general.luks")
 command("unlock-ephemeral", secret=GENERAL)
-ready()
+stopped()
+start_gateway()
 assert status()["general_readonly"]
 assert "rsa_id=0123456789ABCDEF0123456789ABCDEF01234567" in selective()
 command("lock")
@@ -212,7 +222,8 @@ command("unlock", secret=GENERAL)
 command("clear-api-key")
 for invalid in [seed.replace("Tor 0.4.9.14", "Tor 0.4.10.0"), seed + "BWHistoryReadValues 100,200\n"]:
     state.write_text(invalid)
-    assert command("set-api-key", secret=KEY, success=False) == "gateway_start_failed"
+    command("set-api-key", secret=KEY)
+    assert subprocess.run(["systemctl", "start", OWNER], capture_output=True, timeout=120).returncode != 0
     stopped()
     assert state.read_text() == invalid and status()["general_open"]
     command("clear-api-key")
@@ -267,7 +278,8 @@ if Path("/run/oblivion-tor-online").exists():
     assert os.read(console, 3) == b"go\n"
     os.close(console)
     command("unlock", secret=GENERAL)
-    ready()
+    stopped()
+    start_gateway()
     assert not network_ready()
     deadline = time.monotonic() + 300
     while not network_ready():
@@ -278,7 +290,8 @@ if Path("/run/oblivion-tor-online").exists():
     command("lock")
     check("real Tor bootstrap and a persisted sampled guard set precede online session authorization; no provider request is made")
     command("unlock", secret=GENERAL)
-    ready()
+    stopped()
+    start_gateway()
     identities = {field for line in public.splitlines() if line.startswith("Guard ") for field in line.split() if field.startswith("rsa_id=")}
     assert identities.intersection(selective().split())
     command("lock")

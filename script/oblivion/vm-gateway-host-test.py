@@ -74,6 +74,11 @@ def ready():
     return pid, owner
 
 
+def start_gateway():
+    run("systemctl", "start", OWNER)
+    return ready()
+
+
 def digest(path):
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -104,7 +109,7 @@ root = Path("/run/oblivion-gateway-qemu-root")
 root.mkdir(mode=0o755)
 run("mount", "-t", "tmpfs", "-o", "mode=0755,nodev,nosuid,size=512m", "tmpfs", str(root))
 shutil.copytree("/usr/lib/oblivion/vm/qemu-root", root, symlinks=True, dirs_exist_ok=True)
-(root / "run/oblivion-gateway-vm").mkdir(mode=0o755)
+(root / "run/oblivion-gateway-vm").mkdir(mode=0o755, exist_ok=True)
 root.chmod(0o755)
 run("mount", "-o", "remount,ro", str(root))
 # The old immutable host also predates the dedicated numeric account. Install
@@ -115,7 +120,8 @@ for name, entry in {
 }.items():
     source = Path("/etc") / name
     content = source.read_text()
-    assert not any(line.split(":")[2] == "1101" for line in content.splitlines())
+    if any(line.split(":")[2] == "1101" for line in content.splitlines()):
+        continue
     target = Path("/run") / ("oblivion-lab-" + name)
     target.write_text(content + entry)
     target.chmod(0o644)
@@ -144,12 +150,21 @@ stopped()
 check("general unlock without an API key leaves gateway services and VM stopped")
 
 command("set-api-key", secret=KEY)
-first, _ = ready()
+stopped()
+first, owner = start_gateway()
 assert json.loads(Path("/run/oblivion/general/profile/provider.keys.json").read_text())["entries"][0]["key"].encode() == KEY
-check("saving the protected credential starts a distinct UID 1101 gateway VM and completes private configuration")
+check("saving the protected credential leaves networking stopped; explicit startup configures a distinct UID 1101 gateway VM")
+selected = status()["api_keys"]["selected"]
+command("api-keys", secret=json.dumps({"action": "rename", "id": selected, "name": "Renamed test key"}).encode())
+command("api-keys", secret=json.dumps({"action": "add", "name": "Unused test key", "key": NEXT.decode()}).encode())
+unused = next(entry["id"] for entry in status()["api_keys"]["entries"] if entry["id"] != selected)
+command("api-keys", secret=json.dumps({"action": "remove", "id": unused}).encode())
+assert ready() == (first, owner)
+check("renaming the effective key and adding/removing an unused key preserve the running gateway and owner PIDs")
 
 command("set-api-key", secret=NEXT)
-second, _ = ready()
+stopped()
+second, _ = start_gateway()
 assert second != first and not Path(f"/proc/{first}").exists()
 assert json.loads(Path("/run/oblivion/general/profile/provider.keys.json").read_text())["entries"][0]["key"].encode() == NEXT
 command("clear-api-key")
@@ -161,16 +176,18 @@ saved = Path(CONFIG).read_text()
 invalid = json.loads(saved)
 invalid["gateway"]["filesystem"] = "/run/missing-oblivion-image"
 Path(CONFIG).write_text(json.dumps(invalid))
-assert command("set-api-key", secret=KEY, success=False) == "gateway_start_failed"
+command("set-api-key", secret=KEY)
+assert subprocess.run(["systemctl", "start", OWNER], capture_output=True, timeout=120).returncode != 0
 stopped()
 assert status()["general_open"] and status()["api_key_present"]
 Path(CONFIG).write_text(saved)
 command("lock")
 command("unlock", secret=GENERAL)
-ready()
+stopped()
+start_gateway()
 check("failed gateway startup preserves the saved key and open-state report; explicit lock and unlock recover")
 session = command("create", secret=PASSWORD)
-assert command("enter", session, secret=PASSWORD, success=False) == "session_channel_failed"
+command("enter", session, secret=PASSWORD)
 chat = int(property("oblivion-session.service", "MainPID"))
 assert "Uid:\t1100\t1100\t1100\t1100" in Path(f"/proc/{chat}/status").read_text()
 ready()
@@ -179,7 +196,7 @@ assert not Path(f"/proc/{chat}/root/run/oblivion-gateway-vm/control.sock").exist
 assert command("set-api-key", secret=NEXT, success=False) == "session_must_be_closed"
 command("force-leave")
 ready()
-check("a legacy guest without the token receiver fails closed; its VM stays interlocked and cannot see private control or change the key")
+check("the session receives its capability but cannot see private gateway control or change the infrastructure key")
 
 pid, owner = ready()
 os.kill(owner, signal.SIGKILL)
@@ -191,7 +208,7 @@ assert not status()["general_open"]
 check("host owner death removes gateway credential memory; explicit lock then closes the general LUKS mapping")
 
 command("unlock", secret=GENERAL)
-pid, owner = ready()
+pid, owner = start_gateway()
 os.kill(pid, signal.SIGSTOP)
 stopped()
 assert not Path(f"/proc/{pid}").exists() and not Path(f"/proc/{owner}").exists()
@@ -200,18 +217,22 @@ assert not status()["general_open"] and not status()["recovery_required"]
 check("an unresponsive gateway expires the private status deadline and is killed before recovery closes storage")
 
 command("unlock", secret=GENERAL)
-pid, owner = ready()
+pid, owner = start_gateway()
+command("enter-documents", session, secret=PASSWORD)
+document_vm = int(property("oblivion-session.service", "MainPID"))
 os.kill(owner, signal.SIGSTOP)
 assert command("lock", success=False) == "locked_without_tor_state"
 stopped()
 assert not Path(f"/proc/{pid}").exists() and not Path(f"/proc/{owner}").exists()
+assert not Path(f"/proc/{document_vm}").exists()
 current = status()
 assert not current["general_open"] and not current["session_open"] and not current["recovery_required"], current
 check("a failed gateway checkpoint still stops both units and locks storage before reporting a safe warning")
 
 before = digest("/data/general.luks")
 command("unlock-ephemeral", secret=GENERAL)
-ready()
+stopped()
+start_gateway()
 assert status()["general_readonly"]
 assert command("set-api-key", secret=NEXT, success=False) == "general_not_writable"
 command("lock")
@@ -220,13 +241,40 @@ assert digest("/data/general.luks") == before
 check("readonly general supplies the saved credential without modifying any byte of the encrypted profile")
 
 command("unlock", secret=GENERAL)
-ready()
+start_gateway()
 command("recover")
 stopped()
 current = status()
 assert not any(current[k] for k in ["general_open", "general_mounted", "session_open", "recovery_required"])
 assert current["api_key_present"] is None
 check("explicit recovery stops gateway before closing the general")
+
+command("unlock", secret=GENERAL)
+command("enter-documents", session, secret=PASSWORD)
+assert status()["session_mode"] == "documents"
+stopped()
+assert command("start-chat", success=False) == "gateway_not_ready"
+deadline = time.monotonic() + 90
+while property(OWNER, "ActiveState") == "activating":
+    assert time.monotonic() < deadline, "asynchronous gateway startup deadline"
+    time.sleep(0.1)
+ready()
+command("start-chat")
+assert status()["session_mode"] == "starting"
+assert command("api-keys", secret=json.dumps({"action": "rename", "id": status()["api_keys"]["selected"], "name": "Blocked"}).encode(), success=False) == "session_must_be_closed"
+check("modern chat launch waits for client acknowledgement and blocks credential edits while starting")
+command("chat-recover")
+current = status()
+assert current["session_mode"] == "documents" and current["session_open"] and not current["recovery_required"]
+document_vm = int(property("oblivion-session.service", "MainPID"))
+arguments = Path(f"/proc/{document_vm}/cmdline").read_bytes().split(b"\0")
+assert any(b"oblivion.documents=1" in value for value in arguments) and b"-netdev" not in arguments
+check("failed client startup recovers Documents on the same unlocked volume with no VM network device")
+command("cancel-chat")
+stopped()
+assert status()["session_mode"] == "documents" and int(property("oblivion-session.service", "MainPID")) == document_vm
+command("lock")
+check("cancelling startup stops the gateway while keeping the offline Documents VM available until explicit lock")
 
 # Exercise the actual controller service's ExecStopPost composition. The
 # existing manager suite covers its dependent TUI; suppress that dependency
@@ -238,7 +286,7 @@ Path("/run/systemd/system/oblivion-controller.service").write_text(controller)
 run("systemctl", "daemon-reload")
 run("systemctl", "start", "oblivion-controller.service")
 run("setpriv", "--reuid=1000", "--regid=1000", "--clear-groups", "/usr/bin/oblivion-control", "unlock", input=GENERAL)
-ready()
+start_gateway()
 run("systemctl", "stop", "oblivion-controller.service")
 stopped()
 current = status()
