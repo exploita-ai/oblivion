@@ -2,27 +2,26 @@
   <img src="assets/oblivion-logo.svg" width="900" alt="Oblivion — private by design">
 </p>
 
-<h1 align="center">A private live OS for AI conversations, discovery and creation</h1>
+<h1 align="center">A privacy-first live OS for conversations, research, documents and code</h1>
 
 <p align="center">
-  Run Oblivion as a live OS on supported hardware or inside a virtual machine.<br>
-  Talk, explore, work with documents, or use a full coding agent—then lock the session and leave the disposable runtime behind.
+  Boot Oblivion on supported hardware or in a virtual machine.<br>
+  Work inside isolated, encrypted sessions—then lock them and leave the disposable runtime behind.
 </p>
 
 <p align="center">
   <a href="https://github.com/exploita-ai/oblivion/actions/workflows/oblivion-release.yml"><img alt="Release images" src="https://github.com/exploita-ai/oblivion/actions/workflows/oblivion-release.yml/badge.svg?branch=main"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-d32f2f.svg"></a>
-  <a href="#project-status"><img alt="Status: pre-beta" src="https://img.shields.io/badge/status-pre--beta-d32f2f.svg"></a>
+  <a href="#project-status"><img alt="Status: early beta" src="https://img.shields.io/badge/status-early%20beta-d32f2f.svg"></a>
   <img alt="Platforms: amd64 and arm64" src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-27272a.svg">
   <a href="https://github.com/exploita-ai/oblivion/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/exploita-ai/oblivion?style=flat&color=d32f2f"></a>
 </p>
 
 <p align="center">
+  <a href="#download-oblivion">Download</a> ·
+  <a href="#quick-start">Quick start</a> ·
   <a href="#why-oblivion">Why Oblivion</a> ·
-  <a href="#architecture">Architecture</a> ·
-  <a href="#privacy-model">Privacy model</a> ·
-  <a href="#tor-and-network-privacy">Tor</a> ·
-  <a href="#remote-inference-providers">Providers</a> ·
+  <a href="#privacy-model">Privacy</a> ·
   <a href="#where-oblivion-runs">Platforms</a> ·
   <a href="#build-from-source">Build</a> ·
   <a href="#join-the-project">Contribute</a>
@@ -30,34 +29,81 @@
 
 ---
 
-Oblivion is a minimal Debian live operating system for private AI conversations, research,
-document work and coding. It is built around an
-[OpenCode](https://github.com/anomalyco/opencode)-derived agent, gives every
-persistent session its own VM and LUKS2-encrypted volume, keeps the live runtime
-in memory, and routes session traffic through a dedicated Tor or SOCKS5 gateway
-with no direct fallback.
+Oblivion is a minimal Debian live operating system built around an
+[OpenCode](https://github.com/anomalyco/opencode)-derived agent. Each persistent
+session gets its own VM, LUKS2-encrypted volume, conversations and document
+workspace. The live host is disposable, while remote model traffic is routed
+through a dedicated Tor or SOCKS5 gateway with no direct fallback.
 
-It is not only a coding tool and it is not another chat wrapper. A session can
-hold several conversations and a shared document workspace: use it to think,
-learn, investigate, write, build, or let the full agent operate on files you
-explicitly place inside that isolated workspace.
+It is not only a coding tool and it is not another chat wrapper. Use Oblivion to
+talk, learn, investigate, write, work with documents, or let the full coding
+agent operate on files you explicitly place inside an isolated workspace.
 
 > [!WARNING]
-> Oblivion is pre-beta research software. It has not received an independent security audit. The current images are development candidates, not a promise of anonymity or a safe place for irreplaceable secrets.
+> Oblivion is early-beta research software. It has not received an independent security audit. Public images are experimental pre-releases, not a promise of anonymity or a safe place for irreplaceable secrets.
+
+## Download Oblivion
+
+The current public build is
+[`v0.1.0-beta.1`](https://github.com/exploita-ai/oblivion/releases/tag/v0.1.0-beta.1).
+
+| Image | Choose it for | Download |
+| --- | --- | --- |
+| `amd64` / `x86_64` | 64-bit Intel or AMD PCs and x86 virtual machines | [ISO](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.1/oblivion-v0.1.0-beta.1-amd64.iso) · [SHA-256](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.1/oblivion-v0.1.0-beta.1-amd64.sha256) |
+| `arm64` / `aarch64` | Apple Silicon M3+ with UTM and other ARM64 hosts | [ISO](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.1/oblivion-v0.1.0-beta.1-arm64.iso) · [SHA-256](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.1/oblivion-v0.1.0-beta.1-arm64.sha256) |
+
+Download the matching checksum next to the ISO, then verify it before booting:
+
+```sh
+# Linux
+sha256sum --check oblivion-v0.1.0-beta.1-amd64.sha256
+
+# macOS
+shasum -a 256 --check oblivion-v0.1.0-beta.1-arm64.sha256
+```
+
+Windows users can run `certutil -hashfile <image.iso> SHA256` and compare the
+result with the downloaded checksum file. These hashes detect a damaged or
+incomplete download; signed release provenance is not available yet.
+
+## Quick start
+
+1. Download the image matching your CPU and verify its SHA-256 checksum.
+2. For direct boot, write the ISO to a dedicated writable drive with a trusted
+   image writer. This erases the selected drive.
+3. For a VM, turn the ISO into a larger writable raw disk with the repository's
+   `bun run vm:disk` helper. A read-only virtual DVD cannot persist vaults.
+4. Enable VT-x/AMD-V or nested virtualization and boot the writable image in
+   UEFI mode.
+5. Follow the first-run setup to create the general encrypted vault, then create
+   a protected or ephemeral session.
+
+Use the [VM guide](docs/DEVELOPMENT.md#run-from-a-virtual-machine) for UTM,
+QEMU/KVM and VirtualBox. Running inside a VM is convenient for evaluation, but
+the outer OS and hypervisor can observe input, display, memory and virtual disk.
+
+<p align="center">
+  <img src="assets/oblivion-manager.png" width="1014" alt="Oblivion session manager showing protected sessions and network indicators">
+</p>
 
 ## Why Oblivion
 
-Ordinary coding agents can leave conversations, logs, temporary files, credentials, and working copies across the host filesystem. Oblivion changes the boundary: during a direct bare-metal boot the installed OS is not running, the live system is disposable, and a protected session owns a separate encrypted workspace.
+Ordinary agents can leave conversations, logs, temporary files, credentials and
+working copies across the host filesystem. Oblivion changes that boundary. On a
+direct bare-metal boot, the installed OS is not running; the live system is
+disposable; and every protected session owns an encrypted workspace.
 
-The goal is not to turn an online model into an air-gapped model. The current cloud mode still sends the context you approve to the configured provider. A future local inference engine is planned for genuinely offline operation.
+| Boundary | What Oblivion does |
+| --- | --- |
+| **At rest** | Separate LUKS2 volume and password for every persistent session |
+| **While running** | Read-only Debian base with runtime and temporary paths in RAM |
+| **Between sessions** | One open volume and one session VM at a time; no shared session filesystem |
+| **On the network** | Dedicated gateway VM with Tor or explicit SOCKS5 and no direct fallback |
+| **For documents** | Offline access without a network device, API key or agent process |
 
-| | Boundary | What Oblivion does |
-| --- | --- | --- |
-| **At rest** | Persistent storage | Separate LUKS2 volume and password for every persistent session |
-| **While running** | Live host | Read-only Debian base with runtime and temporary paths in RAM |
-| **Between sessions** | Workspaces | One open volume and one session VM at a time; no shared session filesystem |
-| **On the network** | Model traffic | Dedicated gateway VM with Tor or explicit SOCKS5 and no direct fallback |
-| **For documents** | Offline work | Files can be opened without a network device, API key, or agent process |
+The current cloud mode still sends the context you approve to the configured
+provider. The planned local inference engine is the path to genuinely offline
+operation.
 
 ## Architecture
 
@@ -65,146 +111,105 @@ The goal is not to turn an online model into an air-gapped model. The current cl
 Oblivion live OS (bare metal or supported VM)
 └── minimal read-only Debian base
     ├── tmpfs runtime (discarded on shutdown)
-    ├── general LUKS2 vault
-    │   └── Wi-Fi, API keys and host preferences
+    ├── general LUKS2 vault — settings and API keys
     ├── Oblivion manager
-    ├── isolated gateway VM
-    │   └── Tor or an explicit SOCKS5 proxy; no direct fallback
+    ├── isolated gateway VM — Tor or explicit SOCKS5
     └── one active protected session
         ├── independent LUKS2 volume
         └── session VM
-            ├── OpenCode-derived coding agent
-            ├── shared workspace and imports for that session
-            └── multiple chats inside the same encrypted session
+            ├── OpenCode-derived agent
+            ├── shared documents for that session
+            └── multiple encrypted conversations
 ```
 
-Documents mode starts the session VM without a network device, provider token, or agent process. Starting a chat reuses the unlocked session volume and replaces the offline VM with the networked chat VM. The host receives control messages and file metadata; it does not mount a session filesystem.
+Documents mode starts the session VM without a network device, provider token
+or agent process. Starting a chat reuses the unlocked session volume and starts
+the networked VM. The host sees control messages and file metadata; it does not
+mount the session filesystem. See the maintained
+[architecture document](docs/ARCHITECTURE.md) for the complete boundary model.
 
 ## Privacy model
 
-- A general encrypted vault stores host settings and API keys.
+- The general encrypted vault stores host preferences and API keys.
 - Every persistent session has a different LUKS2 volume and password.
-- Only one session volume and one session VM may be open at a time.
-- Ephemeral mode keeps its working state in RAM and does not intentionally modify persistent storage.
+- Ephemeral sessions keep working state in RAM and do not intentionally modify
+  persistent storage.
 - Runtime paths and temporary files live on tmpfs in the live system.
-- Documents can be opened without starting the gateway or supplying an API key.
-- Session egress is mediated by a dedicated gateway VM using Tor or a configured SOCKS5 proxy.
-- Direct session access is deny-by-default; Oblivion does not fall back to the host connection.
-- API keys are injected for an opening and removed from the session runtime when it closes.
-- The production profile disables OpenCode logging, telemetry, update checks, provider discovery, crash dumps, and project-level configuration loading.
+- The gateway mediates session egress through Tor or a configured SOCKS5 proxy;
+  direct access is deny-by-default.
+- API keys are injected for one opening and removed from session runtime on
+  close.
+- The production profile disables agent logs, telemetry, update checks,
+  provider discovery, crash dumps and project-level configuration loading.
 
-These are implementation goals backed by automated and VM-level tests. They are not a formal proof.
+These are implementation goals backed by automated and VM-level tests, not a
+formal proof. Read [SECURITY.md](SECURITY.md) before using sensitive data.
 
-## Tor and network privacy
+## Tor and remote providers
 
-Tor is the default remote-inference route. Oblivion runs it inside a dedicated
-gateway VM rather than letting the session VM use the host connection. Provider
-traffic and network access explicitly allowed for agent tools cross that gateway;
-direct session egress has no fallback path. An explicit SOCKS5 proxy can replace
-Tor when the user controls or trusts another route.
+Tor is the default remote route. It hides the source network from the model
+endpoint, but it does **not** hide prompts, selected documents, tool results or
+responses from the provider processing them. HTTPS protects traffic from Tor
+exit relays. Tor may start slowly and some destinations block exit relays.
 
-Tor provides **network anonymity, not content secrecy from the AI provider**.
-It hides the user's public IP from the destination and prevents a single Tor
-relay from seeing both ends of the circuit. HTTPS still protects the request
-from the exit relay, but the selected provider must receive the prompt,
-documents included as context, tool results and generated response in order to
-perform inference. See the Tor Project's explanations of
-[what Tor protects](https://support.torproject.org/about-tor/introduction/protections/)
-and [Tor with HTTPS](https://support.torproject.org/about-tor/security/https-encryption-and-tor/).
+| Provider | Integration | Oblivion policy |
+| --- | --- | --- |
+| [Abliteration.ai](https://abliteration.ai/) | Native | Provider publishes zero-retention handling for core API inference |
+| [Refuseless](https://refuseless.com/) | OpenAI-compatible | Provider says prompts and outputs are not saved; upstream handling can vary |
+| [OpenRouter](https://openrouter.ai/) | Native | `zdr: true`, data collection denied and fallback disabled; requests fail closed without an eligible endpoint |
 
-Operational consequences are visible in the UI:
-
-- `TOR READY` is shown only after bootstrap and isolation checks succeed.
-- A configured proxy is not considered ready until SOCKS5 negotiation succeeds.
-- Stale observations expire instead of leaving a reassuring green state behind.
-- Oblivion does not contact a public “what is my IP” service automatically.
-- Tor can be slower, can take time to bootstrap, and some providers or websites
-  may block exit relays.
-
-## Remote inference providers
-
-Provider privacy is a separate boundary from Oblivion's local encryption. A
-provider necessarily processes the content sent for a request. “Zero retention”
-below describes each provider's published policy; it is not a technical property
-that Oblivion can independently prove.
-
-| Provider | Oblivion status | Published handling of inference content | Account and payment notes |
-| --- | --- | --- | --- |
-| [Abliteration.ai](https://abliteration.ai/) | **Integrated now** | Its [data-handling policy](https://abliteration.ai/data-handling) says core API prompts, completions and images are processed in memory, not stored and not used for training. Operational telemetry and billing metadata are retained. Optional web search/fetch is outside that zero-retention boundary. | Account and billing data are retained; its current privacy policy describes Stripe payment processing. |
-| [Refuseless](https://refuseless.com/) | **Integrated now** | Its [privacy policy](https://refuseless.com/privacy) says prompts and outputs are not saved or used for training. It may route some requests to third-party model providers and explicitly says it cannot guarantee their retention policy in every case. | OpenAI-compatible API. Accepts card or BTC, ETH, USDT, USDC and XMR according to its [pricing page](https://refuseless.com/pricing). Signup uses email/password or Google; login and billing records are retained. A no-KYC guarantee is **not stated** in its public policy. |
-| [OpenRouter](https://openrouter.ai/) | **Integrated with mandatory ZDR routing** | Oblivion overwrites every request with `zdr: true`, `data_collection: deny` and `allow_fallbacks: false`. OpenRouter [documents ZDR at endpoint level](https://openrouter.ai/docs/guides/features/zdr); a model with no eligible ZDR endpoint fails closed instead of falling back. | OpenRouter and the selected upstream still process the request. ZDR does not cover optional server tools or plugins; Oblivion does not enable those provider-side features. |
-
-The production gateway allowlists exactly one endpoint for the provider selected
-for that chat opening. The real API key remains in the gateway VM; the session
-receives only a revocable local capability and the provider identifier. Refuseless
-uses OpenCode's OpenAI-compatible adapter, while OpenRouter uses OpenCode's native
-adapter. Provider routing fields supplied by a model or client cannot weaken the
-gateway's OpenRouter ZDR policy. Oblivion will not silently route a request through
-an unreviewed provider.
+The selected provider still processes the submitted content. Oblivion can
+enforce routing but cannot independently prove a provider's retention claims.
+Read [provider privacy and routing details](docs/PROVIDERS.md) before choosing a
+remote service.
 
 ## What Oblivion cannot protect
 
-- Prompts, selected documents, tool results, and model output are visible to the cloud provider you use.
+- Cloud providers see the content deliberately sent to them.
 - Data is plaintext in RAM while a vault or session is unlocked.
-- A compromised BIOS, firmware, kernel, hypervisor, keyboard, display, or physical machine can observe an active session.
-- Tor can hide the source network from a provider, but it cannot make submitted content private from that provider.
-- Exported files are protected only by the destination you choose.
-- Development images expose diagnostics that are deliberately absent from release images.
-
-Read [SECURITY.md](SECURITY.md) before testing Oblivion with sensitive data.
+- Compromised firmware, kernel, hypervisor, keyboard, display or physical
+  hardware can observe an active session.
+- Exported files inherit the security of their destination.
+- Development images contain diagnostics deliberately absent from releases.
 
 ## Where Oblivion runs
 
-The direct bare-metal path and the VM path have different security properties.
-When a computer boots directly into Oblivion, its installed OS is not running.
-In a VM, the outer OS and hypervisor can observe input, display, memory and
-storage.
-
-| Host | CPU | Outer OS / hypervisor | Image | Current support |
-| --- | --- | --- | --- | --- |
-| PC booted directly into Oblivion | Intel or AMD 64-bit (`x86_64`) with VT-x/AMD-V | Installed OS is not running | `amd64` | **Primary target; tested from writable boot media** |
-| Linux workstation/server | `x86_64` with nested KVM | Linux + QEMU/KVM | `amd64` | Development/evaluation target |
-| Linux ARM host | `aarch64` with nested KVM | Linux + QEMU/KVM | `arm64` | Supported design; hardware validation pending |
-| Windows PC | Intel or AMD 64-bit with nested virtualization | Windows + VirtualBox | `amd64` | Supported design; physical validation pending |
-| Apple Silicon Mac | M3 or newer | macOS 15+ + UTM Apple Virtualization | `arm64` | Native Mac evaluation target; nested KVM validated on M4 Pro |
-| Apple Silicon Mac | M1 or M2 | macOS + UTM | `arm64` | Manager may boot; full sessions are unsupported because nested virtualization is unavailable |
-| Intel Mac | Intel 64-bit | Hypervisor exposing nested VT-x | `amd64` | Unverified |
-| 32-bit x86 or ARM, Windows on ARM without nested KVM | — | — | — | Unsupported |
-
 Full sessions require nested hardware virtualization because Oblivion starts
-separate gateway, session and transfer VMs. There is deliberately no slow
-software-emulation fallback. See the detailed
-[virtual-machine guide](docs/DEVELOPMENT.md#run-from-a-virtual-machine).
+separate gateway, session and transfer VMs. There is no software-emulation
+fallback in the production profile.
 
-### Bare-metal boot requirements
+| Host | CPU | Image | Current support |
+| --- | --- | --- | --- |
+| Direct PC boot | Intel/AMD 64-bit with VT-x/AMD-V | `amd64` | **Primary target; tested on physical hardware** |
+| Linux + QEMU/KVM | `x86_64` or `aarch64` with nested KVM | matching image | Development/evaluation target |
+| Windows + VirtualBox | Intel/AMD 64-bit with nested virtualization | `amd64` | Supported design; broader validation pending |
+| Apple Silicon + UTM Apple Virtualization | M3+, macOS 15+ | `arm64` | Validated on M4 Pro |
+| Apple Silicon M1/M2 | ARM64 | `arm64` | Manager may boot; full sessions unsupported |
+| 32-bit systems or hypervisors without nested virtualization | — | — | Unsupported |
 
-- A 64-bit Intel/AMD PC with UEFI and hardware virtualization enabled in
-  firmware; the current physical candidate is `amd64`.
-- A dedicated writable boot drive: **8 GB minimum, 16 GB or more recommended**.
-  The current bare-metal persistence path uses USB storage and places encrypted
-  data in free space after the read-only live system.
-- **8 GB system RAM recommended** for the live host and nested VMs. More memory
-  is useful for large repositories and will be required for future local models.
-- Secure Boot disabled for current development images; signed Secure Boot
-  releases are not available yet.
-- A Debian-supported Ethernet or Wi-Fi adapter. Firmware coverage is broad but
-  not universal, so hardware reports are welcome.
-- Optional second removable media for explicit document import/export. Session
-  filesystems are never shared directly with the host or another session.
+### Practical requirements
 
-Writing the ISO destroys the previous contents of the selected boot drive.
-Verify the device identity before writing it and never test persistence on
-irreplaceable media.
+The defaults are intentionally small: the public ISO is about 1.2 GB, the
+general vault is 2 GiB, a new session reserves 512 MiB, and the chat plus
+gateway VMs use about 1.8 GiB of guest memory.
 
-## Future: the Oblivion local inference engine
+| Resource | Minimum for the current beta | Recommended |
+| --- | --- | --- |
+| Writable boot disk | 4 GB | 8 GB or more for additional sessions and documents |
+| System or outer-VM memory | 4 GB | 8 GB for comfortable development headroom |
+| CPU | 64-bit, virtualization, 2 cores | 4 cores for smoother nested guests |
+| Firmware | UEFI; Secure Boot disabled | Hardware virtualization enabled |
 
-Cloud mode can minimize local traces and network metadata, but it cannot be
-fully air-gapped: approved context still leaves the machine for inference. The
-planned **Oblivion Local Inference Engine** completes the offline architecture
-by adding a dedicated inference VM that never receives a network device.
+Direct boot currently targets Intel/AMD PCs. The persistence implementation
+uses free space after the read-only live image. In a VM, expose the prepared
+raw disk as writable storage and disable shared folders, clipboard integration
+and host-disk passthrough for meaningful privacy testing. A Debian-supported
+Ethernet or Wi-Fi adapter is required for remote inference.
 
-The intended design keeps the existing boundaries rather than embedding a
-model server in the trusted host:
+## Future: local inference
+
+Cloud inference cannot be fully air-gapped. The planned **Oblivion Local
+Inference Engine** will add a dedicated inference VM with no network device:
 
 ```text
 encrypted model media
@@ -212,151 +217,90 @@ encrypted model media
         ▼
 local inference VM ── private channel ── session VM
         │
-        └── no NIC, no cloud credential, no provider request
+        └── no NIC, cloud credential or provider request
 ```
 
-Model weights, runtime and accelerator access will need their own signed
-manifests, memory-erasure tests, update process and hardware matrix. Local mode
-will be called air-gapped only after tests prove that the inference path boots
-and operates with every external network interface absent—not merely blocked by
-a UI setting.
+Oblivion will call this path air-gapped only after tests prove every external
+network interface is absent—not merely disabled by a UI setting. Model
+manifests, accelerator isolation, memory erasure and offline updates remain
+future work.
 
 ## Project status
 
-| Area | Status |
-| --- | --- |
-| amd64 bare-metal boot | Tested on physical hardware using writable USB media |
-| arm64 live image | Built; boot, nested KVM and offline Documents validated in UTM on M4 Pro |
-| General and per-session LUKS2 persistence | Implemented and tested |
-| Offline Documents VM | Implemented |
-| Tor and SOCKS5 gateway | Implemented; hardening and UX work continue |
-| Abliteration.ai remote inference | Integrated |
-| Refuseless remote inference | Integrated through the fixed provider gateway |
-| OpenRouter remote inference | Integrated; ZDR-only endpoints enforced per request |
-| Multiple chats per encrypted session | Implemented; persistence recovery under test |
-| Import/export | Implemented with manifest and recovery checks |
-| Reproducible signed releases | Not yet available |
-| Independent security audit | Not yet performed |
-| Local inference | Planned |
+`v0.1.0-beta.1` is the first public pre-release. Both `amd64` and `arm64`
+images are built and verified by GitHub Actions, encrypted persistence and a
+real provider response have been tested on physical amd64 hardware, and nested
+ARM sessions have been validated in UTM on M4 Pro.
 
-The maintained architecture, development guide and release status live in
-[`docs`](docs). Per-commit test evidence is published by CI instead of being
-committed as historical snapshots.
+Hardening is still in progress: reproducible signed provenance, a minimal Debian
+package audit, broader hardware coverage and an independent security review are
+not complete. See [current status and limitations](docs/STATUS.md).
 
 ## Build from source
 
-Development currently requires macOS or Linux, [Bun 1.4.4](https://bun.sh), Docker with Buildx, Python 3, and enough disk space for Debian and VM images.
+Development requires macOS or Linux, [Bun 1.4.4](https://bun.sh), Docker with
+Buildx, Python 3 and space for Debian and VM images.
 
 ```sh
 git clone https://github.com/exploita-ai/oblivion.git
 cd oblivion
 bun install --frozen-lockfile --os '*' --cpu '*' --libc '*'
-
-# Canonical lint and type check
 bun run check
 
-# Intel and AMD 64-bit PCs (`amd64` / `x86_64`)
+# Intel/AMD 64-bit
 bun run build:iso
 
-# Apple Silicon and other 64-bit ARM systems (`arm64` / `aarch64`)
+# ARM64
 OBLIVION_ARCH=arm64 bun run build:iso
 ```
 
-Intel and AMD use the same `amd64` image; 32-bit x86 is not supported. To run
-Oblivion from QEMU or VirtualBox, prepare a writable virtual boot disk and
-follow the nested-virtualization requirements in the
-[development guide](docs/DEVELOPMENT.md#run-from-a-virtual-machine).
-
-On Apple Silicon, the native VM path is the `arm64` image in UTM using the Apple
-Virtualization backend. Full sessions require macOS 15 and an M3 or newer chip;
-M1/M2 and VirtualBox ARM cannot expose the nested virtualization Oblivion needs.
-
-Build output is written under `artifacts/`, which is intentionally ignored by Git. The hardware helper creates a dedicated SSH key outside the repository for development images:
-
-```sh
-bun run build:hardware
-```
-
-Do not distribute a development image as a release image.
-
-### Branches and release images
-
-Development and pull requests target `dev`. The `main` branch contains only
-release candidates: every push to `main` builds and verifies fresh `amd64` and
-`arm64` images, but does not publish them. A `v*` tag is accepted only when its
-commit belongs to `main` and the complete `Oblivion checks` workflow for that
-commit succeeded.
-
-An accepted tag creates a GitHub pre-release with both ISO files, per-image
-SHA-256 files and a combined `SHA256SUMS`. Images are uploaded directly to the
-GitHub Release, not retained as expiring Actions artifacts. Current checksums
-detect corruption but are not a cryptographic signature; signed provenance is
-still a release blocker.
+Build output stays under ignored `artifacts/`. Development targets `dev`; only
+reviewed release candidates reach `main`, and accepted `v*` tags publish both
+architectures with checksums. Full build, VM and release instructions live in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Repository map
 
-- `packages/oblivion-host` — trusted storage, VM lifecycle, manager bridge, console, display, and transfers.
-- `packages/oblivion-gateway` — isolated egress broker, policy enforcement, Tor/SOCKS5 supervision, and firewall control.
-- `packages/oblivion-manager` — the full-screen host TUI.
-- `packages/oblivion-transfer` — bounded import/export protocol and filesystem operations.
-- `packages/oblivion-transport` and `packages/oblivion-tor-state` — shared transport contracts.
-- `packages/cli`, `packages/tui`, `packages/core`, and related `@opencode/*` packages — the retained OpenCode coding-agent runtime.
-- `script/oblivion` — image construction, VM labs, hardware helpers, and security regression tests.
-- `docs` — maintained architecture, development, security and release-status documentation.
+- `packages/oblivion-host` — encrypted storage, VM lifecycle and transfers.
+- `packages/oblivion-gateway` — Tor/SOCKS5 egress and firewall policy.
+- `packages/oblivion-manager` — full-screen host TUI.
+- `packages/oblivion-transfer` — bounded import/export operations.
+- `packages/cli`, `packages/tui`, `packages/core` and related packages — the
+  retained OpenCode agent runtime.
+- `script/oblivion` — image construction and security laboratories.
 
-The repository intentionally excludes OpenCode's web app, desktop app, hosted console, website, telemetry services, deployment infrastructure, and translated upstream marketing documentation.
-
-## Development
-
-Use the package-local test commands described in [CONTRIBUTING.md](CONTRIBUTING.md). The canonical repository check is:
-
-```sh
-bun run check
-```
-
-For the agent TUI against an already running local OpenCode service:
-
-```sh
-bun run dev:live /path/to/project
-```
-
-Never commit API keys, session volumes, captured traffic, generated images, or user documents. Synthetic laboratory credentials are clearly marked and must not be accepted by production images.
-
-## OpenCode attribution
-
-Oblivion is an independent project derived from OpenCode v2 and is not affiliated with or endorsed by the OpenCode team. The retained agent code remains under its MIT license. See [NOTICE](NOTICE) and [LICENSE](LICENSE).
+The repository excludes OpenCode's web and desktop apps, hosted services,
+deployment infrastructure, telemetry and upstream marketing packages.
 
 ## Join the project
 
-Oblivion is being built in public. Contributions are welcome across the TUI, Debian image, isolation boundary, network gateway, reproducible builds, hardware support, documentation, and security testing.
+Contributions are welcome across the TUI, minimal Debian image, isolation
+boundary, network gateway, builds, hardware support, documentation and testing.
+Priorities include:
 
-### What we want to build next
+- completing the Debian package, service, binary and host-egress audit;
+- reproducible images, signed checksums and provenance;
+- the offline local inference engine and verified model imports;
+- OnionShare-based explicit file exchange;
+- a disposable browser VM with quarantined downloads;
+- broader Wi-Fi, graphics, keyboard, UEFI and virtualization coverage;
+- an independent security review.
 
-- Finish the minimal Debian package, service, binary and host-egress audit.
-- Expand audited provider support without weakening the per-opening endpoint allowlist.
-- Build the offline Oblivion Local Inference Engine and its verified model-import
-  workflow.
-- Add OnionShare-based, explicitly authorized file exchange without introducing
-  a shared session filesystem.
-- Design a disposable browser VM with per-session network rules, download
-  quarantine and no access to other session volumes.
-- Publish reproducible images, signed checksums, provenance and an auditable
-  release profile with every debug path removed.
-- Expand the physical hardware matrix for Wi-Fi, graphics, keyboards, UEFI and
-  nested virtualization.
-- Commission an independent security review before recommending sensitive use.
+Read [CONTRIBUTING.md](CONTRIBUTING.md), explore the
+[architecture](docs/ARCHITECTURE.md), open focused issues for bugs and hardware
+reports, and report vulnerabilities privately as described in
+[SECURITY.md](SECURITY.md).
 
-Roadmap items are design directions, not shipped security claims. Proposals
-should explain which VM owns the feature, what data crosses each boundary, how
-failure is revoked, and what evidence can verify the result.
+If the mission resonates with you, star the repository and help test Oblivion
+on real hardware.
 
-- Read the [contribution guide](CONTRIBUTING.md) before opening a pull request.
-- Explore the [architecture](docs/ARCHITECTURE.md) and current [project status](docs/STATUS.md).
-- Open an issue for bugs, hardware reports, UX feedback, or focused proposals.
-- Report vulnerabilities privately through GitHub Security Advisories as described in [SECURITY.md](SECURITY.md).
+## OpenCode attribution
 
-If the mission resonates with you, star the repository and help us test Oblivion on real hardware.
+Oblivion is an independent project derived from OpenCode v2 and is not
+affiliated with or endorsed by the OpenCode team. The retained agent code
+remains under its MIT license. See [NOTICE](NOTICE) and [LICENSE](LICENSE).
 
 ## License
 
-MIT. Copyright notices for upstream OpenCode and Oblivion contributors are preserved in [LICENSE](LICENSE).
+MIT. Copyright notices for upstream OpenCode and Oblivion contributors are
+preserved in [LICENSE](LICENSE).

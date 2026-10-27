@@ -17,4 +17,4 @@
 - Disabled logging, telemetry, update checks, provider discovery, crash dumps, and project configuration in the Oblivion agent profile.
 - Kept laboratory diagnostics and synthetic credentials out of production image stages.
 
-This project is still pre-beta and has not received an independent security audit.
+This project is early beta and has not received an independent security audit.

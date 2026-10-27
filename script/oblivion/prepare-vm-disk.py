@@ -12,7 +12,7 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("--image", required=True, type=Path, help="Oblivion amd64 or arm64 ISO")
 parser.add_argument("--output", required=True, type=Path, help="New raw disk image to create")
-parser.add_argument("--size-gib", type=int, default=16, help="Virtual disk capacity (default: 16 GiB)")
+parser.add_argument("--size-gib", type=int, default=8, help="Virtual disk capacity (default: 8 GiB)")
 args = parser.parse_args()
 
 source = args.image.resolve(strict=True)

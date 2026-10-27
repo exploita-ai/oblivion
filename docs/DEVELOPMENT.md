@@ -85,7 +85,7 @@ to booting the complete writable image. Prepare a new sparse raw disk instead:
 bun run vm:disk -- \
   --image artifacts/oblivion-beta-iso/image/oblivion-development-amd64.iso \
   --output artifacts/oblivion-amd64.raw \
-  --size-gib 16
+  --size-gib 8
 ```
 
 The helper accepts only a new output file and never opens a physical device.
@@ -133,13 +133,14 @@ Prepare the writable ARM virtual boot disk:
 bun run vm:disk -- \
   --image artifacts/oblivion-arm-iso/image/oblivion-development-arm64.iso \
   --output artifacts/oblivion-arm64.raw \
-  --size-gib 16
+  --size-gib 8
 ```
 
 In UTM:
 
 1. Create a new **Virtualize → Linux** VM using Apple Virtualization.
-2. Assign at least 8 GiB RAM and four CPU cores.
+2. Assign at least 4 GiB RAM and two CPU cores. Use 8 GiB and four cores when
+   you want more headroom for development and larger workspaces.
 3. Use UEFI boot and import `oblivion-arm64.raw` as an external/removable drive.
 4. Put that drive first in the boot order and keep it writable.
 5. Use shared/NAT networking, but disable shared directories, clipboard sharing,
@@ -167,7 +168,7 @@ On an x86_64 Linux host with nested KVM enabled:
 
 ```sh
 qemu-system-x86_64 \
-  -machine q35,accel=kvm -cpu host -m 8G -smp 4 \
+  -machine q35,accel=kvm -cpu host -m 4G -smp 2 \
   -device qemu-xhci,id=xhci \
   -drive file=artifacts/oblivion-amd64.raw,format=raw,if=none,id=oblivion,cache=none \
   -device usb-storage,bus=xhci.0,drive=oblivion,bootindex=1 \
@@ -191,7 +192,8 @@ VBoxManage convertfromraw artifacts/oblivion-amd64.raw \
   artifacts/oblivion-amd64.vdi --format VDI
 ```
 
-Create a Linux/Debian 64-bit VM with at least 8 GiB RAM and four virtual CPUs.
+Create a Linux/Debian 64-bit VM with at least 4 GiB RAM and two virtual CPUs.
+Use 8 GiB and four virtual CPUs for more comfortable development.
 Enable EFI and **Nested VT-x/AMD-V**, add a USB storage controller, and attach
 the VDI to that controller as a writable hard disk. VirtualBox can boot virtual
 USB storage only through EFI. NAT is sufficient for ordinary testing; never add
@@ -200,8 +202,8 @@ privacy test VM.
 
 Running Oblivion inside another operating system weakens its threat model: the
 host OS and hypervisor can observe the display, input, memory and virtual disk.
-The VM path is for evaluation and development. Booting the signed image directly
-on dedicated hardware remains the intended high-privacy deployment.
+The VM path is for evaluation and development. Booting a verified release image
+directly on dedicated hardware remains the intended high-privacy deployment.
 
 ## TUI development
 

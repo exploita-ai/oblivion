@@ -1,7 +1,8 @@
 # Project status
 
-Oblivion is pre-beta. The architecture works end to end in development, but the
-project is not yet ready for sensitive or irreplaceable data.
+Oblivion is early beta. The architecture works end to end and public
+pre-release images are available, but the project is not yet ready for
+sensitive or irreplaceable data.
 
 ## Implemented
 
@@ -29,10 +30,10 @@ Validation results belong to the commit that produced them. GitHub Actions
 publishes the detailed logs and machine-readable evidence as expiring workflow
 artifacts instead of storing historical snapshots in this repository.
 
-## Release blockers
+## Hardening milestones
 
 - complete the Debian package, service, binary and host-egress allowlist audit
-- produce a clean release profile with all debug access removed
+- audit the release profile and keep all debug access removed
 - repeat destructive persistence and recovery tests on a dedicated physical boot drive
 - finish long-running Tor, proxy failure and network-revocation tests
 - verify multi-chat persistence and migration across image upgrades
@@ -51,16 +52,16 @@ artifacts instead of storing historical snapshots in this repository.
 - the image is larger and contains more Debian tooling than the final minimal
   profile should contain
 - an unlocked system holds plaintext data and credentials in RAM
-- current development builds are intentionally more observable than release
-  builds will be
+- debug and development builds are intentionally more observable than release
+  images
 
 ## Near-term roadmap
 
 1. Finish the public-source cleanup and automated secret checks.
 2. Reduce and lock the Debian role manifests and enabled services.
 3. Stabilize the manager, chat, Documents and multi-chat UX.
-4. Build and validate an amd64 beta boot image on physical hardware.
-5. Publish signed images only after the release profile passes the security
+4. Expand physical validation of public beta images across supported hardware.
+5. Publish signed provenance after the release profile passes the security
    gates above.
 
 Local inference is a later milestone. It will add an offline inference role

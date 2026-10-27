@@ -1,6 +1,6 @@
 # Security policy
 
-Oblivion is pre-beta security software. It has not received an independent audit and should not yet be trusted with high-risk or irreplaceable secrets.
+Oblivion is early-beta security software. It has not received an independent audit and should not yet be trusted with high-risk or irreplaceable secrets.
 
 ## Reporting a vulnerability
 

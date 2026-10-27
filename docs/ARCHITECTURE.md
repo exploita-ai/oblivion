@@ -1,7 +1,7 @@
 # Oblivion architecture
 
 This document describes the intended security boundaries of Oblivion. It is a
-design description, not a claim that the current pre-beta image is secure.
+design description, not a claim that the current beta image is secure.
 
 ## System boundary
 
