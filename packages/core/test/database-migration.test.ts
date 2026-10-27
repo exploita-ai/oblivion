@@ -4,7 +4,7 @@ import { fileURLToPath } from "url"
 import path from "path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { EffectDrizzleSqlite } from "@opencode/core/database/drizzle"
-import { Deferred, Effect, Fiber, Layer } from "effect"
+import { Cause, Deferred, Effect, Fiber, Layer } from "effect"
 import { Reactivity } from "effect/reactivity"
 import { SqlClient, Statement } from "effect/sql"
 import { sql } from "drizzle-orm"
@@ -21,6 +21,7 @@ import executionClaimsMigration from "@opencode/core/database/migration/20260811
 import sessionInboxMigration from "@opencode/core/database/migration/20260812181746_session_inbox"
 import sessionViewedStateMigration from "@opencode/core/database/migration/20260819222447_session_viewed_state"
 import azureCliCredentialMigration from "@opencode/core/database/migration/20261007190000_azure_cli_external_credential"
+import resetSessionMigration from "@opencode/core/database/migration/20260622170816_reset_v2_session_state"
 import { Global } from "@opencode/util/global"
 
 const run = <A, E>(
@@ -63,6 +64,75 @@ const parkedClient = (arrived: Deferred.Deferred<void>, gate: Deferred.Deferred<
   ).pipe(Layer.provide(SqliteClient.layer({ filename: ":memory:", disableWAL: true })), Layer.provide(Reactivity.layer))
 
 describe("DatabaseMigration", () => {
+  test.each([
+    ["20260427172553_slow_nightmare", "session_entry"],
+    ["20260603040000_session_message_projection_order", "session_message"],
+    ["20260604172448_event_sourced_session_input", "session_input"],
+    ["20260611192811_lush_chimera", "credential"],
+    ["20260622170816_reset_v2_session_state", "event"],
+    ["20260622202450_simplify_session_input", "workspace"],
+    ["20260804233008_loose_psylocke", "session_input"],
+  ])("refuses populated legacy state before any pending migration: %s", async (id, table) => {
+    const migration = migrations.find((migration) => migration.id === id)
+    if (!migration) throw new Error(`Missing migration ${id}`)
+    await run(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        yield* db.run(sql`CREATE TABLE ${sql.identifier(table)} (id text PRIMARY KEY, content text NOT NULL)`)
+        yield* db.run(sql`INSERT INTO ${sql.identifier(table)} VALUES ('original', 'preserve this data')`)
+        const result = yield* Effect.exit(
+          DatabaseMigration.applyOnly(db, [
+            { id: "earlier", up: (tx) => tx.run(sql`CREATE TABLE must_not_run (id text)`) },
+            migration,
+          ]),
+        )
+        expect(result._tag).toBe("Failure")
+        if (result._tag === "Failure")
+          expect(Cause.pretty(result.cause)).toContain("legacy_chat_history_requires_recovery")
+        expect(yield* db.all(sql`SELECT * FROM ${sql.identifier(table)}`)).toEqual([
+          { id: "original", content: "preserve this data" },
+        ])
+        expect(yield* db.get(sql`SELECT name FROM sqlite_master WHERE name = 'must_not_run'`)).toBeUndefined()
+        expect(yield* db.all(sql`SELECT id FROM migration`)).toEqual([])
+      }),
+    )
+  })
+
+  test("allows an empty legacy reset and never replays it over later chat data", async () => {
+    await run(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        for (const table of ["session_context_epoch", "session_input", "session_message", "event", "event_sequence"]) {
+          yield* db.run(sql`CREATE TABLE ${sql.identifier(table)} (id text PRIMARY KEY)`)
+        }
+        yield* DatabaseMigration.applyOnly(db, [resetSessionMigration])
+        yield* db.run(sql`INSERT INTO session_message VALUES ('saved-message')`)
+        yield* DatabaseMigration.applyOnly(db, [resetSessionMigration])
+        expect(yield* db.all(sql`SELECT id FROM session_message`)).toEqual([{ id: "saved-message" }])
+        expect(yield* db.all(sql`SELECT id FROM migration`)).toEqual([{ id: resetSessionMigration.id }])
+      }),
+    )
+  })
+
+  test("refuses an unknown populated V2 lineage instead of replacing its message projection", async () => {
+    await run(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        yield* db.run(sql`CREATE TABLE session_message (id text PRIMARY KEY, data text NOT NULL)`)
+        yield* db.run(sql`INSERT INTO session_message VALUES ('saved-message', 'original conversation')`)
+        const result = yield* Effect.exit(DatabaseMigration.applyOnly(db, [previousV2Migration]))
+        expect(result._tag).toBe("Failure")
+        if (result._tag === "Failure")
+          expect(Cause.pretty(result.cause)).toContain("legacy_chat_history_requires_recovery")
+        expect(yield* db.all(sql`SELECT * FROM session_message`)).toEqual([
+          { id: "saved-message", data: "original conversation" },
+        ])
+        expect(yield* db.all(sql`SELECT id FROM migration`)).toEqual([])
+        expect(yield* db.get(sql`SELECT name FROM sqlite_master WHERE name = 'session_v2'`)).toBeUndefined()
+      }),
+    )
+  })
+
   test("defaults missing workspace names while preserving legacy workspace data", async () => {
     await run(
       Effect.gen(function* () {

@@ -3,6 +3,7 @@ import type { DatabaseMigration } from "../migration.js"
 
 const migration: DatabaseMigration.Migration = {
   id: "20260604172448_event_sourced_session_input",
+  requiresEmpty: ["session_input", "session_message", "event", "event_sequence", "workspace"],
   up(tx) {
     return Effect.gen(function* () {
       yield* tx.run(`DELETE FROM \`session_input\`;`)

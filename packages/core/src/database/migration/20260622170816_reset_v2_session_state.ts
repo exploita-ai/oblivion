@@ -3,6 +3,7 @@ import type { DatabaseMigration } from "../migration.js"
 
 const migration: DatabaseMigration.Migration = {
   id: "20260622170816_reset_v2_session_state",
+  requiresEmpty: ["session_context_epoch", "session_input", "session_message", "event", "event_sequence"],
   up(tx) {
     return Effect.gen(function* () {
       yield* tx.run(`DELETE FROM \`session_context_epoch\`;`)

@@ -6,6 +6,7 @@ const previousV2Marker = "20260730195856_optional_session_title"
 
 const migration: DatabaseMigration.Migration = {
   id: "20260804233008_loose_psylocke",
+  requiresEmpty: ["session_input"],
   up(tx) {
     return Effect.gen(function* () {
       // This marker identifies the completed pre-split V2 lineage. Its V2 tables
@@ -36,6 +37,13 @@ const migration: DatabaseMigration.Migration = {
         yield* tx.run(`DROP TABLE IF EXISTS \`session_context_epoch\`;`)
         yield* tx.run(`DROP TABLE IF EXISTS \`session_input\`;`)
         return
+      }
+
+      // Only the completed previous-V2 lineage above preserves this projection.
+      // The V1 squash below replaces it, so an unknown populated lineage needs
+      // recovery with its original client rather than silently losing history.
+      if (yield* tx.get(sql`SELECT 1 FROM session_message LIMIT 1`)) {
+        return yield* Effect.fail(new Error("legacy_chat_history_requires_recovery"))
       }
 
       yield* tx.run(`

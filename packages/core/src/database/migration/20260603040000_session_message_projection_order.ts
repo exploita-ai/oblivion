@@ -3,6 +3,7 @@ import type { DatabaseMigration } from "../migration.js"
 
 const migration: DatabaseMigration.Migration = {
   id: "20260603040000_session_message_projection_order",
+  requiresEmpty: ["session_message"],
   up(tx) {
     return Effect.gen(function* () {
       // Pre-launch Session projections were written before durable event persistence

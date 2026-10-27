@@ -282,6 +282,7 @@ separate commits; a code fix does not close its remaining runtime release gate.
 | Finding | Implemented and checked | Still required |
 | --- | --- | --- |
 | A2: committed chat durability | SQLite connections now use WAL/FULL. With pinned Bun 1.4.4, 27 database/migration/workerd tests pass, including on-disk commit/reopen and sync-policy coverage; core typecheck passes. | Full guest/outer-VM crash and power-loss workflow, plus storage performance measurements. |
+| A4: legacy resets | Pending destructive migrations now preflight their populated tables before executing the migration sequence. Unknown populated V2 projections and old pending inputs are refused, not reset. The tested completed July V2 lineage still preserves messages, pending work and events; fresh/current databases remain supported. Database/migration/workerd suites: 36 passing tests. | Guest recovery UX and compiled-client upgrade fixtures. Unsupported pre-launch archives must be opened with their original client for export/recovery; no automatic data-erasing upgrade. |
 
 ## Security boundary
 

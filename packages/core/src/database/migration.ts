@@ -14,6 +14,7 @@ type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0]
 export type Migration = {
   id: string
   foreignKeys?: boolean
+  requiresEmpty?: readonly string[]
   up: (tx: Transaction) => Effect.Effect<void, unknown, Global.Service>
 }
 
@@ -101,6 +102,18 @@ export function applyOnly(db: Database, input: Migration[]) {
         completed = new Set(
           (yield* db.all<{ id: string }>(sql`SELECT id FROM ${sql.identifier("migration")}`)).map((row) => row.id),
         )
+      }
+    }
+
+    // Preflight every pending reset before running any migration. Some early
+    // OpenCode migrations discarded pre-release data instead of converting it.
+    const protectedTables = new Set(
+      input.filter((migration) => !completed.has(migration.id)).flatMap((migration) => migration.requiresEmpty ?? []),
+    )
+    for (const table of protectedTables) {
+      if (!(yield* db.get(sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${table}`))) continue
+      if (yield* db.get(sql`SELECT 1 FROM ${sql.identifier(table)} LIMIT 1`)) {
+        return yield* Effect.fail(new Error("legacy_chat_history_requires_recovery"))
       }
     }
 
