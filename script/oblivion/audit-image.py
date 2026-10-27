@@ -82,10 +82,10 @@ def inventory(image, role, work, manifests):
     policy = {}
     for entry in files:
         path = entry["path"]
-        if (path in ("/etc/fstab", "/etc/systemd/journald.conf", "/etc/oblivion/firewall.nft", "/etc/oblivion/torrc")
+        if (path in ("/etc/fstab", "/etc/systemd/journald.conf", "/etc/oblivion/firewall.nft", "/etc/oblivion/host-firewall.nft", "/etc/oblivion/torrc")
             or path.startswith(("/etc/systemd/journald.conf.d/", "/usr/lib/systemd/journald.conf.d/",
                                 "/etc/systemd/system.conf.d/", "/etc/modules-load.d/", "/etc/sysctl.d/",
-                                "/etc/NetworkManager/conf.d/"))
+                                "/etc/NetworkManager/conf.d/", "/etc/systemd/system/NetworkManager.service.d/"))
             or (path.startswith("/etc/systemd/system/oblivion-") and path.endswith((".service", ".conf")))):
             policy[path] = run("unsquashfs", "-cat", str(image), path.lstrip("/"))
     return {
