@@ -292,6 +292,14 @@ try:
         assert len(passed) == 2, result.stdout
         for test in passed:
             check("compiled adapter: " + test)
+        database = subprocess.run(["setpriv", "--reuid=1000", "--regid=1000", "--clear-groups",
+            "--no-new-privs", "--", "python3", str(BUNDLE / "test-chat-database.py"), "-v"],
+            capture_output=True, text=True, timeout=240,
+            env={"PATH": "/usr/bin:/bin", "HOME": "/tmp", "PYTHONDONTWRITEBYTECODE": "1",
+                 "OBLIVION_TEST_CLIENT": str(binary), "OBLIVION_TEST_DATABASE_HELPER": str(BUNDLE / "chat-database.py")})
+        assert database.returncode == 0, database.stdout + database.stderr
+        for line in database.stderr.splitlines():
+            if line.endswith(" ... ok"): check("compiled chat storage: " + line.removesuffix(" ... ok"))
     finally:
         subprocess.run(["umount", str(guest)], check=True)
     print("OBLIVION_VM_LAB_PASS", flush=True)

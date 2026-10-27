@@ -8,7 +8,7 @@ import sqlite3
 import tempfile
 import unittest
 
-source = Path(__file__).resolve().parents[2] / "packages/oblivion-host/guest/chat-database.py"
+source = Path(os.environ["OBLIVION_TEST_DATABASE_HELPER"]) if "OBLIVION_TEST_DATABASE_HELPER" in os.environ else Path(__file__).resolve().parents[2] / "packages/oblivion-host/guest/chat-database.py"
 spec = importlib.util.spec_from_file_location("chat_database", source)
 chat = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(chat)

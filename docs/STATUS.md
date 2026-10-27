@@ -289,6 +289,35 @@ separate commits; a code fix does not close its remaining runtime release gate.
 | A6: key metadata | The controller now distinguishes effective credential changes from labels and unrelated keys. Renaming, replacing with the same secret, removing an unused key and changing a default hidden by an opening override preserve the gateway; effective replacement/removal/selection revokes it. Nine Linux key tests pass. | Tor progress/deadline/cancellation and a real gateway PID/circuit lifecycle test. |
 | A3: global shutdown | Gateway shutdown distinguishes verified termination from checkpoint persistence. Lock/recover attempts gateway, transfer and session shutdown before checking results; a failed stop retains the recovery latch and prevents mapping closure. After successful closure, a lost Tor checkpoint produces a specific locked-state notice. Linux host builds and 55 Rust tests pass; 25 manager tests and typecheck pass, including the notice at 80×24/160×50. | Execute the added stopped-owner fault injection in the swap-free Linux VM, with real encrypted storage and session teardown. |
 
+### Disposable Linux qualification (2026-10-27)
+
+The ARM64 Linux client was rebuilt with Bun 1.4.4. A swap-free Debian guest
+with no external NIC passed **68 checks** using the current gateway bundle:
+35 component tests, 10 activation tests, production UID/capability/channel
+checks, both compiled-adapter streaming/revocation tests and all five compiled
+chat-storage migration tests. The storage cases cover channel histories,
+conflicting transcripts, invalid sources, pending input and committed WAL
+frames. The adapter packet capture recorded 766 TCP/IPv4 packets, zero
+non-loopback/UDP/IPv6 packets and zero dropped/truncated packets. No synthetic
+marker was found on the scanned writable disk. This is scoped loopback/lab
+qualification, not a claim that the release ISO or outer hypervisor cannot
+retain data. Evidence: ignored local `artifacts/oblivion-audit-storage-vm/summary.json`.
+
+The systemd/LUKS lifecycle run passed its initial storage-full, key publication,
+read-only metadata and credential-access checks, then stopped on a fixture
+mismatch: a shell-only guest was built where the test expected the compiled
+TUI. It is **not** a passing lifecycle run. The corrected TUI image build
+completed its filesystem stage but export was cancelled as the Mac approached
+full capacity. Its partial export was removed. The rerun, crash/power-loss
+workflows, live Tor capture and host-wide egress qualification remain open.
+User archives, running personal sessions and the existing USB candidate were
+not modified.
+
+The new compiled migration tests are part of the gateway laboratory bundle,
+so future qualification runs execute them rather than relying on source-only
+unit tests. Repository-wide `bun run check` passes; the manager suite currently
+has 88 passing tests.
+
 ## Security boundary
 
 Remote APIs are not air-gapped; providers process submitted context and tool

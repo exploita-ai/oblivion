@@ -254,9 +254,10 @@ RUN cargo fetch --locked
 COPY packages/oblivion-gateway/src/ src/
 COPY packages/oblivion-gateway/guest/firewall.nft guest/firewall.nft
 COPY packages/oblivion-gateway/tests/ tests/
+COPY packages/oblivion-host/guest/chat-database.py script/oblivion/test-chat-database.py /gateway/
 RUN --network=none cargo test --locked --offline --lib --features lab-emulation \
     && cargo test --locked --offline --no-run --features lab-emulation \
-    && mkdir /gateway-bundle \
+    && mkdir /gateway-bundle && cp chat-database.py test-chat-database.py /gateway-bundle/ \
     && cp /tmp/target/debug/oblivion-api /gateway-bundle/oblivion-api-lab \
     && cp /tmp/target/debug/oblivion-egress /gateway-bundle/oblivion-egress-lab \
     && cp /tmp/target/debug/oblivion-tools /gateway-bundle/oblivion-tools-lab \
@@ -267,8 +268,8 @@ RUN --network=none cargo test --locked --offline --lib --features lab-emulation 
     && cp /tmp/target/debug/oblivion-gateway-control /gateway-bundle/oblivion-gateway-control \
     && cp /tmp/target/debug/oblivion-egress /gateway-bundle/oblivion-egress \
     && cp /tmp/target/debug/oblivion-tools /gateway-bundle/oblivion-tools \
-    && strip /gateway-bundle/* \
-    && find Cargo.toml Cargo.lock .cargo src tests guest/firewall.nft ../oblivion-tor-state/Cargo.toml ../oblivion-tor-state/src ../oblivion-transport/Cargo.toml ../oblivion-transport/src -type f -print0 | sort -z | xargs -0 sha256sum > /gateway-bundle/sources.sha256 \
+    && strip /gateway-bundle/oblivion-* /gateway-bundle/*-tests \
+    && find Cargo.toml Cargo.lock .cargo src tests guest/firewall.nft chat-database.py test-chat-database.py ../oblivion-tor-state/Cargo.toml ../oblivion-tor-state/src ../oblivion-transport/Cargo.toml ../oblivion-transport/src -type f -print0 | sort -z | xargs -0 sha256sum > /gateway-bundle/sources.sha256 \
     && rustc --version > /gateway-bundle/compiler.txt \
     && cd /gateway-bundle && sha256sum * > SHA256SUMS
 

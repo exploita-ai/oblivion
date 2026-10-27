@@ -46,6 +46,7 @@ script/oblivion/*
 !script/oblivion/run-vm-lab.py
 !script/oblivion/run-tui-boot-lab.py
 !script/oblivion/packet_capture.py
+!script/oblivion/test-chat-database.py
 !script/oblivion/vm-*.sh
 !script/oblivion/vm-*.py
 !script/oblivion/vm-stream-*.pem
