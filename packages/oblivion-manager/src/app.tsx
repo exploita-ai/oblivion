@@ -127,8 +127,10 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
       setNotice(wizard() || ["Refresh", "Load system status"].includes(label) ? "" : label + " completed.")
     } catch (error) {
       setFeedback(error instanceof ControlError && ["gateway_not_ready", "chat_start_cancelled"].includes(error.code) ? "info" : "error")
-      setNotice(explain(error))
       await refresh().catch(() => undefined)
+      setNotice(label === "Create encrypted storage" && state()?.general_incomplete
+        ? "Encrypted storage preparation was interrupted. Discard the incomplete attempt, then retry."
+        : explain(error))
     } finally {
       setBusy("")
       if (state()?.session_open && !chatVisible() && !form() && !wizard()) setDocuments(true)
@@ -226,10 +228,9 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
     setForm({
       title: "Create encrypted storage",
       description: `System storage: /dev/${plan.device} · ${capacity(plan.disk_bytes)}. Reserve ${capacity(plan.sectors * 512)} of available unpartitioned space for Oblivion. Existing data in that space will be overwritten.`,
-      fields: [{ id: "confirmStorage", label: "Confirm storage", choices: [{ value: "no", label: "Cancel setup" }, { value: "yes", label: "Use the available free space" }] }, { id: "password", label: "New Oblivion password", secret: true }, { id: "confirm", label: "Repeat Oblivion password", secret: true }],
+      fields: [{ id: "password", label: "New Oblivion password", secret: true }, { id: "confirm", label: "Repeat Oblivion password", secret: true }],
       submit: "Create encrypted storage",
       run: async (values) => {
-        if (values.confirmStorage !== "yes") throw new ControlError("storage_confirmation_required")
         validatePassword(values)
         await command("prepare-usb", { plan, password: values.password })
         await command("unlock", values.password)
@@ -591,8 +592,7 @@ function explain(error: unknown) {
     volume_unlock_failed: "The volume could not be unlocked. Check your password and keyboard layout, then retry.",
     password_too_short: "Use a password of at least 16 bytes.",
     passwords_do_not_match: "The two passwords do not match. Try again.",
-    storage_confirmation_required: "Choose 'Use the available free space' to create encrypted storage, or press Esc to cancel.",
-    usb_confirmation_required: "Choose 'Use the available free space' to create encrypted storage, or press Esc to cancel.",
+    usb_confirmation_required: "Encrypted storage is not available for this system disk configuration.",
     gateway_not_ready: "The network route is still connecting. Wait, then retry Start chat.",
     chat_start_cancelled: "Connection cancelled. Your session documents remain open offline.",
     gateway_connect_timeout: "The protected connection is taking too long. Check Network, then retry Start chat. Documents remain offline.",

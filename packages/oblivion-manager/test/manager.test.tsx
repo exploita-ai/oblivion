@@ -136,7 +136,7 @@ test("welcome keyboard settings apply only temporarily, then ephemeral access us
   } finally { await app.dispose() }
 })
 
-test("encrypted storage setup submits confirmation and passwords, then opens the saved-settings wizard", async () => {
+test("encrypted storage setup submits passwords, then opens the saved-settings wizard", async () => {
   const base = preview(() => {})
   const initial = status.parse(JSON.parse(await base.request({ operation: "status" })))
   let current = { ...initial, general_present: false, general_open: false, general_mounted: false, sessions: [] }
@@ -164,9 +164,8 @@ test("encrypted storage setup submits confirmation and passwords, then opens the
     expect(app.captureCharFrame()).toContain("Create encrypted storage")
     expect(app.captureCharFrame().match(/Keyboard (?:& time zone|\/ Time)/g)).toHaveLength(1)
     expect(app.captureCharFrame()).not.toContain("Test keyboard")
+    expect(app.captureCharFrame()).not.toContain("Cancel setup")
     expect(app.captureCharFrame()).not.toContain("USB")
-    await app.mockInput.pressEnter()
-    await app.mockInput.pressArrow("down")
     await app.mockInput.pressEnter()
     await app.mockInput.typeText("synthetic-archive-password")
     await app.mockInput.pressEnter()
@@ -180,6 +179,34 @@ test("encrypted storage setup submits confirmation and passwords, then opens the
     await app.mockInput.pressEscape()
     await app.renderOnce()
     expect(app.captureCharFrame()).toContain("New session")
+  } finally { app.renderer.destroy(); await app.renderer.closed }
+})
+
+test("interrupted encrypted storage setup explains the recovery action", async () => {
+  const base = preview(() => {})
+  const initial = status.parse(JSON.parse(await base.request({ operation: "status" })))
+  let current = { ...initial, general_present: false, general_incomplete: false, general_open: false, general_mounted: false, sessions: [] }
+  const runtime = { ...base, request: async (input: Parameters<typeof base.request>[0]) => {
+    if (input.operation === "status") return JSON.stringify(current)
+    if (input.operation === "prepare-usb") {
+      current = { ...current, general_incomplete: true }
+      throw new ControlError("volume_unlock_failed")
+    }
+    return base.request(input)
+  } }
+  const app = await testRender(() => <App runtime={runtime} initial={current} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await app.renderOnce()
+    await app.mockInput.pressEnter()
+    await app.mockInput.typeText("synthetic-archive-password")
+    await app.mockInput.pressEnter()
+    await app.mockInput.typeText("synthetic-archive-password")
+    await app.mockInput.pressEnter()
+    await app.mockInput.pressEnter()
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Discard incomplete preparation")
+    expect(app.captureCharFrame()).toContain("Encrypted storage preparation was interrupted")
+    expect(app.captureCharFrame()).not.toContain("The volume could not be unlocked")
   } finally { app.renderer.destroy(); await app.renderer.closed }
 })
 
@@ -214,7 +241,7 @@ test("controller errors retain their specific message and allow another unlock a
   } finally { app.renderer.destroy(); await app.renderer.closed }
 })
 
-test("encrypted storage setup without explicit confirmation never reports a completed preparation", async () => {
+test("encrypted storage setup requires a valid password", async () => {
   const runtime = preview(() => {})
   const initial = status.parse(JSON.parse(await runtime.request({ operation: "status" })))
   initial.general_present = false
@@ -226,10 +253,9 @@ test("encrypted storage setup without explicit confirmation never reports a comp
     await app.mockInput.pressEnter()
     await app.mockInput.pressKey("TAB")
     await app.mockInput.pressKey("TAB")
-    await app.mockInput.pressKey("TAB")
     await app.mockInput.pressEnter()
     await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("Choose 'Use the available free space'")
+    expect(app.captureCharFrame()).toContain("Use a password of at least 16 bytes")
     expect(app.captureCharFrame()).not.toContain("completed.")
     expect(app.captureCharFrame()).not.toContain("Could not complete")
   } finally { app.renderer.destroy(); await app.renderer.closed }
