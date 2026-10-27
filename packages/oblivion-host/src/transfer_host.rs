@@ -318,7 +318,10 @@ pub fn cleanup() -> Result<()> {
             .try_exists()
             .map_err(|_| Error("device_check_failed"))?
         {
-            vm::execute("/usr/sbin/dmsetup", &["remove".into(), name.into()])?;
+            vm::execute(
+                "/usr/sbin/dmsetup",
+                &["remove".into(), "--retry".into(), name.into()],
+            )?;
         }
     }
     if job()?.is_some() {
