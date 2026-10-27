@@ -18,6 +18,18 @@ spec.loader.exec_module(console)
 
 
 class ConsoleTest(unittest.TestCase):
+    def test_non_terminal_executes_command_without_pty(self):
+        result = subprocess.run(
+            [sys.executable, str(source), sys.executable, "-c", "print('HEADLESS')"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "HEADLESS\n")
+        self.assertEqual(result.stderr, "")
+
     def test_input_preserves_text_and_split_escape_sequences(self):
         decoder = console.Input()
         output = bytearray()

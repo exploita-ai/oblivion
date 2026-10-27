@@ -54,6 +54,10 @@ class Input:
 
 
 def main(command):
+    # Headless OpenCode commands such as `run --format json` deliberately use
+    # pipes or /dev/null. They need no viewer resize protocol or guest PTY.
+    if not os.isatty(0):
+        os.execvp(command[0], command)
     original = termios.tcgetattr(0)
     tty.setraw(0)
     decoder = Input()
