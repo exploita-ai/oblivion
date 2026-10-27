@@ -352,7 +352,13 @@ with socket.socket(socket.AF_UNIX) as client:
     assert probe.returncode == 0, probe.stderr
     assert int(property(CONTROLLER, "MainPID")) > 0
     check("fragmented controller frames and secrets expire despite continued progress; the same service accepts the next valid request")
-    assert status()["api_key_present"] is None and status()["egress"] is None
+    initial_status = status()
+    assert initial_status["api_key_present"] is None
+    assert initial_status["egress"] == {
+        "saved": {"mode": "tor"},
+        "selected": {"mode": "tor"},
+        "temporary": False,
+    }
     assert command("egress", secret=TOR_SAVE, success=False) == "general_not_open"
     assert command("network-policy", secret=WEB_SAVE, success=False) == "general_not_open"
     assert command("set-api-key", secret=API_KEY, success=False) == "general_not_writable"
