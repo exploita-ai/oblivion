@@ -80,7 +80,8 @@ for unit in NetworkManager oblivion-controller; do
     printf '[Unit]\nRequires=oblivion-host-firewall.service\nAfter=oblivion-host-firewall.service\n' > "/etc/systemd/system/$unit.service.d/firewall.conf"
 done
 systemctl enable oblivion-host-firewall.service NetworkManager.service oblivion-network-console.service
-systemctl mask NetworkManager-wait-online.service e2scrub_reap.service e2scrub_all.timer
+systemctl mask NetworkManager-wait-online.service e2scrub_reap.service e2scrub_all.timer \
+    dpkg-db-backup.timer dpkg-db-backup.service
 printf 'loop\ndm_crypt\nkvm\n' > /etc/modules-load.d/oblivion-live.conf
 # The guest's minimal initrd is not enough for booting physical USB or SATA.
 printf 'MODULES=most\nCOMPRESS=gzip\nRESUME=none\n' > /etc/initramfs-tools/conf.d/oblivion
