@@ -16,7 +16,13 @@ struct Status {
     general_mounted: bool,
     general_readonly: bool,
     session_open: bool,
+    #[serde(rename = "session_mode")]
+    _session_mode: Option<String>,
+    #[serde(rename = "active_session")]
+    _active_session: Option<String>,
     sessions: Vec<String>,
+    #[serde(rename = "session_titles")]
+    _session_titles: serde_json::Value,
     incomplete_sessions: Vec<String>,
     available_bytes: Option<u64>,
     session_bytes: u64,
@@ -35,6 +41,14 @@ struct Status {
     network_profiles_saved: Option<bool>,
     #[serde(default, rename = "settings")]
     _settings: Option<oblivion_host::settings::Status>,
+    #[serde(rename = "network_status")]
+    _network_status: serde_json::Value,
+    #[serde(rename = "connections")]
+    _connections: serde_json::Value,
+    #[serde(rename = "system")]
+    _system: serde_json::Value,
+    #[serde(rename = "debug_available")]
+    _debug_available: bool,
 }
 
 fn main() {

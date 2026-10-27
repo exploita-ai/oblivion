@@ -260,7 +260,7 @@ def main():
             check("separate VMs boot read-only with no shared filesystem; Tor is not started before a transport is selected")
             key = "synthetic-" + secrets.token_hex(32)
             token = secrets.token_hex(32)
-            assert control.call("configure", api_key=key) == {"ok": True, "configured": True, "active": False}
+            assert control.call("configure", provider="abliteration-ai", api_key=key) == {"ok": True, "configured": True, "active": False}
             control.call("tor-initialize", state=None)
             assert control.call("grant", token=token) == {"ok": True, "configured": True, "active": True}
             summary["processes"] = gateway.call("supervisor-info")

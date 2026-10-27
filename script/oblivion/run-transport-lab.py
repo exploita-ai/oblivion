@@ -96,7 +96,7 @@ def main():
             check("startup has no Tor daemon, Tor state, selected route or IP traffic")
             transport = {"mode": "socks5", "endpoint": f"10.0.2.2:{proxy.port}", "authentication":
                 {"username": USERNAME, "password": PASSWORD} if proxy.authenticated else None}
-            assert not control.call("configure", api_key=KEY, transport=transport)["active"]
+            assert not control.call("configure", provider="abliteration-ai", api_key=KEY, transport=transport)["active"]
             state = gateway.call("transport-state")
             assert state["tor"] == "inactive" and not state["tor_state_file"]
             assert state["selectors"]["tor_owners"] == state["selectors"]["tor_connectors"] == []
@@ -171,7 +171,7 @@ def main():
             elif args.fault == "control-disconnect":
                 control.close()
             elif args.fault == "reconfigure":
-                body = json.dumps({"operation": "configure", "api_key": KEY, "transport": {"mode": "tor"}}).encode()
+                body = json.dumps({"operation": "configure", "provider": "abliteration-ai", "api_key": KEY, "transport": {"mode": "tor"}}).encode()
                 control.socket.sendall(len(body).to_bytes(4, "big") + body)
                 assert control.receive() == {"ok": False, "error": "control_failed"}
             else:

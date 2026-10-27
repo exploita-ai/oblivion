@@ -44,7 +44,7 @@ with vault.open("xb") as file:
     file.truncate(128 * 1024 * 1024)
 subprocess.run(["mkfs.ext4", "-q", "-m", "0", str(vault)], check=True)
 started = time.monotonic()
-markers = [b"Conversazioni e documenti", b"/exit blocca"]
+markers = [b"OBLIVION", b"/new new chat", b"/resume chats"]
 received = bytearray()
 with (output / "serial.log").open("xb") as log:
     with subprocess.Popen([
@@ -52,16 +52,20 @@ with (output / "serial.log").open("xb") as log:
         "-accel", args.accelerator, "-cpu", "host" if args.accelerator == "kvm" else "cortex-a72" if args.architecture == "aarch64" else "max",
         "-m", "1536", "-smp", "2",
         "-nodefaults", "-no-reboot", "-display", "none", "-monitor", "none",
-        "-nic", "none", "-serial", "stdio",
+        "-nic", "none", "-serial", "null",
         "-object", "rng-random,filename=/dev/urandom,id=rng", "-device", "virtio-rng-pci,rng=rng",
         "-kernel", str(guest / "kernel"), "-initrd", str(guest / "initrd"),
-        "-append", "root=/dev/vda ro rootfstype=squashfs console=" + ("ttyAMA0" if args.architecture == "aarch64" else "ttyS0") + " loglevel=4 systemd.show_status=true panic=-1",
+        "-append", "root=/dev/vda ro rootfstype=squashfs console=hvc0 quiet loglevel=0 systemd.show_status=false panic=-1",
         "-drive", f"file={guest / 'guest.squashfs'},format=raw,if=none,id=root,readonly=on",
         "-device", "virtio-blk-pci,drive=root,serial=oblivion-root",
+        "-device", "virtio-serial-pci,id=oblivion-serial",
+        "-chardev", "stdio,id=console,signal=off",
+        "-device", "virtconsole,chardev=console,bus=oblivion-serial.0,name=oblivion.console",
         "-drive", f"file={vault},format=raw,if=none,id=vault,cache=none",
         "-device", "virtio-blk-pci,drive=vault,serial=oblivion-vault",
-    ], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0) as process:
+    ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0) as process:
         try:
+            sized = False
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
                 while time.monotonic() - started < 180:
@@ -74,6 +78,10 @@ with (output / "serial.log").open("xb") as log:
                     log.flush()
                     received.extend(chunk)
                     assert len(received) <= 4 * 1024 * 1024, "boot output limit"
+                    if not sized and b"\x1b]777;oblivion;ready\x07" in received:
+                        process.stdin.write(b"\x1b[8;24;80t")
+                        process.stdin.flush()
+                        sized = True
                     plain = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", received)
                     if all(marker in plain for marker in markers):
                         break
