@@ -274,6 +274,15 @@ checks or a new ISO build. Existing earlier laboratory results are not a fresh
 validation of this revision. No runtime code or tests were changed, so the
 repository-wide lint/typecheck was not rerun for this documentation update.
 
+### Remediation progress
+
+The audit above records the original findings. Implementation proceeds in
+separate commits; a code fix does not close its remaining runtime release gate.
+
+| Finding | Implemented and checked | Still required |
+| --- | --- | --- |
+| A2: committed chat durability | SQLite connections now use WAL/FULL. With pinned Bun 1.4.4, 27 database/migration/workerd tests pass, including on-disk commit/reopen and sync-policy coverage; core typecheck passes. | Full guest/outer-VM crash and power-loss workflow, plus storage performance measurements. |
+
 ## Security boundary
 
 Remote APIs are not air-gapped; providers process submitted context and tool

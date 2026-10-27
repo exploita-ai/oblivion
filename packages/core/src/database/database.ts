@@ -38,7 +38,9 @@ const databaseLayer = (lock: Effect.Effect<Semaphore.Semaphore>) =>
 
       if (supportsTuningPragmas) {
         yield* db.run("PRAGMA journal_mode = WAL")
-        yield* db.run("PRAGMA synchronous = NORMAL")
+        // A committed message must sync its WAL before acknowledging the write.
+        // NORMAL can lose acknowledged commits when the live system loses power.
+        yield* db.run("PRAGMA synchronous = FULL")
         yield* db.run("PRAGMA busy_timeout = 5000")
         yield* db.run("PRAGMA cache_size = -64000")
         yield* db.run("PRAGMA wal_checkpoint(PASSIVE)")
