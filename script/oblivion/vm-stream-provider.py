@@ -22,6 +22,7 @@ active = set()
 closed = set()
 errors = []
 sequence = 0
+probes = 0
 credentials = {}
 web = {"http": 0, "https": 0, "redirect": 0, "shell": 0, "completed": 0}
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -123,7 +124,7 @@ print('OBLIVION_SHELL_PROXY_OK')''')
 
 
 def serve(connection):
-    global sequence
+    global probes, sequence
     identifier = None
     try:
         with connection:
@@ -140,7 +141,12 @@ def serve(connection):
             else:
                 assert len(token) == 64 and all(byte in b"0123456789abcdef" for byte in token)
             connection.sendall(b"\x01\x00")
-            assert exact(connection, 4) == b"\x05\x01\x00\x03"
+            prefix = connection.recv(1)
+            if not prefix:
+                with lock:
+                    probes += 1
+                return
+            assert prefix + exact(connection, 3) == b"\x05\x01\x00\x03"
             assert exact(connection, exact(connection, 1)[0]) == b"api.abliteration.ai"
             port = struct.unpack(">H", exact(connection, 2))[0]
             assert port == 443 or (EXTERNAL and port == 80)
@@ -216,7 +222,7 @@ def status(line):
     request = json.loads(line)
     assert set(request) == {"operation", "id"} and request["operation"] == "status"
     with lock:
-        value = {"id": request["id"], "active": sorted(active), "closed": sorted(closed), "errors": errors.copy(), "credentials": credentials.copy(), "web": web.copy()}
+        value = {"id": request["id"], "active": sorted(active), "closed": sorted(closed), "errors": errors.copy(), "credentials": credentials.copy(), "web": web.copy(), "probes": probes}
     value["fixture_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     if not EXTERNAL:
         value["api_sha256"] = hashlib.sha256(Path("/usr/bin/oblivion-api").read_bytes()).hexdigest()

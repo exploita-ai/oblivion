@@ -390,7 +390,9 @@ if SOCKS:
         # Counters/fixture locations are synthetic diagnostics, not user logs.
         print("OBLIVION_WEBTOOLS_FIXTURE " + json.dumps(stream_status()), flush=True)
         raise
-    assert stream_status()["web"] == {"http": 1, "https": 1, "redirect": 1, "shell": 1, "completed": 1}
+    observed = stream_status()
+    assert observed["web"] == {"http": 1, "https": 1, "redirect": 1, "shell": 1, "completed": 1}
+    assert observed["probes"] > 0
     check("compiled OpenCode webfetch and a shell client use the local proxy for HTTP and verified HTTPS; redirected, unknown and wrong-port targets fail without external contact or a direct fallback")
 
 if STREAM:
