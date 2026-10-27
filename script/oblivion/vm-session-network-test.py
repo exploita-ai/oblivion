@@ -436,8 +436,8 @@ if SOCKS:
     check("the laboratory captures A's compiled-client traffic outside the gateway, without a cleartext provider key or local capability")
 
 if STREAM:
-    stopped()
     command("api-keys", secret=json.dumps({"action": "select", "id": alternate_key}).encode())
+    stopped()
     current = status()
     assert current["gateway_state"] in ["inactive", "failed"] and current["gateway_vm_state"] in ["inactive", "failed"], current
     assert closing_gateway is not None and not Path(f"/proc/{closing_gateway}").exists()
