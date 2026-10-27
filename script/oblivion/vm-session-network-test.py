@@ -248,11 +248,11 @@ if SOCKS:
     check("encrypted external SOCKS profile is selected before the key starts the gateway")
 
 command("set-api-key", secret=KEY)
-ready()
+stopped()
+check("saving an API key keeps the gateway stopped until a chat starts")
 a = command("create", secret=PASSWORD)
 b = command("create", secret=b"synthetic-session-password-b")
 if SOCKS:
-    previous_gateway, _ = ready()
     policy_command = json.dumps({"action": "put", "rule": {
         "destination": "denied.example.com", "port": 443, "action": "deny", "session": a}, "save": True}).encode()
     command("network-policy", secret=policy_command)
@@ -261,16 +261,15 @@ if SOCKS:
             "destination": "api.abliteration.ai", "port": port, "action": "allow", "session": a}, "save": True}).encode())
     policy_file = Path("/run/oblivion/general/profile/network-policy.json")
     assert json.loads(policy_file.read_text())["rules"][0]["session"] == a
-    assert ready()[0] == previous_gateway
-    check("a scoped web policy is saved in the encrypted profile without restarting an idle gateway")
+    stopped()
+    check("a scoped web policy is saved in the encrypted profile without starting the idle gateway")
 if STREAM:
     command("api-keys", secret=json.dumps({"action": "add", "name": "Seconda", "key": NEXT.decode()}).encode())
     initial_key, alternate_key = [entry["id"] for entry in status()["api_keys"]["entries"]]
     assert status()["api_keys"]["selected"] == initial_key
-    previous_gateway, _ = ready()
     command("api-keys", secret=json.dumps({"action": "select", "id": initial_key}).encode())
-    assert ready()[0] == previous_gateway
-    check("reselecting the current key records the RAM choice without restarting its gateway or Tor bootstrap")
+    stopped()
+    check("reselecting the current key records the RAM choice without starting a gateway or Tor bootstrap")
 
 
 
@@ -363,10 +362,11 @@ def probe(client):
     return token
 
 
+command("enter", a, secret=PASSWORD)
+ready()
 if SOCKS:
     qmp("gateway", "object-add", {"qom-type": "filter-dump", "id": "webtools-capture",
         "netdev": "outside", "file": "/run/oblivion-gateway-vm/webtools-outside.pcap"})
-command("enter", a, secret=PASSWORD)
 chat = int(property("oblivion-session.service", "MainPID"))
 assert property("oblivion-session.service", "PrivateNetwork") == "yes"
 assert not Path(f"/proc/{chat}/root/run/oblivion-gateway-vm/control.sock").exists()
@@ -528,7 +528,7 @@ check("normal QEMU exit also revokes automatically; repeated opens bind fresh pr
 tokens = [first, second, third, fourth, fifth]
 if SOCKS:
     command("unlock", secret=GENERAL)
-    previous_gateway, _ = ready()
+    stopped()
     saved_transport = Path("/run/oblivion/general/profile/transport.json").read_bytes()
     tor_state = Path("/run/oblivion/general/profile/tor-state")
     assert tor_state.read_bytes() == b"unused-tor-state-fixture"
@@ -537,12 +537,11 @@ if SOCKS:
     guard_id = "rsa_id=0123456789ABCDEF0123456789ABCDEF01234567"
     tor_state.write_text("Guard in=default " + guard_id + " nickname=TestGuard sampled_on=2026-10-24T00:00:00 sampled_idx=0 sampled_by=0.4.9.14 listed=1 confirmed_on=2026-10-24T00:01:00 confirmed_idx=0\nTorVersion Tor 0.4.9.14\nLastWritten 2026-10-24 00:02:00\n")
     command("egress", secret=b'{"action":"select","transport":{"mode":"tor"}}')
-    tor_gateway, _ = ready()
-    assert tor_gateway != previous_gateway and not Path(f"/proc/{previous_gateway}").exists()
+    stopped()
     assert status()["egress"]["selected"] == {"mode": "tor"} and status()["egress"]["temporary"]
     assert Path("/run/oblivion/general/profile/transport.json").read_bytes() == saved_transport
-    assert gateway_status() == {"ok": False, "configured": True, "active": False}
     assert command("enter", a, secret=PASSWORD, success=False) == "gateway_not_ready"
+    tor_gateway, _ = ready()
     assert not status()["session_open"] and property("oblivion-session.service", "ActiveState") in ["inactive", "failed"]
     assert not Path("/dev/mapper/oblivion-session").exists() and not Path("/run/oblivion-session/console.sock").exists()
     assert stream_status()["active"] == [] and stream_status()["closed"] == [1, 2]
@@ -553,16 +552,18 @@ if SOCKS:
     check("SOCKS-to-Tor imports its saved guard and replaces the gateway; absent bootstrap still rejects opening before any session mapping or VM, with no SOCKS fallback")
 
     command("egress", secret=b'{"action":"saved"}')
-    restored_gateway, _ = ready()
-    assert restored_gateway != tor_gateway and not Path(f"/proc/{tor_gateway}").exists()
+    stopped()
+    assert not Path(f"/proc/{tor_gateway}").exists()
     assert status()["egress"]["selected"]["mode"] == "socks5" and not status()["egress"]["temporary"]
     assert Path("/run/oblivion/general/profile/transport.json").read_bytes() == saved_transport
     saved_tor_state = tor_state.read_bytes()
     assert guard_id.encode() in saved_tor_state
-    assert gateway_status() == {"ok": True, "configured": True, "active": False}
-    check("restoring the saved SOCKS profile closes the Tor gateway and completes its selective state checkpoint before replacement")
+    check("restoring the saved SOCKS profile closes the Tor gateway and completes its selective state checkpoint before the next chat")
 
     command("enter", a, secret=PASSWORD)
+    restored_gateway, _ = ready()
+    assert restored_gateway != tor_gateway
+    assert gateway_status() == {"ok": True, "configured": True, "active": False}
     client = console()
     transition_token = probe(client)
     assert transition_token not in tokens
@@ -593,6 +594,10 @@ if SOCKS:
     check("restored SOCKS serves a fresh-token client stream, rejects the prior token and revokes without mutating the saved Tor checkpoint")
 
 command("unlock", secret=GENERAL)
+stopped()
+command("enter", a, secret=PASSWORD)
+ready()
+command("force-leave")
 ready()
 # A privileged client that drips a frame must not hold the gateway owner
 # indefinitely. The production five-second admission budget expires and the
@@ -633,14 +638,15 @@ if SOCKS:
     saved_keys = Path("/run/oblivion/general/profile/provider.keys.json").read_bytes()
     temporary_command = json.dumps({"action": "temporary", "name": "Solo RAM", "key": RAM_KEY.decode()}).encode()
     command("api-keys", secret=temporary_command)
-    ready()
+    stopped()
     assert status()["api_keys"]["entries"][0]["temporary"]
     assert Path("/run/oblivion/general/profile/provider.keys.json").read_bytes() == saved_keys
-    check("an empty saved key archive leaves the ephemeral gateway stopped; a new RAM-only key starts it without writing the read-only profile")
+    check("an empty saved key archive and a new RAM-only key leave the ephemeral gateway stopped until chat without writing the read-only profile")
     assert status()["general_readonly"] and status()["sessions"] == []
     assert tor_state.read_bytes() == saved_tor_state
     assert command("enter", a, secret=PASSWORD, success=False) == "general_not_writable"
     command("enter-ephemeral")
+    ready()
     client = console()
     ephemeral_token = probe(client)
     assert ephemeral_token not in tokens
@@ -673,8 +679,9 @@ if SOCKS:
     stopped()
     assert status()["api_keys"]["entries"] == [] and not status()["api_key_present"]
     command("api-keys", secret=json.dumps({"action": "temporary", "name": "Nuova RAM", "key": NEXT.decode()}).encode())
-    ready()
+    stopped()
     command("enter-ephemeral")
+    ready()
     client = console()
     next_ephemeral_token = probe(client)
     assert next_ephemeral_token not in tokens
