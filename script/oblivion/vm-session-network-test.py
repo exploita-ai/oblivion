@@ -407,6 +407,7 @@ if STREAM:
         assert command("egress", secret=b'{"action":"select","transport":{"mode":"tor"}}', success=False) == "session_must_be_closed"
         assert ready()[0] == previous_gateway and stream_status()["active"] == [1]
         check("active streaming blocks a transport change without interrupting or replacing its gateway")
+closing_gateway = ready()[0] if STREAM else None
 
 # Keep the old guest alive while requesting close: the VM interlock rejects
 # closing its disk, but revocation must already have removed its API listener.
@@ -435,9 +436,11 @@ if SOCKS:
     check("the laboratory captures A's compiled-client traffic outside the gateway, without a cleartext provider key or local capability")
 
 if STREAM:
-    previous_gateway, _ = ready()
+    stopped()
     command("api-keys", secret=json.dumps({"action": "select", "id": alternate_key}).encode())
-    assert ready()[0] != previous_gateway and not Path(f"/proc/{previous_gateway}").exists()
+    current = status()
+    assert current["gateway_state"] in ["inactive", "failed"] and current["gateway_vm_state"] in ["inactive", "failed"], current
+    assert closing_gateway is not None and not Path(f"/proc/{closing_gateway}").exists()
 command("enter", b, secret=b"synthetic-session-password-b")
 client = console()
 second = probe(client)
