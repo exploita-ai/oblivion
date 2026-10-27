@@ -89,11 +89,12 @@ browser. No GPU passthrough or inference VM work is scheduled.
 
 ## Near-term roadmap
 
-1. **Focused source audit — complete; runtime qualification pending.**
+1. **Focused audit and corrections — implemented; ARM64 laboratory checks passing.**
    [Findings and targeted test results](#audit-results) cover controller/VM
-   lifecycle, chat storage, credentials and transport. Complete image-wide
-   write/egress tracing and destructive VM tests before release; native-vault
-   research remains stopped.
+   lifecycle, chat storage, credentials and transport. Rebuilt-image inspection,
+   canary disk scans, forced VM termination and live Tor capture are recorded
+   below. Complete target-hardware and hypervisor-profile acceptance before
+   release; native-vault research remains stopped.
 2. **Persistence and recovery.** Prove multi-chat and document preservation
    across close/reopen, Debian reboot, outer-VM termination and upgrades.
    Exercise wrong passwords, full disks, interrupted transfers and failed lock.
@@ -281,24 +282,25 @@ separate commits; a code fix does not close its remaining runtime release gate.
 
 | Finding | Implemented and checked | Still required |
 | --- | --- | --- |
-| A1: application readiness | Chat startup now remains `starting` until the attached OpenCode client confirms a DB-backed read after connection/plugin initialization. Guest migration runs after viewer attachment and reports fixed failure codes; failed startup revokes the capability and returns the same unlocked volume to Documents, retaining the recovery latch if cleanup fails. Console/parser and manager regressions cover success, storage failure and client exit. | Boot the compiled client/controller together; inject full/corrupt disks and failed offline recovery. |
-| A2: committed chat durability | SQLite connections now use WAL/FULL. With pinned Bun 1.4.4, 27 database/migration/workerd tests pass, including on-disk commit/reopen and sync-policy coverage; core typecheck passes. | Full guest/outer-VM crash and power-loss workflow, plus storage performance measurements. |
-| A4: legacy resets | Pending destructive migrations now preflight their populated tables before executing the migration sequence. Unknown populated V2 projections and old pending inputs are refused, not reset. The tested completed July V2 lineage still preserves messages, pending work and events; fresh/current databases remain supported. Database/migration/workerd suites: 36 passing tests. | Guest recovery UX and compiled-client upgrade fixtures. Unsupported pre-launch archives must be opened with their original client for export/recovery; no automatic data-erasing upgrade. |
-| A7: provider errors | The broker now returns fixed classifications and actionable messages for 401, 403, 429 and 5xx without forwarding provider bodies/headers. Ten local TLS/SOCKS broker tests pass, covering nine upstream status cases, credential stripping, disconnects and revocation. | Compiled adapter tests and the release VM credential lifecycle. No real key was used. |
-| A6: bootstrap lifecycle | Tor exposes only a validated 0–100 progress value. Modern startup schedules the gateway without blocking on systemd bootstrap, shows progress, counts controller work in the 120-second deadline and routes cancellation through controller cleanup. An in-flight operation settles before ordered cancellation/revocation; cleanup may exceed the connection deadline and is shown explicitly. Existing synchronous legacy entry remains available. Parser and manager tests cover malformed progress, elapsed controller time and cancellation after a controller accepts startup. | Slow/failed Tor, cancellation and no-fallback packet capture in the booted Linux lab. |
-| A6: key metadata | The controller now distinguishes effective credential changes from labels and unrelated keys. Renaming, replacing with the same secret, removing an unused key and changing a default hidden by an opening override preserve the gateway; effective replacement/removal/selection revokes it. Nine Linux key tests pass. | Tor progress/deadline/cancellation and a real gateway PID/circuit lifecycle test. |
-| A3: global shutdown | Gateway shutdown distinguishes verified termination from checkpoint persistence. Lock/recover attempts gateway, transfer and session shutdown before checking results; a failed stop retains the recovery latch and prevents mapping closure. After successful closure, a lost Tor checkpoint produces a specific locked-state notice. Linux host builds and 55 Rust tests pass; 25 manager tests and typecheck pass, including the notice at 80×24/160×50. | Execute the added stopped-owner fault injection in the swap-free Linux VM, with real encrypted storage and session teardown. |
-| A8: host egress | The live host installs an atomic nftables default-deny policy before NetworkManager or the controller starts. Only the gateway hypervisor UID may open external TCP; IPv6, host/session/transfer TCP and external DNS are blocked. IPv4 DHCP and explicit diagnostic SSH subnets are the narrow exceptions; release images have no SSH service. Stopping the policy service does not flush its rules. | Rebuild and boot the complete release images; qualify actual Wi-Fi/Ethernet hardware and inspect their enabled services/packages. |
+| A1: application readiness | Chat startup now remains `starting` until the attached OpenCode client confirms a DB-backed read after connection/plugin initialization. Guest migration runs after viewer attachment and reports fixed failure codes; failed startup revokes the capability and returns the same unlocked volume to Documents, retaining the recovery latch if cleanup fails. Console/parser and manager regressions cover success, storage failure and client exit. | Compiled TUI/controller lifecycle and modern starting/recover/cancel transitions pass in Linux. Still qualify the user-facing full/corrupt-disk dialog and failed offline recovery on supported KVM hardware. |
+| A2: committed chat durability | SQLite connections now use WAL/FULL. With pinned Bun 1.4.4, 27 database/migration/workerd tests pass, including on-disk commit/reopen and sync-policy coverage; core typecheck passes. | The compiled API now passes outer-VM SIGKILL/reboot on two LUKS layers (details below). Physical power-loss behavior and target-hardware latency remain release qualification. |
+| A4: legacy resets | Pending destructive migrations now preflight their populated tables before executing the migration sequence. Unknown populated V2 projections and old pending inputs are refused, not reset. The tested completed July V2 lineage still preserves messages, pending work and events; fresh/current databases remain supported. Database/migration/workerd suites: 36 passing tests. | Five compiled-client migration fixtures pass. Confirm the recovery dialog on supported KVM targets. Unsupported pre-launch archives must be opened with their original client for export/recovery; no automatic data-erasing upgrade. |
+| A5: disk retention | Rebuilt ARM64 ISO inventory and runtime inspection verify RAM-backed writable system paths, no swap and disabled journal storage/forwarding. Synthetic lifecycle and crash disk scans find no plaintext markers; ephemeral use leaves the encrypted general image byte-identical. | The outer OS/hypervisor remains trusted. Guest controls cannot prevent host swap, snapshots, dumps or screen capture; qualify and document each supported host profile. No universal zero-retention claim. |
+| A7: provider errors | The broker now returns fixed classifications and actionable messages for 401, 403, 429 and 5xx without forwarding provider bodies/headers. Ten local TLS/SOCKS broker tests pass, covering nine upstream status cases, credential stripping, disconnects and revocation. | Both compiled adapter tests and the Linux credential lifecycle pass. Provider acceptance remains separate; no real key was used. |
+| A6: bootstrap lifecycle | Tor exposes only a validated 0–100 progress value. Modern startup schedules the gateway without blocking on systemd bootstrap, shows progress, counts controller work in the 120-second deadline and routes cancellation through controller cleanup. An in-flight operation settles before ordered cancellation/revocation; cleanup may exceed the connection deadline and is shown explicitly. Existing synchronous legacy entry remains available. Parser and manager tests cover malformed progress, elapsed controller time and cancellation after a controller accepts startup. | Live Tor bootstrap/guard persistence, packet capture, stalled-owner cleanup and controller cancellation pass in Linux. Qualify the deadline/progress UI on supported KVM hardware and degraded real links. |
+| A6: key metadata | The controller now distinguishes effective credential changes from labels and unrelated keys. Renaming, replacing with the same secret, removing an unused key and changing a default hidden by an opening override preserve the gateway; effective replacement/removal/selection revokes it. Nine Linux key tests pass. | Real gateway PID checks now pass for rename, unused-key add/remove, replacement and removal. Target-hardware UI acceptance remains. |
+| A3: global shutdown | Gateway shutdown distinguishes verified termination from checkpoint persistence. Lock/recover attempts gateway, transfer and session shutdown before checking results; a failed stop retains the recovery latch and prevents mapping closure. After successful closure, a lost Tor checkpoint produces a specific locked-state notice. Linux host builds and 55 Rust tests pass; 25 manager tests and typecheck pass, including the notice at 80×24/160×50. | The stopped-owner injection now passes with real LUKS and the gateway VM. Supported KVM hardware acceptance remains. |
+| A8: host egress | The live host installs an atomic nftables default-deny policy before NetworkManager or the controller starts. Only the gateway hypervisor UID may open external TCP; IPv6, host/session/transfer TCP and external DNS are blocked. IPv4 DHCP and explicit diagnostic SSH subnets are the narrow exceptions; release images have no SSH service. Stopping the policy service does not flush its rules. | The rebuilt ARM64 ISO passes static inventory, runtime policy and boot-order checks. Qualify amd64 and actual Wi-Fi/Ethernet hardware. |
 
-The host policy also passed a direct-kernel ARM64 live-ISO test with a RAM-only
-diagnostic overlay and no external NIC or writable disk. Real packets exercised
-the gateway allow rule, blocked application/DNS traffic, DHCP and diagnostic
-SSH opt-in/revocation. The production systemd sandbox loaded the policy;
-stopping it retained enforcement, and an invalid replacement failed without
-removing the prior rules. The test borrowed nft/Python from the ISO's immutable
-guest images and changed only their executable/library paths for the service
-probe. This does not replace acceptance of a rebuilt ISO's boot ordering.
-Evidence: `artifacts/oblivion-audit-live-policy-service/summary.json` (ignored).
+The rebuilt ARM64 ISO boots with the host policy active **before** NetworkManager
+and the controller. Both services require the policy unit. Real namespace
+packets exercise gateway TCP, blocked host/session/transfer traffic and DNS,
+DHCP and diagnostic SSH opt-in/revocation. Stopping the firewall service retains
+its rules; an invalid replacement fails without removing the previous policy.
+The direct-kernel probe uses a RAM-only diagnostic overlay, no external NIC and
+no writable disk. Its Python/nft executable/library paths come from the ISO's
+immutable guest images; the production service confinement is retained.
+Evidence: `artifacts/oblivion-audit-boot-order/summary.json` (ignored).
 
 ### Disposable Linux qualification (2026-10-27)
 
@@ -314,15 +316,57 @@ marker was found on the scanned writable disk. This is scoped loopback/lab
 qualification, not a claim that the release ISO or outer hypervisor cannot
 retain data. Evidence: ignored local `artifacts/oblivion-audit-storage-vm/summary.json`.
 
-The systemd/LUKS lifecycle run passed its initial storage-full, key publication,
-read-only metadata and credential-access checks, then stopped on a fixture
-mismatch: a shell-only guest was built where the test expected the compiled
-TUI. It is **not** a passing lifecycle run. The corrected TUI image build
-completed its filesystem stage but export was cancelled as the Mac approached
-full capacity. Its partial export was removed. The rerun, crash/power-loss
-workflows, live Tor capture and host-wide egress qualification remain open.
+The corrected systemd/LUKS lifecycle run passed **40 checks**, including the
+compiled TUI with actual shell-tool execution, full storage, hidden key/proxy
+credentials, interrupted formatting, ephemeral isolation, manager/controller
+SIGKILL, stalled-VM recovery and explicit force-stop. Read-only/ephemeral use
+left the complete general encrypted image byte-identical. The writable-disk
+scan found no synthetic secret/document markers. Evidence:
+`artifacts/oblivion-audit-services-current/summary.json`.
+
+A real gateway-owner lifecycle run passed **15 checks**, including retained
+PIDs for harmless key edits, credential revocation, failed startup, owner death,
+an unresponsive VM and a failed checkpoint followed by verified gateway,
+session and storage closure. Modern startup remains `starting` until explicit
+client acknowledgement; recovery returns the same unlocked volume to an offline
+Documents VM, and cancellation stops the gateway without losing that VM.
+This run used the actual units and encrypted profile with the compiled host
+bundle. Evidence: `artifacts/oblivion-audit-gateway-lifecycle-final/summary.json`.
+
+Selective Tor-state qualification passed **8 checks**, including live bootstrap
+and retaining sampled guards across two gateway lifetimes. The outer capture
+contained zero packets before explicit networking enablement, then 7,348
+TCP/IPv4 packets and zero UDP/IPv6 packets. No provider request or real credential
+was used. No synthetic secret marker was found on the writable disk.
+Evidence: `artifacts/oblivion-audit-tor-state/summary.json`.
+
+The rebuilt ISO also passed an outer-VM crash/reboot test: two committed chat
+histories, their titles, durable pending input and a document survived SIGKILL
+immediately after the compiled chat API acknowledged admission. Storage used
+two nested LUKS2 layers. The raw disk contained no plaintext canary or test
+password. This destroys the guest RAM; it does **not** simulate loss of the
+physical Mac's power or storage cache. This focused probe runs the real chat
+API on encrypted storage, not a complete interactive session-VM workflow.
+Evidence: `artifacts/oblivion-audit-final-powerloss/summary.json`.
+
+Static inventory of that exact ISO matched all five package manifests: host
+282, session 154, gateway 132, import/export 110 each. No diagnostic image marker
+was present. Runtime observation found no swap, a tmpfs root overlay, tmpfs
+`/tmp`, `/var` and `/run`, read-only live media, no INET listener and disabled
+journal storage/forwarding. The host services observed were Oblivion's
+controller/manager/console/seat, NetworkManager/dispatcher/wpa_supplicant and
+Debian's D-Bus/hostnamed/journald/logind/udev. An unnecessary dpkg database
+backup timer/service was removed from activation by masking both units.
+Idle services and no-NIC observations are not a claim about every connected
+workload. Evidence: `artifacts/oblivion-audit-final-inventory/inventory.json`
+and `artifacts/oblivion-audit-boot-order/summary.json`.
+
+Nested lifecycle labs use TCG explicitly in the lab build. They test behavior,
+not production KVM isolation or performance. Direct live-ISO probes use HVF with
+a diagnostic initramfs, so they do not replace unmodified UEFI/USB acceptance.
 User archives, running personal sessions and the existing USB candidate were
-not modified.
+not modified. Generated evidence stays ignored; the separate audit ISO is not
+published as a release.
 
 The new compiled migration tests are part of the gateway laboratory bundle,
 so future qualification runs execute them rather than relying on source-only

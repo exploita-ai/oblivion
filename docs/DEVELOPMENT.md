@@ -205,6 +205,39 @@ host OS and hypervisor can observe the display, input, memory and virtual disk.
 The VM path is for evaluation and development. Booting a verified release image
 directly on dedicated hardware remains the intended high-privacy deployment.
 
+For retention-sensitive tests, fully power off the VM after locking Oblivion;
+do not suspend it, save its RAM state or take memory snapshots. Keep VM files
+outside cloud-synchronized/automatically backed-up folders and protect the
+outer disk. These settings reduce accidental retention but do not prevent the
+outer OS or hypervisor from reading memory, swapping it or recording input and
+display. Oblivion cannot enforce those host policies from inside Debian.
+
+## Disposable audit checks
+
+Use only freshly built, unprovisioned images and disposable synthetic disks.
+Never run destructive fixtures against a user's boot medium or archive.
+The ARM64 Mac probes use QEMU/HVF with a diagnostic initramfs; they do not install
+or change the user's VM and do not qualify physical UEFI boot or nested KVM.
+
+```sh
+python3 script/oblivion/run-live-policy-lab.py \
+  --iso /absolute/path/to/oblivion-arm64.iso \
+  --output artifacts/policy-check
+
+python3 script/oblivion/run-chat-powerloss-lab.py \
+  --iso /absolute/path/to/oblivion-arm64.iso \
+  --output artifacts/chat-crash-check
+```
+
+Output directories must be new. The first probe checks actual host firewall
+packets, service confinement and activation order, then records a runtime
+metadata inventory. The second kills the outer VM after a compiled chat API
+commit, reboots its disposable nested-LUKS disk and checks histories, queued
+input, documents and absence of plaintext markers. It does not simulate the
+physical host losing power. See [qualification results](STATUS.md#disposable-linux-qualification-2026-10-27)
+for the distinct controller/TUI, gateway and live Tor laboratories and their
+remaining target-hardware gates.
+
 ## TUI development
 
 To run the coding-agent TUI against the currently elected local OpenCode
