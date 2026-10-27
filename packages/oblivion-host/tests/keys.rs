@@ -260,3 +260,21 @@ fn removing_a_temporary_key_never_rotates_to_the_saved_account() {
         .is_err()
     );
 }
+
+#[test]
+fn metadata_edits_preserve_the_gateway_but_effective_credentials_revoke_it() {
+    let mut saved = Archive::legacy(Zeroizing::new(FIRST.into())).unwrap();
+    saved.change(Command::Add { provider: Provider::Refuseless, name: "Other".into(), key: Zeroizing::new(SECOND.into()) }).unwrap();
+    let other = saved.status(None).entries[1].id.clone();
+    let ring = Keyring::new(saved, Archive::empty()).unwrap();
+    assert!(!ring.requires_revocation(&Command::Rename { id: LEGACY.into(), name: "Renamed".into() }, None));
+    assert!(!ring.requires_revocation(&Command::Remove { id: other.clone() }, None));
+    assert!(!ring.requires_revocation(&Command::Replace { id: other.clone(), key: Zeroizing::new(FIRST.into()) }, None));
+    assert!(!ring.requires_revocation(&Command::Replace { id: LEGACY.into(), key: Zeroizing::new(FIRST.into()) }, None));
+    assert!(!ring.requires_revocation(&Command::Select { id: LEGACY.into() }, None));
+    assert!(ring.requires_revocation(&Command::Replace { id: LEGACY.into(), key: Zeroizing::new(SECOND.into()) }, None));
+    assert!(ring.requires_revocation(&Command::Remove { id: LEGACY.into() }, None));
+    assert!(ring.requires_revocation(&Command::Select { id: other.clone() }, None));
+    assert!(ring.requires_revocation(&Command::Default { id: other.clone() }, None));
+    assert!(!ring.requires_revocation(&Command::Default { id: other }, Some(Some(LEGACY.into()))));
+}

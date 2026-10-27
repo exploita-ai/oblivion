@@ -939,6 +939,7 @@ impl Config {
         let mode = mount_mode()?;
         require(mode != MountMode::Closed, "general_not_open")?;
         let mut keyring = read_keyring()?;
+        let revoke = keyring.requires_revocation(&command, key_selection()?);
         let temporary = match &command {
             keys::Command::Temporary { .. } => true,
             keys::Command::Replace { id, .. }
@@ -958,7 +959,7 @@ impl Config {
         require(credentials_editable()?, "session_must_be_closed")?;
         if let keys::Command::Default { id } = &command {
             require(keyring.key(id).is_some(), "api_key_missing")?;
-            if self.gateway.is_some() {
+            if revoke && self.gateway.is_some() {
                 crate::gateway::stop()?;
             }
             if mode == MountMode::ReadOnly || keyring.temporary.key(id).is_some() {
@@ -1020,7 +1021,7 @@ impl Config {
         }
         // No old credential remains delegated across a profile/selection change,
         // including a failed write. Restart requires the selected key to exist.
-        if self.gateway.is_some() {
+        if revoke && self.gateway.is_some() {
             crate::gateway::stop()?;
         }
         if temporary {
