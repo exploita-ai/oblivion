@@ -73,7 +73,13 @@ LimitCORE=0
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl enable NetworkManager.service oblivion-network-console.service
+# The host must load its deny policy before configuring any connection or
+# accepting manager requests. A failed firewall prevents either dependency.
+for unit in NetworkManager oblivion-controller; do
+    mkdir -p "/etc/systemd/system/$unit.service.d"
+    printf '[Unit]\nRequires=oblivion-host-firewall.service\nAfter=oblivion-host-firewall.service\n' > "/etc/systemd/system/$unit.service.d/firewall.conf"
+done
+systemctl enable oblivion-host-firewall.service NetworkManager.service oblivion-network-console.service
 systemctl mask NetworkManager-wait-online.service e2scrub_reap.service e2scrub_all.timer
 printf 'loop\ndm_crypt\nkvm\n' > /etc/modules-load.d/oblivion-live.conf
 # The guest's minimal initrd is not enough for booting physical USB or SATA.

@@ -180,7 +180,7 @@ FROM ${GUEST} AS selected-guest
 
 FROM os AS host
 ARG TARGETARCH
-RUN apt-get update && apt-get install -y --no-install-recommends cryptsetup-bin dmsetup python3 \
+RUN apt-get update && apt-get install -y --no-install-recommends cryptsetup-bin dmsetup python3 nftables iproute2 \
     $(if [ "$TARGETARCH" = arm64 ]; then printf qemu-system-arm; else printf qemu-system-x86; fi) \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 oblivion-manager \
@@ -254,10 +254,10 @@ RUN cargo fetch --locked
 COPY packages/oblivion-gateway/src/ src/
 COPY packages/oblivion-gateway/guest/firewall.nft guest/firewall.nft
 COPY packages/oblivion-gateway/tests/ tests/
-COPY packages/oblivion-host/guest/chat-database.py script/oblivion/test-chat-database.py /gateway/
+COPY packages/oblivion-host/guest/chat-database.py script/oblivion/test-chat-database.py script/oblivion/test-host-firewall.py script/oblivion/host-firewall.nft /gateway/
 RUN --network=none cargo test --locked --offline --lib --features lab-emulation \
     && cargo test --locked --offline --no-run --features lab-emulation \
-    && mkdir /gateway-bundle && cp chat-database.py test-chat-database.py /gateway-bundle/ \
+    && mkdir /gateway-bundle && cp chat-database.py test-chat-database.py test-host-firewall.py host-firewall.nft /gateway-bundle/ \
     && cp /tmp/target/debug/oblivion-api /gateway-bundle/oblivion-api-lab \
     && cp /tmp/target/debug/oblivion-egress /gateway-bundle/oblivion-egress-lab \
     && cp /tmp/target/debug/oblivion-tools /gateway-bundle/oblivion-tools-lab \
@@ -269,7 +269,7 @@ RUN --network=none cargo test --locked --offline --lib --features lab-emulation 
     && cp /tmp/target/debug/oblivion-egress /gateway-bundle/oblivion-egress \
     && cp /tmp/target/debug/oblivion-tools /gateway-bundle/oblivion-tools \
     && strip /gateway-bundle/oblivion-* /gateway-bundle/*-tests \
-    && find Cargo.toml Cargo.lock .cargo src tests guest/firewall.nft chat-database.py test-chat-database.py ../oblivion-tor-state/Cargo.toml ../oblivion-tor-state/src ../oblivion-transport/Cargo.toml ../oblivion-transport/src -type f -print0 | sort -z | xargs -0 sha256sum > /gateway-bundle/sources.sha256 \
+    && find Cargo.toml Cargo.lock .cargo src tests guest/firewall.nft chat-database.py test-chat-database.py test-host-firewall.py host-firewall.nft ../oblivion-tor-state/Cargo.toml ../oblivion-tor-state/src ../oblivion-transport/Cargo.toml ../oblivion-transport/src -type f -print0 | sort -z | xargs -0 sha256sum > /gateway-bundle/sources.sha256 \
     && rustc --version > /gateway-bundle/compiler.txt \
     && cd /gateway-bundle && sha256sum * > SHA256SUMS
 
@@ -426,7 +426,7 @@ RUN case "$TARGETARCH" in arm64|amd64) ;; *) exit 1;; esac \
     && apt-get update && apt-get install -y --no-install-recommends \
     live-boot live-boot-initramfs-tools cryptsetup-bin dmsetup fdisk \
     $(if [ "$TARGETARCH" = arm64 ]; then printf qemu-system-arm; else printf qemu-system-x86; fi) \
-    network-manager wpasupplicant iproute2 console-setup-mini kbd tzdata xkb-data \
+    network-manager wpasupplicant iproute2 nftables console-setup-mini kbd tzdata xkb-data \
     libwlroots-0.18 foot seatd fonts-dejavu-mono libxkbcommon-tools \
     firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211 firmware-mediatek \
     && rm -rf /var/lib/apt/lists/*
@@ -438,6 +438,7 @@ COPY ${MANAGER_ASSETS} /usr/lib/oblivion/manager/
 COPY packages/oblivion-host/host/ /etc/systemd/system/
 COPY script/oblivion/live-setup.sh /tmp/live-setup
 COPY script/oblivion/live-controller.json /etc/oblivion/controller.json
+COPY script/oblivion/host-firewall.nft /etc/oblivion/host-firewall.nft
 COPY packages/oblivion-gateway/guest/resolv.conf /etc/resolv.conf
 RUN sh /tmp/live-setup && rm /tmp/live-setup
 COPY script/oblivion/display/*.service script/oblivion/display/*.socket script/oblivion/display/manager.conf script/oblivion/display/foot.ini /usr/lib/oblivion/display/

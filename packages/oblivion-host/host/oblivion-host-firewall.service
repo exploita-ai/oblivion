@@ -1,0 +1,25 @@
+[Unit]
+Description=Oblivion Debian host network policy
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target NetworkManager.service oblivion-controller.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/oblivion/host-firewall.nft
+# Stopping the service must never remove the enforced rules.
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

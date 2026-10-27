@@ -1,0 +1,37 @@
+#!/usr/sbin/nft -f
+# Debian host only. Session traffic is restricted again inside the gateway VM.
+# Apply atomically without replacing the gateway/debug tables.
+add table inet oblivion_host
+flush table inet oblivion_host
+table inet oblivion_host {
+    # Populated only by the optional debug image's explicit SSH opt-in.
+    set debug4 { type ipv4_addr; flags interval; }
+    chain input {
+        type filter hook input priority filter; policy drop;
+        iifname "lo" accept
+        meta nfproto ipv6 counter drop
+        ct state invalid counter drop
+        tcp dport 22 ip saddr @debug4 counter accept
+        tcp dport 22 counter drop
+        ct state established,related accept
+        udp sport 67 udp dport 68 counter accept
+        counter drop
+    }
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        counter drop
+    }
+    chain output {
+        type filter hook output priority filter; policy drop;
+        oifname "lo" accept
+        meta nfproto ipv6 counter drop
+        ct state invalid counter drop
+        ct state established,related accept
+        # NetworkManager's IPv4 DHCP. Wi-Fi authentication/ARP are link-layer.
+        meta skuid 0 udp sport 68 udp dport 67 counter accept
+        # Only the gateway hypervisor owns external TCP sockets. Its guest
+        # enforces Tor/proxy policy; no host application receives this UID.
+        meta skuid 1101 meta l4proto tcp counter accept
+        counter drop
+    }
+}

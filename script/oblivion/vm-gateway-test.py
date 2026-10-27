@@ -302,6 +302,9 @@ try:
             if line.endswith(" ... ok"): check("compiled chat storage: " + line.removesuffix(" ... ok"))
     finally:
         subprocess.run(["umount", str(guest)], check=True)
+    policy = subprocess.run(["unshare", "--net", "python3", str(BUNDLE / "test-host-firewall.py"), str(BUNDLE / "host-firewall.nft")], capture_output=True, text=True, timeout=60)
+    assert policy.returncode == 0, policy.stdout + policy.stderr
+    check("host firewall: " + policy.stdout.strip())
     print("OBLIVION_VM_LAB_PASS", flush=True)
 except BaseException:
     print("OBLIVION_VM_LAB_FAIL", flush=True)

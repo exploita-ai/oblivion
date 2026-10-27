@@ -288,6 +288,17 @@ separate commits; a code fix does not close its remaining runtime release gate.
 | A6: bootstrap lifecycle | Tor exposes only a validated 0–100 progress value. Modern startup schedules the gateway without blocking on systemd bootstrap, shows progress, counts controller work in the 120-second deadline and routes cancellation through controller cleanup. An in-flight operation settles before ordered cancellation/revocation; cleanup may exceed the connection deadline and is shown explicitly. Existing synchronous legacy entry remains available. Parser and manager tests cover malformed progress, elapsed controller time and cancellation after a controller accepts startup. | Slow/failed Tor, cancellation and no-fallback packet capture in the booted Linux lab. |
 | A6: key metadata | The controller now distinguishes effective credential changes from labels and unrelated keys. Renaming, replacing with the same secret, removing an unused key and changing a default hidden by an opening override preserve the gateway; effective replacement/removal/selection revokes it. Nine Linux key tests pass. | Tor progress/deadline/cancellation and a real gateway PID/circuit lifecycle test. |
 | A3: global shutdown | Gateway shutdown distinguishes verified termination from checkpoint persistence. Lock/recover attempts gateway, transfer and session shutdown before checking results; a failed stop retains the recovery latch and prevents mapping closure. After successful closure, a lost Tor checkpoint produces a specific locked-state notice. Linux host builds and 55 Rust tests pass; 25 manager tests and typecheck pass, including the notice at 80×24/160×50. | Execute the added stopped-owner fault injection in the swap-free Linux VM, with real encrypted storage and session teardown. |
+| A8: host egress | The live host installs an atomic nftables default-deny policy before NetworkManager or the controller starts. Only the gateway hypervisor UID may open external TCP; IPv6, host/session/transfer TCP and external DNS are blocked. IPv4 DHCP and explicit diagnostic SSH subnets are the narrow exceptions; release images have no SSH service. Stopping the policy service does not flush its rules. | Rebuild and boot the complete release images; qualify actual Wi-Fi/Ethernet hardware and inspect their enabled services/packages. |
+
+The host policy also passed a direct-kernel ARM64 live-ISO test with a RAM-only
+diagnostic overlay and no external NIC or writable disk. Real packets exercised
+the gateway allow rule, blocked application/DNS traffic, DHCP and diagnostic
+SSH opt-in/revocation. The production systemd sandbox loaded the policy;
+stopping it retained enforcement, and an invalid replacement failed without
+removing the prior rules. The test borrowed nft/Python from the ISO's immutable
+guest images and changed only their executable/library paths for the service
+probe. This does not replace acceptance of a rebuilt ISO's boot ordering.
+Evidence: `artifacts/oblivion-audit-live-policy-service/summary.json` (ignored).
 
 ### Disposable Linux qualification (2026-10-27)
 

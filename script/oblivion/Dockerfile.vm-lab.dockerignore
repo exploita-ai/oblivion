@@ -47,6 +47,7 @@ script/oblivion/*
 !script/oblivion/run-tui-boot-lab.py
 !script/oblivion/packet_capture.py
 !script/oblivion/test-chat-database.py
+!script/oblivion/test-host-firewall.py
 !script/oblivion/vm-*.sh
 !script/oblivion/vm-*.py
 !script/oblivion/vm-stream-*.pem
@@ -56,6 +57,7 @@ script/oblivion/*
 !script/oblivion/Dockerfile.vm-lab
 !script/oblivion/Dockerfile.vm-lab.dockerignore
 !script/oblivion/live-*
+!script/oblivion/host-firewall.nft
 !script/oblivion/settings-catalog.py
 !script/oblivion/display/
 !script/oblivion/display/**

@@ -12,6 +12,7 @@ ExecStart=/usr/sbin/sshd -D -e -f /etc/oblivion/hardware/sshd_config
 # PAM places interactive sessions in logind scopes outside this service.
 ExecStopPost=-/usr/bin/loginctl terminate-user oblivion-test
 ExecStopPost=-/usr/sbin/nft delete table inet oblivion_hardware
+ExecStopPost=-/usr/sbin/nft flush set inet oblivion_host debug4
 KillMode=control-group
 Restart=on-failure
 RestartSec=2

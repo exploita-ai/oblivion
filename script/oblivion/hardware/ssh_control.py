@@ -34,6 +34,12 @@ def main():
   }
 }
 """
+    # The release host policy is independent of this diagnostic filter. Keep
+    # its explicit SSH exception in the same transaction as subnet changes.
+    if Path("/etc/oblivion/host-firewall.nft").exists():
+        rules += "flush set inet oblivion_host debug4\n"
+        if networks:
+            rules += "add element inet oblivion_host debug4 { " + ", ".join(networks) + " }\n"
     subprocess.run(["nft", "-f", "-"], input=rules, text=True, check=True)
     if sys.argv[1] == "refresh":
         return
