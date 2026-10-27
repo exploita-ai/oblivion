@@ -147,7 +147,7 @@ def reopen():
     assert not status()["session_open"]
     send(b"\r", "Password della sessione")
     send(PASSWORD + b"\r", "Conversations and documents")
-    wait_screen("/exit blocca")
+    wait_screen("/exit lock session")
 
 
 def file_digest(path):
@@ -607,7 +607,7 @@ with socket.socket(socket.AF_UNIX) as client:
 
     send(PASSWORD + b"\r", "Ripeti la password")
     send(PASSWORD + b"\r", "Conversations and documents")
-    wait_screen("/exit blocca")
+    wait_screen("/exit lock session")
     session_id = status()["sessions"][0]
     assert command("set-api-key", secret=NEXT_API_KEY, success=False) == "session_must_be_closed"
     assert command("clear-api-key", success=False) == "session_must_be_closed"
@@ -769,7 +769,7 @@ with socket.socket(socket.AF_UNIX) as client:
     send(b"n", "Scegli la chiave per questa apertura")
     send(b"j", "> Volatile [RAM]")
     send(b"\r", "Conversations and documents")
-    wait_screen("/exit blocca")
+    wait_screen("/exit lock session")
     assert status()["session_open"] and status()["general_readonly"]
     assert command("enter-ephemeral", success=False) == "vm_already_running"
     assert command("api-keys", secret=temporary_command, success=False) == "session_must_be_closed"
@@ -791,7 +791,7 @@ with socket.socket(socket.AF_UNIX) as client:
     send(b"n", "Scegli la chiave per questa apertura")
     send(b"j", "> Volatile [RAM]")
     send(b"\r", "Conversations and documents")
-    wait_screen("/exit blocca")
+    wait_screen("/exit lock session")
     assert subprocess.check_output(["cryptsetup", "luksUUID", str(ephemeral)]).strip() != first_ephemeral
     send(b"OBLIVION_TUI_B_REQUEST", "OBLIVION_TUI_B_REQUEST")
     send(b"\r", "OBLIVION_TUI_B_REPLY")
@@ -866,7 +866,7 @@ with socket.socket(socket.AF_UNIX) as client:
     send(b"i", "Sessioni protette")
     send(b"\r", "Password della sessione")
     send(PASSWORD + b"\r", "Conversations and documents")
-    wait_screen("/exit blocca")
+    wait_screen("/exit lock session")
     check("disk exhaustion is explicit, preserves existing archives and permits reopening after pending cleanup")
     terminal.reset()
     os.kill(manager_pid, signal.SIGKILL)

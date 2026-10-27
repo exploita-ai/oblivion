@@ -250,7 +250,7 @@ try:
     os.write(master, b"\r")
     wait_screen("Password della sessione")
     os.write(master, PASSWORD + b"\r")
-    wait_screen("/exit blocca")
+    wait_screen("/exit lock session")
     assert state()["session_open"] and state()["vm_state"] == "active"
     assert qmp("session", "query-kvm") == {"enabled": True, "present": True}
     pid = int(property("oblivion-session.service", "MainPID"))

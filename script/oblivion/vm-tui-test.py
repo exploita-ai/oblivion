@@ -58,7 +58,7 @@ def screenshot(name):
         # Wait for its generated final cursor sequence instead of capturing the
         # first chunk that happens to contain the expected text.
         deadline = time.monotonic() + 5
-        marker = {"home": "/exit blocca", "conversation-a": "OBLIVION_TUI_A_REPLY",
+        marker = {"home": "/exit lock session", "conversation-a": "OBLIVION_TUI_A_REPLY",
             "resumed-a": "OBLIVION_TUI_A_RESUMED"}[name]
         while not (re.search(rb"\x1b\[\d+;\d+H\x1b\[\?25[hl]$", screen[-64:])
                 and marker in "\n".join(terminal.display) and "commands" in "\n".join(terminal.display)):
@@ -105,7 +105,7 @@ def session_create(password):
     send(b"n", "Nuova sessione - password")
     send(password + b"\r", "Ripeti la password")
     send(password + b"\r", "Conversations and documents")
-    wait("/exit blocca")
+    wait("/exit lock session")
 
 
 print("OBLIVION_TUI_FIXTURE_SHA256 " + hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), flush=True)
