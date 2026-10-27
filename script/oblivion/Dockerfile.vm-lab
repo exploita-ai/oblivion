@@ -6,9 +6,22 @@ FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20b
 RUN apt-get update && apt-get install -y --no-install-recommends openssl \
     && rm -rf /var/lib/apt/lists/* && mkdir /fixture \
     && openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 7 \
-        -subj '/CN=Oblivion isolated fixture' \
-        -addext 'subjectAltName=DNS:api.abliteration.ai' \
-        -keyout /fixture/key.pem -out /fixture/cert.pem \
+        -subj '/CN=Oblivion laboratory root' \
+        -addext 'basicConstraints=critical,CA:TRUE' \
+        -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+        -keyout /fixture/ca-key.pem -out /fixture/ca.pem \
+    && openssl req -newkey rsa:2048 -nodes -sha256 \
+        -subj '/CN=api.abliteration.ai' \
+        -keyout /fixture/key.pem -out /fixture/server.csr \
+    && printf '%s\n' \
+        'subjectAltName=DNS:api.abliteration.ai' \
+        'basicConstraints=critical,CA:FALSE' \
+        'keyUsage=critical,digitalSignature,keyEncipherment' \
+        'extendedKeyUsage=serverAuth' > /fixture/server.ext \
+    && openssl x509 -req -sha256 -days 7 -in /fixture/server.csr \
+        -CA /fixture/ca.pem -CAkey /fixture/ca-key.pem -CAcreateserial \
+        -extfile /fixture/server.ext -out /fixture/cert.pem \
+    && rm /fixture/ca-key.pem /fixture/ca.srl /fixture/server.csr /fixture/server.ext \
     && chmod 0600 /fixture/key.pem
 
 FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS cage-build
@@ -132,7 +145,7 @@ RUN chmod 0755 /usr/libexec/oblivion
 FROM conversation-guest AS session-network-guest
 COPY script/oblivion/vm-session-network-guest.py /usr/libexec/oblivion
 # Build-local fixture certificate, trusted only by the web-tool probe subprocess.
-COPY --from=stream-tls-fixture /fixture/cert.pem /usr/lib/oblivion-stream-fixture/cert.pem
+COPY --from=stream-tls-fixture /fixture/ca.pem /usr/lib/oblivion-stream-fixture/cert.pem
 RUN chmod 0755 /usr/libexec/oblivion
 
 # UI iteration bundle: replace only immutable session software in a disposable
@@ -152,7 +165,7 @@ FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20b
 RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools && rm -rf /var/lib/apt/lists/*
 COPY packages/oblivion-host/guest/ /sources/guest/
 COPY script/oblivion/vm-session-network-guest.py /sources/lab/
-COPY --from=stream-tls-fixture /fixture/cert.pem /sources/lab/stream-cert.pem
+COPY --from=stream-tls-fixture /fixture/ca.pem /sources/lab/stream-cert.pem
 RUN --mount=type=bind,from=session-network-guest,source=/,target=/guest,ro \
     mkdir /out && cp /guest/boot/vmlinuz-* /out/kernel && cp /guest/boot/initrd.img-* /out/initrd \
     && mksquashfs /guest /out/session.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
@@ -307,10 +320,10 @@ COPY --from=gateway-network-pack /out/ /
 # Lab-only trust overlay. Retain the exact diff; neither production stage above
 # uses this binary or certificate. Runtime activation/hardening stay unchanged.
 FROM gateway-compiler AS stream-compiler
-COPY --from=stream-tls-fixture /fixture/cert.pem /fixture/cert.pem
+COPY --from=stream-tls-fixture /fixture/ca.pem /fixture/ca.pem
 RUN test "$(grep -cF '.https_only(true)' src/broker.rs)" = 1 \
     && cp src/broker.rs /tmp/production-broker.rs \
-    && sed -i '/\.https_only(true)/a\            .add_root_certificate(reqwest::Certificate::from_pem(include_bytes!("/fixture/cert.pem")).expect("laboratory certificate"))' src/broker.rs \
+    && sed -i '/\.https_only(true)/a\            .add_root_certificate(reqwest::Certificate::from_pem(include_bytes!("/fixture/ca.pem")).expect("laboratory certificate"))' src/broker.rs \
     && mkdir /stream-bundle \
     && (diff -u /tmp/production-broker.rs src/broker.rs > /stream-bundle/trust.diff; test "$?" = 1) \
     && cargo build --locked --offline --bin oblivion-api \
@@ -350,6 +363,7 @@ RUN --mount=type=bind,from=selected-stream-gateway,source=/,target=/gateway,ro \
     && cp /gateway/usr/lib/oblivion-stream-fixture/trust.diff /stream-out/gateway/ \
     && cp /fixture/cert.pem /stream-out/gateway/fixture-cert.pem \
     && cp /fixture/key.pem /stream-out/gateway/fixture-key.pem \
+    && cp /fixture/ca.pem /stream-out/gateway/fixture-ca.pem \
     && cp /session/usr/lib/oblivion/build-evidence.json /stream-out/session/ \
     && sha256sum /session/usr/bin/oblivion > /stream-out/session/opencode.sha256 \
     && cd /stream-out/gateway && sha256sum * > SHA256SUMS \
@@ -367,7 +381,7 @@ COPY --from=stream-pack /stream-out/gateway/ /
 FROM gateway-network-lab AS transport-network-lab
 COPY --from=stream-compiler /stream-bundle/oblivion-api /usr/bin/oblivion-api
 COPY --from=stream-compiler /stream-bundle/trust.diff /usr/lib/oblivion-transport-fixture/trust.diff
-COPY --from=stream-tls-fixture /fixture/cert.pem /usr/lib/oblivion-transport-fixture/cert.pem
+COPY --from=stream-tls-fixture /fixture/ca.pem /usr/lib/oblivion-transport-fixture/cert.pem
 
 FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS transport-network-pack
 RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools && rm -rf /var/lib/apt/lists/*
@@ -381,6 +395,7 @@ RUN --mount=type=bind,from=transport-network-lab,source=/,target=/lab,ro \
     && cp /lab/usr/lib/oblivion-transport-fixture/trust.diff /out/trust.diff \
     && cp /fixture/cert.pem /out/fixture-cert.pem \
     && cp /fixture/key.pem /out/fixture-key.pem \
+    && cp /fixture/ca.pem /out/fixture-ca.pem \
     && sha256sum /lab/usr/bin/oblivion-api /lab/usr/bin/oblivion-egress /lab/usr/bin/oblivion-tools /lab/usr/bin/oblivion-gateway-control > /out/binaries.sha256 \
     && cd /sources && find . -type f -print0 | sort -z | xargs -0 sha256sum > /out/sources.sha256 \
     && cp broker.sha256 /out/broker-sources.sha256 \
