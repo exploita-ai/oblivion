@@ -101,9 +101,9 @@ disposable; and every protected session owns an encrypted workspace.
 | **On the network** | Dedicated gateway VM with Tor or explicit SOCKS5 and no direct fallback |
 | **For documents** | Offline access without a network device, API key or agent process |
 
-The current cloud mode still sends the context you approve to the configured
-provider. The planned local inference engine is the path to genuinely offline
-operation.
+The current cloud mode sends the context you approve to the configured
+provider. This beta focuses on remote APIs and is not air-gapped; local
+inference is deferred.
 
 ## Architecture
 
@@ -174,8 +174,9 @@ remote service.
 
 ## Where Oblivion runs
 
-Full sessions require nested hardware virtualization because Oblivion starts
-separate gateway, session and transfer VMs. There is no software-emulation
+When Oblivion runs inside another VM, full sessions require nested hardware
+virtualization for its gateway, session and transfer VMs. Bare-metal live boot
+requires ordinary hardware virtualization. There is no software-emulation
 fallback in the production profile.
 
 | Host | CPU | Image | Current support |
@@ -206,24 +207,29 @@ raw disk as writable storage and disable shared folders, clipboard integration
 and host-disk passthrough for meaningful privacy testing. A Debian-supported
 Ethernet or Wi-Fi adapter is required for remote inference.
 
-## Future: local inference
+## Next: complete the remote-API experience
 
-Cloud inference cannot be fully air-gapped. The planned **Oblivion Local
-Inference Engine** will add a dedicated inference VM with no network device:
+The next managed beta focuses on reliable protected sessions, provider keys,
+Tor/SOCKS5, Documents and recovery. Keep the coding agent and existing chat UI;
+make installation, normal use and upgrades work without manual server setup
+or configuration-file repairs.
 
-```text
-encrypted model media
-        │ explicit, verified import
-        ▼
-local inference VM ── private channel ── session VM
-        │
-        └── no NIC, cloud credential or provider request
-```
+Keep one Debian-based product: boot it directly on a qualified PC or run it as
+the host VM in a qualified virtualizer. Retain the existing LUKS storage,
+controller and gateway/session/transfer VMs. The native application port and
+removal of the outer Debian VM are no longer active roadmap items.
 
-Oblivion will call this path air-gapped only after tests prove every external
-network interface is absent—not merely disabled by a UI setting. Model
-manifests, accelerator isolation, memory erasure and offline updates remain
-future work.
+The virtualized path needs a tested image/setup profile, persistent virtual
+disk and actual nested-virtualization support. Qualify each host and hypervisor
+combination through full session tests, not just a booting manager. Debian's
+volatile runtime cannot prevent the outer host from saving unlocked VM memory;
+virtualized use has a different retention boundary from physical live boot.
+
+Local inference, llama.cpp, model acquisition, GPU support and DGX Spark work
+are deferred. Remote APIs are not air-gapped: the provider processes submitted
+context, and the trusted host can observe active data.
+See the [beta scope](docs/STATUS.md#remote-api-beta-scope) and
+[architecture and delivery plan](docs/ARCHITECTURE.md#remote-api-beta-plan).
 
 ## Project status
 
@@ -280,9 +286,9 @@ Priorities include:
 
 - completing the Debian package, service, binary and host-egress audit;
 - reproducible images, signed checksums and provenance;
-- the offline local inference engine and verified model imports;
-- OnionShare-based explicit file exchange;
-- a disposable browser VM with quarantined downloads;
+- remote-API routing, credential isolation and Tor/SOCKS5 failure tests;
+- multi-chat persistence, transfer recovery and safe upgrades;
+- tested virtual-machine profiles, nested startup checks and host-integration boundaries;
 - broader Wi-Fi, graphics, keyboard, UEFI and virtualization coverage;
 - an independent security review.
 

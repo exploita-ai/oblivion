@@ -12,7 +12,7 @@ Include the affected commit or image hash, architecture, reproduction steps, exp
 
 Oblivion is designed to reduce persistent local traces and to isolate each protected session from the host and from other sessions.
 
-The intended boundaries are:
+The intended boundaries of the current live implementation are:
 
 - an immutable Debian live root with volatile runtime paths;
 - a general LUKS2 vault for host preferences and credentials;
@@ -26,9 +26,24 @@ The intended boundaries are:
 
 An implementation defect that crosses one of these boundaries is in scope.
 
+The [remote-API beta plan](docs/ARCHITECTURE.md#remote-api-beta-plan) retains
+Debian as the host, booted directly or inside a supported outer VM. It retains
+the gateway, session and transfer VM boundaries and Linux encrypted storage.
+Native ports and replacement of these boundaries are outside the active plan.
+Local inference is deferred; the remote-API milestone is not air-gapped or
+proof of host integrity.
+
 ## Important limitations
 
 Encryption protects data at rest only after the relevant volume is locked. While a session is active, its data exists in guest memory and is accessible to the running guest, host kernel, and physical machine.
+
+Virtualized use additionally trusts the outer operating system and hypervisor.
+Debian's tmpfs/no-swap policy cannot prevent outer-host swap, dumps, display
+capture or saved VM memory. Snapshots and suspend files may retain plaintext
+and unlocked keys after a volume is closed. The qualified VM profile must
+avoid automatic memory-state saving and shared host integration; this is not
+a guarantee against an untrusted outer host or forensic residue. Explicit
+clipboard/export actions release the selected data to their destination.
 
 Cloud inference is not air-gapped. The configured provider receives the prompt, selected context, tool results, and response. Tor or SOCKS5 changes the network path; it does not hide submitted content from the provider.
 
