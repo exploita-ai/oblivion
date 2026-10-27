@@ -135,7 +135,7 @@ pub fn main() -> Result<()> {
     )?;
     // Latch before taking the operation lock: a worker may still be completing
     // when the manager dies. Its completion must not permit another opening.
-    if op == "recover" {
+    if matches!(op, "lock" | "recover") {
         runtime()?;
         OpenOptions::new()
             .write(true)
@@ -702,20 +702,29 @@ pub fn main() -> Result<()> {
             clear_key_file("session-info")
         }
         "lock" | "recover" => {
-            // Even failed transfer cleanup must leave no gateway connections
-            // or credentials active. Storage remains interlocked on failure.
-            if config.gateway.is_some() {
-                crate::gateway::stop()?;
-            }
-            if config.import.is_some()
-                || config.export.is_some()
-                || crate::transfer_host::prepared()?
-            {
-                crate::transfer_host::stop()?;
-            }
-            if config.vm.is_some() {
-                crate::vm::stop(false)?;
-            }
+            // Attempt every independent shutdown before checking the results.
+            // A failed checkpoint is not a running gateway; a failed stop is.
+            // Never close mappings while a worker's stop is unconfirmed.
+            let gateway = config
+                .gateway
+                .as_ref()
+                .map_or(Ok(true), |_| crate::gateway::shutdown());
+            let transfers = (|| {
+                if config.import.is_some()
+                    || config.export.is_some()
+                    || crate::transfer_host::prepared()?
+                {
+                    crate::transfer_host::stop()?;
+                }
+                Ok(())
+            })();
+            let session = config
+                .vm
+                .as_ref()
+                .map_or(Ok(()), |_| crate::vm::stop(false));
+            let checkpoint = gateway?;
+            transfers?;
+            session?;
             close_general()?;
             clear_key_file("session-info")?;
             clear_key_selection()?;
@@ -726,7 +735,7 @@ pub fn main() -> Result<()> {
             if recovery_required()? {
                 fs::remove_file(RECOVERY).map_err(|_| Error("recovery_clear_failed"))?;
             }
-            Ok(())
+            require(checkpoint, "locked_without_tor_state")
         }
         "status" => {
             let mode = mount_mode()?;

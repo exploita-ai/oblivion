@@ -93,13 +93,19 @@ pub fn start() -> Result<()> {
 }
 
 pub fn stop() -> Result<()> {
+    require(shutdown()?, "gateway_shutdown_unconfirmed")
+}
+
+/// The checkpoint result is advisory only after both gateway units are stopped.
+/// Global locking must still close the session and vault if checkpointing fails.
+pub fn shutdown() -> Result<bool> {
     let checkpoint = if state()? == "active" {
         request(&Request::Stop {}, false)
     } else {
         Ok(())
     };
     destroy()?;
-    checkpoint.map_err(|_| Error("gateway_shutdown_unconfirmed"))
+    Ok(checkpoint.is_ok())
 }
 
 fn destroy() -> Result<()> {

@@ -126,7 +126,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
       setFeedback("success")
       setNotice(wizard() || ["Refresh", "Load system status"].includes(label) ? "" : label + " completed.")
     } catch (error) {
-      setFeedback(error instanceof ControlError && ["gateway_not_ready", "chat_start_cancelled"].includes(error.code) ? "info" : "error")
+      setFeedback(error instanceof ControlError && ["gateway_not_ready", "chat_start_cancelled", "locked_without_tor_state"].includes(error.code) ? "info" : "error")
       await refresh().catch(() => undefined)
       setNotice(label === "Create encrypted storage" && state()?.general_incomplete
         ? "Encrypted storage preparation was interrupted. Discard the incomplete attempt, then retry."
@@ -598,6 +598,7 @@ function explain(error: unknown) {
     gateway_connect_timeout: "The protected connection is taking too long. Check Network, then retry Start chat. Documents remain offline.",
     gateway_unavailable: "The gateway is unavailable. Retry Start chat; documents remain available.",
     gateway_start_failed: "The gateway could not start. Check the host connection and retry Start chat.",
+    locked_without_tor_state: "Oblivion is locked. Tor state could not be saved; the next connection may take longer. Your chats and documents remain encrypted.",
     session_already_open: "Close the active session before opening another one.",
     session_must_be_closed: "Close the active session before changing this setting.",
     general_not_writable: "Persistent storage is read-only. Unlock Oblivion in persistent mode to save changes.",

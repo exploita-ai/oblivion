@@ -199,6 +199,16 @@ command("recover")
 assert not status()["general_open"] and not status()["recovery_required"]
 check("an unresponsive gateway expires the private status deadline and is killed before recovery closes storage")
 
+command("unlock", secret=GENERAL)
+pid, owner = ready()
+os.kill(owner, signal.SIGSTOP)
+assert command("lock", success=False) == "locked_without_tor_state"
+stopped()
+assert not Path(f"/proc/{pid}").exists() and not Path(f"/proc/{owner}").exists()
+current = status()
+assert not current["general_open"] and not current["session_open"] and not current["recovery_required"], current
+check("a failed gateway checkpoint still stops both units and locks storage before reporting a safe warning")
+
 before = digest("/data/general.luks")
 command("unlock-ephemeral", secret=GENERAL)
 ready()

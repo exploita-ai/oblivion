@@ -6,6 +6,26 @@ import { preview } from "../src/preview"
 import { status } from "../src/state"
 import { ControlError } from "../src/control"
 
+test.each([[80, 24], [160, 50]])("a failed Tor checkpoint shows a locked welcome screen at %ix%i", async (width, height) => {
+  const fixture = preview(() => {})
+  const initial = status.parse(JSON.parse(await fixture.request({ operation: "status" })))
+  const app = await testRender(() => <App initial={initial} runtime={{ ...fixture, request: async (request) => {
+    const result = await fixture.request(request)
+    if (request.operation === "lock") throw new ControlError("locked_without_tor_state")
+    return result
+  } }} />, { width, height, kittyKeyboard: true })
+  try {
+    await app.renderOnce()
+    await app.mockInput.pressKey("q", { ctrl: true })
+    await app.mockInput.pressEnter()
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Welcome back")
+    expect(app.captureCharFrame()).toContain("Oblivion is locked.")
+    expect(app.captureCharFrame()).not.toContain("Operation not completed")
+    expect(app.captureCharFrame()).not.toContain("Complete recovery and lock")
+  } finally { await app.dispose() }
+})
+
 test("archive unlock submits the real form action before unmounting its view", async () => {
   const runtime = preview(() => {})
   await runtime.request({ operation: "lock" })
