@@ -208,8 +208,12 @@ impl Broker {
         let Ok(upstream) = upstream else {
             return error(StatusCode::BAD_GATEWAY, "provider_unavailable");
         };
-        if upstream.status() == StatusCode::TOO_MANY_REQUESTS {
-            return error(StatusCode::TOO_MANY_REQUESTS, "provider_limit");
+        match upstream.status() {
+            StatusCode::UNAUTHORIZED => return error(StatusCode::UNAUTHORIZED, "provider_credentials_rejected"),
+            StatusCode::FORBIDDEN => return error(StatusCode::FORBIDDEN, "provider_request_denied"),
+            StatusCode::TOO_MANY_REQUESTS => return error(StatusCode::TOO_MANY_REQUESTS, "provider_limit"),
+            status if status.is_server_error() => return error(StatusCode::BAD_GATEWAY, "provider_unavailable"),
+            _ => {}
         }
         if upstream.status() != StatusCode::OK
             || upstream
@@ -258,6 +262,13 @@ struct StreamState {
 }
 
 fn error(status: StatusCode, code: &'static str) -> Response<Body> {
+    let message = match code {
+        "provider_credentials_rejected" => "The provider rejected the API key. Close the session and replace the key in API keys.",
+        "provider_request_denied" => "The provider denied this request. Check the key permissions and model access.",
+        "provider_limit" => "The provider rate limit was reached. Wait before retrying.",
+        "provider_unavailable" => "The provider could not be reached or is temporarily unavailable. Retry later.",
+        _ => code,
+    };
     Response::builder()
         .status(status)
         .header(CONTENT_TYPE, "application/json")
@@ -265,7 +276,7 @@ fn error(status: StatusCode, code: &'static str) -> Response<Body> {
         .header("connection", "close")
         .body(
             Full::new(Bytes::from(format!(
-                "{{\"error\":{{\"message\":\"{code}\",\"type\":\"oblivion_gateway\"}}}}"
+                "{{\"error\":{{\"message\":\"{message}\",\"code\":\"{code}\",\"type\":\"oblivion_gateway\"}}}}"
             )))
             .map_err(|never| match never {})
             .boxed_unsync(),

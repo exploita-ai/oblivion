@@ -473,14 +473,16 @@ async fn rejects_untrusted_tls_and_does_not_fall_back_when_proxy_is_down() {
 #[tokio::test]
 async fn refuses_redirects_and_sanitizes_provider_errors() {
     let mut fixture = Fixture::new(true, TOKEN).await;
-    for (status, expected) in [
-        (302, 502),
-        (307, 502),
-        (400, 502),
-        (401, 502),
-        (429, 429),
-        (500, 502),
-        (200, 502),
+    for (status, expected, code) in [
+        (302, 502, "provider_response_denied"),
+        (307, 502, "provider_response_denied"),
+        (400, 502, "provider_response_denied"),
+        (401, 401, "provider_credentials_rejected"),
+        (403, 403, "provider_request_denied"),
+        (429, 429, "provider_limit"),
+        (500, 502, "provider_unavailable"),
+        (503, 502, "provider_unavailable"),
+        (200, 502, "provider_response_denied"),
     ] {
         let pending = tokio::spawn(fixture.request(chat()).send());
         let observed = fixture.next().await;
@@ -499,9 +501,13 @@ async fn refuses_redirects_and_sanitizes_provider_errors() {
         assert_eq!(response.status(), expected);
         assert!(!response.headers().contains_key("location"));
         assert!(!response.headers().contains_key("set-cookie"));
-        assert!(!response.text().await.unwrap().contains(KEY));
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = response.text().await.unwrap();
+        assert!(!body.contains(KEY));
+        let decoded: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(decoded["error"]["code"], code);
     }
-    assert_eq!(fixture.attempts.load(Ordering::SeqCst), 7);
+    assert_eq!(fixture.attempts.load(Ordering::SeqCst), 9);
 }
 
 #[tokio::test]
