@@ -26,6 +26,7 @@ export const status = z.object({
   session_mode: z.enum(["documents", "chat", "starting"]).nullable().default(null),
   active_session: z.string().nullable().default(null),
   network_status: z.object({
+    tor_progress: z.number().int().min(0).max(100).nullable().optional(),
     label: z.enum(["NOT STARTED", "CONNECTING", "TOR READY", "SOCKS5 READY", "OFFLINE", "OFFLINE · NO NETWORK DEVICE", "STATUS UNKNOWN"]),
     host_link: z.enum(["CONNECTED", "OFFLINE", "STATUS UNKNOWN"]).default("STATUS UNKNOWN"),
     direct_blocked: z.boolean(), age_ms: z.number().nonnegative().default(0),

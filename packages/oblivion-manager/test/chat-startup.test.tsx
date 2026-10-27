@@ -48,3 +48,39 @@ for (const outcome of ["started", "storage-failed", "client-failed"] as const) {
     } finally { await app.dispose() }
   })
 }
+
+
+test("cancelling an in-flight startup waits for the controller then revokes it", async () => {
+  const fixture = preview(() => {})
+  await fixture.request({ operation: "open-documents", session: "a".repeat(32) })
+  const initial = status.parse(JSON.parse(await fixture.request({ operation: "status" })))
+  const accepted = Promise.withResolvers<void>()
+  const pending = Promise.withResolvers<void>()
+  const operations: string[] = []
+  const app = await testRender(() => <App initial={initial} runtime={{ ...fixture,
+    request: async (input) => {
+      operations.push(input.operation)
+      if (input.operation === "start-chat") { accepted.resolve(); await pending.promise }
+      return fixture.request(input)
+    },
+    connectChat: () => { throw new Error("A cancelled opening must not attach chat") },
+  }} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await app.renderOnce(); await app.mockInput.pressKey("F6")
+    await app.mockInput.pressEnter(); await app.mockInput.pressEnter()
+    await accepted.promise
+    await app.mockInput.pressEscape(); await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Cancelling connection")
+    expect(operations).not.toContain("cancel-chat")
+    pending.resolve()
+    for (let frame = 0; frame < 10; frame++) {
+      await app.renderOnce()
+      if (operations.includes("cancel-chat")) break
+    }
+    await app.renderOnce()
+    expect(operations).toContain("cancel-chat")
+    expect(operations).not.toContain("chat-ready")
+    expect(status.parse(JSON.parse(await fixture.request({ operation: "status" }))).session_mode).toBe("documents")
+    expect(app.captureCharFrame()).toContain("Connection cancelled")
+  } finally { pending.resolve(); await app.dispose() }
+})

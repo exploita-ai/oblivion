@@ -205,10 +205,9 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                 let transport = transport
                     .as_ref()
                     .ok_or_else(|| io::Error::other("not_configured"))?;
+                let progress = tor.as_ref().and_then(|tor| tor.progress().ok());
                 let ready = match transport {
-                    Transport::Tor {} => tor
-                        .as_ref()
-                        .is_some_and(|tor| tor.bootstrapped().unwrap_or(false)),
+                    Transport::Tor {} => progress == Some(100),
                     Transport::Socks5 { .. } => Process::start(
                         Role::Probe,
                         Zeroizing::new(serde_json::to_vec(
@@ -219,7 +218,7 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                 };
                 channel.write(
                     &serde_json::to_vec(
-                        &serde_json::json!({"ready": ready, "isolated": isolated}),
+                        &serde_json::json!({"ready": ready, "isolated": isolated, "tor_progress": progress}),
                     )?,
                     api,
                 )?;

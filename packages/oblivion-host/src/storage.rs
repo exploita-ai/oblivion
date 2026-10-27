@@ -356,7 +356,8 @@ pub fn main() -> Result<()> {
             let id = session_info()?.ok_or(Error("session_not_open"))?.0;
             let vm = config.vm.as_ref().ok_or(Error("vm_not_configured"))?;
             require(api_key_present()?, "api_key_missing")?;
-            config.start_gateway()?;
+            config.start_gateway(false)?;
+            require(crate::gateway::state()? == "active", "gateway_not_ready")?;
             crate::gateway::ready()?;
             let provider = selected_provider()?;
             let (saved, selected) = policy_profiles()?;
@@ -388,6 +389,13 @@ pub fn main() -> Result<()> {
             write_session_info(&id, "chat")
         }
         "chat-recover" => recover_chat(&config),
+        "cancel-chat" => {
+            let (_, mode) = session_info()?.ok_or(Error("session_not_open"))?;
+            require(matches!(mode.as_str(), "starting" | "documents"), "chat_already_started")?;
+            if mode == "starting" { recover_chat(&config)?; }
+            crate::gateway::shutdown()?;
+            Ok(())
+        }
         "browse" => {
             require(
                 !recovery_required()?
@@ -637,7 +645,7 @@ pub fn main() -> Result<()> {
             vm.validate()?;
             require(crate::vm::stopped()?, "vm_already_running")?;
             if config.gateway.is_some() {
-                config.start_gateway()?;
+                config.start_gateway(true)?;
                 crate::gateway::ready()?;
             }
             let id = if op == "enter-ephemeral" {
@@ -1043,9 +1051,9 @@ impl Config {
         Ok(())
     }
 
-    fn start_gateway(&self) -> Result<()> {
-        if self.gateway.is_some() && api_key_present()? && crate::gateway::state()? != "active" {
-            crate::gateway::start()?;
+    fn start_gateway(&self, wait: bool) -> Result<()> {
+        if self.gateway.is_some() && api_key_present()? && matches!(crate::gateway::state()?.as_str(), "inactive" | "failed") {
+            crate::gateway::start(wait)?;
         }
         Ok(())
     }
@@ -2171,11 +2179,15 @@ fn network_observation(mode: Option<&str>) -> network::Observation {
         .into(),
         direct_blocked: false,
         age_ms: 0,
+        tor_progress: None,
     };
     if mode == Some("documents") {
         if crate::vm::network_devices().is_ok_and(|count| count == 0) {
             result.label = "OFFLINE · NO NETWORK DEVICE".into();
             result.direct_blocked = true;
+        }
+        if let Ok(observed) = crate::gateway::observation() {
+            if observed.age_ms <= 10000 { result.tor_progress = observed.tor_progress; }
         }
         return result;
     }
@@ -2198,6 +2210,7 @@ fn network_observation(mode: Option<&str>) -> network::Observation {
     if observed.age_ms > 10000 {
         return result;
     }
+    result.tor_progress = observed.tor_progress;
     result.direct_blocked = observed.isolated
         && (mode.is_none() || crate::vm::network_devices().is_ok_and(|count| count == 1));
     result.label = if !result.direct_blocked {

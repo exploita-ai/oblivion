@@ -53,13 +53,11 @@ impl Tor {
     }
 
     pub fn bootstrapped(&self) -> io::Result<bool> {
-        let lines = control("GETINFO status/bootstrap-phase\r\n")?;
-        if lines.len() != 1 || !lines[0].starts_with("250-status/bootstrap-phase=") {
-            return Err(io::Error::other("unexpected_tor_reply"));
-        }
-        Ok(lines[0]
-            .split_ascii_whitespace()
-            .any(|field| field == "PROGRESS=100"))
+        Ok(self.progress()? == 100)
+    }
+
+    pub fn progress(&self) -> io::Result<u8> {
+        bootstrap_progress(&control("GETINFO status/bootstrap-phase\r\n")?)
     }
 
     pub fn snapshot(&self, stop: bool) -> io::Result<State> {
@@ -209,4 +207,34 @@ fn expect(stream: &mut UnixStream, expected: &str) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+// Export only the bounded percentage, never Tor's free-form diagnostics.
+fn bootstrap_progress(lines: &[String]) -> io::Result<u8> {
+    if lines.len() != 1 || !lines[0].starts_with("250-status/bootstrap-phase=") {
+        return Err(io::Error::other("unexpected_tor_reply"));
+    }
+    let fields: Vec<_> = lines[0]["250-status/bootstrap-phase=".len()..].split_ascii_whitespace()
+        .filter_map(|field| field.strip_prefix("PROGRESS=")).collect();
+    if fields.len() != 1 {
+        return Err(io::Error::other("unexpected_tor_reply"));
+    }
+    fields[0].parse::<u8>().ok().filter(|value| *value <= 100)
+        .ok_or_else(|| io::Error::other("unexpected_tor_reply"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bootstrap_progress;
+
+    #[test]
+    fn progress_is_bounded_and_does_not_export_diagnostics() {
+        for value in [0, 5, 50, 95, 100] {
+            assert_eq!(bootstrap_progress(&[format!("250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS={value} TAG=conn SUMMARY=private")]).unwrap(), value);
+        }
+        for line in ["250-status/bootstrap-phase=PROGRESS=101", "250-status/bootstrap-phase=PROGRESS=50 PROGRESS=100", "250-status/bootstrap-phase=PROGRESS=bad", "250-other=PROGRESS=100"] {
+            assert!(bootstrap_progress(&[line.into()]).is_err());
+        }
+        assert!(bootstrap_progress(&[]).is_err());
+    }
 }

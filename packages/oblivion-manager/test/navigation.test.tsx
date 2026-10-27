@@ -32,6 +32,7 @@ test("pending gateway startup waits visibly and cancellation keeps Documents ope
     expect(app.captureCharFrame()).not.toContain("Working ·")
     expect(app.captureCharFrame()).not.toContain("Tor [ ]")
     await app.mockInput.pressEscape(); await app.renderOnce()
+    expect(operations).toContain("cancel-chat")
     expect(app.captureCharFrame()).toContain("Connection cancelled")
     expect(app.captureCharFrame()).toContain("SESSION / aaaaaaaa / Documents")
     expect(app.captureCharFrame()).toContain("workspace/")

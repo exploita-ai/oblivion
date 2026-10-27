@@ -9,6 +9,7 @@ pub struct Observation {
     pub host_link: String,
     pub direct_blocked: bool,
     pub age_ms: u64,
+    pub tor_progress: Option<u8>,
 }
 
 #[derive(Deserialize, Serialize)]

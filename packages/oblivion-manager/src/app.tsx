@@ -317,23 +317,37 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
     if (!id) { addKey(); setFeedback("info"); setNotice("Add an API key to start chat. Press Esc to browse documents offline."); return }
     await command("api-keys", { action: "select", id })
     const controller = new AbortController()
-    await startWhenReady(async () => { await command("start-chat") }, {
-      signal: controller.signal,
-      waiting: (waiting) => {
-        setNetworkWait(waiting ? controller : undefined)
-        setBusy(waiting ? `Connecting to ${state()?.egress?.selected?.mode === "socks5" ? "SOCKS5" : "Tor"}` : "Starting chat")
-      },
-    })
-    setBusy("Starting chat")
+    const deadline = setTimeout(() => controller.abort(new ControlError("gateway_connect_timeout")), 120_000)
+    let started = false
     try {
+      await startWhenReady(async () => { await command("start-chat") }, {
+        signal: controller.signal,
+        waiting: async (waiting) => {
+          setNetworkWait(waiting ? controller : undefined)
+          if (!waiting) return
+          const transport = state()?.egress?.selected?.mode === "socks5" ? "SOCKS5" : "Tor"
+          setBusy(`Connecting to ${transport}`)
+          await refresh()
+          const progress = state()?.network_status?.tor_progress
+          if (!controller.signal.aborted && transport === "Tor" && progress != null) setBusy(`Connecting to Tor · ${progress}%`)
+        },
+      })
+      started = true
+      clearTimeout(deadline)
+      setBusy("Starting chat")
       await chat(true)
       await command("chat-ready")
     } catch (error) {
       detachChat()
-      await command("chat-recover")
+      setBusy("Restoring offline documents")
+      if (started) await command("chat-recover")
+      if (controller.signal.aborted || (error instanceof ControlError && error.code === "gateway_connect_timeout")) {
+        await command("cancel-chat")
+      }
       setDocuments(true)
+      if (controller.signal.reason instanceof ControlError) throw controller.signal.reason
       throw error
-    }
+    } finally { clearTimeout(deadline); setNetworkWait(undefined) }
   }
 
   function sessionView(index: number) {
@@ -490,7 +504,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
 
   useKeyboard((key) => {
     if (key.defaultPrevented) return
-    if (networkWait() && key.name === "escape") { key.preventDefault(); networkWait()!.abort(); return }
+    if (networkWait() && key.name === "escape") { key.preventDefault(); networkWait()!.abort(); setBusy("Cancelling connection · waiting for safe cleanup"); return }
     if (!editing() && state()?.session_open) {
       if (key.name === "f6" || key.name === "f7") { key.preventDefault(); key.stopPropagation(); sessionView(key.name === "f6" ? 0 : 1); return }
       if (key.ctrl && key.name === "q" || key.name === "f8" || key.raw === "\x1d" || key.ctrl && key.name === "]") {

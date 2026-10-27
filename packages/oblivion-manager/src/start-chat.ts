@@ -1,25 +1,40 @@
 import { setTimeout } from "node:timers/promises"
 import { ControlError } from "./control"
 
-// The controller's start-chat operation checks readiness before stopping the
-// offline VM or granting a capability. Only that pending state is retryable.
+// The controller checks readiness before granting a capability. An aborted
+// in-flight call must settle before the caller requests ordered cleanup.
 export async function startWhenReady(start: () => Promise<void>, options: {
   signal: AbortSignal;
-  waiting: (value: boolean) => void;
+  waiting: (value: boolean) => void | Promise<void>;
   wait?: () => Promise<void>;
+  now?: () => number;
 }) {
-  for (let attempt = 0; attempt < 40; attempt++) {
+  const now = options.now ?? performance.now.bind(performance)
+  const deadline = now() + 120_000
+  const remaining = () => {
     if (options.signal.aborted) throw new ControlError("chat_start_cancelled")
-    try { await start(); return } catch (error) {
-      if (!(error instanceof ControlError) || error.code !== "gateway_not_ready") throw error
-    }
-    if (attempt === 39) throw new ControlError("gateway_connect_timeout")
-    options.waiting(true)
-    try {
-      await (options.wait?.() ?? setTimeout(3000, undefined, { signal: options.signal }))
-    } catch (error) {
-      if (options.signal.aborted) throw new ControlError("chat_start_cancelled")
-      throw error
-    } finally { options.waiting(false) }
+    if (now() >= deadline) throw new ControlError("gateway_connect_timeout")
   }
+  try {
+    for (let attempt = 0; attempt < 40; attempt++) {
+      remaining()
+      await options.waiting(true)
+      remaining()
+      try {
+        await start()
+        remaining()
+        return
+      } catch (error) {
+        remaining()
+        if (!(error instanceof ControlError) || error.code !== "gateway_not_ready") throw error
+      }
+      if (attempt === 39) throw new ControlError("gateway_connect_timeout")
+      try {
+        await (options.wait?.() ?? setTimeout(Math.min(3000, Math.max(0, deadline - now())), undefined, { signal: options.signal }))
+      } catch (error) {
+        remaining()
+        throw error
+      }
+    }
+  } finally { await options.waiting(false) }
 }

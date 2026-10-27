@@ -17,6 +17,7 @@ export type Operation =
   | "start-chat"
   | "chat-ready"
   | "chat-recover"
+  | "cancel-chat"
   | "browse"
   | "prepare-usb"
   | "unlock"

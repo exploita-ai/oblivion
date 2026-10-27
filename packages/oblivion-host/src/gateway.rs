@@ -53,6 +53,7 @@ pub struct Observation {
     pub isolated: bool,
     pub tor: bool,
     pub age_ms: u64,
+    pub tor_progress: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -60,6 +61,8 @@ pub struct Observation {
 struct Observed {
     ready: bool,
     isolated: bool,
+    #[serde(default)]
+    tor_progress: Option<u8>,
 }
 
 pub fn observation() -> Result<Observation> {
@@ -82,14 +85,15 @@ pub fn state() -> Result<String> {
     vm::unit_state(UNIT)
 }
 
-pub fn start() -> Result<()> {
+pub fn start(wait: bool) -> Result<()> {
     require(
         matches!(state()?.as_str(), "inactive" | "failed"),
         "gateway_already_running",
     )?;
-    vm::execute("/usr/bin/systemctl", &["start".to_owned(), UNIT.to_owned()])
-        .map_err(|_| Error("gateway_start_failed"))?;
-    require(state()? == "active", "gateway_start_failed")
+    let arguments = if wait { vec!["start".to_owned(), UNIT.to_owned()] }
+        else { vec!["start".to_owned(), "--no-block".to_owned(), UNIT.to_owned()] };
+    vm::execute("/usr/bin/systemctl", &arguments).map_err(|_| Error("gateway_start_failed"))?;
+    require(!wait || state()? == "active", "gateway_start_failed")
 }
 
 pub fn stop() -> Result<()> {
@@ -293,10 +297,11 @@ fn connected(key: crate::storage::ApiKey, transport: Transport, network: bool) -
                     serde_json::from_slice(&bytes).map_err(|_| Error("invalid_gateway_request"))?;
                 if matches!(request, Request::Observe {}) {
                     let observation = Observation {
-                        ready: observed.ready && network,
+                        ready: network_ready && network,
                         isolated: observed.isolated,
                         tor,
                         age_ms: observed_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        tor_progress: observed.tor_progress.filter(|value| *value <= 100),
                     };
                     send(
                         &mut Channel::new(&client, Duration::from_secs(2)),
