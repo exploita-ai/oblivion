@@ -676,7 +676,12 @@ with socket.socket(socket.AF_UNIX) as client:
     command("lock")
     assert file_digest("/data/general.luks") == encrypted_before
     assert not selection_file.exists()
-    assert not policy_selection.exists() and status()["network_policy"] is None
+    assert not policy_selection.exists()
+    assert status()["network_policy"] == {
+        "policy": {"version": 1, "rules": []},
+        "enabled": False,
+        "temporary": False,
+    }
     check("read-only web policy overrides use only RAM, clear on lock and leave the encrypted profile byte-identical")
     check("read-only transport choices use RAM, clear on lock and leave the entire encrypted image byte-identical")
     check("read-only profile exposes key metadata and permits RAM selection, rejects saved-key mutations and pending deletion, and remains byte-identical")
