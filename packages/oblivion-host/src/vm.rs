@@ -529,12 +529,24 @@ pub fn stop_role(role: Role, force: bool) -> Result<()> {
         return Ok(());
     }
     if force {
-        execute(
-            "/usr/bin/systemctl",
-            &["stop".to_owned(), format!("{}.service", role.name())],
-        )?;
-        require(stopped_role(role)?, "vm_still_running")?;
-        return Ok(());
+        let status = Command::new("/usr/bin/systemctl")
+            .args(["stop", &format!("{}.service", role.name())])
+            .env_clear()
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|_| Error("vm_command_failed"))?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if stopped_role(role)? {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        require(status.success(), "vm_command_failed")?;
+        return Err(Error("vm_still_running"));
     }
     qmp(role, "system_powerdown")?;
     let deadline = Instant::now() + Duration::from_secs(30);
