@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/exploita-ai/oblivion/actions/workflows/oblivion-check.yml"><img alt="CI" src="https://github.com/exploita-ai/oblivion/actions/workflows/oblivion-check.yml/badge.svg?branch=dev"></a>
+  <a href="https://github.com/exploita-ai/oblivion/actions/workflows/oblivion-release.yml"><img alt="Release images" src="https://github.com/exploita-ai/oblivion/actions/workflows/oblivion-release.yml/badge.svg?branch=main"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-d32f2f.svg"></a>
   <a href="#project-status"><img alt="Status: pre-beta" src="https://img.shields.io/badge/status-pre--beta-d32f2f.svg"></a>
   <img alt="Platforms: amd64 and arm64" src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-27272a.svg">
