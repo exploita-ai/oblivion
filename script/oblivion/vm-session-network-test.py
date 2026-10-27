@@ -568,7 +568,7 @@ if SOCKS:
     command("enter", a, secret=PASSWORD)
     restored_gateway, _ = ready()
     assert restored_gateway != tor_gateway
-    assert gateway_status() == {"ok": True, "configured": True, "active": False}
+    assert gateway_status() == {"ok": True, "configured": True, "active": True}
     client = console()
     transition_token = probe(client)
     assert transition_token not in tokens
