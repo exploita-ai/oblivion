@@ -787,7 +787,9 @@ with socket.socket(socket.AF_UNIX) as client:
     first_ephemeral = subprocess.check_output(["cryptsetup", "luksUUID", str(ephemeral)]).strip()
     assert str(ephemeral).encode() in subprocess.check_output(["cryptsetup", "status", "oblivion-session"])
     assert subprocess.run(["findmnt", "--noheadings", "--source", "/dev/mapper/oblivion-session"], capture_output=True).returncode == 1
-    send(b"OBLIVION_TUI_A_REQUEST", "OBLIVION_TUI_A_REQUEST")
+    # Frame synthetic prompt bursts as terminal pastes. The rendered text is
+    # the acknowledgement that paste insertion finished before sending Enter.
+    send(b"\x1b[200~OBLIVION_TUI_A_REQUEST\x1b[201~", "OBLIVION_TUI_A_REQUEST")
     send(b"\r", "OBLIVION_TUI_A_REPLY")
     check("trusted ephemeral boot opens a read-only profile and a fresh RAM-backed LUKS VM; the compiled TUI executes the real document-writing shell tool")
     send(b"\x1d", "Nuova sessione effimera")
@@ -800,7 +802,7 @@ with socket.socket(socket.AF_UNIX) as client:
     send(b"\r", "Conversations and documents")
     wait_screen("/exit lock session")
     assert subprocess.check_output(["cryptsetup", "luksUUID", str(ephemeral)]).strip() != first_ephemeral
-    send(b"OBLIVION_TUI_B_REQUEST", "OBLIVION_TUI_B_REQUEST")
+    send(b"\x1b[200~OBLIVION_TUI_B_REQUEST\x1b[201~", "OBLIVION_TUI_B_REQUEST")
     send(b"\r", "OBLIVION_TUI_B_REPLY")
     check("closing an ephemeral chat removes its RAM disk; the next VM has a distinct LUKS identity, no prior document, temporary files or conversation")
     terminal.reset()

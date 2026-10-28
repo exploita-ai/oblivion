@@ -485,6 +485,7 @@ pub fn serve(config: &Config, uid: u32) -> Result<()> {
 impl Guests {
     fn run(&mut self, config: &Config, job: &Job, uid: u32) -> Result<Option<UnixStream>> {
         let deadline = Instant::now() + Duration::from_secs(u64::from(job.ttl_seconds));
+        let startup = deadline.min(Instant::now() + Duration::from_secs(120));
         config.gateway.start_role(Role::OnionUplink)?;
         self.uplink = Some(Peer::connect(Role::OnionUplink, "qmp.sock")?);
         config.gateway.start_role(Role::OnionGateway)?;
@@ -495,14 +496,29 @@ impl Guests {
             vm::attach_onion_backup(&crate::storage::closed_session_file(&job.session)?)?;
         }
         vm::resume_transfer(Role::OnionGateway)?;
-        vm::resume_transfer(Role::OnionFile)?;
-        self.boot()?;
-        let initialized: Initialized = self.gateway(&json!({"operation":"initialize","state":self.saved.as_ref().map(oblivion_tor_state::State::as_str)}))?;
+        self.boot(Role::OnionGateway, startup)?;
+        // Tor initialization starts, stops and restarts the disabled service.
+        // Keep the file guest paused so its idle watchdog cannot expire while
+        // those cold starts exceed the normal five-second observation budget.
+        let peer = self
+            .gateway
+            .as_ref()
+            .ok_or(Error("onion_guest_not_ready"))?;
+        let initialized: Initialized = exchange_channel(
+            &mut self.channel(
+                peer,
+                startup.saturating_duration_since(Instant::now()).min(Duration::from_secs(30)),
+                true,
+            )?,
+            &json!({"operation":"initialize","state":self.saved.as_ref().map(oblivion_tor_state::State::as_str)}),
+        ).map_err(|_| Error("onion_initialization_failed"))?;
         require(
             initialized.ok && initialized.initialized && !initialized.active,
             "onion_initialization_failed",
         )?;
         self.initialized = true;
+        vm::resume_transfer(Role::OnionFile)?;
+        self.boot(Role::OnionFile, startup)?;
         let enabled: Initialized = self.gateway(&json!({"operation":"enable"}))?;
         require(
             enabled.ok && enabled.initialized && !enabled.active,
@@ -945,68 +961,46 @@ impl Guests {
             .map(|peer| &peer.owner)
     }
 
-    fn boot(&self) -> Result<()> {
-        let peers = [
-            (self.gateway.as_ref().unwrap(), "onion-gateway"),
-            (self.files.as_ref().unwrap(), "onion-file"),
-        ];
-        let mut ready = [false; 2];
-        let deadline = Instant::now() + Duration::from_secs(60);
+    fn boot(&self, role: Role, deadline: Instant) -> Result<()> {
+        let (peer, expected) = match role {
+            Role::OnionGateway => (self.gateway.as_ref(), "onion-gateway"),
+            Role::OnionFile => (self.files.as_ref(), "onion-file"),
+            _ => return Err(Error("invalid_onion_role")),
+        };
+        let peer = peer.ok_or(Error("onion_guest_not_ready"))?;
         let mut checked = Instant::now();
         loop {
             require(Instant::now() < deadline, "onion_guest_not_ready")?;
             for owner in self.owners().chain(std::iter::once(&self.session)) {
                 require(!exited(owner)?, "onion_guest_not_ready")?;
             }
-            for (index, (peer, role)) in peers.iter().enumerate() {
-                if ready[index] {
-                    continue;
-                }
-                let mut descriptor = libc::pollfd {
-                    fd: peer.file.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
+            let mut descriptor = libc::pollfd {
+                fd: peer.file.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            require(
+                unsafe { libc::poll(&mut descriptor, 1, 0) } >= 0,
+                "onion_channel_failed",
+            )?;
+            if descriptor.revents != 0 {
+                let hello: Hello =
+                    read_message(&mut self.channel(peer, Duration::from_secs(5), true)?, 4096)
+                        .map_err(|_| Error("onion_guest_not_ready"))?;
                 require(
-                    unsafe { libc::poll(&mut descriptor, 1, 0) } >= 0,
-                    "onion_channel_failed",
+                    hello.ready && hello.version == 1 && hello.role == expected,
+                    "invalid_onion_guest",
                 )?;
-                if descriptor.revents != 0 {
-                    let hello: Hello =
-                        read_message(&mut self.channel(peer, Duration::from_secs(5), true)?, 4096)
-                            .map_err(|_| Error("onion_guest_not_ready"))?;
-                    require(
-                        hello.ready && hello.version == 1 && hello.role == *role,
-                        "invalid_onion_guest",
-                    )?;
-                    ready[index] = true;
-                }
-            }
-            if ready.iter().all(|ready| *ready) {
                 return Ok(());
             }
-            // A fast guest must not expire while the other VM is still booting,
-            // especially in the explicit TCG laboratory profile.
-            if checked.elapsed() >= Duration::from_secs(4) {
-                if ready[0] {
-                    let value: Observed = self.gateway(&json!({"operation":"observe"}))?;
-                    require(
-                        value.ok && value.isolated && !value.active && !value.tor_ready,
-                        "invalid_onion_observation",
-                    )?;
-                }
-                if ready[1] {
-                    let value: FileObserved = exchange_channel(
-                        &mut self.channel(peers[1].0, Duration::from_secs(5), true)?,
-                        &json!({"operation":"observe"}),
-                    )?;
-                    require(
-                        value.ok
-                            && matches!(value.phase, FilePhase::Fresh)
-                            && value.worker.is_none(),
-                        "invalid_onion_observation",
-                    )?;
-                }
+            // The initialized gateway stays disabled and observed while the
+            // file VM boots. Its network is enabled only after both are ready.
+            if self.initialized && checked.elapsed() >= Duration::from_secs(4) {
+                let value: Observed = self.gateway(&json!({"operation":"observe"}))?;
+                require(
+                    value.ok && value.isolated && !value.active && !value.tor_ready,
+                    "invalid_onion_observation",
+                )?;
                 checked = Instant::now();
             }
             std::thread::sleep(Duration::from_millis(25));

@@ -165,7 +165,12 @@ pub fn main() -> Result<()> {
             .map_err(|_| Error("recovery_marker_failed"))?;
     }
     let _lock = lock()?;
-    if !matches!(op, "status" | "transfers" | "onion" | "lock" | "recover") {
+    // A broken transfer record must not prevent teardown from revoking the
+    // current grant. Admission guards apply to new work, not close/recovery.
+    if !matches!(
+        op,
+        "status" | "transfers" | "onion" | "close" | "leave" | "force-leave" | "lock" | "recover"
+    ) {
         require(
             !crate::transfer_host::archiving()? && !crate::onion_host::archiving()?,
             "backup_active",
@@ -894,15 +899,15 @@ pub fn main() -> Result<()> {
         "close" | "leave" | "force-leave" => {
             // Transfer cleanup can fail while a session is still running.
             // Revoke its network before attempting any fallible teardown.
-            let onion = if config.onion.is_some() || crate::onion_host::prepared()? {
-                crate::onion_host::shutdown()
-            } else {
-                Ok(true)
-            };
             let gateway = if config.gateway.is_some() {
                 crate::gateway::revoke()
             } else {
                 Ok(())
+            };
+            let onion = if config.onion.is_some() || crate::onion_host::prepared()? {
+                crate::onion_host::shutdown()
+            } else {
+                Ok(true)
             };
             onion?;
             gateway?;
