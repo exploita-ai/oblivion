@@ -93,11 +93,10 @@ class VM:
                         while "return" not in json.loads(stream.readline()):
                             pass
             if mode == "file":
-                # The first greeting includes Debian boot under software
-                # emulation; subsequent control operations keep their 30s cap.
+                # Match the controller's 120s cold-worker startup budget as
+                # well as emulated boot. Copy ports retain their 30s cap.
                 self.ports["file"].settimeout(120)
                 assert read(self.ports["file"]) == {"ready": True, "version": 1, "role": "onion-file"}
-                self.ports["file"].settimeout(30)
             deadline = time.monotonic() + 120
             while True:
                 remaining = deadline - time.monotonic()
