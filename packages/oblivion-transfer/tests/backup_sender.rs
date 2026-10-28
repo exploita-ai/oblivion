@@ -17,6 +17,10 @@ use support::Tree;
 
 const ID: &str = "0123456789abcdef0123456789abcdef";
 const MIB: u64 = 1024 * 1024;
+// A full 512 MiB transfer includes manifest hashing, verified copying and fsync
+// in unoptimized child processes on shared CI CPUs. Keep its budget bounded
+// without making the fixture an assertion about the runner's throughput.
+const BUDGET: Duration = Duration::from_secs(180);
 
 struct Endpoint {
     child: Child,
@@ -40,7 +44,7 @@ impl Endpoint {
         let source_fd = source.as_raw_fd();
         let mut command = Command::new(env!("CARGO_BIN_EXE_oblivion-copy"));
         command
-            .args([role, &maximum.to_string(), "60000"])
+            .args([role, &maximum.to_string(), &BUDGET.as_millis().to_string()])
             .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -58,7 +62,7 @@ impl Endpoint {
             child,
             channel: Channel::new(
                 File::from(OwnedFd::from(stream.try_clone().unwrap())),
-                Duration::from_secs(60),
+                BUDGET,
             )
             .unwrap(),
             socket: stream,

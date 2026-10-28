@@ -66,7 +66,11 @@ class VM:
                     stream.write(json.dumps({"execute": command}).encode() + b"\n")
                     while "return" not in json.loads(stream.readline()):
                         pass
+        # The initial greeting includes Debian boot under software emulation.
+        # Restore the control-operation deadline once the owner is available.
+        self.control.settimeout(120)
         self.hello = self.receive()
+        self.control.settimeout(60)
         assert self.hello == {"ready": True, "version": 1, "role": "onion-gateway"}, self.hello
         assert self.messages.get(timeout=60) == {"ready": True}
 

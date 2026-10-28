@@ -284,7 +284,7 @@ jobs:
           test "$(uname -m)" = x86_64
           test -c /dev/kvm
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 libarchive-tools
           sudo usermod -a -G kvm "$(id -un)"
           sg kvm -c 'test -r /dev/kvm && test -w /dev/kvm'
       - name: Build the controller, private transfer guests and synthetic host
@@ -348,7 +348,7 @@ jobs:
         run: |
           test -c /dev/kvm
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 libarchive-tools
           sudo usermod -a -G kvm "$(id -un)"
           sg kvm -c 'test -r /dev/kvm && test -w /dev/kvm'
       - name: Import, export, recover and exercise filesystem failures through the manager
