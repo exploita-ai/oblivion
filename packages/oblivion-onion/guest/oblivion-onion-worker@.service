@@ -1,0 +1,41 @@
+[Unit]
+Description=Unprivileged OnionShare HTTP worker
+BindsTo=oblivion-onion-file.service
+After=oblivion-onion-file.service
+CollectMode=inactive-or-failed
+
+[Service]
+Type=exec
+User=1000
+Group=1000
+ExecStart=/opt/oblivion-onionshare/bin/python -IB /usr/lib/oblivion/onion/service.py
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateDevices=yes
+BindReadOnlyPaths=-/dev/vdb:/dev/oblivion-backup
+DeviceAllow=block-virtblk r
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/oblivion-onion
+BindReadOnlyPaths=/run/oblivion-onion-state/share:/run/oblivion-onion/share
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=896M
+TasksMax=32
+RuntimeMaxSec=3700
+StandardInput=null
+StandardOutput=null
+StandardError=null
+Restart=no
+KillMode=control-group
+TimeoutStopSec=10

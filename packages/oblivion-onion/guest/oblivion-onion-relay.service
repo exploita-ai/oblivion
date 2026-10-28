@@ -1,0 +1,35 @@
+[Unit]
+Description=Private gateway to OnionShare Unix socket relay
+BindsTo=oblivion-onion-file.service
+After=oblivion-onion-file.service oblivion-onion-file-network.service
+
+[Service]
+Type=exec
+User=1000
+Group=1000
+ExecStart=/usr/bin/socat TCP4-LISTEN:8080,bind=10.89.0.2,reuseaddr,fork,max-children=8,range=10.89.0.1/32 UNIX-CONNECT:/run/oblivion-onion/http/service.sock
+SuccessExitStatus=143
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=32M
+TasksMax=16
+StandardInput=null
+StandardOutput=null
+StandardError=null
+Restart=no
+KillMode=control-group
+TimeoutStopSec=5

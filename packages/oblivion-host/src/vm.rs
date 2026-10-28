@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -27,6 +28,9 @@ pub enum Role {
     Gateway,
     Import,
     Export,
+    OnionUplink,
+    OnionGateway,
+    OnionFile,
 }
 
 impl Role {
@@ -36,6 +40,9 @@ impl Role {
             Self::Gateway => "oblivion-gateway-vm",
             Self::Import => "oblivion-import-vm",
             Self::Export => "oblivion-export-vm",
+            Self::OnionUplink => "oblivion-onion-uplink",
+            Self::OnionGateway => oblivion_host::onion_vm::Kind::Gateway.name(),
+            Self::OnionFile => oblivion_host::onion_vm::Kind::File.name(),
         }
     }
 
@@ -45,6 +52,9 @@ impl Role {
             Self::Gateway => GATEWAY_UID,
             Self::Import => IMPORT_UID,
             Self::Export => EXPORT_UID,
+            Self::OnionUplink => GATEWAY_UID,
+            Self::OnionGateway => oblivion_host::onion_vm::GATEWAY_UID,
+            Self::OnionFile => oblivion_host::onion_vm::FILE_UID,
         }
     }
 
@@ -196,6 +206,10 @@ impl Config {
     }
 
     fn launch(&self, role: Role, network: bool, documents: bool) -> Result<()> {
+        if matches!(role, Role::OnionUplink) {
+            require(!network && !documents, "invalid_onion_launch")?;
+            return self.launch_onion_uplink();
+        }
         require(stopped_role(role)?, "vm_already_running")?;
         if matches!(role, Role::Session) {
             let device = fs::metadata(DEVICE).map_err(|_| Error("session_device_missing"))?;
@@ -296,6 +310,38 @@ impl Config {
             // VM, so Before=owner/controller would deadlock their stop jobs.
             args.push("--property=BindsTo=oblivion-gateway-host.service".to_owned());
         }
+        if matches!(role, Role::OnionGateway | Role::OnionFile) {
+            // The owner waits for cleanup; adding Before=owner would deadlock
+            // its ExecStopPost, as with the existing model gateway lifecycle.
+            args.push(format!(
+                "--property=BindsTo={}",
+                oblivion_host::onion_vm::OWNER
+            ));
+            args.push("--property=RestrictNamespaces=yes".into());
+            args.push("--property=PrivatePIDs=yes".into());
+            let source = if matches!(role, Role::OnionGateway) {
+                prepare_onion_wire(
+                    Role::OnionUplink,
+                    "network.sock",
+                    oblivion_host::onion_vm::GATEWAY_UID,
+                )?
+            } else {
+                prepare_onion_wire(
+                    Role::OnionGateway,
+                    "inside.sock",
+                    oblivion_host::onion_vm::FILE_UID,
+                )?
+            };
+            args.push(format!(
+                "--property=BindReadOnlyPaths={source}:{}/{}",
+                role.runtime(),
+                if matches!(role, Role::OnionGateway) {
+                    "uplink.sock"
+                } else {
+                    "network.sock"
+                }
+            ));
+        }
         if matches!(role, Role::Import) {
             args.extend([
                 "--property=BindsTo=oblivion-transfer-host.service".to_owned(),
@@ -372,11 +418,21 @@ impl Config {
                 "-device".to_owned(),
                 "virtconsole,chardev=console,bus=oblivion-serial.0,name=oblivion.console"
                     .to_owned(),
+                "-chardev".to_owned(),
+                "socket,id=terminal,path=/run/oblivion-session/terminal.sock,server=on,wait=off"
+                    .to_owned(),
+                "-device".to_owned(),
+                "virtconsole,chardev=terminal,bus=oblivion-serial.0,name=oblivion.terminal"
+                    .to_owned(),
                 "-drive".to_owned(),
                 "file=/dev/oblivion-session,format=raw,if=none,id=vault,cache=none".to_owned(),
                 "-device".to_owned(),
                 "virtio-blk-pci,drive=vault,serial=oblivion-vault".to_owned(),
             ]);
+            args.extend(
+                oblivion_host::onion_vm::session_lifetime(std::path::Path::new(&role.runtime()))
+                    .map_err(Error)?,
+            );
         }
         if matches!(role, Role::Import) {
             args.extend([
@@ -438,6 +494,18 @@ impl Config {
                 "virtio-net-pci,netdev=outside,mac=52:54:00:6f:00:02,romfile=".to_owned(),
             ]);
         }
+        if matches!(role, Role::OnionGateway | Role::OnionFile) {
+            require(!network && !documents, "invalid_onion_launch")?;
+            args.extend(
+                if matches!(role, Role::OnionGateway) {
+                    oblivion_host::onion_vm::Kind::Gateway
+                } else {
+                    oblivion_host::onion_vm::Kind::File
+                }
+                .arguments(std::path::Path::new(&role.runtime()))
+                .map_err(Error)?,
+            );
+        }
         if documents {
             args.extend([
                 "-S".to_owned(),
@@ -458,24 +526,130 @@ impl Config {
                 "-device".to_owned(), "virtio-net-pci,netdev=inside,mac=52:54:00:6f:00:03,romfile=".to_owned(),
             ]);
         }
-        execute("/usr/bin/systemd-run", &args)?;
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
-            if stopped_role(role)? {
-                return Err(Error("vm_start_failed"));
-            }
-            if PathBuf::from(role.runtime()).join("qmp.sock").exists() {
-                qmp(role, "query-status")?;
-                return Ok(());
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        Err(Error("vm_start_timeout"))
+        start_command(role, &args)
     }
+
+    fn launch_onion_uplink(&self) -> Result<()> {
+        let role = Role::OnionUplink;
+        require(stopped_role(role)?, "vm_already_running")?;
+        let mut args = vec![
+            "--quiet".into(),
+            "--collect".into(),
+            format!("--unit={}", role.name()),
+            "--service-type=exec".into(),
+        ];
+        args.extend(
+            [
+                format!("User={GATEWAY_UID}"),
+                format!("Group={GATEWAY_UID}"),
+                format!("RootDirectory={}", self.root.display()),
+                format!("RuntimeDirectory={}", role.name()),
+                "RuntimeDirectoryMode=0700".into(),
+                format!("ReadWritePaths={}", role.runtime()),
+                format!("BindsTo={}", oblivion_host::onion_vm::OWNER),
+                "UMask=0077".into(),
+                "PrivateDevices=yes".into(),
+                "PrivateNetwork=no".into(),
+                "PrivatePIDs=yes".into(),
+                "TemporaryFileSystem=/tmp:rw,nosuid,nodev,size=16M".into(),
+                "RestrictAddressFamilies=AF_UNIX AF_INET".into(),
+                "ProtectSystem=strict".into(),
+                "ProtectHome=yes".into(),
+                "ProtectProc=invisible".into(),
+                "ProcSubset=pid".into(),
+                "ProtectKernelTunables=yes".into(),
+                "ProtectKernelModules=yes".into(),
+                "ProtectKernelLogs=yes".into(),
+                "ProtectControlGroups=yes".into(),
+                "NoNewPrivileges=yes".into(),
+                "CapabilityBoundingSet=".into(),
+                "RestrictNamespaces=yes".into(),
+                "RestrictSUIDSGID=yes".into(),
+                "LockPersonality=yes".into(),
+                "LimitCORE=0".into(),
+                "MemorySwapMax=0".into(),
+                "MemoryMax=128M".into(),
+                "TasksMax=32".into(),
+                "KillMode=control-group".into(),
+                "TimeoutStopSec=5".into(),
+                "SendSIGKILL=yes".into(),
+                "StandardInput=null".into(),
+                "StandardOutput=null".into(),
+                "StandardError=null".into(),
+                "Restart=no".into(),
+            ]
+            .into_iter()
+            .map(|value| format!("--property={value}")),
+        );
+        args.push(
+            if cfg!(target_arch = "aarch64") {
+                "/usr/bin/qemu-system-aarch64"
+            } else {
+                "/usr/bin/qemu-system-x86_64"
+            }
+            .into(),
+        );
+        args.extend(
+            oblivion_host::onion_uplink::arguments(std::path::Path::new(&role.runtime()))
+                .map_err(Error)?,
+        );
+        start_command(role, &args)
+    }
+}
+
+fn start_command(role: Role, args: &[String]) -> Result<()> {
+    execute("/usr/bin/systemd-run", args)?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if stopped_role(role)? {
+            return Err(Error("vm_start_failed"));
+        }
+        if PathBuf::from(role.runtime()).join("qmp.sock").exists() {
+            qmp(role, "query-status")?;
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Err(Error("vm_start_timeout"))
+}
+
+fn prepare_onion_wire(role: Role, name: &str, group: u32) -> Result<String> {
+    require(state_role(role)? == "active", "onion_network_unavailable")?;
+    let path = PathBuf::from(role.runtime()).join(name);
+    let metadata = fs::symlink_metadata(&path).map_err(|_| Error("onion_network_unavailable"))?;
+    require(
+        metadata.file_type().is_socket()
+            && metadata.uid() == role.uid()
+            && metadata.mode() & 7 == 0,
+        "unsafe_onion_network",
+    )?;
+    let text = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| Error("invalid_vm_path"))?;
+    require(
+        unsafe { libc::chown(text.as_ptr(), role.uid(), group) } == 0,
+        "onion_network_unavailable",
+    )?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o660))
+        .map_err(|_| Error("onion_network_unavailable"))?;
+    Ok(path.to_str().ok_or(Error("invalid_vm_path"))?.into())
 }
 
 pub fn state() -> Result<String> {
     state_role(Role::Session)
+}
+
+/// This second monitor does not contend with either console or short QMP
+/// operations. SO_PEERPIDFD pins the actual session process, without a numeric
+/// PID lookup or any guest output. Only the host owner can access its parent.
+pub fn session_owner() -> Result<OwnedFd> {
+    let socket = channel::connect(
+        std::path::Path::new("/run/oblivion-session/lifetime.sock"),
+        Duration::from_secs(2),
+    )
+    .map_err(|_| Error("session_watch_unavailable"))?;
+    crate::gateway::peer(&socket, VM_UID)?;
+    let file = std::fs::File::from(OwnedFd::from(socket));
+    oblivion_transfer::relay::peer_process(&file).map_err(|_| Error("session_watch_unavailable"))
 }
 
 pub fn network_devices() -> Result<usize> {
@@ -574,6 +748,14 @@ pub fn resume_transfer(role: Role) -> Result<()> {
 /// A fresh channel per transfer. Connect its host side before hotplugging the
 /// guest port so the guest's readiness marker cannot be discarded by QEMU.
 pub fn copy_port(id: &str, export: bool) -> Result<UnixStream> {
+    session_port(id, if export { "export" } else { "copy" })
+}
+
+pub fn chat_export_port(id: &str) -> Result<UnixStream> {
+    session_port(id, "archive")
+}
+
+fn session_port(id: &str, role: &str) -> Result<UnixStream> {
     require(
         id.len() == 32
             && id
@@ -593,7 +775,7 @@ pub fn copy_port(id: &str, export: bool) -> Result<UnixStream> {
     qmp_arguments(
         Role::Session,
         "device_add",
-        json!({"driver":"virtserialport","id":name,"chardev":name,"bus":"oblivion-serial.0","name":format!("oblivion.{}.{id}", if export { "export" } else { "copy" })}),
+        json!({"driver":"virtserialport","id":name,"chardev":name,"bus":"oblivion-serial.0","name":format!("oblivion.{role}.{id}")}),
     )?;
     Ok(stream)
 }
@@ -651,17 +833,122 @@ fn qmp(role: Role, operation: &str) -> Result<Value> {
 }
 
 fn qmp_arguments(role: Role, operation: &str, arguments: Value) -> Result<Value> {
+    qmp_descriptor(role, operation, arguments, None)
+}
+
+/// Give only the already-open, read-only ciphertext to the file hypervisor.
+/// No general-vault directory or unlocked mapping enters its namespace.
+pub fn attach_onion_backup(file: &std::fs::File) -> Result<()> {
+    let mut header = [0u8; 8];
+    std::os::unix::fs::FileExt::read_exact_at(file, &mut header, 0)
+        .map_err(|_| Error("invalid_backup_volume"))?;
+    let bytes = file
+        .metadata()
+        .map_err(|_| Error("invalid_backup_volume"))?
+        .len();
+    require(
+        header == *b"LUKS\xba\xbe\0\x02"
+            && (32 * 1024 * 1024..=oblivion_transfer::MAX_ENCRYPTED_VOLUME_BYTES).contains(&bytes),
+        "invalid_backup_volume",
+    )?;
+    require(
+        unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) } & libc::O_ACCMODE == libc::O_RDONLY,
+        "backup_must_be_read_only",
+    )?;
+    qmp_descriptor(Role::OnionFile, "add-fd", json!({"fdset-id":1}), Some(file))?;
+    qmp_arguments(
+        Role::OnionFile,
+        "blockdev-add",
+        json!({"driver":"raw","node-name":"oblivion-backup","read-only":true,"file":{"driver":"file","filename":"/dev/fdset/1","read-only":true}}),
+    )?;
+    qmp_arguments(
+        Role::OnionFile,
+        "device_add",
+        json!({"driver":"virtio-blk-pci","drive":"oblivion-backup","id":"backup","serial":"oblivion-backup","bus":"oblivion-backup-port"}),
+    )?;
+    Ok(())
+}
+
+fn qmp_descriptor(
+    role: Role,
+    operation: &str,
+    arguments: Value,
+    descriptor: Option<&std::fs::File>,
+) -> Result<Value> {
+    // Copy hotplug/cleanup runs outside the foreground storage request. QEMU's
+    // Unix monitor accepts one client: serialize those callers per VM rather
+    // than allowing a directory refresh to consume an unrelated monitor frame.
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(format!("/run/oblivion/qmp-{}.lock", role.name()))
+        .map_err(|_| Error("vm_control_lock_failed"))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            break;
+        }
+        require(
+            std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock
+                && Instant::now() < deadline,
+            "vm_control_busy",
+        )?;
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let stream = channel::connect(
         &PathBuf::from(format!("{}/qmp.sock", role.runtime())),
         Duration::from_secs(5),
     )
     .map_err(|_| Error("vm_control_unavailable"))?;
+    crate::gateway::peer(&stream, role.uid())?;
     let mut reader = BufReader::new(Channel::new(&stream, Duration::from_secs(5)));
-    require(
-        read_qmp(&mut reader)?.get("QMP").is_some(),
-        "invalid_vm_greeting",
-    )?;
+    loop {
+        let greeting = read_qmp(&mut reader)?;
+        if greeting.get("event").is_some() {
+            continue;
+        }
+        require(greeting.get("QMP").is_some(), "invalid_vm_greeting")?;
+        break;
+    }
     for command in ["qmp_capabilities", operation] {
+        if command == operation {
+            if let Some(file) = descriptor {
+                reader
+                    .get_ref()
+                    .prepare_write()
+                    .map_err(|_| Error("vm_control_failed"))?;
+                let mut control = [0usize; 8];
+                let mut byte = b' ';
+                let mut data = libc::iovec {
+                    iov_base: (&mut byte as *mut u8).cast(),
+                    iov_len: 1,
+                };
+                let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+                message.msg_iov = &mut data;
+                message.msg_iovlen = 1;
+                message.msg_control = control.as_mut_ptr().cast();
+                message.msg_controllen =
+                    unsafe { libc::CMSG_SPACE(size_of::<i32>() as u32) as usize };
+                unsafe {
+                    let header = libc::CMSG_FIRSTHDR(&message);
+                    (*header).cmsg_level = libc::SOL_SOCKET;
+                    (*header).cmsg_type = libc::SCM_RIGHTS;
+                    (*header).cmsg_len = libc::CMSG_LEN(size_of::<i32>() as u32) as usize;
+                    std::ptr::write_unaligned(
+                        libc::CMSG_DATA(header).cast::<i32>(),
+                        file.as_raw_fd(),
+                    );
+                    require(
+                        libc::sendmsg(stream.as_raw_fd(), &message, libc::MSG_NOSIGNAL) == 1,
+                        "vm_control_failed",
+                    )?;
+                }
+            }
+        }
         reader
             .get_mut()
             .write_all(format!("{}\n", json!({"execute": command, "arguments": if command == operation { arguments.clone() } else { json!({}) }})).as_bytes())

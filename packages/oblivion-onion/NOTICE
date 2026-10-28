@@ -1,0 +1,13 @@
+Oblivion's OnionShare worker is a separate GPL-3.0-or-later component.
+It imports the upstream OnionShare web service and does not replace its HTTP,
+multipart, archive or download implementations. The surrounding Oblivion
+controller communicates with this worker as a separate process.
+
+OnionShare 2.7: https://github.com/onionshare/onionshare
+Source commit: 98ae86a660469bc3da4ffb4aeb2381f1cdfc1756
+Copyright (C) 2014-2026 Micah Lee, et al. <micah@micahflee.com>
+
+The accompanying LICENSE reproduces upstream's GPL version 3. The worker's
+SPDX identifier permits version 3 or any later version. Installed dependency
+licenses, source URLs, versions and hashes are retained in the bundled Python
+environment and its inventory.json; no dependencies are fetched at runtime.

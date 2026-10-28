@@ -16,6 +16,10 @@ pub fn configure(transport: &Transport) -> io::Result<()> {
             endpoint.ip(), endpoint.port(),
         )),
     }
+    apply(&policy)
+}
+
+pub fn apply(policy: &str) -> io::Result<()> {
     let mut child = Command::new("/usr/sbin/nft")
         .args(["-f", "-"])
         .env_clear()

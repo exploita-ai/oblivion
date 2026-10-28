@@ -1,0 +1,47 @@
+{
+  "format_version": 1,
+  "sources": [
+    {
+      "package": "cython",
+      "version": "3.3.0",
+      "url": "https://files.pythonhosted.org/packages/a9/d8/4981ef716ad0e3ff0d3ef383aefc6b03c4a88dee33b272bf8e0d833001ca/cython-3.3.0.tar.gz",
+      "sha256": "eed0d93fbca7087f143b42c34b05a825849bdf17f101572c2105acfa49aa88b8",
+      "members": [
+        "cython-3.3.0/COPYING.txt",
+        "cython-3.3.0/LICENSE.txt"
+      ]
+    },
+    {
+      "package": "dnspython",
+      "version": "2.9.0",
+      "url": "https://raw.githubusercontent.com/rthalley/dnspython/e790c8f20a67ad439c7aafef2321e161c6028eee/LICENSE",
+      "sha256": "c3ea3ff5654b329c19d3bc5f7481af623c3dded4a6145585499f843ad3d741cd",
+      "filename": "LICENSE"
+    },
+    {
+      "package": "gevent-websocket",
+      "version": "0.10.1",
+      "url": "https://files.pythonhosted.org/packages/98/d2/6fa19239ff1ab072af40ebf339acd91fb97f34617c2ee625b8e34bf42393/gevent-websocket-0.10.1.tar.gz",
+      "sha256": "7eaef32968290c9121f7c35b973e2cc302ffb076d018c9068d2f5ca8b2d85fb0",
+      "members": [
+        "gevent-websocket-0.10.1/LICENSE"
+      ]
+    },
+    {
+      "package": "onionshare-cli",
+      "version": "2.7",
+      "url": "https://raw.githubusercontent.com/onionshare/onionshare/98ae86a660469bc3da4ffb4aeb2381f1cdfc1756/LICENSE.txt",
+      "sha256": "00209f6e6b6efaba0d150005ab108364bfeef6418345410835d725623661da4f",
+      "filename": "LICENSE.txt"
+    },
+    {
+      "package": "pypng",
+      "version": "0.20220715.0",
+      "url": "https://files.pythonhosted.org/packages/93/cd/112f092ec27cca83e0516de0a3368dbd9128c187fb6b52aaaa7cde39c96d/pypng-0.20220715.0.tar.gz",
+      "sha256": "739c433ba96f078315de54c0db975aee537cbc3e1d0ae4ed9aab0ca1e427e2c1",
+      "members": [
+        "pypng-0.20220715.0/LICENCE"
+      ]
+    }
+  ]
+}

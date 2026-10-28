@@ -24,6 +24,13 @@ pub struct Permit {
     pub limits: Limits,
 }
 
+/// Selection metadata comes from the same offer that produced the verified
+/// receipt. A later publication cannot silently substitute another selection.
+pub struct Approved {
+    pub receipt: Receipt,
+    pub paths: Vec<String>,
+}
+
 /// A maintenance port reaches only the active guest's receiver. No source VM,
 /// external device, arbitrary path or document payload is involved.
 pub fn recover(
@@ -90,6 +97,62 @@ fn run_copy(
     permit: Option<Permit>,
     external: bool,
 ) -> io::Result<()> {
+    let (approved, mut control) = copy(
+        source,
+        destination,
+        control,
+        owners,
+        budget,
+        permit,
+        external,
+    )?;
+    write_message(&mut control, &approved.receipt)
+}
+
+/// A restore is not published by the copy engine. The controller must durably
+/// record the verified ciphertext and release its source before acknowledging
+/// the copy to the manager; unlocking/validation happens separately.
+pub fn stage(
+    source: File,
+    destination: File,
+    control: File,
+    owners: Vec<OwnedFd>,
+    budget: Duration,
+    permit: Permit,
+) -> io::Result<Receipt> {
+    stage_selected(source, destination, control, owners, budget, permit)
+        .map(|approved| approved.receipt)
+}
+
+pub fn stage_selected(
+    source: File,
+    destination: File,
+    control: File,
+    owners: Vec<OwnedFd>,
+    budget: Duration,
+    permit: Permit,
+) -> io::Result<Approved> {
+    copy(
+        source,
+        destination,
+        control,
+        owners,
+        budget,
+        Some(permit),
+        false,
+    )
+    .map(|(approved, _)| approved)
+}
+
+fn copy(
+    source: File,
+    destination: File,
+    control: File,
+    owners: Vec<OwnedFd>,
+    budget: Duration,
+    permit: Option<Permit>,
+    external: bool,
+) -> io::Result<(Approved, Channel)> {
     let deadline = Instant::now()
         .checked_add(budget)
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
@@ -117,7 +180,7 @@ fn run_copy(
     // connection. The controller must still reap this worker before teardown.
     drop(source);
     drop(destination);
-    write_message(&mut control, &result?)
+    Ok((result?, control))
 }
 
 fn exchange(
@@ -125,7 +188,7 @@ fn exchange(
     destination: &mut Channel,
     control: &mut Channel,
     permit: Option<Permit>,
-) -> io::Result<Receipt> {
+) -> io::Result<Approved> {
     let request = loop {
         match read_message::<SourceRequest>(control, 64 * 1024)? {
             SourceRequest::Offer(request) => break request,
@@ -193,7 +256,10 @@ fn exchange(
     let mut done = [0; 7];
     source.read_exact(&mut done)?;
     require(&done == b"copied\n", "sender_not_complete")?;
-    Ok(receipt)
+    Ok(Approved {
+        receipt,
+        paths: request.paths,
+    })
 }
 
 /// Linux 6.5+ pins the process that established this private Unix connection.

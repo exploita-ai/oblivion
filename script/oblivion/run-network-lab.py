@@ -180,18 +180,28 @@ def verify_image(image, overlay=False):
         digest, name = line.split()
         assert Path(name).name == name and hashlib.sha256((image / name).read_bytes()).hexdigest() == digest
     repository = Path(__file__).resolve().parents[2]
+    guest_helpers = {"chat-database.py", "chat-export.py", "session-backup.py"}
+    build_helpers = {"test-chat-database.py", "test-chat-export.py", "test-session-backup.py", "test-host-firewall.py", "host-firewall.nft"}
     for line in (image / "broker-sources.sha256").read_text().splitlines():
         digest, name = line.split()
-        source = repository / "packages/oblivion-gateway" / name
+        # The compiler stages these shared host/script helpers in its working
+        # directory; their authoritative sources remain in their own packages.
+        if name in guest_helpers:
+            source = repository / "packages/oblivion-host/guest" / name
+        elif name in build_helpers:
+            source = repository / "script/oblivion" / name
+        else:
+            source = repository / "packages/oblivion-gateway" / name
+        assert source.resolve().is_relative_to(repository), "Source manifest escaped the repository"
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest, f"rebuild broker: {source}"
     # By default test the exact built image. Development overlays are explicit
     # and cannot hide an old firewall, Tor policy or service configuration.
     for line in (image / "sources.sha256").read_text().splitlines():
         digest, name = line.split()
         if name.startswith("./guest/"):
-            if overlay and Path(name).name == "network.sh":
+            if overlay and name == "./guest/network.sh":
                 continue
-            source = repository / "packages/oblivion-gateway/guest" / Path(name).name
+            source = repository / "packages/oblivion-gateway" / name.removeprefix("./")
             assert hashlib.sha256(source.read_bytes()).hexdigest() == digest, f"rebuild image: {source}"
         if name.startswith("./lab/"):
             if overlay and Path(name).name == "vm-network-fixture.py":
@@ -276,9 +286,9 @@ def main():
             (output / "rules-after-probes.json").write_text(json.dumps(rules, indent=2) + "\n")
             check("root in the chat cannot reach listening administration/SOCKS sockets or forward TCP, DNS, UDP/QUIC and IPv6")
             before = drops(rules, "output", owner=True)
-            gateway.call("direct-denied")
+            assert gateway.call("direct-denied")["api_and_tools_dns_tcp_udp_denied"]
             assert drops(gateway.call("rules"), "output", owner=True) > before
-            check("API process UID cannot connect directly to a public IP")
+            check("API and tools UIDs cannot send direct DNS over TCP/UDP, DoT or application UDP; API cannot reach a public IP directly")
             shutil.copyfile(output / "gateway-outside.pcap", output / "before-tor-outside.pcap")
             summary["before_tor"] = capture(output / "before-tor-outside.pcap")
             assert summary["before_tor"]["ipv4"] == 0 and summary["before_tor"]["ipv6"] == 0

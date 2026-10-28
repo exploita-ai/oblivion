@@ -1,0 +1,38 @@
+[Unit]
+Description=Oblivion protected session terminal
+Requires=oblivion-vault.service
+After=oblivion-vault.service oblivion-session-network.service
+
+[Service]
+Type=simple
+User=1000
+Group=1000
+WorkingDirectory=/vault/workspace
+RuntimeDirectory=oblivion-terminal
+RuntimeDirectoryMode=0700
+Environment=HOME=/vault/home
+Environment=XDG_CONFIG_HOME=/vault/config
+Environment=XDG_STATE_HOME=/vault/state
+Environment=XDG_DATA_HOME=/vault/state
+Environment=XDG_CACHE_HOME=/tmp/oblivion-cache
+Environment=TMPDIR=/tmp
+Environment=HISTFILE=/dev/null
+Environment=TERM=xterm-256color COLORTERM=truecolor
+ExecStart=/usr/lib/oblivion/guest/terminal.sh
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/hvc1
+TTYReset=yes
+TTYVHangup=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+LimitCORE=0
+KillMode=control-group
+TimeoutStopSec=10s
+Restart=on-failure
+RestartSec=1s
+
+[Install]
+WantedBy=multi-user.target

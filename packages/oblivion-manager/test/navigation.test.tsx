@@ -81,6 +81,22 @@ test("setup supports variants, a keyboard test and temporary-only UTC before unl
   } finally { app.renderer.destroy(); await app.renderer.closed }
 })
 
+test.each([[80, 24], [160, 50]])("setup leaves the loading modal after applying a keyboard at %ix%i", async (width, height) => {
+  const pending = Promise.withResolvers<void>()
+  const started = Promise.withResolvers<void>()
+  const app = await testRender(() => <Setup catalog={{ keyboards: [{ value: "it", label: "Italian", variants: [{ value: "mac", label: "Italian (Macintosh)" }] }], timezones: ["UTC"] }} current={{ version: 1, completed: false, keyboard: "it", variant: "mac", timezone: "UTC" }} writable={false} applyKeyboard={() => { started.resolve(); return pending.promise }} save={async () => {}} cancel={() => {}} failed={(error) => { throw error }} />, { width, height, kittyKeyboard: true })
+  try {
+    await app.renderOnce(); await app.mockInput.pressEnter(); await app.renderOnce()
+    await app.mockInput.pressEnter(); await started.promise; await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Applying preferences")
+    pending.resolve(); await pending.promise; await app.renderOnce()
+    expect(app.captureCharFrame()).not.toContain("Applying preferences")
+    expect(app.captureCharFrame()).toContain("Keyboard / Test")
+    await app.mockInput.typeText("test"); await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("test")
+  } finally { pending.resolve(); await app.dispose() }
+})
+
 test.each([[80, 24], [160, 50]])("documents occupy the %ix%i viewport with visible actions", async (width, height) => {
   const runtime = preview(() => {})
   await runtime.request({ operation: "open-documents", session: "a".repeat(32) })
@@ -213,7 +229,7 @@ test.each([
     for (const [width, height] of [[80, 24], [160, 50]]) {
       app.resize(width, height); await app.renderOnce()
       const footer = app.captureCharFrame().split("\n").slice(-4).join("\n")
-      expect(footer).toContain("Internet [?]")
+      expect(footer).toContain("Network [+]")
       expect(footer).toContain(tor)
       expect(footer).toContain(socks)
       expect(footer).not.toMatch(/SESSION NETWORK|Direct connections|All sessions|NOT STARTED|F6 Menu/)

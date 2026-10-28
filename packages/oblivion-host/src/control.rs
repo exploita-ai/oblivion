@@ -35,7 +35,14 @@ fn connect(operation: &str, session: Option<&str>, secret: &[u8]) -> Result<Unix
     if secret.len()
         > if matches!(
             operation,
-            "api-keys" | "egress" | "network-policy" | "transfers" | "prepare-usb" | "settings" | "connections"
+            "api-keys"
+                | "egress"
+                | "network-policy"
+                | "transfers"
+                | "onion"
+                | "prepare-usb"
+                | "settings"
+                | "connections"
         ) {
             4096
         } else {
@@ -99,8 +106,18 @@ fn response(channel: Channel<'_>) -> Result<String> {
 
 #[cfg(target_os = "linux")]
 pub fn console() -> Result<UnixStream> {
+    descriptor("console")
+}
+
+#[cfg(target_os = "linux")]
+pub fn terminal() -> Result<UnixStream> {
+    descriptor("terminal")
+}
+
+#[cfg(target_os = "linux")]
+fn descriptor(operation: &str) -> Result<UnixStream> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    let stream = connect("console", None, &[])?;
+    let stream = connect(operation, None, &[])?;
     let channel = Channel::new(&stream, Duration::from_secs(120));
     let mut byte = 0u8;
     let mut data = libc::iovec {
@@ -139,5 +156,10 @@ pub fn console() -> Result<UnixStream> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn console() -> Result<UnixStream> {
+    Err("linux_required".into())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn terminal() -> Result<UnixStream> {
     Err("linux_required".into())
 }

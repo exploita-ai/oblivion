@@ -2,6 +2,8 @@ pub mod browser;
 pub mod channel;
 mod directory;
 pub mod endpoint;
+#[cfg(target_os = "linux")]
+pub mod onion_file;
 pub mod recovery;
 pub mod relay;
 
@@ -11,12 +13,15 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"OBLVCP01";
 const END: &[u8; 8] = b"OBLVEND1";
 const HEADER_LIMIT: usize = 1024 * 1024;
+pub const ENCRYPTED_VOLUME_NAME: &str = "session.oblivion";
+pub const MAX_ENCRYPTED_VOLUME_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -136,6 +141,64 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// Resolve a selected backup inside an isolated media guest, retaining the
+    /// opened file and emitting only the fixed public ciphertext filename.
+    pub fn encrypted_path(root: &Path, path: &str, maximum: u64) -> io::Result<Self> {
+        validate_path(path)?;
+        let mut components = path.split('/').collect::<Vec<_>>();
+        let name = components.pop().ok_or_else(|| invalid("invalid_path"))?;
+        let parent = components
+            .into_iter()
+            .try_fold(Directory::open(root)?, |parent, name| {
+                parent.directory(name)
+            })?;
+        Self::encrypted_volume(parent.source(name)?, maximum)
+    }
+
+    /// A trusted controller delegates one closed, read-only LUKS2 file. The
+    /// signature is not authentication or a check of its encrypted filesystem.
+    /// No directory or peer-selected filesystem path is accepted here.
+    pub fn encrypted_volume(mut file: File, maximum: u64) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        require(
+            flags >= 0 && flags & libc::O_ACCMODE == libc::O_RDONLY,
+            "source_not_read_only",
+        )?;
+        require(
+            metadata.is_file() && metadata.nlink() == 1,
+            "unsupported_source",
+        )?;
+        require(
+            metadata.len() >= 32 * 1024 * 1024 && metadata.len() <= maximum,
+            "byte_limit",
+        )?;
+        file.rewind()?;
+        let mut magic = [0; 8];
+        file.read_exact(&mut magic)?;
+        require(
+            &magic == b"LUKS\xba\xbe\x00\x02",
+            "invalid_encrypted_volume",
+        )?;
+        file.rewind()?;
+        let sha256 = copy_hash(&mut file, &mut io::sink(), metadata.len())?;
+        require(file.metadata()?.len() == metadata.len(), "source_changed")?;
+        Ok(Self {
+            manifest: Manifest::new(
+                vec![Entry::File {
+                    path: ENCRYPTED_VOLUME_NAME.into(),
+                    size: metadata.len(),
+                    sha256,
+                }],
+                Limits {
+                    entries: 1,
+                    bytes: maximum,
+                },
+            )?,
+            files: vec![file],
+        })
+    }
+
     pub fn prepare(root: &Path, paths: &[String], limits: Limits) -> io::Result<Self> {
         require(
             limits.entries > 0 && limits.entries <= 4096,

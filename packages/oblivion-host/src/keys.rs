@@ -111,12 +111,18 @@ impl Keyring {
 
     // Only an effective credential change invalidates the gateway. Labels and
     // unrelated keys must not discard a healthy Tor circuit.
-    pub fn requires_revocation(&self, command: &Command, selection: Option<Option<String>>) -> bool {
+    pub fn requires_revocation(
+        &self,
+        command: &Command,
+        selection: Option<Option<String>>,
+    ) -> bool {
         let selected = self.status(selection.clone()).selected;
         match command {
             Command::Rename { .. } => false,
             Command::Remove { id } => selected.as_ref() == Some(id),
-            Command::Replace { id, key } => selected.as_ref() == Some(id) && self.key(id) != Some(key.as_str()),
+            Command::Replace { id, key } => {
+                selected.as_ref() == Some(id) && self.key(id) != Some(key.as_str())
+            }
             Command::Default { id } => selection.is_none() && selected.as_ref() != Some(id),
             Command::Select { id } => selected.as_ref() != Some(id),
             Command::Temporary { .. } => true,

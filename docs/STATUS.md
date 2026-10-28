@@ -6,6 +6,25 @@ sensitive or irreplaceable data.
 
 ## Implemented
 
+- **Host/guest text clipboard in development images.** UTM uses Debian's SPICE
+  broker and a pinned open-source Wayland adapter restricted to UTF-8 text and
+  256 KiB payloads. The host announces formats; bytes are requested only on
+  paste. Guest terminal clipboard escapes remain filtered and manager copy
+  requires a visible selection. With no selection Ctrl+C still interrupts
+  agent/shell commands. State and helper output remain confined to the display
+  RAM/runtime boundary. Bare-metal boot has no hypervisor clipboard channel.
+  The amd64 build includes only the pinned upstream VirtualBox clipboard
+  client, without guest-control, shared-folder or full Guest Additions services.
+  Both mechanisms use the hypervisor's explicit sharing setting, independently
+  of Debug/SSH. A fresh ARM64 ISO and separate networkless UTM VM passed both
+  directions with a human tester using physical shortcuts; automated modifier
+  delivery through the Apple view was unsuitable for these shortcut checks.
+  Four protocol tests, six real headless Cage/data-control checks, 130 manager
+  tests, official manager TypeScript checks and the 20-task repository check
+  pass. Actual VirtualBox acceptance remains pending. Setup and clipboard
+  instructions for UTM/VirtualBox are in `DEVELOPMENT.md`; previously released
+  ISOs and the user's personal VM are unchanged.
+
 - amd64 and arm64 Debian live images
 - encrypted general settings vault
 - separate LUKS2 volume and password for each persistent session
@@ -69,6 +88,7 @@ new runtime capability, format migration or removal of an existing VM boundary.
 | In scope | Delivery boundary |
 | --- | --- |
 | Agent and manager | Retain coding tools and OpenCode chat components; fix concrete usability/reliability defects. |
+| Operational workspace | Deliver the interactive terminal and process controls in the milestones below. |
 | Protected work | General LUKS2 vault and separate session volumes, titles, multiple chats, Documents, one active session, locking and recovery. |
 | Remote providers | Abliteration first; qualify other integrated providers separately. No new catalog or arbitrary endpoints. |
 | Keys and network | Encrypted keys, global default/per-opening override, Tor default, optional SOCKS5, revoked grants and no direct fallback. |
@@ -76,50 +96,310 @@ new runtime capability, format migration or removal of an existing VM boundary.
 | Virtualized image | Same Debian environment on qualified CPU/OS/hypervisor combinations, nested KVM, persistent virtual disk and tested import/setup profile. Start with the available UTM Mac; qualify Linux/QEMU and Windows/VirtualBox independently. |
 | arm64 | Preserve builds/regressions; no generic ARM or all-Mac compatibility claim. |
 | Ephemeral mode | Volatile Debian session state and unchanged archives; outer-host memory/swap/snapshot retention remains outside Debian's control. |
-| Transfers and upgrades | Explicit import/export, preserved histories/files and verified recovery/upgrade paths without shell repair. |
+| Transfers and portability | USB and virtual-media import, OnionShare receive/share, conversation exports, encrypted session backup/restore and redacted diagnostics. |
+| Upgrades | Preserved histories/files and verified recovery/upgrade paths without shell repair. |
 
 Do not replace the gateway/transfer VMs with native host services or introduce
 new platform abstractions solely for deferred native ports. Keep the current
 Linux storage backend and formats. No native Mac encryption backend is needed
 for this roadmap: Debian manages LUKS inside the VM's persistent virtual disk.
 
-Also defer inference nodes, air-gap workflows, HuggingBay/torrents, OnionShare,
-copies between sessions, simultaneous protected sessions and a disposable
-browser. No GPU passthrough or inference VM work is scheduled.
+Also defer inference nodes, air-gap workflows, HuggingBay/torrents, live copies
+between sessions and simultaneous protected sessions. The additional Files/Git
+UI, browser/project previews and MCP integrations are deferred for
+now, with no scheduled delivery milestone. OnionShare is implemented in the development tree and remains subject to
+operational-candidate qualification. No GPU passthrough or inference VM work is scheduled.
 
 ## Near-term roadmap
 
-1. **Focused audit and corrections — implemented; ARM64 laboratory checks passing.**
-   [Findings and targeted test results](#audit-results) cover controller/VM
-   lifecycle, chat storage, credentials and transport. Rebuilt-image inspection,
-   canary disk scans, forced VM termination and live Tor capture are recorded
-   below. Complete target-hardware and hypervisor-profile acceptance before
-   release; native-vault research remains stopped.
-2. **Persistence and recovery.** Prove multi-chat and document preservation
-   across close/reopen, Debian reboot, outer-VM termination and upgrades.
-   Exercise wrong passwords, full disks, interrupted transfers and failed lock.
-3. **Remote reliability.** Complete key lifecycle, real API/agent tasks, Tor
-   progress/cancellation, SOCKS5, failure recovery and direct-egress denial.
-4. **Usable delivery.** Finish setup and existing TUI behavior, tested VM
-   profiles, nested-acceleration/resource checks and explicit file transfers.
-   Users install the supported virtualizer/import the image; Oblivion manages
-   its internal services without Linux commands or configuration-file edits.
-5. **Qualified beta.** Minimize Debian based on evidence, remove release debug
-   access, publish verified artifacts/provenance, test upgrades/rollback and
-   run independent user trials. Replace the physical candidate only after
-   its successor passes regressions; publish actual supported combinations.
+The operational roadmap was updated on 2026-10-28 to focus on terminal,
+transfers, exports, encrypted backup/restore and OnionShare. These are ordered
+milestones with acceptance gates, not calendar estimates or released features.
+Retain the existing English OpenTUI manager, red branding and OpenCode chat
+components throughout.
 
-The audit below sets the order for persistence and remote-network corrections.
-This plan does not change the
-running VM, personal archives or host networking. Use disposable fixtures or
-copies for destructive tests.
+### Baseline and reusable implementation
 
-Require the full workflow on every declared profile: boot/import, prepare
-storage, configure a key, perform an agent file task, use multiple chats and
-Documents, lock, reboot and restore all work. At least five non-author testers
-across qualified paths must complete it without developer repairs before the
-managed-beta usability gate is complete. Unsupported nested virtualization
-must be diagnosed early, not hidden behind a session startup timeout.
+The ARM64 candidate with SHA-256
+`93c6dc8b4eafc86f9124195d8f7d92b9d124f209c69fb4e1f0e80ac24f1a0636`
+passed real UTM acceptance on 2026-10-28: Tor/provider responses, two chats with
+titles, a shared document, close/reopen and clean full VM shutdown/start. A new
+provider request after restart read the original document using the saved key.
+This covers the tested M4 Pro / Apple Virtualization profile at 4 CPUs and 4 GiB
+RAM. The host's NordVPN was disconnected for the passing network test;
+Tailscale remained connected. The earlier DHCP failure and 8 GiB stalls need
+separate diagnosis. This result does not replace physical power-loss,
+full-image leak, upgrade or network-failure qualification. Detailed local
+evidence remains in ignored artifacts; publish reproducible evidence with the
+candidate that is actually released.
+
+| Capability | Current implementation to reuse | Remaining product work |
+| --- | --- | --- |
+| Terminal and jobs | OpenCode shell/jobs and PTY services; the manager's embedded terminal and bounded console transport. | A user-facing guest terminal and process view, independent of chat and provider readiness. |
+| Files in/out | Documents picker, isolated transfer endpoints, manifests, hashes, cancellation and recovery. | Qualify USB and virtual import media; add the new source/destination choices without shared folders. |
+| Exports and backups | Stable chat DB, per-session LUKS2 containers and controller teardown. | Markdown/JSON export, closed-session encrypted backup/restore and allowlisted diagnostics. |
+| OnionShare | Existing Tor gateway and verified copy engine. | Package and confine the upstream CLI, implement private receive/share lifecycles and explicit intake approval. |
+
+### Ordered milestones
+
+| Milestone | Deliverable | Dependency and exit evidence |
+| --- | --- | --- |
+| **M0 — protect the baseline** | Preserve the passing chat/storage behavior; surface unsupported nested virtualization, insufficient RAM/storage, DHCP, gateway and provider failures distinctly. Finish remaining high-priority audit corrections. | Existing source/lab results plus profile-specific fault tests. No lost history, false lock success, stale protection indicator or direct fallback. This gate stays active for every later milestone. |
+| **M1 — Terminal and Processes** | A full-window interactive shell in the session VM; create/select/stop terminals, inspect build/test/server jobs, bounded output and exit status. It works offline without a provider key. Switching to Chat or Documents keeps processes running; locking stops and verifies all session processes. | Reuse PTY/jobs and the embedded renderer. Exercise input, resize, scroll, interrupts, process-tree shutdown, crash/reopen and offline-to-chat transitions. No host shell, root console, provider key or general-vault access. |
+| **M2 — file intake and delivery** | `Documents / Import` accepts selected USB files/folders and explicitly attached virtual import media. `Export` writes selected readable files after a clear destination/confirmation step. Provide source, destination, totals, progress, cancellation and recovery. | Reuse the copy engine. Test actual USB and UTM media, large directories, unsupported files, path escapes, disconnects, full disks and interrupted copies. Verify receipt/flush before success. Never expose an entire outer-host folder or mount the session filesystem there. |
+| **M3 — exports and session portability** | Three distinct actions: `Export chat` as Markdown/JSON, `Back up encrypted session` with `Restore session`, and `Export diagnostics`. Backups preserve all chats, IDs, workspace/imports and required session metadata; provider keys remain in the general vault. | Complete M2 and the backup format/lifecycle contract below. Restore on a disposable copy and on another qualified instance; preserve originals and reject unsupported versions without destructive migration. Test corruption/truncation, wrong passwords, cancellation and low space. |
+| **M4 — OnionShare files** | `Receive over Tor` and `Share over Tor` in the existing transfer UI, using upstream OnionShare CLI. Temporary private addresses/access keys, size/time limits, progress and cancellation; inspect and approve received files before publishing them to the session. | Complete M2/M3. Qualify the dedicated transfer/Tor path under the existing gateway boundary, secret/log retention, owner death, timeout and revoke-on-lock. Test real sender/recipient round trips, including an encrypted session backup. |
+| **M5 — qualify and release** | Minimal audited Debian packages/services for the delivered features, release/debug separation, signed manifests/checksums, verified update/rollback and tested live/VM profiles. | Every included milestone passes affected package checks, root `bun run check`, Linux integration and actual supported-profile acceptance. At least five non-author testers finish the workflow without developer repairs. Publish measured image/RAM costs and exact support boundaries. |
+
+The next operational candidate contains M0–M4: terminal/processes, useful file
+intake/export, chat exports, encrypted session backup/restore, redacted
+diagnostics and OnionShare receive/share. M5 qualifies that candidate for
+release; incomplete features stay visibly planned and are not advertised as
+shipped.
+
+### Implementation progress (2026-10-28)
+
+- **M1 source implemented; deployment qualification in progress.** Terminal F8
+  uses guest-only tmux through the existing sanitized 60 Hz viewport, alongside
+  Chat F6 and Documents F7. Offline use needs no key/NIC; chat-mode shells use
+  the same revocable tool-proxy capability as the agent. Manager lifecycle and
+  layout tests pass at 80×24 and 160×50, and the real PTY/tmux regression passes
+  for multiple windows, resizing and reattachment. The ARM64 Linux guest with
+  the actual terminal service and Rust bridge passes offline nonroot execution,
+  process view, interruption and a workspace file across clean guest reboot.
+  The focused real controller/LUKS laboratory additionally passes terminal
+  attachment, background-job retention across detach/reattach, normal close
+  with the QEMU PID reaped and LUKS mapping gone, and reopening with the workspace
+  preserved and old jobs absent. Its persistent-disk scan finds no synthetic
+  plaintext canaries. This uses HVF plus a nested TCG fixture: coexistence with
+  a real provider chat and supported outer-VM acceptance still need the rebuilt
+  candidate. Evidence stays under ignored `artifacts/oblivion-operations`.
+- **Session base tools integrated in source.** The shared production/laboratory
+  image now bundles curl, jq/SQLite, file/tree/less/nano, archive tools, Python
+  venv/pip, PDF utilities and a pinned upstream Node LTS/npm bundle alongside
+  Git/ripgrep and the shell/process tools. The generated `oblivion-tools`
+  inventory is loaded by the real compiled client's configuration and included
+  in static image audits, including non-Debian npm dependencies and source
+  hashes. Shared terminal/agent defaults disable histories and npm log files,
+  keep caches in RAM, and enable Node's native proxy support. The upstream
+  bundle replaces Debian npm after a real test exposed an authenticated-proxy
+  dependency/API mismatch; it also avoids that package's broad dependency set.
+  Four ARM64 container integration tests pass with no external network and a
+  read-only root, including authenticated HTTPS for curl/Python/Node/Git/npm/pip,
+  certificate and proxy refusals, package installation and real chat startup.
+  The offline ARM64 VM passes tools, virtualenv and Node-file persistence across
+  reboot together with terminal/export acceptance. Its compressed session root
+  is 307,261,440 bytes versus 247,767,040 bytes for the prior laboratory image
+  (about 57 MiB additional; not a measured final ISO size). The amd64 upstream
+  archive hash, Node and npm executables were checked under emulation; complete
+  amd64 tool integration and supported-candidate/physical-media acceptance
+  remain qualification gates. No running personal VM was updated.
+- **M2 source implemented; supported-profile qualification remains.** Eligible USB and explicitly tagged
+  virtio import/export media now expose their kind and read-only status.
+  Export rejects import-only/read-only sources. The disposable ARM64 host/
+  nested-guest lifecycle passes real LUKS copies, cancellation, interrupted
+  writers, source-VM death, forced closure, ENOSPC, FAT/exFAT name collisions,
+  UTF-8 round trips and ephemeral operation with persistent storage byte-identical.
+  Its persistent-disk scan finds none of the synthetic plaintext canaries.
+  That is a software-media test under HVF/TCG, not physical USB or production
+  KVM/UTM acceptance of the new candidate.
+- **M3 source implementation and qualification in progress.** Documents can select
+  a chat and confirm Markdown/OpenCode JSON creation, or review and create an
+  allowlisted diagnostic JSON report. Files are created inside the encrypted
+  session and selected for a subsequent explicit media export. Chat export
+  snapshots SQLite including committed WAL frames, reads the snapshot through
+  an unregistered, network-isolated OpenCode server and preserves pending work
+  and incomplete source messages. It returns only chat metadata and generated
+  paths to the manager. Real compiled-client tests cover transcript equality,
+  tool/reasoning content, UTF-8, symlink refusal and private staging cleanup.
+  The deployed ARM64 service passes offline JSON/Markdown and diagnostic
+  creation, ten consecutive maintenance operations, reboot persistence and
+  removal of unfinished staging while preserving completed exports. Service
+  instances use the operation ID rather than a reusable kernel port number.
+  Supported-candidate acceptance remains pending; transcript export is not a
+  backup. Whole-session backup and restore are connected in source to the
+  controller and manager.
+  `Sessions / Back up` selects writable media, requests the session password
+  and write authorization, then requires confirmation of the encrypted volume.
+  An offline guest records versioned session metadata and checks SQLite without
+  starting the agent. The controller stops that guest and closes its mapping
+  before copying; other session openings remain blocked until cleanup. The
+  copy subprocess runs without root, with only a read-only inherited descriptor
+  for the selected ciphertext. No session filesystem is mounted on the host.
+  The separate backup authority allows one volume up to 1 TiB and one hour;
+  ordinary document limits remain 256 MiB / 1,024 entries / five minutes.
+  Descriptor-source/destination tests pass for a real 512 MiB stream, pinned
+  inodes, invalid headers, corruption, truncation and widened authority. Metadata
+  tests cover SQLite WAL, future versions and hostile links. Manager tests pass
+  at 80×24 and 160×50, including disposal during preparation; the six focused
+  cases also pass ten consecutive executions. The complete manager suite passes
+  116 tests, the official TypeScript check passes, the Linux ARM64 manager builds
+  and root `bun run check` passes all 20 tasks.
+  The first real-controller backup run exposed a missing host copy executable;
+  packaging is corrected for both laboratory and Live images. The repeated
+  ARM64 laboratory passes actual 512 MiB LUKS backup, cancellation, termination
+  of the copy subprocess and reopening of the original workspace/metadata. It
+  confirms descriptor confinement, no provider/gateway dependency and no synthetic plaintext markers
+  on the persistent disks. It uses HVF plus nested TCG and disposable ext4
+  media, not a supported-profile or physical-media qualification. All 35 ordinary
+  import/export lifecycle checks also pass again with the updated controller,
+  including FAT/exFAT, low space, interruption, recovery and byte-identical
+  persistent storage after ephemeral use. `Sessions / Restore` reuses the
+  existing paginated source browser, copies one encrypted file into a fresh
+  private volume and requests its password only after the source VM is detached.
+  An offline session VM verifies metadata, SQLite integrity and compatibility
+  through a private OpenCode snapshot before the new archive entry is published.
+  Passwords stay off argv/environment/state records; the receiver has only an
+  inherited descriptor for the empty destination. The original archive and
+  backup medium are preserved. Cancel deletes only the new pending copy; a
+  wrong password retains a verified copy for retry. An unexpected interruption
+  after copying can leave an incomplete entry for explicit cleanup.
+  The real ARM64 controller/LUKS lab passes cancellation, wrong-password retry,
+  publication under a new ID, title/workspace reopening and unchanged source
+  archive/medium. This combined volume test uses a guest without a chat DB.
+  Separately, seven compiled-client export/inspection tests pass in an isolated
+  Linux container, including unchanged live SQLite/WAL and preserved pending
+  chats. The restore UI passes narrow/wide tests for read-only sources, late
+  preparation cleanup, low-space feedback and transfer ownership; all seven
+  cases pass ten consecutive executions. All 35 ordinary transfer lifecycle
+  checks also pass again with the restore-capable controller. A combined
+  native-chat volume round trip now also passes in a separate ARM64 laboratory:
+  two settled transcript fixtures and pending prompts are created through the
+  compiled OpenCode API, copied as part of the actual 512 MiB LUKS volume and
+  compared after restore/reopening, including IDs, titles, messages, pending
+  inbox records and a shared document. The same run rejects future metadata,
+  a corrupt SQLite database, an invalid LUKS header and a truncated volume
+  without publication or changes to the original archive/source medium.
+  Insufficient general-vault space is refused before source startup. These
+  are synthetic conversations without provider calls, under HVF plus nested
+  TCG; physical media and supported-candidate UI acceptance remain pending. Copy
+  hashes detect corruption; they do not authenticate an untrusted LUKS2 payload.
+- **M4 source implemented; final qualification is in progress.** Documents now
+  offers receive/share using pinned OnionShare 2.7 components in a separate
+  GPL-3.0-or-later worker. Ordinary documents retain their 256 MiB / 1,024-entry
+  limit and explicit manifest/hash approval. Intake is frozen after revocation;
+  outgoing selections are copied, verified and sealed before publication.
+  The host receives metadata and streams approved bytes without mounting the
+  session filesystem. Addresses/access keys remain in RAM; reveal is explicit.
+  A distinct Tor-only gateway has no provider credential, SOCKS listener or
+  forwarding path. Publication requires fresh bootstrap/isolation and an
+  acknowledged worker; cancellation, expiry, owner/session death and locking
+  reap every auxiliary process before storage closure. Transfer guards use
+  `onion-tor-state`, independently of model Tor/SOCKS5 settings.
+  The host display keeps UID 1104; transfer hypervisors use 1105/1106 with
+  private PID/network namespaces. The network-only actor shares only the
+  existing public-uplink identity. A disposable Live-host build verifies these
+  users coexist and keeps diagnostic access absent. New image definitions
+  include both transfer profiles; existing distributed/personal images are
+  unchanged.
+  Encrypted backup sharing is a separate authority: after offline metadata
+  checkpointing and verified session closure, one read-only LUKS2 descriptor
+  becomes a read-only block device in the file VM. Neither a general-vault
+  directory nor the session password reaches that VM. The worker verifies
+  its device/header/size and streams through upstream HTTP/Range machinery,
+  without copying the entire container into RAM. Its limit is 1 TiB / one
+  hour, independent of ordinary documents. Source opening/mutation is blocked
+  during sharing. The manager separately asks for preparation and publication
+  approval. Restore currently reads removable/virtual media; direct Tor intake
+  of backups larger than the document limit is not implemented.
+  Tests found and fixed a display/transfer UID collision, the missing PCI
+  hotplug port for ciphertext, concurrent QMP monitor access during copy setup,
+  backup publication's phase admission and upstream acceptance of ranges
+  starting beyond EOF. Werkzeug validates/normalizes ranges before upstream
+  streaming. Linux ARM64 host/transfer suites pass (86 + one ignored, and 61),
+  as do 130 manager tests, the official TypeScript check and the 20-task
+  repository check. Rust also checks all Linux ARM64/amd64 targets.
+  A public ARM64 HVF/TCG laboratory has passed 13 receive/import/reopen/share/
+  revoke/ephemeral checks with independent Tor clients: absent/wrong
+  authorization refused, selected-only content verified, all actors reaped and
+  the persistent archive byte-identical during ephemeral use. Its capture has
+  zero packets before enable and no UDP/IPv6 afterward; a full synthetic-disk
+  scan finds no plaintext canaries. Earlier fresh Tor bootstrap failure at
+  180 seconds is retained; later passes do not establish network reliability.
+  Full 512 MiB public backup qualification is not yet passed: one attempt
+  hit the laboratory unit's 15-minute ceiling, a later full stream ended with
+  a curl failure, and the next fresh service missed the public reachability
+  deadline before upload. Failed runs are retained. Only this opt-in test has
+  a longer laboratory budget, with production deadlines unchanged. A separate
+  real file-VM test passes interruption, Range resume and the complete 512 MiB
+  hash on a private wire; its sparse block fixture is not an encrypted archive
+  and does not replace public qualification. Supported
+  UTM/KVM/physical-media acceptance and measured full-candidate RAM/image costs
+  remain M5 gates.
+- **DNS and UDP verified separately for the current network path.** Fresh
+  two-VM Tor and authenticated SOCKS5 laboratories pass 13 checks each. They
+  cover remote destination resolution, direct DNS over TCP/UDP, DoT,
+  application UDP/QUIC and IPv6 bypass probes, revocation and transport loss.
+  SOCKS5 outside capture contains only TCP to the configured proxy; Tor's
+  explicit HTTPS test exits through Tor. Neither path falls back directly.
+  A Live-host policy test with actual listening peers additionally passes for
+  every host role, including the new transfer identities: application egress
+  and UDP are blocked, while Root's DHCP exchange remains available. These
+  policies govern Oblivion, not a surrounding host OS.
+
+### Implementation contracts
+
+- **One workspace and one open session.** Chat, Documents and Terminal use
+  the selected session's encrypted filesystem. Views share its process
+  lifetime; they do not unlock other volumes. Keep Chat full-window with the
+  network footer and explicit view shortcuts; put infrequent actions in a
+  command menu. Loading/recovery uses the existing central modal. Check 80×24,
+  160×50, resizing, keyboard-only navigation and focus for every new view.
+- **Files arrive through one intake path.** A source endpoint reads only the
+  selected media/files. An isolated receiver stages data, the manager receives
+  metadata, and the user approves the verified manifest before publication to
+  `imports`. OnionShare reuses this path. No automatic
+  execution, preview or archive extraction on receipt; an agent may send file
+  contents to the provider when using them as context. A future outer-host
+  file picker must send only an explicit selection through a bounded endpoint;
+  qualify that adapter before offering it, without requiring a new native app.
+- **Large backups need a separate operation.** Document transfers currently
+  allow 256 MiB / 1,024 entries; a default session container is already 512 MiB.
+  Keep bounded document limits. Add an authorized, streaming ciphertext-backup
+  path with its own storage budget and cancellation, rather than giving the
+  document browser access to the general vault. Close/flush/lock the selected
+  session before copying its LUKS2 container; include versioned, encrypted
+  session metadata without introducing custom cryptography. Validate lengths
+  and hashes for copy corruption, then check the restored filesystem/database
+  inside an offline guest using the session password. A hash alone does not
+  authenticate an untrusted backup. Restore creates a separate archive entry,
+  preserves chat IDs and the source, and keeps the one-open-session invariant.
+  Do not back up VM RAM or unlocked saved-state files.
+- **Explicit export boundaries.** Markdown/JSON and ordinary file exports are
+  readable copies. Backup payloads remain encrypted. Diagnostics are generated
+  from a fixed allowlist of version/platform/state/error fields, previewed and
+  exported only on request; exclude conversations, documents, keys, access
+  URLs, filenames and memory dumps. Ephemeral sessions offer readable exports
+  but cannot be described as an existing persistent LUKS backup; an encrypted
+  save-to-archive action needs its own explicit user-created archive flow.
+- **OnionShare is a separate transfer capability.** Run its HTTP/file handling
+  in the transfer boundary, with bounded RAM or encrypted staging. Only the
+  gateway boundary may make external connections. Design and test an isolated
+  Tor-service/control adapter; never hand the session a raw Tor control socket
+  or the API broker's credentials. OnionShare requires Tor even when inference
+  uses SOCKS5: request and show transfer Tor readiness separately, preserving
+  the selected model transport. Private, expiring transfers are the default;
+  disable webhooks, filename/request logging and automatic public services.
+  Received content remains untrusted. Closing/locking revokes the service and
+  cleans or explicitly recovers unfinished staging before reporting success.
+- **Shell and agent tools use the same Rules.** Local operations
+  work offline; permitted remote operations go through the gateway and scoped
+  credentials. New tool destinations do not expand the model-provider
+  allowlist. A generic proxy or shell subprocess must not provide an alternate
+  route around Rules. Keep outer-host LAN, gateway-management and host-control
+  services outside the session's reach.
+- **Reuse upstream code deliberately.** Start with OpenCode PTY/jobs,
+  OpenTUI, the existing transfer library and OnionShare CLI. Audit dependencies'
+  logs, updates, crash output and temporary files. Bundle required runtimes in
+  the image or a verified supported component delivery flow; users should not
+  need package-manager commands or manual service setup.
+
+Begin implementation with M1 after recording M0's remaining qualification
+items. Use the current controller/guest boundaries and extend their internal
+protocols as required. If a public Protocol or Server HttpApi changes, regenerate
+the client from `packages/client` and respect the repository dependency layers.
+Use disposable fixtures/copies for failure tests. This roadmap update itself
+changes no running VM, personal archive, host network setting or release image.
 
 ## Audit results
 

@@ -23,7 +23,7 @@ export function DebugPage(props: { status?: z.infer<typeof debugStatus>; actions
         <text width={17} flexShrink={0} fg={theme.text.muted}>{row[0]}</text>
         <text flexGrow={1} minWidth={0} fg={theme.text.base}>{row[1]}</text>
       </box>}</For>
-      <text fg={theme.text.muted}>Enable access to let your Mac inspect this VM and use the explicit copy/paste bridge. Diagnostic keys stay in RAM. Chat data is never shown here.</text>
+      <text fg={theme.text.muted}>Enable temporary diagnostic access from your test computer. Diagnostic keys stay in RAM. Chat data is never shown here.</text>
     </scrollbox>
   </box>
 }

@@ -11,7 +11,7 @@ RUN --network=none mkdir /evidence \
     && (cargo test --locked --offline > /evidence/tests.log 2>&1 || { cat /evidence/tests.log; exit 1; }) \
     && cat /evidence/tests.log \
     && (cargo build --locked --offline --release --bins > /evidence/build.log 2>&1 || { cat /evidence/build.log; exit 1; }) \
-    && cp target/release/oblivion-copy target/release/oblivion-copy-relay /evidence/ \
+    && cp target/release/oblivion-copy target/release/oblivion-copy-relay target/release/oblivion-onion-file /evidence/ \
     && rustc --version > /evidence/rustc.txt \
     && find Cargo.toml Cargo.lock src tests -type f -print0 | sort -z | xargs -0 sha256sum > /evidence/sources.sha256 \
     && cd /evidence && sha256sum * > SHA256SUMS

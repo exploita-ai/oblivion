@@ -26,7 +26,7 @@ test.each([[80, 24], [160, 50]])("debug access stays inside the locked manager a
     await app.mockInput.pressKey("TAB"); await app.mockInput.pressArrow("down"); await app.mockInput.pressEnter(); await app.renderOnce()
     expect(app.captureCharFrame()).toContain("ACCESS / Debug")
     expect(app.captureCharFrame()).toContain("192.0.2.10")
-    expect(app.captureCharFrame()).toContain("Internet")
+    expect(app.captureCharFrame()).toContain("Network")
     expect(app.captureCharFrame()).toContain("Keyboard")
     await app.mockInput.pressKey("e"); await app.renderOnce()
     expect(app.captureCharFrame()).toContain("Disable access")

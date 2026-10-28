@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 test "$(id -u)" = 1000
+. /usr/lib/oblivion/guest/session-environment.sh
 # Build channels must never select a different conversation history. Migration
 # runs inside the session VM, before the provider capability is loaded.
 if ! OPENCODE_DB=$(/usr/bin/python3 /usr/lib/oblivion/guest/chat-database.py 2>/dev/null); then
@@ -15,16 +16,7 @@ OBLIVION_PROVIDER=$(cat /run/oblivion-api/provider)
 export OBLIVION_API_TOKEN OBLIVION_PROVIDER
 # Proxy-aware tools share only this opening's revocable capability. Programs
 # that ignore these variables still have no direct route through the gateway.
-HTTP_PROXY="http://oblivion-tools:${OBLIVION_API_TOKEN}@10.88.0.1:8112"
-HTTPS_PROXY=$HTTP_PROXY
-ALL_PROXY=$HTTP_PROXY
-http_proxy=$HTTP_PROXY
-https_proxy=$HTTP_PROXY
-all_proxy=$HTTP_PROXY
-# Keep the local API broker and this guest's own server on their local paths.
-NO_PROXY='127.0.0.1,localhost,::1,10.88.0.1:8111'
-no_proxy=$NO_PROXY
-export HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy
+. /usr/lib/oblivion/guest/tools-proxy.sh
 case "$OBLIVION_PROVIDER" in
     abliteration-ai)
         ABLIT_KEY=$OBLIVION_API_TOKEN
@@ -43,4 +35,6 @@ case "$OBLIVION_PROVIDER" in
         ;;
     *) exit 1 ;;
 esac
+OPENCODE_CONFIG_CONTENT=$(printf '%s' "$OPENCODE_CONFIG_CONTENT" | /usr/bin/python3 -c 'import json,sys; config=json.load(sys.stdin); config["instructions"]=["/usr/lib/oblivion/session-tools.md"]; print(json.dumps(config))')
+export OPENCODE_CONFIG_CONTENT
 exec /usr/bin/oblivion "$@" --standalone

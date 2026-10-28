@@ -56,6 +56,7 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
             | "egress"
             | "network-policy"
             | "transfers"
+            | "onion"
             | "settings"
             | "browse"
     );
@@ -65,6 +66,7 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
             | "egress"
             | "network-policy"
             | "transfers"
+            | "onion"
             | "settings"
             | "browse"
             | "prepare-usb"

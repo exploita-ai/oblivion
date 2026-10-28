@@ -72,15 +72,18 @@ try:
     run('ip', '-n', peer, 'address', 'add', '10.222.0.1/24', 'dev', 'inside')
     run('ip', '-n', peer, 'link', 'set', 'inside', 'up')
     run('ip', '-n', peer, 'link', 'set', 'lo', 'up')
-    server(peer, '10.222.0.1', ['tcp:8081', 'udp:53', 'udp:67'])
+    server(peer, '10.222.0.1', ['tcp:8081', 'tcp:53', 'tcp:853', 'udp:53', 'udp:123', 'udp:443', 'udp:9999', 'udp:67'])
     server(None, '10.222.0.2', ['tcp:22'])
     assert connects(1000), 'positive control must reach the fixture before filtering'
     run('nft', '-f', str(policy))
     assert connects(1101), 'gateway UID must reach its external TCP transport'
-    for uid in (0, 1000, 1100, 1102, 1103):
+    for uid in (0, 1000, 1100, 1102, 1103, 1104, 1105, 1106):
+        for port in (53, 853):
+            assert not connects(uid, port=port), "TCP DNS/DoT escaped: UID "+str(uid)
         assert not connects(uid), 'non-gateway TCP escaped: UID '+str(uid)
-    for uid in (0, 1000, 1101):
-        assert not connects(uid, port=53, udp=True), 'DNS escaped: UID '+str(uid)
+    for uid in (0, 1000, 1100, 1101, 1102, 1103, 1104, 1105, 1106):
+        for port in (53, 123, 443, 9999):
+            assert not connects(uid, port=port, udp=True), "UDP escaped: UID "+str(uid)
     assert connects(0, port=67, udp=True, bind=68), 'DHCP exchange must work'
     assert not connects(1000, peer, port=22), 'debug SSH must be closed by default'
     run('nft', 'add', 'element', 'inet', 'oblivion_host', 'debug4', '{', '10.222.0.0/24', '}')

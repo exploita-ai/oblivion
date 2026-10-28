@@ -6,6 +6,7 @@ Before=oblivion-conversation.service
 [Service]
 Type=oneshot
 ExecStart=/usr/lib/oblivion/guest/prepare.sh
+ExecStartPost=/usr/bin/setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs /usr/bin/python3 -B /usr/lib/oblivion/guest/chat-export.py --cleanup-all
 RemainAfterExit=yes
 StandardOutput=null
 StandardError=null

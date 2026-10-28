@@ -90,8 +90,11 @@ pub fn start(wait: bool) -> Result<()> {
         matches!(state()?.as_str(), "inactive" | "failed"),
         "gateway_already_running",
     )?;
-    let arguments = if wait { vec!["start".to_owned(), UNIT.to_owned()] }
-        else { vec!["start".to_owned(), "--no-block".to_owned(), UNIT.to_owned()] };
+    let arguments = if wait {
+        vec!["start".to_owned(), UNIT.to_owned()]
+    } else {
+        vec!["start".to_owned(), "--no-block".to_owned(), UNIT.to_owned()]
+    };
     vm::execute("/usr/bin/systemctl", &arguments).map_err(|_| Error("gateway_start_failed"))?;
     require(!wait || state()? == "active", "gateway_start_failed")
 }
@@ -240,7 +243,7 @@ fn connected(key: crate::storage::ApiKey, transport: Transport, network: bool) -
     configured(&mut channel, false)?;
     // SOCKS does not read, import, checkpoint or mutate Tor's saved guards.
     let mut saved = if tor {
-        crate::storage::tor_state()?
+        crate::storage::tor_state(oblivion_host::tor_profile::Purpose::Model)?
     } else {
         None
     };
@@ -494,7 +497,7 @@ fn checkpoint(
         .is_none_or(|previous| !previous.same_guards(&state))
     {
         if writable {
-            crate::storage::save_tor_state(&state)?;
+            crate::storage::save_tor_state(oblivion_host::tor_profile::Purpose::Model, &state)?;
         }
         *saved = Some(state);
     }

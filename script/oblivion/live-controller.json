@@ -38,5 +38,23 @@
     "filesystem": "/usr/lib/oblivion/vm/export/root.squashfs",
     "memory_mib": 512,
     "cpus": 1
+  },
+  "onion": {
+    "gateway": {
+      "root": "/usr/lib/oblivion/vm/qemu-root",
+      "kernel": "/usr/lib/oblivion/vm/onion-gateway/kernel",
+      "initrd": "/usr/lib/oblivion/vm/onion-gateway/initrd",
+      "filesystem": "/usr/lib/oblivion/vm/onion-gateway/root.squashfs",
+      "memory_mib": 768,
+      "cpus": 1
+    },
+    "files": {
+      "root": "/usr/lib/oblivion/vm/qemu-root",
+      "kernel": "/usr/lib/oblivion/vm/onion-file/kernel",
+      "initrd": "/usr/lib/oblivion/vm/onion-file/initrd",
+      "filesystem": "/usr/lib/oblivion/vm/onion-file/root.squashfs",
+      "memory_mib": 1152,
+      "cpus": 1
+    }
   }
 }

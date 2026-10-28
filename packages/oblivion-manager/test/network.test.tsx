@@ -5,6 +5,27 @@ import { ControlError } from "../src/control"
 import { preview } from "../src/preview"
 import { status } from "../src/state"
 
+test.each([
+  ["local", "Network [+]"],
+  ["available", "Network [+]"],
+  ["offline", "Network [ ]"],
+  ["unknown", "Network [?]"],
+] as const)("welcome reports the %s connection independently of privacy routes", async (internet, expected) => {
+  const runtime = preview(() => {})
+  await runtime.request({ operation: "lock" })
+  const initial = status.parse(JSON.parse(await runtime.request({ operation: "status" })))
+  initial.connections!.internet = internet
+  const app = await testRender(() => <App runtime={runtime} initial={initial} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    for (const [width, height] of [[80, 24], [160, 50]]) {
+      app.resize(width, height); await app.renderOnce()
+      const footer = app.captureCharFrame().split("\n").slice(-4).join("\n")
+      expect(footer).toContain(`${expected}   Tor [ ]   SOCKS5 [ ]`)
+      expect(footer).not.toContain("Internet")
+    }
+  } finally { await app.dispose() }
+})
+
 for (const ephemeral of [false, true]) {
   test.each([[80, 24], [160, 50]])(`Network stays in the ${ephemeral ? "ephemeral" : "persistent"} manager at %ix%i`, async (width, height) => {
     const runtime = preview(() => {})
@@ -15,7 +36,7 @@ for (const ephemeral of [false, true]) {
       await app.renderOnce(); await app.mockInput.pressKey("2"); await app.renderOnce()
       expect(app.captureCharFrame()).toContain("HOST / Network / Connection")
       expect(app.captureCharFrame()).toContain("Ethernet · eth0")
-      expect(app.captureCharFrame()).toContain("Internet [?]   Tor [ ]   SOCKS5 [ ]")
+      expect(app.captureCharFrame()).toContain("Network [+]   Tor [ ]   SOCKS5 [ ]")
       expect(app.captureCharFrame()).toContain("API keys")
       await app.mockInput.pressArrow("right"); await app.renderOnce()
       expect(app.captureCharFrame()).toContain("HOST / Network / Privacy")
@@ -69,7 +90,7 @@ test("Wi-Fi failure stays in Network and never displays the secret", async () =>
     await app.mockInput.pressEnter(); await app.mockInput.pressEnter(); await app.mockInput.pressEnter(); await app.renderOnce()
     expect(app.captureCharFrame()).toContain("Could not connect")
     expect(app.captureCharFrame()).toContain("HOST / Network / Connection")
-    expect(app.captureCharFrame()).toContain("Internet [?]")
+    expect(app.captureCharFrame()).toContain("Network [+]")
     expect(requests).toContain("connections")
     expect(requests).not.toContain("save-network")
     expect(requests).not.toContain("network-menu")
@@ -84,6 +105,7 @@ test.each([null, { internet: "local" as const, wifi_enabled: false, devices: [{ 
   try {
     await app.renderOnce(); await app.mockInput.pressKey("2"); await app.renderOnce()
     expect(app.captureCharFrame()).toContain(connections ? "No Wi-Fi adapter detected" : "NetworkManager is unavailable")
+    expect(app.captureCharFrame()).toContain(connections ? "Network [+]" : "Network [?]")
     expect(app.captureCharFrame()).not.toContain("Refresh Wi-Fi networks")
     await app.mockInput.pressArrow("right"); await app.renderOnce()
     expect(app.captureCharFrame()).toContain("HOST / Network / Privacy")
@@ -104,7 +126,7 @@ test("large Wi-Fi lists scroll without hiding tabs or footer", async () => {
       expect(frame).toContain("Wi-Fi 099")
       expect(frame).not.toContain("Wi-Fi 000")
       expect(frame).toMatch(/Connection\s+Privacy\s+Rules/)
-      expect(frame).toContain("Internet [?]   Tor [ ]   SOCKS5 [ ]")
+      expect(frame).toContain("Network [+]   Tor [ ]   SOCKS5 [ ]")
       expect(frame.split("\n")).toHaveLength(height + 1)
     }
   } finally { await app.dispose() }

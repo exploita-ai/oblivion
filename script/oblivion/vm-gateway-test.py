@@ -300,6 +300,22 @@ try:
         assert database.returncode == 0, database.stdout + database.stderr
         for line in database.stderr.splitlines():
             if line.endswith(" ... ok"): check("compiled chat storage: " + line.removesuffix(" ... ok"))
+        exported = subprocess.run(["setpriv", "--reuid=1000", "--regid=1000", "--clear-groups",
+            "--no-new-privs", "--", "python3", str(BUNDLE / "test-chat-export.py"), "-v"],
+            capture_output=True, text=True, timeout=180,
+            env={"PATH": "/usr/bin:/bin", "HOME": "/tmp", "PYTHONDONTWRITEBYTECODE": "1",
+                 "OBLIVION_TEST_CLIENT": str(binary), "OBLIVION_TEST_EXPORT_HELPER": str(BUNDLE / "chat-export.py")})
+        assert exported.returncode == 0, exported.stdout + exported.stderr
+        for line in exported.stderr.splitlines():
+            if line.endswith(" ... ok"): check("compiled chat export: " + line.removesuffix(" ... ok"))
+        backup = subprocess.run(["setpriv", "--reuid=1000", "--regid=1000", "--clear-groups",
+            "--no-new-privs", "--", "python3", str(BUNDLE / "test-session-backup.py"), "-v"],
+            capture_output=True, text=True, timeout=60,
+            env={"PATH": "/usr/bin:/bin", "HOME": "/tmp", "PYTHONDONTWRITEBYTECODE": "1",
+                 "OBLIVION_TEST_BACKUP_HELPER": str(BUNDLE / "session-backup.py")})
+        assert backup.returncode == 0, backup.stdout + backup.stderr
+        for line in backup.stderr.splitlines():
+            if line.endswith(" ... ok"): check("encrypted backup metadata: " + line.removesuffix(" ... ok"))
     finally:
         subprocess.run(["umount", str(guest)], check=True)
     policy = subprocess.run(["unshare", "--net", "python3", str(BUNDLE / "test-host-firewall.py"), str(BUNDLE / "host-firewall.nft")], capture_output=True, text=True, timeout=60)

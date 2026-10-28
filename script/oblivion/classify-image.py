@@ -61,10 +61,11 @@ def main():
             runtime = ["systemd-sysv", "udev", "dbus", "util-linux", "busybox-static", "kmod", "tzdata"]
             runtime += {"host": ["live-boot", "live-boot-initramfs-tools", "cryptsetup-bin", "dmsetup", "fdisk", "e2fsprogs",
                                  "qemu-system-arm" if architecture == "arm64" else "qemu-system-x86", "network-manager", "wpasupplicant",
-                                 "iproute2", "console-setup-mini", "kbd", "xkb-data", "firmware-iwlwifi", "firmware-realtek",
+                                 "iproute2", "nftables", "foot", "seatd", "fonts-dejavu-mono", "libwlroots-0.18", "libpciaccess0", "console-setup-mini", "kbd", "xkb-data", "firmware-iwlwifi", "firmware-realtek",
                                  "firmware-atheros", "firmware-brcm80211", "firmware-mediatek"],
-                        "session": ["git", "ripgrep", "python3", "ca-certificates"],
-                        "gateway": ["tor", "nftables", "iproute2", "ca-certificates"], "import": [], "export": []}[role]
+                        "session": list(data.get("bundled_tools", {}).get("packages", {}))
+                                   or ["git", "ripgrep", "python3", "ca-certificates", "tmux", "procps"],
+                        "gateway": ["tor", "nftables", "iproute2", "ca-certificates"], "import": [], "export": [], "onion-gateway": ["tor", "nftables", "iproute2"], "onion-file": ["python3", "socat", "nftables", "iproute2"]}[role]
             categories = {
                 "retain_runtime": runtime,
                 "retain_debian_essential": sorted(name for name, p in installed.items() if p.essential),
@@ -112,6 +113,7 @@ def main():
                     decision, reason = "retain_current_boot", "Current device, shutdown, IPC or volatile-runtime lifecycle dependency."
                 units.append({"unit": name, "decision": decision, "reason": reason})
             report["roles"][role] = {"declared_roots": categories, "packages": packages, "units": units,
+                                      "bundled_components": data.get("bundled_tools", {}).get("components", {}),
                                       "package_counts": dict(Counter(p["decision"] for p in packages)),
                                       "unit_counts": dict(Counter(u["decision"] for u in units)),
                                       "unresolved_dependencies": unresolved,

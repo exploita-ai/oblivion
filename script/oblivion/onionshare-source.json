@@ -1,0 +1,8 @@
+{
+  "package": "onionshare-cli",
+  "version": "2.7",
+  "source": "https://github.com/onionshare/onionshare",
+  "commit": "98ae86a660469bc3da4ffb4aeb2381f1cdfc1756",
+  "wheel_sha256": "0241dc829f2d2f3d461063bcc2f15bd2f9b37d842309675271406722b97d4eb1",
+  "license": "GPL-3.0-or-later"
+}

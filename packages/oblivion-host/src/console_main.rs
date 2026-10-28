@@ -26,6 +26,10 @@ fn run() -> control::Result<terminal::Action> {
         // Detaching a view never closes a session. The trusted manager owns lock.
         return Ok(terminal::Action::Sessions);
     }
+    if std::env::args().nth(1).as_deref() == Some("--terminal-screen") {
+        oblivion_host::chat_screen::bridge_terminal(control::terminal()?)?;
+        return Ok(terminal::Action::Sessions);
+    }
     let mut terminal = Terminal::open()?;
     if std::env::args().nth(1).as_deref() == Some("--documents") {
         documents()?.wait()?;

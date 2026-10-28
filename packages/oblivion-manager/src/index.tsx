@@ -4,7 +4,7 @@ import { App, type Runtime } from "./app"
 import { ControlError, request } from "./control"
 import { preview } from "./preview"
 import { theme } from "./theme"
-import { connectChat } from "./chat"
+import { connectChat, connectTerminal } from "./chat"
 import { createManagerClipboard } from "./clipboard"
 
 const demonstration = process.argv.includes("--preview")
@@ -41,6 +41,7 @@ async function helper(mode: string) {
 const runtime: Runtime = demonstration ? preview(exit) : {
   request,
   connectChat,
+  connectTerminal,
   clearClipboard: clipboard.clear,
   async console() { return await helper("--console") === 10 ? "new" : "sessions" },
   async documents() { await helper("--documents") },

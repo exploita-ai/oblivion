@@ -87,6 +87,10 @@ text["cage.c"] = replace(text["cage.c"], "\tswitch (signal) {", "\tswitch (signa
 line = "\tstruct wl_event_source *sigterm_source = wl_event_loop_add_signal(event_loop, SIGTERM, handle_signal, &server);"
 text["cage.c"] = replace(text["cage.c"], line, line + "\n\tstruct wl_event_source *sighup_source = wl_event_loop_add_signal(event_loop, SIGHUP, handle_signal, &server);")
 text["cage.c"] = replace(text["cage.c"], "\twl_event_source_remove(sigint_source);", "\twl_event_source_remove(sighup_source);\n\twl_event_source_remove(sigint_source);")
+# Only trusted display processes share this Wayland socket. The isolated
+# session has neither this socket nor the data-control clipboard protocol.
+text["cage.c"] = replace(text["cage.c"], "#include <wlr/types/wlr_data_device.h>", "#include <wlr/types/wlr_data_device.h>\n#include <wlr/types/wlr_data_control_v1.h>")
+text["cage.c"] = replace(text["cage.c"], "\tif (!wlr_data_device_manager_create(server.wl_display)) {", "\twlr_data_control_manager_v1_create(server.wl_display);\n\tif (!wlr_data_device_manager_create(server.wl_display)) {")
 line = next(line for line in text["meson.build"].splitlines() if line.startswith("have_xwayland ="))
 text["meson.build"] = replace(text["meson.build"], line, "# Oblivion runs only a native Wayland terminal.\nhave_xwayland = false")
 patch = "".join("".join(difflib.unified_diff(files[name].splitlines(True), changed.splitlines(True), fromfile="a/" + name, tofile="b/" + name)) for name, changed in text.items())

@@ -39,6 +39,12 @@ def server(binary, path, runtime):
         "XDG_CACHE_HOME": str(runtime / "cache"),
         "OPENCODE_DB": str(path),
         "OPENCODE_PASSWORD": password,
+        "OPENCODE_CONFIG_DIR": str(runtime / "config"),
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_DISABLE_CLAUDE_CODE": "1",
+        "OPENCODE_DISABLE_MODELS_FETCH": "1",
+        "OPENCODE_DISABLE_FILEWATCHER": "1",
+        "OPENCODE_DISABLE_FFF": "1",
     }
     # Unregistered stdio servers do not run restart recovery. No provider token,
     # user configuration, proxy credentials or inherited environment is supplied.
@@ -58,7 +64,7 @@ def server(binary, path, runtime):
         url = json.loads(line)["url"]
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-        def request(route, payload=None):
+        def request(route, payload=None, *, envelope=False):
             headers = {
                 "Authorization": "Basic " + base64.b64encode(("opencode:" + password).encode()).decode(),
                 "Content-Type": "application/json",
@@ -68,7 +74,10 @@ def server(binary, path, runtime):
                 data=None if payload is None else json.dumps(payload).encode(),
             )
             with opener.open(query, timeout=30) as response:
-                return None if response.status == 204 else json.load(response)["data"]
+                if response.status == 204:
+                    return None
+                value = json.load(response)
+                return value if envelope else value["data"]
 
         yield request
     finally:

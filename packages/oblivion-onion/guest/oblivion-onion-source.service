@@ -1,0 +1,35 @@
+[Unit]
+Description=Read frozen received files for an approved copy
+BindsTo=oblivion-onion-file.service
+After=oblivion-onion-file.service
+
+[Service]
+Type=exec
+User=1002
+Group=1002
+ExecStart=/usr/libexec/oblivion-onion-source
+ExecStopPost=+/usr/libexec/oblivion-onion-copy-stop
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+DevicePolicy=closed
+DeviceAllow=/dev/virtio-ports/oblivion.onion.source rw
+PrivateNetwork=yes
+ProtectSystem=strict
+BindReadOnlyPaths=/run/oblivion-onion/receive:/source
+ProtectHome=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=128M
+TasksMax=8
+RuntimeMaxSec=310
+StandardInput=null
+StandardOutput=null
+StandardError=null
+KillMode=control-group
+TimeoutStopSec=5
+Restart=no

@@ -35,6 +35,7 @@ struct Config {
     gateway: Option<crate::vm::Config>,
     import: Option<crate::vm::Config>,
     export: Option<crate::vm::Config>,
+    onion: Option<crate::onion_host::Config>,
     #[serde(default)]
     gateway_network: bool,
     #[serde(default)]
@@ -89,15 +90,32 @@ pub fn main() -> Result<()> {
         return crate::ipc::serve(Path::new(&args[1]), config.manager_uid);
     }
     let op = args[2].as_str();
-    if args.len() == 3 && op == "debug" { return crate::debug::run(&password(false)?); }
+    if args.len() == 3 && op == "debug" {
+        return crate::debug::run(&password(false)?);
+    }
     // The worker's stop hook runs while the controller may hold storage.lock
     // waiting for systemd stop. It must not reacquire that lock and deadlock.
     if args.len() == 3 && op == "transfer-cleanup" {
         return crate::transfer_host::cleanup();
     }
+    if args.len() == 3 && op == "onion-cleanup" {
+        return crate::onion_host::cleanup();
+    }
+    if args.len() == 3 && op == "onion-host-run" {
+        require(
+            !recovery_required()? && mount_mode()? != MountMode::Closed,
+            "general_not_open",
+        )?;
+        return crate::onion_host::serve(
+            config.onion.as_ref().ok_or(Error("onion_not_configured"))?,
+            config.manager_uid,
+        );
+    }
     if args.len() == 3 && op == "transfer-host-run" {
         require(
-            !recovery_required()? && mapping_open("oblivion-session")? && !crate::vm::stopped()?,
+            !recovery_required()?
+                && (crate::transfer_host::archiving()?
+                    || mapping_open("oblivion-session")? && !crate::vm::stopped()?),
             "session_not_open",
         )?;
         return crate::transfer_host::serve(
@@ -147,6 +165,12 @@ pub fn main() -> Result<()> {
             .map_err(|_| Error("recovery_marker_failed"))?;
     }
     let _lock = lock()?;
+    if !matches!(op, "status" | "transfers" | "onion" | "lock" | "recover") {
+        require(
+            !crate::transfer_host::archiving()? && !crate::onion_host::archiving()?,
+            "backup_active",
+        )?;
+    }
     if matches!(
         op,
         "init-general"
@@ -176,6 +200,80 @@ pub fn main() -> Result<()> {
         require(!recovery_required()?, "recovery_required")?;
     }
     match op {
+        "onion" => {
+            let mut payload = Zeroizing::new(Vec::new());
+            std::io::stdin()
+                .take(4097)
+                .read_to_end(&mut payload)
+                .map_err(|_| Error("invalid_onion_request"))?;
+            require(payload.len() <= 4096, "invalid_onion_request")?;
+            let command: oblivion_host::onion::Command =
+                serde_json::from_slice(&payload).map_err(|_| Error("invalid_onion_request"))?;
+            command.validate().map_err(Error)?;
+            let status = match command {
+                oblivion_host::onion::Command::Status {} => {
+                    crate::onion_host::status(config.onion.is_some())?
+                }
+                oblivion_host::onion::Command::Receive { client_auth } => {
+                    require(
+                        config.onion.is_some()
+                            && !recovery_required()?
+                            && mount_mode()? != MountMode::Closed,
+                        "general_not_open",
+                    )?;
+                    crate::onion_host::receive(client_auth)?
+                }
+                oblivion_host::onion::Command::Access {} => {
+                    let access = crate::onion_host::access()?;
+                    println!(
+                        "{}",
+                        serde_json::to_string(&access).map_err(|_| Error("encode_failed"))?
+                    );
+                    return Ok(());
+                }
+                oblivion_host::onion::Command::Freeze {} => crate::onion_host::freeze()?,
+                oblivion_host::onion::Command::Import {} => crate::onion_host::import()?,
+                oblivion_host::onion::Command::Stage {} => crate::onion_host::stage()?,
+                oblivion_host::onion::Command::Share { client_auth } => {
+                    crate::onion_host::share(client_auth)?
+                }
+                oblivion_host::onion::Command::Cancel {} => {
+                    let _checkpoint = crate::onion_host::shutdown()?;
+                    oblivion_host::onion::Status::closed(config.onion.is_some())
+                }
+                oblivion_host::onion::Command::PrepareBackup {
+                    id,
+                    password,
+                    ttl_seconds,
+                } => {
+                    require(config.onion.is_some(), "onion_not_configured")?;
+                    require(
+                        !crate::onion_host::prepared()? && !crate::transfer_host::prepared()?,
+                        "transfer_active",
+                    )?;
+                    config.prepare_backup(&id, password.as_bytes())?;
+                    crate::onion_host::start(id, ttl_seconds, true)?
+                }
+                oblivion_host::onion::Command::Prepare { ttl_seconds } => {
+                    require(config.onion.is_some(), "onion_not_configured")?;
+                    require(
+                        !recovery_required()? && mount_mode()? != MountMode::Closed,
+                        "general_not_open",
+                    )?;
+                    let (id, mode) = session_info()?.ok_or(Error("session_not_open"))?;
+                    require(
+                        matches!(mode.as_str(), "documents" | "chat") && !crate::vm::stopped()?,
+                        "session_not_open",
+                    )?;
+                    crate::onion_host::start(id, ttl_seconds, false)?
+                }
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&status).map_err(|_| Error("encode_failed"))?
+            );
+            Ok(())
+        }
         "init-general" => {
             require(!config.usb_persistence, "usb_confirmation_required")?;
             config.initialize(&password(true)?)
@@ -257,7 +355,8 @@ pub fn main() -> Result<()> {
             discard_pending(&PathBuf::from(format!(
                 "{MOUNT}/sessions/{}.pending",
                 args[3]
-            )))
+            )))?;
+            discard_restore_record(&args[3])
         }
         "unlock" | "unlock-ephemeral" => {
             config.unlock(&password(false)?, op == "unlock-ephemeral")?;
@@ -274,31 +373,23 @@ pub fn main() -> Result<()> {
         }
         "create" => config.create(&password(true)?),
         "rename-session" => {
-            let command: oblivion_host::session_title::Rename = serde_json::from_slice(&password(false)?)
-                .map_err(|_| Error("invalid_session_title"))?;
+            let command: oblivion_host::session_title::Rename =
+                serde_json::from_slice(&password(false)?)
+                    .map_err(|_| Error("invalid_session_title"))?;
             validate_id(&command.id)?;
             oblivion_host::session_title::validate(&command.title).map_err(Error)?;
             let mode = mount_mode()?;
             require(mode != MountMode::Closed, "general_not_open")?;
             if mode == MountMode::ReadOnly {
-                require(session_info()?.is_some_and(|(id, _)| id == command.id), "session_not_open")?;
+                require(
+                    session_info()?.is_some_and(|(id, _)| id == command.id),
+                    "session_not_open",
+                )?;
                 return write_key_file("session-title", command.title.as_bytes());
             }
             trusted_file(&Path::new(MOUNT).join(format!("sessions/{}.luks", command.id)))?;
-            let directory = Path::new(MOUNT).join("sessions");
-            let path = directory.join(format!("{}.title", command.id));
-            let pending = directory.join(format!("{}.title.pending", command.id));
-            for existing in [&path, &pending] {
-                if fs::symlink_metadata(existing).is_ok() { trusted_file(existing)?; }
-            }
-            let mut file = OpenOptions::new().write(true).create(true).truncate(true)
-                .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(&pending).map_err(|_| Error("session_title_write_failed"))?;
-            file.write_all(command.title.as_bytes()).and_then(|()| file.sync_all())
-                .map_err(|_| Error("session_title_write_failed"))?;
-            fs::rename(pending, path).map_err(|_| Error("session_title_write_failed"))?;
-            sync_directory(&directory)
-        },
+            write_session_title(&command.id, &command.title)
+        }
         "settings-catalog" => {
             println!(
                 "{}",
@@ -347,6 +438,7 @@ pub fn main() -> Result<()> {
             write_session_info(&id, "documents")
         }
         "start-chat" => {
+            require(!crate::onion_host::prepared()?, "transfer_active")?;
             require(
                 mapping_open("oblivion-session")?
                     && session_info()?.is_some_and(|(_, mode)| mode == "documents"),
@@ -388,11 +480,19 @@ pub fn main() -> Result<()> {
             require(mode == "starting", "chat_not_starting")?;
             write_session_info(&id, "chat")
         }
-        "chat-recover" => recover_chat(&config),
+        "chat-recover" => {
+            require(!crate::onion_host::prepared()?, "transfer_active")?;
+            recover_chat(&config)
+        }
         "cancel-chat" => {
             let (_, mode) = session_info()?.ok_or(Error("session_not_open"))?;
-            require(matches!(mode.as_str(), "starting" | "documents"), "chat_already_started")?;
-            if mode == "starting" { recover_chat(&config)?; }
+            require(
+                matches!(mode.as_str(), "starting" | "documents"),
+                "chat_already_started",
+            )?;
+            if mode == "starting" {
+                recover_chat(&config)?;
+            }
             crate::gateway::shutdown()?;
             Ok(())
         }
@@ -454,15 +554,49 @@ pub fn main() -> Result<()> {
             );
             Ok(())
         }
+        "chat-export" => {
+            let request: oblivion_host::chat_export::Request =
+                serde_json::from_reader(std::io::stdin().take(4096))
+                    .map_err(|_| Error("invalid_chat_export_request"))?;
+            require(request.is_chat_export(), "invalid_chat_export_request")?;
+            let response = session_export(request)?;
+            println!(
+                "{}",
+                serde_json::to_string(&response).map_err(|_| Error("encode_failed"))?
+            );
+            Ok(())
+        }
+        "diagnostics" => {
+            let request: oblivion_host::diagnostics::Request =
+                serde_json::from_reader(std::io::stdin().take(1024))
+                    .map_err(|_| Error("invalid_diagnostics_request"))?;
+            let report = diagnostic_report()?;
+            let output = match request {
+                oblivion_host::diagnostics::Request::Preview => serde_json::to_string(&report),
+                oblivion_host::diagnostics::Request::Export => serde_json::to_string(
+                    &session_export(oblivion_host::chat_export::Request::Diagnostics { report })?,
+                ),
+            }
+            .map_err(|_| Error("encode_failed"))?;
+            println!("{output}");
+            Ok(())
+        }
         "network-menu" => Err(Error("network_manager_required")),
         "connections" => {
             require(mount_mode()? != MountMode::Closed, "general_not_open")?;
             require(credentials_editable()?, "session_must_be_closed")?;
             let mut bytes = Zeroizing::new(Vec::new());
-            std::io::stdin().take(4097).read_to_end(&mut bytes).map_err(|_| Error("invalid_network_request"))?;
+            std::io::stdin()
+                .take(4097)
+                .read_to_end(&mut bytes)
+                .map_err(|_| Error("invalid_network_request"))?;
             require(bytes.len() <= 4096, "invalid_network_request")?;
-            let command = serde_json::from_slice(&bytes).map_err(|_| Error("invalid_network_request"))?;
-            crate::host_network::change(command, config.network_profiles && mount_mode()? == MountMode::ReadWrite)
+            let command =
+                serde_json::from_slice(&bytes).map_err(|_| Error("invalid_network_request"))?;
+            crate::host_network::change(
+                command,
+                config.network_profiles && mount_mode()? == MountMode::ReadWrite,
+            )
         }
         "settings" => {
             require(
@@ -571,7 +705,7 @@ pub fn main() -> Result<()> {
             config.change_network_policy(command)
         }
         "transfers" => {
-            let mut bytes = Vec::new();
+            let mut bytes = Zeroizing::new(Vec::new());
             std::io::stdin()
                 .take(4097)
                 .read_to_end(&mut bytes)
@@ -579,7 +713,24 @@ pub fn main() -> Result<()> {
             require(bytes.len() <= 4096, "transfer_request_too_large")?;
             let command: transfers::Command =
                 serde_json::from_slice(&bytes).map_err(|_| Error("invalid_transfer_request"))?;
+            if !matches!(
+                command,
+                transfers::Command::List | transfers::Command::Cancel
+            ) {
+                require(!crate::onion_host::prepared()?, "transfer_active")?;
+            }
             if !matches!(command, transfers::Command::Cancel) {
+                require(
+                    !recovery_required()? && mount_mode()? != MountMode::Closed,
+                    "general_not_open",
+                )?;
+            }
+            if matches!(
+                command,
+                transfers::Command::Import { .. }
+                    | transfers::Command::Export { .. }
+                    | transfers::Command::Recover
+            ) {
                 require(
                     !recovery_required()?
                         && mapping_open("oblivion-session")?
@@ -627,6 +778,58 @@ pub fn main() -> Result<()> {
                         serde_json::to_string(&started).map_err(|_| Error("encode_failed"))?
                     );
                     Ok(())
+                }
+                transfers::Command::Backup {
+                    id,
+                    target,
+                    password,
+                } => {
+                    config
+                        .export
+                        .as_ref()
+                        .ok_or(Error("exports_not_configured"))?
+                        .validate()?;
+                    crate::transfer_host::idle()?;
+                    config.prepare_backup(&id, password.as_bytes())?;
+                    drop(password);
+                    let started =
+                        crate::transfer_host::start_backup(&id, &target, &config.general_image)?;
+                    println!(
+                        "{}",
+                        serde_json::to_string(&started).map_err(|_| Error("encode_failed"))?
+                    );
+                    Ok(())
+                }
+                transfers::Command::Restore { source } => {
+                    config
+                        .import
+                        .as_ref()
+                        .ok_or(Error("transfers_not_configured"))?
+                        .validate()?;
+                    let started =
+                        crate::transfer_host::start_restore(&source, &config.general_image)?;
+                    println!(
+                        "{}",
+                        serde_json::to_string(&started).map_err(|_| Error("encode_failed"))?
+                    );
+                    Ok(())
+                }
+                transfers::Command::RestoreFinish { id, password } => {
+                    crate::transfer_host::idle()?;
+                    config.finish_restore(&id, password.as_bytes())
+                }
+                transfers::Command::RestoreDiscard { id } => {
+                    crate::transfer_host::idle()?;
+                    closed_archive()?;
+                    validate_id(&id)?;
+                    let path = Path::new(MOUNT).join(format!("sessions/{id}.pending"));
+                    if path
+                        .try_exists()
+                        .map_err(|_| Error("restore_record_failed"))?
+                    {
+                        discard_pending(&path)?;
+                    }
+                    discard_restore_record(&id)
                 }
                 transfers::Command::Recover => {
                     let started = crate::transfer_host::start_recovery()?;
@@ -691,9 +894,18 @@ pub fn main() -> Result<()> {
         "close" | "leave" | "force-leave" => {
             // Transfer cleanup can fail while a session is still running.
             // Revoke its network before attempting any fallible teardown.
-            if config.gateway.is_some() {
-                crate::gateway::revoke()?;
-            }
+            let onion = if config.onion.is_some() || crate::onion_host::prepared()? {
+                crate::onion_host::shutdown()
+            } else {
+                Ok(true)
+            };
+            let gateway = if config.gateway.is_some() {
+                crate::gateway::revoke()
+            } else {
+                Ok(())
+            };
+            onion?;
+            gateway?;
             if config.import.is_some()
                 || config.export.is_some()
                 || crate::transfer_host::prepared()?
@@ -724,6 +936,11 @@ pub fn main() -> Result<()> {
                 .gateway
                 .as_ref()
                 .map_or(Ok(true), |_| crate::gateway::shutdown());
+            let onion = if config.onion.is_some() || crate::onion_host::prepared()? {
+                crate::onion_host::shutdown()
+            } else {
+                Ok(true)
+            };
             let transfers = (|| {
                 if config.import.is_some()
                     || config.export.is_some()
@@ -738,6 +955,7 @@ pub fn main() -> Result<()> {
                 .as_ref()
                 .map_or(Ok(()), |_| crate::vm::stop(false));
             let checkpoint = gateway?;
+            let onion_checkpoint = onion?;
             transfers?;
             session?;
             close_general()?;
@@ -750,7 +968,7 @@ pub fn main() -> Result<()> {
             if recovery_required()? {
                 fs::remove_file(RECOVERY).map_err(|_| Error("recovery_clear_failed"))?;
             }
-            require(checkpoint, "locked_without_tor_state")
+            require(checkpoint && onion_checkpoint, "locked_without_tor_state")
         }
         "status" => {
             let mode = mount_mode()?;
@@ -1052,7 +1270,10 @@ impl Config {
     }
 
     fn start_gateway(&self, wait: bool) -> Result<()> {
-        if self.gateway.is_some() && api_key_present()? && matches!(crate::gateway::state()?.as_str(), "inactive" | "failed") {
+        if self.gateway.is_some()
+            && api_key_present()?
+            && matches!(crate::gateway::state()?.as_str(), "inactive" | "failed")
+        {
             crate::gateway::start(wait)?;
         }
         Ok(())
@@ -1200,6 +1421,83 @@ impl Config {
         publish(&path, &PathBuf::from(format!("{MOUNT}/sessions/{id}.luks")))?;
         println!("{id}");
         Ok(())
+    }
+
+    fn prepare_backup(&self, id: &str, secret: &[u8]) -> Result<()> {
+        require((1..=1024).contains(&secret.len()), "invalid_secret_length")?;
+        closed_session_file(id)?;
+        let vm = self.vm.as_ref().ok_or(Error("vm_not_configured"))?;
+        vm.validate()?;
+        let metadata = oblivion_host::backup::Metadata {
+            format: "oblivion-session".into(),
+            version: 1,
+            original_id: id.into(),
+            title: session_titles(&MountMode::ReadWrite)?.remove(id),
+        };
+        let result = (|| {
+            self.open(id, secret)?;
+            write_session_info(id, "starting")?;
+            vm.start_documents()?;
+            write_session_info(id, "documents")?;
+            match session_export(oblivion_host::chat_export::Request::Checkpoint { metadata })? {
+                oblivion_host::chat_export::Response::Metadata { .. } => Ok(()),
+                oblivion_host::chat_export::Response::Rejected { error } => {
+                    Err(Error(match error {
+                        oblivion_host::backup::Rejection::UnsupportedVersion => {
+                            "unsupported_backup_version"
+                        }
+                        oblivion_host::backup::Rejection::InvalidMetadata => {
+                            "invalid_backup_metadata"
+                        }
+                        oblivion_host::backup::Rejection::InvalidDatabase => {
+                            "invalid_backup_database"
+                        }
+                    }))
+                }
+                _ => Err(Error("invalid_backup_metadata")),
+            }
+        })();
+        close_maintenance_session()?;
+        result
+    }
+
+    fn finish_restore(&self, id: &str, secret: &[u8]) -> Result<()> {
+        require((1..=1024).contains(&secret.len()), "invalid_secret_length")?;
+        closed_archive()?;
+        restore_receipt(id)?;
+        let vm = self.vm.as_ref().ok_or(Error("vm_not_configured"))?;
+        vm.validate()?;
+        let path = Path::new(MOUNT).join(format!("sessions/{id}.pending"));
+        let result = (|| {
+            crypt_open(&path, "oblivion-session", secret, false)?;
+            write_session_info(id, "starting")?;
+            vm.start_documents()?;
+            write_session_info(id, "documents")?;
+            match session_export(oblivion_host::chat_export::Request::Inspect)? {
+                oblivion_host::chat_export::Response::Metadata { metadata } => Ok(metadata),
+                oblivion_host::chat_export::Response::Rejected { error } => {
+                    Err(Error(match error {
+                        oblivion_host::backup::Rejection::UnsupportedVersion => {
+                            "unsupported_backup_version"
+                        }
+                        oblivion_host::backup::Rejection::InvalidMetadata => {
+                            "invalid_backup_metadata"
+                        }
+                        oblivion_host::backup::Rejection::InvalidDatabase => {
+                            "invalid_backup_database"
+                        }
+                    }))
+                }
+                _ => Err(Error("invalid_backup_metadata")),
+            }
+        })();
+        close_maintenance_session()?;
+        let metadata = result?;
+        if let Some(title) = metadata.title {
+            write_session_title(id, &title)?;
+        }
+        publish(&path, &Path::new(MOUNT).join(format!("sessions/{id}.luks")))?;
+        discard_restore_record(id)
     }
 
     fn open_ephemeral(&self) -> Result<()> {
@@ -1599,21 +1897,10 @@ fn write_transport_profile(path: &Path, profile: &egress::Profile, durable: bool
     Ok(())
 }
 
-pub(crate) fn tor_state() -> Result<Option<oblivion_tor_state::State>> {
-    let path = Path::new(PROFILE).join("tor-state");
-    match fs::symlink_metadata(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(Error("profile_unavailable")),
-        Ok(_) => {}
-    }
-    let mut text = String::new();
-    trusted_file(&path)?
-        .take(oblivion_tor_state::LIMIT as u64 + 1)
-        .read_to_string(&mut text)
-        .map_err(|_| Error("profile_unavailable"))?;
-    Ok(Some(
-        oblivion_tor_state::State::parse(&text).map_err(|_| Error("invalid_tor_state"))?,
-    ))
+pub(crate) fn tor_state(
+    purpose: oblivion_host::tor_profile::Purpose,
+) -> Result<Option<oblivion_tor_state::State>> {
+    oblivion_host::tor_profile::load(Path::new(PROFILE), purpose).map_err(Error)
 }
 
 pub(crate) fn tor_state_writable() -> Result<bool> {
@@ -1625,36 +1912,12 @@ pub(crate) fn tor_state_writable() -> Result<bool> {
     Ok(stat.f_flag & libc::ST_RDONLY == 0)
 }
 
-pub(crate) fn save_tor_state(state: &oblivion_tor_state::State) -> Result<()> {
+pub(crate) fn save_tor_state(
+    purpose: oblivion_host::tor_profile::Purpose,
+    state: &oblivion_tor_state::State,
+) -> Result<()> {
     require(tor_state_writable()?, "general_not_writable")?;
-    let path = Path::new(PROFILE).join("tor-state");
-    if path
-        .try_exists()
-        .map_err(|_| Error("profile_unavailable"))?
-    {
-        trusted_file(&path)?;
-    }
-    let pending = Path::new(PROFILE).join("tor-state.pending");
-    match fs::symlink_metadata(&pending) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(Error("profile_unavailable")),
-        Ok(_) => {
-            trusted_file(&pending)?;
-            fs::remove_file(&pending).map_err(|_| Error("profile_write_failed"))?;
-        }
-    }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&pending)
-        .map_err(|_| Error("profile_write_failed"))?;
-    file.write_all(state.as_str().as_bytes())
-        .and_then(|()| file.sync_all())
-        .map_err(|_| Error("profile_write_failed"))?;
-    fs::rename(pending, path).map_err(|_| Error("profile_write_failed"))?;
-    sync_directory(Path::new(PROFILE))
+    oblivion_host::tor_profile::save(Path::new(PROFILE), purpose, state).map_err(Error)
 }
 
 fn save_api_keys(archive: &keys::Archive) -> Result<()> {
@@ -1721,6 +1984,164 @@ fn close_session() -> Result<()> {
         fs::remove_file(EPHEMERAL).map_err(|_| Error("ephemeral_cleanup_failed"))?;
     }
     Ok(())
+}
+
+pub(crate) fn closed_session_file(id: &str) -> Result<File> {
+    validate_id(id)?;
+    closed_archive()?;
+    trusted_file(&Path::new(MOUNT).join(format!("sessions/{id}.luks")))
+}
+
+fn closed_archive() -> Result<()> {
+    require(!recovery_required()?, "recovery_required")?;
+    require(
+        mount_mode()? == MountMode::ReadWrite && mapping_open("oblivion-general")?,
+        "general_not_writable",
+    )?;
+    require(
+        !mapping_open("oblivion-session")? && crate::vm::stopped()?,
+        "session_must_be_closed",
+    )
+}
+
+pub(crate) fn restore_budget() -> Result<u64> {
+    closed_archive()?;
+    let bytes = available_bytes()?
+        .saturating_sub(16 * MIB)
+        .min(oblivion_transfer::MAX_ENCRYPTED_VOLUME_BYTES);
+    require(bytes >= 32 * MIB, "insufficient_restore_space")?;
+    Ok(bytes)
+}
+
+pub(crate) fn create_restore_copy(id: &str) -> Result<File> {
+    validate_id(id)?;
+    closed_archive()?;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(Path::new(MOUNT).join(format!("sessions/{id}.pending")))
+        .map_err(|_| Error("restore_create_failed"))
+}
+
+pub(crate) fn complete_restore_copy(receipt: &oblivion_transfer::Receipt) -> Result<()> {
+    let path = Path::new(MOUNT).join(format!("sessions/{}.restore-tmp", receipt.id));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .map_err(|_| Error("restore_record_failed"))?;
+    file.write_all(&serde_json::to_vec(receipt).map_err(|_| Error("encode_failed"))?)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| Error("restore_record_failed"))?;
+    publish(
+        &path,
+        &Path::new(MOUNT).join(format!("sessions/{}.restore", receipt.id)),
+    )
+}
+
+fn restore_receipt(id: &str) -> Result<oblivion_transfer::Receipt> {
+    validate_id(id)?;
+    let receipt: oblivion_transfer::Receipt = serde_json::from_reader(
+        trusted_file(&Path::new(MOUNT).join(format!("sessions/{id}.restore")))?.take(1025),
+    )
+    .map_err(|_| Error("invalid_restore_record"))?;
+    require(
+        receipt.id == id
+            && receipt.entries == 1
+            && (32 * MIB..=oblivion_transfer::MAX_ENCRYPTED_VOLUME_BYTES).contains(&receipt.bytes)
+            && receipt.manifest_sha256.len() == 64
+            && receipt
+                .manifest_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "invalid_restore_record",
+    )?;
+    require(
+        trusted_file(&Path::new(MOUNT).join(format!("sessions/{id}.pending")))?
+            .metadata()
+            .map_err(|_| Error("metadata_failed"))?
+            .len()
+            == receipt.bytes,
+        "restore_copy_changed",
+    )?;
+    Ok(receipt)
+}
+
+pub(crate) fn cleanup_restore(id: &str) -> Result<()> {
+    validate_id(id)?;
+    if Path::new(MOUNT)
+        .join(format!("sessions/{id}.restore"))
+        .try_exists()
+        .map_err(|_| Error("restore_record_failed"))?
+    {
+        restore_receipt(id)?;
+        return Ok(());
+    }
+    let path = Path::new(MOUNT).join(format!("sessions/{id}.pending"));
+    if path
+        .try_exists()
+        .map_err(|_| Error("restore_record_failed"))?
+    {
+        discard_pending(&path)?;
+    }
+    discard_restore_record(id)
+}
+
+fn discard_restore_record(id: &str) -> Result<()> {
+    validate_id(id)?;
+    for extension in ["restore", "restore-tmp"] {
+        let path = Path::new(MOUNT).join(format!("sessions/{id}.{extension}"));
+        if path
+            .try_exists()
+            .map_err(|_| Error("restore_record_failed"))?
+        {
+            trusted_file(&path)?;
+            fs::remove_file(path).map_err(|_| Error("restore_record_failed"))?;
+        }
+    }
+    if !Path::new(MOUNT)
+        .join(format!("sessions/{id}.luks"))
+        .try_exists()
+        .map_err(|_| Error("restore_record_failed"))?
+    {
+        for extension in ["title", "title-tmp"] {
+            let path = Path::new(MOUNT).join(format!("sessions/{id}.{extension}"));
+            if path
+                .try_exists()
+                .map_err(|_| Error("restore_record_failed"))?
+            {
+                trusted_file(&path)?;
+                fs::remove_file(path).map_err(|_| Error("restore_record_failed"))?;
+            }
+        }
+    }
+    sync_directory(&Path::new(MOUNT).join("sessions"))
+}
+
+fn close_maintenance_session() -> Result<()> {
+    let stopped = crate::vm::stop(false);
+    let closed = if stopped.is_ok() {
+        close_session()
+    } else {
+        Err(Error("vm_still_running"))
+    };
+    if stopped.is_err() || closed.is_err() {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(RECOVERY)
+            .map_err(|_| Error("recovery_marker_failed"))?;
+        return Err(Error("maintenance_cleanup_required"));
+    }
+    clear_key_file("session-info")
 }
 
 fn format_session() -> Result<()> {
@@ -1854,7 +2275,7 @@ pub(crate) fn lock_named(name: &str) -> Result<File> {
     Ok(file)
 }
 
-fn recovery_required() -> Result<bool> {
+pub(crate) fn recovery_required() -> Result<bool> {
     Path::new(RECOVERY)
         .try_exists()
         .map_err(|_| Error("recovery_check_failed"))
@@ -2026,20 +2447,59 @@ fn mount_mode() -> Result<MountMode> {
     Ok(MountMode::Closed)
 }
 
+fn write_session_title(id: &str, title: &str) -> Result<()> {
+    let directory = Path::new(MOUNT).join("sessions");
+    let path = directory.join(format!("{id}.title"));
+    let pending = directory.join(format!("{id}.title-tmp"));
+    for existing in [&path, &pending] {
+        if fs::symlink_metadata(existing).is_ok() {
+            trusted_file(existing)?;
+        }
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&pending)
+        .map_err(|_| Error("session_title_write_failed"))?;
+    file.write_all(title.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|_| Error("session_title_write_failed"))?;
+    fs::rename(pending, path).map_err(|_| Error("session_title_write_failed"))?;
+    sync_directory(&directory)
+}
+
 fn session_titles(mode: &MountMode) -> Result<std::collections::BTreeMap<String, String>> {
     let mut titles = std::collections::BTreeMap::new();
     let paths: Vec<_> = match mode {
         MountMode::Closed => Vec::new(),
-        MountMode::ReadWrite => sessions(".luks")?.into_iter()
-            .map(|id| (id.clone(), Path::new(MOUNT).join(format!("sessions/{id}.title"))))
+        MountMode::ReadWrite => sessions(".luks")?
+            .into_iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    Path::new(MOUNT).join(format!("sessions/{id}.title")),
+                )
+            })
             .collect(),
-        MountMode::ReadOnly => session_info()?.into_iter()
-            .map(|(id, _)| (id, Path::new(RUN).join("session-title"))).collect(),
+        MountMode::ReadOnly => session_info()?
+            .into_iter()
+            .map(|(id, _)| (id, Path::new(RUN).join("session-title")))
+            .collect(),
     };
     for (id, path) in paths {
-        if !path.try_exists().map_err(|_| Error("session_title_read_failed"))? { continue; }
+        if !path
+            .try_exists()
+            .map_err(|_| Error("session_title_read_failed"))?
+        {
+            continue;
+        }
         let mut title = String::new();
-        trusted_file(&path)?.take(257).read_to_string(&mut title)
+        trusted_file(&path)?
+            .take(257)
+            .read_to_string(&mut title)
             .map_err(|_| Error("session_title_read_failed"))?;
         oblivion_host::session_title::validate(&title).map_err(Error)?;
         titles.insert(id, title);
@@ -2064,7 +2524,7 @@ fn sessions(extension: &str) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-fn validate_id(id: &str) -> Result<()> {
+pub(crate) fn validate_id(id: &str) -> Result<()> {
     require(
         id.len() == 32
             && id
@@ -2131,7 +2591,7 @@ fn recover_chat(config: &Config) -> Result<()> {
     fs::remove_file(RECOVERY).map_err(|_| Error("recovery_clear_failed"))
 }
 
-fn session_info() -> Result<Option<(String, String)>> {
+pub(crate) fn session_info() -> Result<Option<(String, String)>> {
     if !mapping_open("oblivion-session")? {
         return Ok(None);
     }
@@ -2161,6 +2621,86 @@ fn credentials_editable() -> Result<bool> {
     )
 }
 
+fn session_export(
+    request: oblivion_host::chat_export::Request,
+) -> Result<oblivion_host::chat_export::Response> {
+    require(
+        !recovery_required()? && mapping_open("oblivion-session")? && !crate::vm::stopped()?,
+        "session_not_open",
+    )?;
+    require(request.valid(), "invalid_chat_export_request")?;
+    let id = random_id()?;
+    let result = (|| {
+        use oblivion_transfer::endpoint::{read_message, write_message};
+        let stream = crate::vm::chat_export_port(&id)?;
+        let mut channel =
+            oblivion_host::channel::Channel::new(&stream, std::time::Duration::from_secs(95));
+        let mut ready = [0; 6];
+        channel
+            .read_exact(&mut ready)
+            .map_err(|_| Error("chat_export_not_ready"))?;
+        require(&ready == b"ready\n", "invalid_transfer_guest")?;
+        channel
+            .write_all(b"G")
+            .map_err(|_| Error("chat_export_not_ready"))?;
+        write_message(&mut channel, &request).map_err(|_| Error("chat_export_failed"))?;
+        let response: oblivion_host::chat_export::Response =
+            read_message(&mut channel, 64 * 1024).map_err(|_| Error("chat_export_failed"))?;
+        require(response.valid(&request), "invalid_chat_export_response")?;
+        require(
+            !matches!(response, oblivion_host::chat_export::Response::Unavailable),
+            "chat_export_unavailable",
+        )?;
+        Ok(response)
+    })();
+    let cleanup = crate::vm::remove_copy_port(&id);
+    let response = result?;
+    cleanup?;
+    Ok(response)
+}
+
+fn diagnostic_report() -> Result<oblivion_host::diagnostics::Report> {
+    use oblivion_host::diagnostics::{Architecture, Report, Session, Transport};
+    let session = session_info()?;
+    let observation = network_observation(session.as_ref().map(|(_, mode)| mode.as_str()));
+    let system = crate::system_info::status();
+    Ok(Report {
+        version: 1,
+        controller_version: env!("CARGO_PKG_VERSION").into(),
+        architecture: match std::env::consts::ARCH {
+            "aarch64" => Architecture::Aarch64,
+            "x86_64" => Architecture::X86_64,
+            _ => Architecture::Unknown,
+        },
+        cpu_cores: system.cores,
+        memory_mib: system.memory_total / MIB,
+        ephemeral: mount_mode()? == MountMode::ReadOnly,
+        general_open: mapping_open("oblivion-general")?,
+        session: if recovery_required()? {
+            Session::Recovery
+        } else {
+            match session.as_ref().map(|(_, mode)| mode.as_str()) {
+                Some("documents") => Session::Documents,
+                Some("chat") => Session::Chat,
+                Some("starting") => Session::Starting,
+                _ => Session::Locked,
+            }
+        },
+        transport: match observation.label.as_str() {
+            "NOT STARTED" => Transport::NotStarted,
+            "CONNECTING" => Transport::Connecting,
+            "TOR READY" => Transport::Tor,
+            "SOCKS5 READY" => Transport::Socks5,
+            "OFFLINE" | "OFFLINE · NO NETWORK DEVICE" => Transport::Offline,
+            _ => Transport::Unknown,
+        },
+        direct_access_blocked: observation.direct_blocked,
+        observation_age_ms: observation.age_ms,
+        tor_bootstrap: observation.tor_progress,
+        laboratory: cfg!(feature = "lab-emulation"),
+    })
+}
+
 fn network_observation(mode: Option<&str>) -> network::Observation {
     let host_link = fs::read_dir("/sys/class/net").ok().map(|entries| {
         entries.flatten().any(|entry| {
@@ -2187,7 +2727,9 @@ fn network_observation(mode: Option<&str>) -> network::Observation {
             result.direct_blocked = true;
         }
         if let Ok(observed) = crate::gateway::observation() {
-            if observed.age_ms <= 10000 { result.tor_progress = observed.tor_progress; }
+            if observed.age_ms <= 10000 {
+                result.tor_progress = observed.tor_progress;
+            }
         }
         return result;
     }

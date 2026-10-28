@@ -21,6 +21,9 @@ export function createManagerClipboard(renderer: CliRenderer) {
   const clear = () => { text = ""; renderer.clearSelection(); renderer.clearClipboardOSC52() }
   const keyboard = (event: KeyEvent) => {
     if (!(event.ctrl || event.super) || !["c", "v"].includes(event.name)) return
+    // Without a selection Ctrl+C must still interrupt an agent/shell command.
+    // Copy owns the shortcut only while there is visible selected text.
+    if (event.name === "c" && !renderer.getSelection()?.getSelectedText()) return
     event.preventDefault(); event.stopPropagation()
     if (event.name === "c") { copy(); return }
     paste()

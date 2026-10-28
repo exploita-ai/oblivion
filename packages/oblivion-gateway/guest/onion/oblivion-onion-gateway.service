@@ -1,0 +1,38 @@
+[Unit]
+Description=Oblivion private Tor transfer controller
+Requires=oblivion-onion-network.service
+After=oblivion-onion-network.service systemd-tmpfiles-setup.service
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/oblivion-onion-gateway
+ExecStopPost=-/usr/bin/systemctl kill --kill-whom=all --signal=SIGKILL oblivion-tor.service
+ExecStopPost=-/usr/sbin/nft -f /etc/oblivion/firewall.nft
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_NET_ADMIN
+DevicePolicy=closed
+DeviceAllow=/dev/virtio-ports/oblivion.onion-gateway rw
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tor
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=128M
+TasksMax=32
+StandardInput=null
+StandardOutput=null
+StandardError=null
+Restart=no
+KillMode=control-group
+TimeoutStopSec=25

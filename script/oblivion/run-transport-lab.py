@@ -132,6 +132,7 @@ def main():
             rules = gateway.call("rules")
             assert network.drops(rules, "input") > 0 and network.drops(rules, "forward") > 0
             (output / "rules-after-probes.json").write_text(json.dumps(rules, indent=2) + "\n")
+            assert gateway.call("direct-denied")["api_and_tools_dns_tcp_udp_denied"]
             gateway.call("forwarding-off")
             check("compromised chat cannot forward; API/tools/Tor UIDs cannot use external SOCKS; API/tools/connector cannot bypass through local Tor")
             for mode in ["method-rejected", *(["auth-rejected"] if proxy.authenticated else []), "connect-rejected"]:

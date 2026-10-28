@@ -1,0 +1,23 @@
+#!/usr/sbin/nft -f
+# File VM has one private wire, no uplink, default route, DNS or SOCKS access.
+flush ruleset
+table inet oblivion_file {
+    chain input {
+        type filter hook input priority filter; policy drop;
+        meta nfproto ipv6 counter drop
+        ct state invalid counter drop
+        iifname "file0" ip saddr 10.89.0.1 ip daddr 10.89.0.2 tcp dport 8080 ct state new,established counter accept
+        counter drop
+    }
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        counter drop
+    }
+    chain output {
+        type filter hook output priority filter; policy drop;
+        meta nfproto ipv6 counter drop
+        ct state invalid counter drop
+        oifname "file0" meta skuid 1000 ip saddr 10.89.0.2 ip daddr 10.89.0.1 tcp sport 8080 ct state established counter accept
+        counter drop
+    }
+}

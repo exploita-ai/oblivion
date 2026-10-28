@@ -40,7 +40,7 @@ test.each([[80, 24], [160, 50]])("chat fills the window and keeps host actions i
     expect(frame).not.toContain("API keys")
     expect(frame).not.toContain("OBLIVION")
     expect(frame).toContain("Tor [+]")
-    expect(frame).toMatch(/Chat F6\s+Documents F7\s+Close Ctrl\+Q/)
+    expect(frame).toMatch(/Chat F6\s+Documents F7\s+Terminal F8\s+Close Ctrl\+Q/)
     expect(sizes.at(-1)![0]).toBe(width)
     expect(sizes.at(-1)![1]).toBeGreaterThanOrEqual(height - 4)
     await app.mockInput.typeText("12345"); await app.mockInput.pressKey("TAB")

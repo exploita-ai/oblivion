@@ -6,8 +6,8 @@ pub struct Status {
     os: String,
     architecture: &'static str,
     cpu: String,
-    cores: usize,
-    memory_total: u64,
+    pub cores: usize,
+    pub memory_total: u64,
     memory_available: u64,
 }
 

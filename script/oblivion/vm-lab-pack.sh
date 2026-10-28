@@ -17,6 +17,9 @@ if [ -f /guest/usr/bin/oblivion ]; then
     cp /guest/usr/lib/oblivion/build-evidence.json /out/opencode-build.json
     (cd /guest && sha256sum usr/bin/oblivion) > /out/opencode.sha256
 fi
+if [ -f /guest/usr/lib/oblivion/backup-chat-lab ]; then
+    touch /host/usr/lib/oblivion/vm/backup-chat-lab /out/backup-chat-lab
+fi
 # The hypervisor's root contains public executables/libraries, no configuration,
 # profile, host devices or session filesystems. systemd binds just the active disk.
 for tree in usr/share/qemu usr/share/qemu-efi-aarch64 usr/share/seabios usr/share/ipxe; do
@@ -33,7 +36,7 @@ for binary in /host/usr/bin/qemu-system-* /host/usr/lib/*/qemu/*.so; do
         (cd /host && cp -L --parents ".$library" /host/usr/lib/oblivion/vm/qemu-root/)
     done
 done
-for directory in dev proc sys run/oblivion-session run/oblivion-gateway-vm run/oblivion-import-vm run/oblivion-export-vm tmp; do mkdir -p "/host/usr/lib/oblivion/vm/qemu-root/$directory"; done
+for directory in dev proc sys run/oblivion-session run/oblivion-gateway-vm run/oblivion-import-vm run/oblivion-export-vm run/oblivion-onion-uplink run/oblivion-onion-gateway-vm run/oblivion-onion-file-vm tmp; do mkdir -p "/host/usr/lib/oblivion/vm/qemu-root/$directory"; done
 # Mount targets must exist before packing the immutable hypervisor root.
 touch /host/usr/lib/oblivion/vm/qemu-root/kernel /host/usr/lib/oblivion/vm/qemu-root/initrd /host/usr/lib/oblivion/vm/qemu-root/root.squashfs
 rm -rf /guest/boot /guest/var/cache/apt /guest/var/lib/apt/lists /host/var/cache/apt /host/var/lib/apt/lists
@@ -64,6 +67,7 @@ cd /out
 sha256sum kernel initrd host.squashfs host-packages.tsv guest-packages.tsv sources.sha256 > SHA256SUMS
 if [ -f opencode.sha256 ]; then sha256sum opencode.sha256 opencode-build.json >> SHA256SUMS; fi
 if [ -f manager.sha256 ]; then sha256sum manager.sha256 >> SHA256SUMS; fi
+if [ -f backup-chat-lab ]; then sha256sum backup-chat-lab >> SHA256SUMS; fi
 if [ -f tui-lab ]; then sha256sum tui-lab >> SHA256SUMS; fi
 
 if [ -f import-lab ]; then sha256sum import-lab import-source.raw >> SHA256SUMS; fi

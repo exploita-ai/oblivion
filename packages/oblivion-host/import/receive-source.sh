@@ -10,5 +10,8 @@ case "$(blkid -o value -s TYPE /dev/vdb)" in
 esac
 exec 3<>/dev/virtio-ports/oblivion.import
 printf 'ready\n' >&3
-[ "$(dd bs=1 count=1 <&3 2>/dev/null)" = G ]
-exec /usr/bin/oblivion-copy send /source 300000
+case "$(dd bs=1 count=1 <&3 2>/dev/null)" in
+    G) exec /usr/bin/oblivion-copy send /source 300000 ;;
+    B) exec /usr/bin/oblivion-copy send-encrypted /source 3600000 ;;
+    *) exit 1 ;;
+esac

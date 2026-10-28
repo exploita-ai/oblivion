@@ -55,6 +55,13 @@ while IFS= read -r command; do
             [ ! -r /vault/.oblivion-inbox ]
             printf 'OBLIVION_IMPORTS_EMPTY\n'
             ;;
+        terminal-live)
+            systemctl show oblivion-terminal.service --property=ActiveState,SubState,Result
+            tmux -S /run/oblivion-terminal/tmux.sock list-clients -F '#{client_tty}'
+            [ "$(systemctl is-active oblivion-terminal.service)" = active ]
+            kill -0 "$(cat /run/oblivion-terminal/controller-pid)"
+            printf 'OBLIVION_TERMINAL_JOB_ALIVE\n'
+            ;;
         imports-check)
             set -- /vault/imports/*
             [ "$#" = 1 ]

@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/v-dermichev/wayland-vdagent",
+  "commit": "9191ec6a82d9712a81d5c86d6e5cf5daa21af2b9",
+  "files": {
+    "src/main.rs": "bf1e4d0b1456439704f36115fb48131530f56b8dfd387d497a3ab6bd6c0d5cfc",
+    "src/data_control.rs": "72cc74a5154e5b264860976d2492e9856a6c8100a683442bf22e1b87605464eb",
+    "src/udscs.rs": "87316e269ccc91628d05a4fea917cbb560920e560a3c8c76bcf7ddefe7c5043f",
+    "Cargo.toml": "7db04a3b6c48002a750ba9ccafcdbfd700683e2a4d1494baaf19e4813753d5f2",
+    "README.md": "165ed741dc9ac7bce4c9d7457bb916716b4ebfc9f2b4b1fc039ec181c98def32"
+  }
+}

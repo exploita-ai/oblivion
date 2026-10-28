@@ -29,5 +29,8 @@ test("host selection copies explicitly, paste remains text and session close cle
     clipboard.clear(); inputs.length = 0
     await app.mockInput.pressKey("v", { ctrl: true })
     expect(Buffer.from(inputs).toString()).not.toContain("Copy this text")
+    inputs.length = 0
+    await app.mockInput.pressKey("c", { ctrl: true })
+    expect(inputs).toContain(3)
   } finally { clipboard.dispose(); await app.dispose() }
 })

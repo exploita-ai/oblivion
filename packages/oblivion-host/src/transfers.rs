@@ -9,8 +9,27 @@ pub const BUDGET_SECONDS: u64 = 300;
 #[serde(tag = "operation", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Command {
     List,
-    Import { source: String },
-    Export { target: String },
+    Import {
+        source: String,
+    },
+    Export {
+        target: String,
+    },
+    Backup {
+        id: String,
+        target: String,
+        password: zeroize::Zeroizing<String>,
+    },
+    Restore {
+        source: String,
+    },
+    RestoreFinish {
+        id: String,
+        password: zeroize::Zeroizing<String>,
+    },
+    RestoreDiscard {
+        id: String,
+    },
     Recover,
     Cancel,
 }
@@ -21,6 +40,27 @@ pub struct Source {
     pub id: String,
     pub name: String,
     pub bytes: u64,
+    #[serde(default)]
+    pub kind: SourceKind,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceKind {
+    #[default]
+    Usb,
+    Virtual,
+}
+
+impl SourceKind {
+    pub fn detect(usb: bool, virtio: bool, serial: &str) -> Option<Self> {
+        if usb {
+            return Some(Self::Usb);
+        }
+        (virtio && matches!(serial, "oblivion-import" | "oblivion-export")).then_some(Self::Virtual)
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -36,6 +76,8 @@ pub struct Status {
 #[serde(deny_unknown_fields)]
 pub struct Started {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
 }
 
 pub fn limits() -> oblivion_transfer::Limits {

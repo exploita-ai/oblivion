@@ -19,8 +19,11 @@ export type ChatFrame = Extract<ChatEvent, { type: "frame" }>
 export type ChatConnection = { input: (data: Uint8Array) => void; resize: (cols: number, rows: number) => void; close: () => void }
 export type ChatConnect = (receive: (event: ChatEvent) => void, failed: () => void) => ChatConnection
 
-export const connectChat: ChatConnect = (receive, failed) => {
-  const child = Bun.spawn(["/usr/bin/oblivion-console", "--screen"], {
+export const connectChat: ChatConnect = (receive, failed) => connectScreen("--screen", receive, failed)
+export const connectTerminal: ChatConnect = (receive, failed) => connectScreen("--terminal-screen", receive, failed)
+
+function connectScreen(mode: string, receive: Parameters<ChatConnect>[0], failed: () => void): ChatConnection {
+  const child = Bun.spawn(["/usr/bin/oblivion-console", mode], {
     stdin: "pipe", stdout: "pipe", stderr: "ignore",
     env: { PATH: "/usr/bin:/bin", HOME: "/run/oblivion-manager" },
   })

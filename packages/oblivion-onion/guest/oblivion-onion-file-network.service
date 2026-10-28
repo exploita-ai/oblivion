@@ -1,0 +1,13 @@
+[Unit]
+Description=Oblivion file VM network boundary
+BindsTo=sys-subsystem-net-devices-file0.device
+After=sys-subsystem-net-devices-file0.device
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/oblivion-onion-file-network
+RemainAfterExit=yes
+StandardOutput=null
+StandardError=null
+LimitCORE=0
+UMask=0077

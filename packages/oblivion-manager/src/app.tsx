@@ -14,9 +14,12 @@ import { DebugPage, debugStatus } from "./debug-page"
 import { SystemPage } from "./system-page"
 import type { PageAction } from "./action-bar"
 import { NetworkPage, networkTabs } from "./network-page"
+import { SessionBackup } from "./session-backup"
+import { SessionRestore } from "./session-restore"
 
 export type Runtime = {
   connectChat?: ChatConnect
+  connectTerminal?: ChatConnect
   clearClipboard?: () => void
   request: (input: Request) => Promise<string>
   console: () => Promise<"sessions" | "new">
@@ -52,8 +55,15 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   const [session, setSession] = createSignal<string | undefined>(props.initial?.active_session ?? undefined)
   const [documents, setDocuments] = createSignal(!!props.documentsOnly || !!props.initial?.session_open)
   const [documentsLocked, setDocumentsLocked] = createSignal(false)
+  const [backup, setBackup] = createSignal<{ id: string; title: string }>()
+  const [restoring, setRestoring] = createSignal(false)
   const [chatVisible, setChatVisible] = createSignal(false)
   const [connection, setConnection] = createSignal<ChatConnection>()
+  const [terminalVisible, setTerminalVisible] = createSignal(false)
+  const [terminalConnection, setTerminalConnection] = createSignal<ChatConnection>()
+  let drawTerminal: ((frame: ChatFrame) => void) | undefined
+  let terminalStartup: ReturnType<typeof Promise.withResolvers<void>> | undefined
+  onCleanup(() => terminalStartup?.reject(new ControlError("terminal_disconnected")))
   let startup: ReturnType<typeof Promise.withResolvers<void>> | undefined
   onCleanup(() => startup?.reject(new ControlError("chat_start_cancelled")))
   let drawChat: ((frame: ChatFrame) => void) | undefined
@@ -64,13 +74,13 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   const [elapsed, setElapsed] = createSignal(0)
   const [observed, setObserved] = createSignal(performance.now())
   const [now, setNow] = createSignal(performance.now())
-  const breadcrumb = () => !state()?.general_mounted
+  const breadcrumb = () => restoring() ? "HOST / Sessions / Restore session" : backup() ? "HOST / Sessions / Encrypted backup" : !state()?.general_mounted
     ? `ACCESS / ${debugVisible() ? "Debug" : wizard() ? "Keyboard and time zone" : form()?.title ?? (state()?.general_present ? "Welcome back" : "First-time setup")}`
     : page() === 0 && session() && state()?.session_open ? `SESSION / ${state()?.session_titles[session()!] ?? session()!.slice(0, 8)} / ${form()?.title ?? "Documents"}`
     : `HOST / ${category()}${networkVisible() ? ` / ${networkTabs[networkTab()]}` : ""}${keyID() ? " / " + (state()?.api_keys?.entries.find((entry) => entry.id === keyID())?.name ?? "Key") : page() === 0 && session() ? ` / ${state()?.session_titles[session()!] ?? session()!.slice(0, 8)}` : ""}`
-  const editing = () => !!form() || !!wizard() || !!busy() || intro() || documentsLocked()
+  const editing = () => !!form() || !!wizard() || !!busy() || intro() || documentsLocked() || !!backup() || restoring()
   const blocked = () => editing() || documents()
-  const navigate = (index: number) => { setChatVisible(false); setDocuments(false); setPage(index); setSession(undefined); setKeyID(undefined); setSelection(0); setFocus("content"); setNotice(""); if (debugVisible()) void perform("Refresh debug status", () => debug()) }
+  const navigate = (index: number) => { setTerminalVisible(false); setChatVisible(false); setDocuments(false); setPage(index); setSession(undefined); setKeyID(undefined); setSelection(0); setFocus("content"); setNotice(""); if (debugVisible()) void perform("Refresh debug status", () => debug()) }
   const back = () => {
     setNotice("")
     if (!state()?.general_mounted) { setPage(0); setSelection(0); setFocus("content"); return }
@@ -84,6 +94,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   const [focus, setFocus] = createSignal<"navigation" | "content" | "actions">("content")
   const [selection, setSelection] = createSignal(0)
   const [resumeChat, setResumeChat] = createSignal(false)
+  const [resumeTerminal, setResumeTerminal] = createSignal(false)
   const [form, setForm] = createSignal<Form>()
   const [busy, setBusy] = createSignal("")
   const [notice, setNotice] = createSignal("")
@@ -104,6 +115,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
     const previous = state()?.active_session
     setState(status.parse(JSON.parse(await props.runtime.request({ operation: "status" }))))
     if (previous && previous !== state()?.active_session) props.runtime.clearClipboard?.()
+    if (!state()?.session_open || state()?.recovery_required || previous && previous !== state()?.active_session) detachTerminal()
     setObserved(performance.now())
     if (!["chat", "starting"].includes(state()?.session_mode ?? "")) detachChat()
     if (!previous && state()?.active_session) { setSession(state()?.active_session ?? undefined); setDocuments(true) }
@@ -115,6 +127,31 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
     setConnection(undefined); setChatVisible(false)
   }
   onCleanup(detachChat)
+
+  function detachTerminal() {
+    terminalConnection()?.close()
+    setTerminalConnection(undefined); setTerminalVisible(false)
+  }
+  onCleanup(detachTerminal)
+
+  async function terminal() {
+    if (!props.runtime.connectTerminal) { setFeedback("info"); setNotice("Terminal is unavailable in this preview."); return }
+    const pending = !terminalConnection() ? Promise.withResolvers<void>() : undefined
+    terminalStartup = pending
+    const timeout = pending ? setTimeout(() => pending.reject(new ControlError("terminal_disconnected")), 15_000) : undefined
+    if (!terminalConnection()) setTerminalConnection(props.runtime.connectTerminal((event) => {
+      if (event.type === "frame") drawTerminal?.(event)
+      if (event.type === "startup" && event.status === "started") terminalStartup?.resolve()
+    }, () => {
+      if (terminalStartup) { terminalStartup.reject(new ControlError("terminal_disconnected")); return }
+      detachTerminal(); setDocuments(true); setFeedback("error")
+      setNotice("The terminal display disconnected. Open Terminal to reconnect. The session stays open.")
+    }))
+    setForm(undefined); setDocuments(false); setChatVisible(false); setTerminalVisible(true); setFocus("content")
+    try { await pending?.promise } catch (error) {
+      detachTerminal(); setDocuments(true); throw error
+    } finally { clearTimeout(timeout); terminalStartup = undefined }
+  }
 
   async function perform(label: string, operation: () => Promise<void>) {
     if (busy()) return
@@ -135,7 +172,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
         : explain(error))
     } finally {
       setBusy("")
-      if (state()?.session_open && !chatVisible() && !form() && !wizard()) setDocuments(true)
+      if (state()?.session_open && !chatVisible() && !terminalVisible() && !form() && !wizard()) setDocuments(true)
     }
   }
 
@@ -199,6 +236,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   }
 
   async function chat(wait = false) {
+    setTerminalVisible(false)
     if (props.runtime.connectChat) {
       const pending = wait ? Promise.withResolvers<void>() : undefined
       startup = pending
@@ -298,7 +336,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   function startChat() {
     const entries = state()?.api_keys?.entries ?? []
     if (!entries.length) { addKey(); setFeedback("info"); setNotice("Add an API key to start chat. Your session documents are still available."); return }
-    setForm({ title: "Start chat", description: "Choose a provider and key for this opening. Documents remain available if the protected route is not ready.", fields: [{ id: "key", label: "Provider and API key", value: state()?.api_keys?.selected ?? state()?.api_keys?.default ?? entries[0].id, choices: entries.map((key) => ({ value: key.id, label: `${providerName(key.provider)} · ${key.name}${key.id === state()?.api_keys?.default ? " (default)" : ""}` })) }], submit: "Connect and start chat", run: async (values) => {
+    setForm({ title: "Start chat", description: "Choose a provider and key for this opening. Starting chat restarts the offline VM and stops its terminals and jobs. Saved files remain in this session.", fields: [{ id: "key", label: "Provider and API key", value: state()?.api_keys?.selected ?? state()?.api_keys?.default ?? entries[0].id, choices: entries.map((key) => ({ value: key.id, label: `${providerName(key.provider)} · ${key.name}${key.id === state()?.api_keys?.default ? " (default)" : ""}` })) }], submit: "Connect and start chat", run: async (values) => {
       await launchChat(values.key)
     } })
   }
@@ -311,6 +349,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   }
 
   async function launchChat(key?: string) {
+    detachTerminal()
     setDocuments(false)
     const entries = state()?.api_keys?.entries ?? []
     const id = key ?? state()?.api_keys?.default ?? entries[0]?.id
@@ -353,7 +392,8 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   function sessionView(index: number) {
     setNotice("")
     setSessionSection(index); setFocus("content"); setPage(0); setSession(state()?.active_session ?? "ephemeral"); setKeyID(undefined)
-    setChatVisible(false); setDocuments(index === 1)
+    setChatVisible(false); setTerminalVisible(false); setDocuments(index === 1)
+    if (index === 2) { void perform("Opening terminal", terminal); return }
     if (index === 1) return
     if (state()?.session_mode === "chat") { void chat(); return }
     startChat()
@@ -362,9 +402,10 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   function closeSession() {
     setNotice("")
     setResumeChat(chatVisible())
-    setChatVisible(false); setDocuments(false)
-    confirm("Close and lock session", "Stop all running chats and lock the session's encrypted volume.", async () => {
-      await command("close"); detachChat(); navigate(0)
+    setResumeTerminal(terminalVisible())
+    setChatVisible(false); setTerminalVisible(false); setDocuments(false)
+    confirm("Close and lock session", "Stop all chats, terminals and jobs, then lock the session's encrypted volume.", async () => {
+      await command("close"); detachChat(); detachTerminal(); navigate(0)
     })
   }
 
@@ -391,6 +432,10 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
         const id = state()?.sessions[selection()]; if (!id) return
         setForm({ title: "Rename session", description: "The title is saved in your encrypted Oblivion storage. Chat titles are managed separately inside the session.", fields: [titleField(sessionTitle(id))], submit: "Save title", run: async (values) => { await command("rename-session", { id, title: values.title.trim() }) } })
       } },
+      { title: "Back up", key: "B", disabled: !!state()?.general_readonly || !state()?.sessions[selection()], run: () => {
+        const id = state()?.sessions[selection()]; if (id) setBackup({ id, title: sessionTitle(id) })
+      } },
+      { title: "Restore", key: "O", disabled: !!state()?.general_readonly, run: () => setRestoring(true) },
     ]
     if (page() === 2 && !keyID()) return [{ title: "Add API key", key: "N", disabled: !!unavailable(), run: addKey }]
     return []
@@ -403,7 +448,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
     if (networkTab() === 2) return `${storage}. Control websites reached by session tools. Provider traffic uses its dedicated route.`
     if (!current?.connections) return "NetworkManager is unavailable. Retry to refresh the connection status."
     const wifi = current.connections.devices.some((device) => device.kind === "wifi") ? "Choose a Wi-Fi network or manage Ethernet." : "Ethernet connections. No Wi-Fi adapter detected."
-    return `${wifi} ${current.connections.internet === "local" ? "Internet [?]: local route available; external access is not verified." : ""} ${storage}.`
+    return `${wifi} Network indicates the local connection; Tor and SOCKS5 are verified separately. ${storage}.`
   }
 
   function connectWifi(ap: NonNullable<Status["connections"]>["access_points"][number]) {
@@ -506,15 +551,14 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
     if (key.defaultPrevented) return
     if (networkWait() && key.name === "escape") { key.preventDefault(); networkWait()!.abort(); setBusy("Cancelling connection · waiting for safe cleanup"); return }
     if (!editing() && state()?.session_open) {
-      if (key.name === "f6" || key.name === "f7") { key.preventDefault(); key.stopPropagation(); sessionView(key.name === "f6" ? 0 : 1); return }
-      if (key.ctrl && key.name === "q" || key.name === "f8" || key.raw === "\x1d" || key.ctrl && key.name === "]") {
+      if (["f6", "f7", "f8"].includes(key.name)) { key.preventDefault(); key.stopPropagation(); sessionView(key.name === "f6" ? 0 : key.name === "f7" ? 1 : 2); return }
+      if (key.ctrl && key.name === "q" || key.raw === "\x1d" || key.ctrl && key.name === "]") {
         key.preventDefault(); key.stopPropagation(); closeSession(); return
       }
       if (key.raw === "\x1e" || key.ctrl && key.name === "^") { key.preventDefault(); key.stopPropagation(); sessionView(1); return }
-      if (chatVisible() && focus() === "content") return
+      if ((chatVisible() || terminalVisible()) && focus() === "content") return
     }
     if (key.defaultPrevented || editing()) return
-    if (state()?.session_open && key.name === "f8") { key.preventDefault(); closeSession(); return }
     if (documents() && focus() === "content") return
     if (key.ctrl && key.name === "q") { key.preventDefault(); lockOblivion(); return }
     if (state()?.general_mounted && !state()?.session_open && /^[1-5]$/.test(key.name)) { key.preventDefault(); navigate(Number(key.name) - 1); return }
@@ -525,7 +569,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
       key.preventDefault()
       const delta = key.name === "left" || key.name === "up" ? -1 : 1
       if (!state()?.general_mounted) { setAccessSection((value) => Math.max(0, Math.min(accessSections.length - 1 + Number(!!state()?.debug_available), value + delta))); return }
-      if (state()?.session_open) { setSessionSection((value) => Math.max(0, Math.min(1, value + delta))); return }
+      if (state()?.session_open) { setSessionSection((value) => Math.max(0, Math.min(2, value + delta))); return }
       navigate(Math.max(0, Math.min(sections.length - 1 + Number(!!state()?.debug_available), page() + delta))); setFocus("navigation"); return
     }
     if (focus() === "navigation" && key.name === "return") { key.preventDefault(); if (!state()?.general_mounted) { accessSettings(accessSection()); return }; if (state()?.session_open) { sessionView(sessionSection()); return }; setFocus("content"); return }
@@ -570,15 +614,16 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   return <Show when={!intro()} fallback={<BootLogo elapsed={elapsed()} />}>
     <Shell mounted={!!state()?.general_mounted} welcome={welcome()} activeSession={state()?.active_session}
       breadcrumb={chatVisible() ? `SESSION / ${state()?.active_session?.slice(0, 8)} / Chat` : documents() ? `SESSION / ${state()?.active_session?.slice(0, 8)} / Documents` : breadcrumb()}
-      chat={chatVisible()} documents={documents()} onSection={(index) => state()?.general_mounted ? navigate(index) : accessSettings(index)}
+      chat={chatVisible()} terminal={terminalVisible()} documents={documents()} onSection={(index) => state()?.general_mounted ? navigate(index) : accessSettings(index)}
       accessSetting={wizard() ? 0 : undefined} debugAvailable={state()?.debug_available} debugActive={debugVisible()}
-      onChat={() => sessionView(0)} onDocuments={() => sessionView(1)}
+      onChat={() => sessionView(0)} onDocuments={() => sessionView(1)} onTerminal={() => sessionView(2)}
       page={!state()?.general_mounted ? accessSection() : state()?.session_open ? sessionSection() : page()} navigation={focus() === "navigation" && !editing()} editing={editing()}
       host={now() - observed() <= 10000 ? state()?.network_status?.host_link ?? "STATUS UNKNOWN" : "STATUS UNKNOWN"}
       network={networkLabel()} blocked={!!state()?.network_status?.direct_blocked && networkFresh()}
-      internet={now() - observed() <= 10000 ? state()?.connections?.internet ?? "unknown" : "unknown"} transport={state()?.egress?.selected.mode ?? "tor"}
+      connection={now() - observed() <= 10000 ? state()?.connections?.internet ?? "unknown" : "unknown"} transport={state()?.egress?.selected.mode ?? "tor"}
       busy={busy()} cancellable={!!networkWait()} onClose={state()?.session_open ? closeSession : lockOblivion} notice={notice()} feedback={feedback()}>
-        <Show when={chatVisible() && connection()} fallback={
+        <Show when={backup() || restoring()} fallback={<>
+        <Show when={terminalVisible() && terminalConnection()} fallback={<Show when={chatVisible() && connection()} fallback={
         <Show when={documents()} fallback={<Show when={wizard()} fallback={<Show when={form()} fallback={
           <Show when={debugVisible()} fallback={<Show when={page() === 4 && state()?.general_mounted && !state()?.session_open} fallback={<Show when={networkVisible()} fallback={
           <Menu details={!(page() === 2 && !keyID())} toolbar={pageActions()} actionsFocused={focus() === "actions"} focusActions={() => setFocus("actions")} empty={page() === 2 ? "No API keys. Add your first key above." : "No sessions. Create a session above."} title={!state()?.general_mounted ? state()?.general_present ? "Welcome back" : "Welcome to Oblivion" : page() === 0 ? session() ? `Session ${state()?.session_titles[session()!] ?? session()!.slice(0, 8)}` : "Your protected sessions" : keyID() ? state()?.api_keys?.entries.find((entry) => entry.id === keyID())?.name ?? "API key" : page() === 2 ? "Saved API keys" : category()}
@@ -588,7 +633,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
             description={networkDescription()} items={items()} selected={selection()} change={setSelection} choose={choose}
             focused={focus() === "content"} disabled={editing()} activate={() => setFocus("content")} sidebar={() => setFocus("navigation")} back={back} />
           </Show>}><SystemPage status={state()!} focused={!editing() && focus() === "content"} /></Show>}><DebugPage status={diagnostics()} actions={pageActions()} focused={!editing() && focus() !== "navigation"} activate={() => setFocus("actions")} /></Show>
-        }>{(current) => <FormView form={current()} cancel={() => { setForm(undefined); if (state()?.session_open) { if (resumeChat() && connection()) void chat(); else setDocuments(true); setResumeChat(false) }; if (page() === 0 && session() && !state()?.session_open) { setSession(undefined); setSelection(0) } }} submit={(values) => {
+        }>{(current) => <FormView form={current()} cancel={() => { setForm(undefined); if (state()?.session_open) { if (resumeTerminal() && terminalConnection()) void terminal(); else if (resumeChat() && connection()) void chat(); else setDocuments(true); setResumeChat(false); setResumeTerminal(false) }; if (page() === 0 && session() && !state()?.session_open) { setSession(undefined); setSelection(0) } }} submit={(values) => {
           // perform unmounts the form. Capture its action before the Show accessor expires.
           const submitted = current()
           void perform(submitted.title, () => submitted.run(values))
@@ -604,7 +649,14 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
             focused={focus() === "content"} activate={() => setFocus("content")} focusSidebar={undefined} onNavigationLock={setDocumentsLocked}
             back={() => { if (props.documentsOnly) { props.runtime.exit(); return }; sessionView(0) }} />}</Show>
         </Show>
-        }>{(current) => <ChatViewport connection={current()} attach={(receive) => { drawChat = receive }} activate={() => setFocus("content")} focused={focus() === "content" && !busy()} />}</Show>
+        }>{(current) => <ChatViewport connection={current()} attach={(receive) => { drawChat = receive }} activate={() => setFocus("content")} focused={focus() === "content" && !busy()} />}</Show>}>
+          {(current) => <ChatViewport connection={current()} attach={(receive) => { drawTerminal = receive }} activate={() => setFocus("content")} focused={focus() === "content" && !busy()} />}
+        </Show>
+        </>}><Show when={restoring()} fallback={<Show when={backup()}>{(selected) => <SessionBackup id={selected().id} title={selected().title} request={props.runtime.request} back={() => {
+          setBackup(undefined); void perform("Refreshing sessions", async () => {})
+        }} />}</Show>}><SessionRestore request={props.runtime.request} back={() => {
+          setRestoring(false); void perform("Refreshing sessions", async () => {})
+        }} /></Show></Show>
     </Shell>
   </Show>
 }
@@ -616,6 +668,7 @@ function validatePassword(values: Record<string, string>) {
 
 function explain(error: unknown) {
   const messages: Record<string, string> = {
+    terminal_disconnected: "The terminal did not become ready. Your session stays open; retry Terminal or close and lock the session.",
     debug_operation_failed: "Debug access could not be changed. Check that the host has a local network connection, then refresh.",
     debug_image_required: "Debug tools are available only in the debug image.",
     network_manager_unavailable: "NetworkManager is unavailable. Refresh status to retry.",

@@ -49,6 +49,15 @@ path = "src/egress_main.rs"
 name = "oblivion-tools"
 path = "src/tools_main.rs"
 
+[[example]]
+name = "onion-probe"
+path = "examples/onion-probe.rs"
+required-features = ["lab-emulation"]
+
+[[bin]]
+name = "oblivion-onion-gateway"
+path = "src/onion_main.rs"
+
 [profile.dev]
 debug = 0
 incremental = false

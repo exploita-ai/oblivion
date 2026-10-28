@@ -2,7 +2,7 @@
 set -eu
 groupadd --gid 1000 oblivion-manager
 useradd --uid 1000 --gid 1000 --no-create-home --home-dir /run/oblivion-manager --shell /usr/sbin/nologin oblivion-manager
-for entry in '1100 oblivion-vm' '1101 oblivion-gateway-vm' '1102 oblivion-import-vm' '1103 oblivion-export-vm'; do
+for entry in '1100 oblivion-vm' '1101 oblivion-gateway-vm' '1102 oblivion-import-vm' '1103 oblivion-export-vm' '1105 oblivion-onion-gateway-vm' '1106 oblivion-onion-file-vm'; do
     set -- $entry
     groupadd --gid "$1" "$2"
     useradd --uid "$1" --gid "$1" --no-create-home --shell /usr/sbin/nologin "$2"

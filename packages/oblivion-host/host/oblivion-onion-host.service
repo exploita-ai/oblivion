@@ -1,0 +1,38 @@
+[Unit]
+Description=Oblivion isolated Tor file transfer owner
+After=local-fs.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/oblivion-storage --config /etc/oblivion/controller.json onion-host-run
+ExecStopPost=/usr/bin/oblivion-storage --config /etc/oblivion/controller.json onion-cleanup
+RuntimeDirectory=oblivion-onion-host
+RuntimeDirectoryMode=0711
+Restart=no
+KillMode=control-group
+TimeoutStartSec=120
+TimeoutStopSec=25
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=128M
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/oblivion -/run/oblivion-session /run/oblivion/general/profile
+ReadOnlyPaths=/run/oblivion/general
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+StandardInput=null
+StandardOutput=null
+StandardError=null

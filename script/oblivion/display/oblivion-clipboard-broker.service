@@ -1,0 +1,43 @@
+[Unit]
+Description=Oblivion text clipboard hypervisor broker
+ConditionPathExists=/dev/virtio-ports/com.redhat.spice.0
+After=systemd-udev-trigger.service
+
+[Service]
+Type=exec
+User=1104
+Group=1104
+ExecStart=/usr/sbin/spice-vdagentd -x -X -f -u /dev/null -s /dev/virtio-ports/com.redhat.spice.0 -S /run/oblivion-clipboard-broker/socket
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=oblivion-clipboard-broker
+RuntimeDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateDevices=yes
+BindPaths=/dev/virtio-ports/com.redhat.spice.0
+DevicePolicy=closed
+DeviceAllow=/dev/virtio-ports/com.redhat.spice.0 rw
+ProtectSystem=strict
+ProtectHome=yes
+InaccessiblePaths=-/dev/log -/run/systemd/journal/dev-log -/run/systemd/journal/socket
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=32M
+TasksMax=8
+StandardInput=null
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

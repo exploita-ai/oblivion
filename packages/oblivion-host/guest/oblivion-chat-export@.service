@@ -1,0 +1,32 @@
+[Unit]
+Description=Export a settled chat inside its protected session
+Requires=oblivion-vault.service
+After=oblivion-vault.service dev-virtio\x2dports-%i.device
+BindsTo=dev-virtio\x2dports-%i.device
+
+[Service]
+Type=exec
+User=1000
+Group=1000
+ExecStart=/usr/lib/oblivion/guest/chat-export.sh /dev/virtio-ports/%I
+ExecStopPost=/usr/bin/python3 -B /usr/lib/oblivion/guest/chat-export.py --cleanup %I
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateNetwork=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+ProtectSystem=strict
+ReadWritePaths=/vault/state /vault/workspace
+ProtectHome=yes
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=1G
+TasksMax=64
+RuntimeMaxSec=100
+TimeoutStopSec=5
+KillMode=control-group
+Restart=no
+StandardInput=null
+StandardOutput=null
+StandardError=null

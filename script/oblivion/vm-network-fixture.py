@@ -107,12 +107,13 @@ def probes():
     denied = []
     for host, port in [("10.88.0.1", 9050), ("10.88.0.1", 9051), ("10.88.0.1", 22),
         ("10.88.0.1", 53), ("10.0.2.2", 80), ("10.0.2.3", 53), ("169.254.169.254", 80),
-        ("1.1.1.1", 443)]:
+        ("1.1.1.1", 443), ("1.1.1.1", 53), ("1.1.1.1", 853)]:
         with socket.socket() as client:
             client.settimeout(0.5)
             assert client.connect_ex((host, port)) != 0, (host, port)
         denied.append(f"{host}:{port}")
-    for host, port in [("10.88.0.1", 53), ("10.0.2.3", 53), ("1.1.1.1", 443)]:
+    udp = [("10.88.0.1", 53), ("10.0.2.3", 53), ("1.1.1.1", 53), ("1.1.1.1", 443), ("1.1.1.1", 123), ("1.1.1.1", 9999)]
+    for host, port in udp:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
             client.sendto(b"OBLIVION_DENIED_UDP", (host, port))
     # Give the chat an IPv6 address and route; the gateway still drops IPv6.
@@ -120,7 +121,7 @@ def probes():
     with socket.socket(socket.AF_INET6) as client:
         client.settimeout(0.5)
         assert client.connect_ex(("fd00:88::1", 9050)) != 0
-    return {"tcp_denied": denied, "udp_probes_sent": 3, "ipv6_denied": True,
+    return {"tcp_denied": denied, "udp_probes_sent": len(udp), "ipv6_denied": True,
         "interfaces": sorted(p.name for p in Path("/sys/class/net").iterdir())}
 
 
@@ -236,7 +237,24 @@ def gateway(operation, configuration):
             "curl", "--silent", "--show-error", "--noproxy", "*", "--connect-timeout", "2", "--max-time", "3",
             "https://1.1.1.1/"], capture_output=True, timeout=5, env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"})
         assert result.returncode != 0
-        return {"api_uid_direct_denied": True}
+        code = """import socket
+for port in (53, 853):
+ with socket.socket() as peer:
+  peer.settimeout(.3)
+  assert peer.connect_ex(('1.1.1.1',port)) != 0
+for port in (53,123,443,9999):
+ with socket.socket(type=socket.SOCK_DGRAM) as peer:
+  peer.settimeout(.3)
+  try:
+   peer.sendto(b'OBLIVION_DENIED_UDP',('1.1.1.1',port))
+   peer.recv(1024)
+  except OSError: continue
+  raise AssertionError('UDP bypass')
+"""
+        for uid in (1300, 1301):
+            result = subprocess.run(["setpriv", f"--reuid={uid}", f"--regid={uid}", "--clear-groups", "--", "python3", "-c", code], capture_output=True, timeout=5, env={"PATH":"/usr/bin:/bin"})
+            assert result.returncode == 0
+        return {"api_uid_direct_denied": True, "api_and_tools_dns_tcp_udp_denied": True}
     raise AssertionError("unknown gateway operation")
 
 

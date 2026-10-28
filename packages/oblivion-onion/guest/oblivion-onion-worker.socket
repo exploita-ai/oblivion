@@ -1,0 +1,14 @@
+[Unit]
+Description=Private activation channel for the OnionShare worker
+BindsTo=oblivion-onion-file.service
+After=oblivion-onion-file.service
+
+[Socket]
+ListenStream=/run/oblivion-onion-state/worker.sock
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+DirectoryMode=0700
+Accept=yes
+MaxConnections=1
+RemoveOnStop=yes

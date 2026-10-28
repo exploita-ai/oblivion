@@ -1,6 +1,7 @@
 ARG GUEST=guest
 ARG HOST=host
 ARG STREAM_GATEWAY=stream-gateway
+ARG TERMINAL_GUEST=guest
 
 FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS stream-tls-fixture
 RUN apt-get update && apt-get install -y --no-install-recommends openssl \
@@ -41,6 +42,43 @@ RUN sh /tmp/setup && rm /tmp/setup
 FROM os AS rust-toolchain
 RUN apt-get update && apt-get install -y --no-install-recommends cargo rustc gcc libc6-dev && rm -rf /var/lib/apt/lists/*
 
+FROM rust-toolchain AS clipboard-compiler
+WORKDIR /clipboard
+COPY packages/oblivion-clipboard/ ./
+RUN cargo fetch --locked
+RUN --network=none cargo test --locked --offline && cargo build --locked --offline --release \
+    && find Cargo.toml Cargo.lock src LICENSE PROVENANCE.md upstream.json -type f -print0 | sort -z | xargs -0 sha256sum > sources.sha256
+
+FROM os AS clipboard-broker
+RUN apt-get update && apt-get install -y --no-install-recommends libpciaccess0 libglib2.0-0t64 \
+    && cd /tmp && apt-get download spice-vdagent \
+    && mkdir /out && dpkg-deb -x spice-vdagent*.deb /out \
+    && dpkg-deb --field spice-vdagent*.deb > /out/package.control \
+    && sha256sum spice-vdagent*.deb /out/usr/sbin/spice-vdagentd > /out/SHA256SUMS \
+    && ldd /out/usr/sbin/spice-vdagentd | tee /out/libraries.txt \
+    && ! ldd /out/usr/sbin/spice-vdagentd | grep -q 'not found' \
+    && /out/usr/sbin/spice-vdagentd --help >/out/help.txt \
+    && rm -rf /var/lib/apt/lists/* /tmp/*.deb
+
+FROM os AS clipboard-test
+RUN apt-get update && apt-get install -y --no-install-recommends libwlroots-0.18 wl-clipboard python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1104 oblivion-display \
+    && useradd --uid 1104 --gid 1104 --no-create-home oblivion-display
+COPY --from=cage-build /out/oblivion-cage /usr/bin/
+COPY --from=clipboard-compiler /clipboard/target/release/oblivion-clipboard /usr/bin/
+COPY script/oblivion/test-vm-clipboard.py /usr/lib/oblivion/test-vm-clipboard.py
+USER 1104:1104
+ENV XDG_RUNTIME_DIR=/run/oblivion-display WLR_BACKENDS=headless WLR_HEADLESS_OUTPUTS=1 WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
+ENTRYPOINT ["/usr/bin/oblivion-cage", "-d", "--", "/usr/bin/python3", "-B", "/usr/lib/oblivion/test-vm-clipboard.py"]
+
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS vbox-clipboard
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates xorriso bzip2 \
+    && rm -rf /var/lib/apt/lists/*
+COPY script/oblivion/install-vbox-clipboard.py script/oblivion/vbox-clipboard.json /build/
+RUN python3 -B /build/install-vbox-clipboard.py "$TARGETARCH" /out
+
 FROM rust-toolchain AS compiler
 WORKDIR /build
 COPY packages/oblivion-tor-state/ /oblivion-tor-state/
@@ -49,8 +87,8 @@ COPY packages/oblivion-transfer/ /oblivion-transfer/
 COPY packages/oblivion-host/ ./
 RUN cargo test --locked && cargo build --locked --release --bins --examples && cp target/release/oblivion-storage /tmp/oblivion-storage \
     && cargo build --locked --release --features lab-emulation --bin oblivion-storage
-RUN cd /oblivion-transfer && cargo test --locked && cargo build --locked --release --bin oblivion-copy
-RUN mkdir /bundle && cp /oblivion-transfer/target/release/oblivion-copy /bundle/ && cp /tmp/oblivion-storage /bundle/oblivion-storage \
+RUN cd /oblivion-transfer && cargo test --locked && cargo build --locked --release --bins
+RUN mkdir /bundle && cp /oblivion-transfer/target/release/oblivion-copy /oblivion-transfer/target/release/oblivion-onion-file /bundle/ && cp /tmp/oblivion-storage /bundle/oblivion-storage \
     && cp target/release/oblivion-storage /bundle/oblivion-storage-lab \
     && cp target/release/oblivion-control target/release/oblivion-manager target/release/oblivion-console target/release/oblivion-display /bundle/ \
     && cp host/*.service /bundle/ \
@@ -89,6 +127,8 @@ FROM scratch AS transfer-vm-artifacts
 COPY --from=transfer-pack /out/ /
 
 FROM os AS guest
+RUN apt-get update && apt-get install -y --no-install-recommends python3 tmux procps \
+    && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 1000 oblivion && useradd --uid 1000 --gid 1000 --no-create-home --home-dir /vault/home --shell /bin/sh oblivion \
     && useradd --uid 1001 --gid 1000 --no-create-home --shell /usr/sbin/nologin oblivion-import
 RUN passwd -l root && mkdir -p /vault /usr/libexec
@@ -121,16 +161,142 @@ RUN mkdir /target && passwd -l root && chmod 0755 /usr/lib/oblivion/export/*.sh 
     && printf 'virtio_console\nvfat\nexfat\n' > /etc/modules-load.d/oblivion-export.conf \
     && printf '%s\n' 'SUBSYSTEM=="virtio-ports", ATTR{name}=="oblivion.export", OWNER="root", GROUP="root", MODE="0600", TAG+="systemd", ENV{SYSTEMD_WANTS}="oblivion-export-target.service"' > /etc/udev/rules.d/72-oblivion-export.rules
 
-FROM guest AS opencode-guest
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS session-node
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY script/oblivion/install-session-node.py script/oblivion/session-node.json /build/
+RUN python3 -B /build/install-session-node.py "$TARGETARCH" /build/session-node.json /node
+
+# Development-only lock generation. Runtime builds consume the reviewed lock;
+# users never resolve or install Python dependencies when opening a transfer.
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS onionshare-lock-builder
+RUN apt-get update && apt-get install -y --no-install-recommends python3-venv ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /resolver \
+    && /resolver/bin/pip install --no-cache-dir pip-tools==7.6.2
+COPY script/oblivion/onionshare-source.json /source.json
+RUN mkdir /out \
+    && python3 -c 'import json; p=json.load(open("/source.json")); open("/requirements.in","w").write(p["package"]+"=="+p["version"]+"\n")' \
+    && /resolver/bin/pip-compile --generate-hashes --allow-unsafe --strip-extras \
+        --pip-args='--only-binary=:all: --no-binary=stem' --output-file=/out/onionshare-requirements.lock /requirements.in
+
+FROM scratch AS onionshare-lock-artifacts
+COPY --from=onionshare-lock-builder /out/ /
+
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS onionshare-dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends python3-venv ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY script/oblivion/install-onionshare.py script/oblivion/onionshare-source.json script/oblivion/onionshare-requirements.lock script/oblivion/onionshare-licenses.json /build/
+RUN python3 -B /build/install-onionshare.py /build/onionshare-requirements.lock /build/onionshare-source.json /opt/oblivion-onionshare
+
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS onionshare-runtime
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=onionshare-dependencies /opt/oblivion-onionshare/ /opt/oblivion-onionshare/
+COPY packages/oblivion-onion/ /usr/lib/oblivion/onion/
+
+FROM onionshare-runtime AS onionshare-test
+RUN groupadd --gid 1000 oblivion && useradd --uid 1000 --gid 1000 --no-create-home oblivion \
+    && mkdir -m 0700 /fixture-persistent && chown 1000:1000 /fixture-persistent \
+    && printf 'preserve me\n' > /fixture-persistent/canary
+COPY script/oblivion/test-onionshare.py /usr/lib/oblivion/test-onionshare.py
+USER 1000:1000
+ENTRYPOINT ["/usr/bin/python3", "-B", "/usr/lib/oblivion/test-onionshare.py"]
+
+FROM os AS onion-file-base
+RUN apt-get update && apt-get install -y --no-install-recommends python3 socat nftables iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=onionshare-dependencies /opt/oblivion-onionshare/ /opt/oblivion-onionshare/
+COPY packages/oblivion-onion/service.py packages/oblivion-onion/LICENSE packages/oblivion-onion/NOTICE /usr/lib/oblivion/onion/
+COPY packages/oblivion-onion/guest/ /usr/lib/oblivion/onion/guest/
+FROM onion-file-base AS onion-file-system
+ARG ONION_TRANSFER_BUNDLE=artifacts/ci/transfer
+COPY ${ONION_TRANSFER_BUNDLE}/oblivion-copy ${ONION_TRANSFER_BUNDLE}/oblivion-onion-file /usr/bin/
+RUN sh /usr/lib/oblivion/onion/guest/install.sh
+
+FROM onion-file-base AS live-onion-file
+COPY --from=compiler /bundle/oblivion-copy /bundle/oblivion-onion-file /usr/bin/
+RUN sh /usr/lib/oblivion/onion/guest/install.sh
+
+FROM onion-file-system AS onion-file-lab
+COPY script/oblivion/vm-onion-file-fixture.py /usr/libexec/oblivion-onion-file-fixture
+RUN printf '[Unit]\nRequires=oblivion-onion-file.target\nAfter=oblivion-onion-file.target\n[Service]\nExecStart=/usr/bin/python3 -B /usr/libexec/oblivion-onion-file-fixture file\nStandardInput=tty\nStandardOutput=tty\nStandardError=tty\nTTYPath=/dev/console\nTTYReset=yes\nLimitCORE=0\nExecStopPost=/usr/bin/systemctl --no-block poweroff\n' > /etc/systemd/system/oblivion-onion-file-lab.service \
+    && printf '[Unit]\nRequires=oblivion-onion-file-lab.service\nAfter=oblivion-onion-file-lab.service\nAllowIsolate=yes\n' > /etc/systemd/system/oblivion-onion-file-lab.target
+
+FROM os AS onion-file-peer
+RUN apt-get update && apt-get install -y --no-install-recommends python3 iproute2 \
+    && rm -rf /var/lib/apt/lists/* \
+    && printf 'virtio_net\n' >> /etc/initramfs-tools/modules && update-initramfs -u -k all
+COPY script/oblivion/vm-onion-file-fixture.py /usr/libexec/oblivion-onion-file-fixture
+RUN printf '[Unit]\nAfter=multi-user.target\n[Service]\nExecStartPre=/sbin/modprobe virtio_net\nExecStartPre=/usr/bin/udevadm settle\nExecStart=/usr/bin/python3 -B /usr/libexec/oblivion-onion-file-fixture peer\nStandardInput=tty\nStandardOutput=tty\nStandardError=tty\nTTYPath=/dev/console\nTTYReset=yes\nLimitCORE=0\nExecStopPost=/usr/bin/systemctl --no-block poweroff\n' > /etc/systemd/system/oblivion-onion-file-peer.service \
+    && printf '[Unit]\nRequires=multi-user.target oblivion-onion-file-peer.service\nAfter=multi-user.target oblivion-onion-file-peer.service\nAllowIsolate=yes\n' > /etc/systemd/system/oblivion-onion-file-peer.target
+
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS onion-file-pack
+ARG ONION_TRANSFER_BUNDLE=artifacts/ci/transfer
+RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools \
+    && rm -rf /var/lib/apt/lists/*
+COPY packages/oblivion-onion/ /sources/onion/
+COPY packages/oblivion-transfer/ /sources/transfer/
+COPY ${ONION_TRANSFER_BUNDLE}/sources.sha256 /sources/transfer-sources.sha256
+COPY script/oblivion/vm-onion-file-fixture.py script/oblivion/run-onion-file-lab.py script/oblivion/Dockerfile.vm-lab script/oblivion/vm-common-setup.sh script/oblivion/onionshare-*.json script/oblivion/onionshare-requirements.lock /sources/lab/
+RUN cd /sources/transfer && sha256sum -c /sources/transfer-sources.sha256
+RUN --mount=type=bind,from=onion-file-system,source=/,target=/file,ro \
+    --mount=type=bind,from=onion-file-lab,source=/,target=/lab,ro \
+    --mount=type=bind,from=onion-file-peer,source=/,target=/peer,ro \
+    mkdir /out && cp /file/boot/vmlinuz-* /out/kernel && cp /file/boot/initrd.img-* /out/initrd \
+    && cp /peer/boot/initrd.img-* /out/peer-initrd \
+    && mksquashfs /file /out/file.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
+    && mksquashfs /lab /out/laboratory.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
+    && mksquashfs /peer /out/peer.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
+    && chroot /file dpkg-query -W -f='${Package}\t${Version}\n' > /out/packages.tsv \
+    && sha256sum /file/usr/bin/oblivion-onion-file /file/usr/bin/oblivion-copy /file/usr/lib/oblivion/onion/service.py > /out/binaries.sha256 \
+    && cp /file/opt/oblivion-onionshare/inventory.json /out/python-inventory.json \
+    && cd /sources && find . -type f -print0 | sort -z | xargs -0 sha256sum > /out/sources.sha256 \
+    && cd /out && sha256sum * > SHA256SUMS
+
+FROM scratch AS onion-file-artifacts
+COPY --from=onion-file-pack /out/ /
+
+FROM guest AS session-tools
+COPY script/oblivion/session-packages.txt /usr/lib/oblivion/session-packages.txt
+COPY script/oblivion/session-node.json /usr/lib/oblivion/session-node.json
+COPY --from=session-node /node/ /usr/lib/oblivion/node/
+RUN apt-get update && apt-get install -y --no-install-recommends $(cat /usr/lib/oblivion/session-packages.txt) \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/lib/oblivion/node/bin/node /usr/local/bin/node \
+    && ln -s /usr/lib/oblivion/node/bin/npm /usr/local/bin/npm \
+    && ln -s /usr/lib/oblivion/node/bin/npx /usr/local/bin/npx \
+    && python3 -B /usr/lib/oblivion/guest/session-tools.py --build \
+    && ln -s /usr/lib/oblivion/guest/session-tools.py /usr/bin/oblivion-tools \
+    && chmod 0755 /usr/lib/oblivion/guest/session-tools.py
+
+FROM session-tools AS session-tools-test
+COPY --from=stream-tls-fixture --chown=1000:1000 /fixture/ /fixture/
+COPY script/oblivion/test-session-tools.py /usr/lib/oblivion/test-session-tools.py
+USER 1000:1000
+ENTRYPOINT ["/usr/bin/python3", "-B", "/usr/lib/oblivion/test-session-tools.py"]
+
+FROM session-tools AS opencode-guest
 ARG TARGETARCH
 ARG OPENCODE_BUILD_EVIDENCE=artifacts/oblivion-build/build-evidence.json
 ARG OPENCODE_BINARY=artifacts/oblivion-build/cli-linux-arm64/bin/opencode
-RUN case "$TARGETARCH" in arm64|amd64) ;; *) exit 1;; esac && apt-get update && apt-get install -y --no-install-recommends \
-    python3 git ripgrep && rm -rf /var/lib/apt/lists/*
+RUN case "$TARGETARCH" in arm64|amd64) ;; *) exit 1;; esac
 COPY ${OPENCODE_BINARY} /usr/bin/oblivion
 COPY ${OPENCODE_BUILD_EVIDENCE} /usr/lib/oblivion/build-evidence.json
 COPY script/oblivion/vm-chat-probe.py /usr/libexec/oblivion-chat-probe
 RUN python3 -c 'import hashlib,json; from pathlib import Path; assert hashlib.sha256(Path("/usr/bin/oblivion").read_bytes()).hexdigest() == json.loads(Path("/usr/lib/oblivion/build-evidence.json").read_text())["binary_sha256"]'
+
+FROM opencode-guest AS session-tools-chat-test
+COPY --from=session-tools-test --chown=1000:1000 /fixture/ /fixture/
+COPY --from=session-tools-test /usr/lib/oblivion/test-session-tools.py /usr/lib/oblivion/test-session-tools.py
+USER 1000:1000
+ENTRYPOINT ["/usr/bin/python3", "-B", "/usr/lib/oblivion/test-session-tools.py"]
+
+# Native chat/database portability probes never enter a production session.
+FROM opencode-guest AS backup-chat-guest
+COPY script/oblivion/vm-backup-chat-probe.py /usr/lib/oblivion/vm-backup-chat-probe.py
+RUN touch /usr/lib/oblivion/backup-chat-lab
 
 FROM opencode-guest AS tui-guest
 COPY script/oblivion/vm-tui-guest.py /usr/libexec/oblivion
@@ -161,6 +327,21 @@ RUN --mount=type=bind,from=conversation-guest,source=/,target=/guest,ro \
 FROM scratch AS conversation-artifacts
 COPY --from=conversation-pack /out/ /
 
+# Offline terminal acceptance uses the actual session filesystem and services,
+# without an agent binary, provider key or virtual network interface.
+FROM ${TERMINAL_GUEST} AS terminal-session
+
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS terminal-pack
+RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools e2fsprogs && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=bind,from=terminal-session,source=/,target=/guest,ro \
+    mkdir /out && cp /guest/boot/vmlinuz-* /out/kernel && cp /guest/boot/initrd.img-* /out/initrd \
+    && mksquashfs /guest /out/root.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
+    && truncate -s 64M /out/vault.raw && mkfs.ext4 -q -m 0 -E lazy_itable_init=0,lazy_journal_init=0 /out/vault.raw \
+    && cd /out && sha256sum * > SHA256SUMS
+
+FROM scratch AS terminal-artifacts
+COPY --from=terminal-pack /out/ /
+
 FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS session-network-pack
 RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools && rm -rf /var/lib/apt/lists/*
 COPY packages/oblivion-host/guest/ /sources/guest/
@@ -189,11 +370,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends cryptsetup-bin 
     && groupadd --gid 1101 oblivion-gateway-vm && useradd --uid 1101 --gid 1101 --no-create-home --shell /usr/sbin/nologin oblivion-gateway-vm \
     && groupadd --gid 1102 oblivion-import-vm && useradd --uid 1102 --gid 1102 --no-create-home --shell /usr/sbin/nologin oblivion-import-vm \
     && groupadd --gid 1103 oblivion-export-vm && useradd --uid 1103 --gid 1103 --no-create-home --shell /usr/sbin/nologin oblivion-export-vm \
+    && groupadd --gid 1105 oblivion-onion-gateway-vm && useradd --uid 1105 --gid 1105 --no-create-home --shell /usr/sbin/nologin oblivion-onion-gateway-vm \
+    && groupadd --gid 1106 oblivion-onion-file-vm && useradd --uid 1106 --gid 1106 --no-create-home --shell /usr/sbin/nologin oblivion-onion-file-vm \
     && passwd -l root
 COPY --from=compiler /tmp/oblivion-storage /usr/bin/oblivion-storage
 COPY --from=compiler /build/target/release/oblivion-storage /usr/bin/oblivion-storage-lab
 COPY --from=compiler /build/target/release/oblivion-control /usr/bin/oblivion-control
 COPY --from=compiler /build/target/release/oblivion-manager /usr/bin/oblivion-manager
+COPY --from=compiler /bundle/oblivion-copy /usr/bin/oblivion-copy
 COPY script/oblivion/vm-lab-test.py /usr/libexec/oblivion-vm-test
 COPY script/oblivion/vm-host-setup.sh /tmp/setup
 RUN sh /tmp/setup && rm /tmp/setup
@@ -203,6 +387,8 @@ COPY script/oblivion/vm-manager-test.py /usr/libexec/oblivion-vm-test
 RUN touch /usr/lib/oblivion/vm/manager-lab
 
 FROM manager-host AS import-host
+COPY --from=compiler /build/target/release/oblivion-console /usr/bin/oblivion-console
+COPY --from=compiler /build/target/release/examples/viewport-probe /usr/libexec/oblivion-viewport-probe
 COPY script/oblivion/vm-import-test.py /usr/libexec/oblivion-vm-test
 RUN touch /usr/lib/oblivion/vm/import-lab
 
@@ -252,12 +438,15 @@ COPY packages/oblivion-gateway/Cargo.toml packages/oblivion-gateway/Cargo.lock .
 COPY packages/oblivion-gateway/.cargo/ .cargo/
 RUN cargo fetch --locked
 COPY packages/oblivion-gateway/src/ src/
+COPY packages/oblivion-gateway/examples/ examples/
 COPY packages/oblivion-gateway/guest/firewall.nft guest/firewall.nft
+COPY packages/oblivion-gateway/guest/onion/ guest/onion/
 COPY packages/oblivion-gateway/tests/ tests/
-COPY packages/oblivion-host/guest/chat-database.py script/oblivion/test-chat-database.py script/oblivion/test-host-firewall.py script/oblivion/host-firewall.nft /gateway/
+COPY packages/oblivion-host/guest/chat-database.py packages/oblivion-host/guest/chat-export.py packages/oblivion-host/guest/session-backup.py script/oblivion/test-chat-database.py script/oblivion/test-chat-export.py script/oblivion/test-session-backup.py script/oblivion/test-host-firewall.py script/oblivion/host-firewall.nft /gateway/
 RUN --network=none cargo test --locked --offline --lib --features lab-emulation \
+    && cargo test --locked --offline --features lab-emulation --bin oblivion-gateway-control --bin oblivion-onion-gateway \
     && cargo test --locked --offline --no-run --features lab-emulation \
-    && mkdir /gateway-bundle && cp chat-database.py test-chat-database.py test-host-firewall.py host-firewall.nft /gateway-bundle/ \
+    && mkdir /gateway-bundle && cp chat-database.py chat-export.py session-backup.py test-chat-database.py test-chat-export.py test-session-backup.py test-host-firewall.py host-firewall.nft /gateway-bundle/ \
     && cp /tmp/target/debug/oblivion-api /gateway-bundle/oblivion-api-lab \
     && cp /tmp/target/debug/oblivion-egress /gateway-bundle/oblivion-egress-lab \
     && cp /tmp/target/debug/oblivion-tools /gateway-bundle/oblivion-tools-lab \
@@ -268,13 +457,29 @@ RUN --network=none cargo test --locked --offline --lib --features lab-emulation 
     && cp /tmp/target/debug/oblivion-gateway-control /gateway-bundle/oblivion-gateway-control \
     && cp /tmp/target/debug/oblivion-egress /gateway-bundle/oblivion-egress \
     && cp /tmp/target/debug/oblivion-tools /gateway-bundle/oblivion-tools \
+    && cp /tmp/target/debug/oblivion-onion-gateway /gateway-bundle/oblivion-onion-gateway \
     && strip /gateway-bundle/oblivion-* /gateway-bundle/*-tests \
-    && find Cargo.toml Cargo.lock .cargo src tests guest/firewall.nft chat-database.py test-chat-database.py test-host-firewall.py host-firewall.nft ../oblivion-tor-state/Cargo.toml ../oblivion-tor-state/src ../oblivion-transport/Cargo.toml ../oblivion-transport/src -type f -print0 | sort -z | xargs -0 sha256sum > /gateway-bundle/sources.sha256 \
+    && find Cargo.toml Cargo.lock .cargo src tests examples guest/firewall.nft guest/onion chat-database.py chat-export.py session-backup.py test-chat-database.py test-chat-export.py test-session-backup.py test-host-firewall.py host-firewall.nft ../oblivion-tor-state/Cargo.toml ../oblivion-tor-state/src ../oblivion-transport/Cargo.toml ../oblivion-transport/src -type f -print0 | sort -z | xargs -0 sha256sum > /gateway-bundle/sources.sha256 \
     && rustc --version > /gateway-bundle/compiler.txt \
     && cd /gateway-bundle && sha256sum * > SHA256SUMS
 
 FROM scratch AS gateway-artifacts
 COPY --from=gateway-compiler /gateway-bundle/ /
+
+# Component-only proof of ephemeral onion ownership against the real daemon.
+# DisableNetwork remains set; no public Tor service or model request is made.
+FROM gateway-compiler AS onion-tor-compiler
+RUN --network=none cargo build --locked --offline --features lab-emulation --example onion-probe \
+    && strip /tmp/target/debug/examples/onion-probe
+
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS onion-tor-test
+RUN apt-get update && apt-get install -y --no-install-recommends python3 tor openssl util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupmod -g 1200 debian-tor && usermod -u 1200 -g 1200 debian-tor
+COPY --from=onion-tor-compiler /tmp/target/debug/examples/onion-probe /usr/bin/oblivion-onion-probe
+COPY packages/oblivion-gateway/guest/onion/torrc /etc/oblivion/onion/torrc
+COPY script/oblivion/test-onion-tor.py /usr/lib/oblivion/test-onion-tor.py
+ENTRYPOINT ["/usr/bin/python3", "-B", "/usr/lib/oblivion/test-onion-tor.py"]
 
 FROM os AS gateway-system
 RUN apt-get update && apt-get install -y --no-install-recommends tor nftables iproute2 \
@@ -288,6 +493,46 @@ RUN sh /gateway-config/install.sh && rm -rf /gateway-config
 # BuildKit mounts its own resolver read-only during RUN; COPY replaces the
 # image's file without touching that build-time mount.
 COPY packages/oblivion-gateway/guest/resolv.conf /etc/resolv.conf
+
+FROM gateway-system AS onion-gateway-system
+COPY --from=gateway-compiler /gateway-bundle/oblivion-onion-gateway /usr/bin/oblivion-onion-gateway
+COPY packages/oblivion-gateway/guest/onion/ /onion-config/
+RUN sh /onion-config/install.sh && rm -rf /onion-config
+
+FROM onion-gateway-system AS onion-control-lab
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY script/oblivion/vm-onion-fixture.py /usr/libexec/oblivion-onion-fixture
+RUN printf '[Unit]\nRequires=oblivion-onion-gateway.target\nAfter=oblivion-onion-gateway.target\n[Service]\nType=simple\nExecStart=/usr/bin/python3 -B /usr/libexec/oblivion-onion-fixture\nStandardInput=tty\nStandardOutput=tty\nStandardError=tty\nTTYPath=/dev/console\nTTYReset=yes\nLimitCORE=0\nExecStopPost=/usr/bin/systemctl --no-block poweroff\n' > /etc/systemd/system/oblivion-onion-lab.service \
+    && printf '[Unit]\nRequires=oblivion-onion-lab.service\nAfter=oblivion-onion-lab.service\nAllowIsolate=yes\n' > /etc/systemd/system/oblivion-onion-lab.target
+
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS onion-control-pack
+RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools \
+    && rm -rf /var/lib/apt/lists/*
+COPY packages/oblivion-gateway/guest/ /sources/guest/
+COPY script/oblivion/vm-onion-fixture.py script/oblivion/run-onion-lab.py /sources/lab/
+COPY --from=gateway-compiler /gateway-bundle/sources.sha256 /sources/compiler.sha256
+RUN --mount=type=bind,from=onion-gateway-system,source=/,target=/gateway,ro \
+    --mount=type=bind,from=onion-control-lab,source=/,target=/lab,ro \
+    mkdir /out && cp /gateway/boot/vmlinuz-* /out/kernel && cp /gateway/boot/initrd.img-* /out/initrd \
+    && mksquashfs /gateway /out/gateway.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
+    && mksquashfs /lab /out/laboratory.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
+    && chroot /gateway dpkg-query -W -f='${Package}\t${Version}\n' > /out/packages.tsv \
+    && sha256sum /gateway/usr/bin/oblivion-onion-gateway > /out/controller.sha256 \
+    && cd /sources && find . -type f -print0 | sort -z | xargs -0 sha256sum > /out/sources.sha256 \
+    && cd /out && sha256sum * > SHA256SUMS
+
+FROM scratch AS onion-control-artifacts
+COPY --from=onion-control-pack /out/ /
+
+# Independent public caller for the explicit online integration laboratory.
+# It is never copied into the Live image or an Oblivion guest.
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS onion-recipient-test
+RUN apt-get update && apt-get install -y --no-install-recommends python3 tor curl openssl \
+    && rm -rf /var/lib/apt/lists/* && touch /etc/oblivion-recipient.torrc
+COPY script/oblivion/vm-onion-recipient.py /usr/lib/oblivion/vm-onion-recipient.py
+USER 1000:1000
+ENTRYPOINT ["/usr/bin/python3", "-B", "/usr/lib/oblivion/vm-onion-recipient.py"]
 
 # Diagnostics exist only in this separate laboratory image.
 FROM gateway-system AS gateway-network-lab
@@ -406,11 +651,9 @@ FROM scratch AS transport-network-artifacts
 COPY --from=transport-network-pack /out/ /
 
 # The live target never selects a laboratory host, guest or trust overlay.
-FROM guest AS live-session
+FROM session-tools AS live-session
 ARG OPENCODE_BINARY=artifacts/oblivion-beta-iso/client/cli-linux-x64-baseline/bin/opencode
 ARG OPENCODE_BUILD_EVIDENCE=artifacts/oblivion-beta-iso/client-evidence.json
-RUN apt-get update && apt-get install -y --no-install-recommends git ripgrep python3 \
-    && rm -rf /var/lib/apt/lists/*
 COPY ${OPENCODE_BINARY} /usr/bin/oblivion
 COPY ${OPENCODE_BUILD_EVIDENCE} /usr/lib/oblivion/build-evidence.json
 COPY packages/oblivion-host/guest/conversation.sh /usr/libexec/oblivion
@@ -427,12 +670,18 @@ RUN case "$TARGETARCH" in arm64|amd64) ;; *) exit 1;; esac \
     live-boot live-boot-initramfs-tools cryptsetup-bin dmsetup fdisk \
     $(if [ "$TARGETARCH" = arm64 ]; then printf qemu-system-arm; else printf qemu-system-x86; fi) \
     network-manager wpasupplicant iproute2 nftables console-setup-mini kbd tzdata xkb-data \
-    libwlroots-0.18 foot seatd fonts-dejavu-mono libxkbcommon-tools \
+    libwlroots-0.18 foot seatd fonts-dejavu-mono libxkbcommon-tools libpciaccess0 \
     firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211 firmware-mediatek \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=compiler /bundle/oblivion-storage /bundle/oblivion-control /bundle/oblivion-console /bundle/oblivion-display /usr/bin/
+COPY --from=compiler /bundle/oblivion-storage /bundle/oblivion-control /bundle/oblivion-console /bundle/oblivion-display /bundle/oblivion-copy /usr/bin/
 COPY --from=cage-build /out/oblivion-cage /usr/bin/
 COPY --from=cage-build /out/LICENSE /out/oblivion.patch /out/cage-source.sha256 /usr/share/doc/oblivion-display/
+COPY --from=clipboard-compiler /clipboard/target/release/oblivion-clipboard /usr/bin/
+COPY --from=clipboard-compiler /clipboard/LICENSE /clipboard/PROVENANCE.md /clipboard/upstream.json /clipboard/Cargo.lock /clipboard/sources.sha256 /usr/share/doc/oblivion-clipboard/
+COPY --from=clipboard-broker /out/usr/sbin/spice-vdagentd /usr/sbin/
+COPY --from=clipboard-broker /out/usr/share/doc/spice-vdagent/ /usr/share/doc/spice-vdagent/
+COPY --from=clipboard-broker /out/package.control /out/SHA256SUMS /usr/share/doc/spice-vdagent/
+COPY --from=vbox-clipboard /out/ /usr/lib/oblivion/virtualbox/
 COPY ${MANAGER_BINARY} /usr/bin/oblivion-manager
 COPY ${MANAGER_ASSETS} /usr/lib/oblivion/manager/
 COPY packages/oblivion-host/host/ /etc/systemd/system/
@@ -441,7 +690,7 @@ COPY script/oblivion/live-controller.json /etc/oblivion/controller.json
 COPY script/oblivion/host-firewall.nft /etc/oblivion/host-firewall.nft
 COPY packages/oblivion-gateway/guest/resolv.conf /etc/resolv.conf
 RUN sh /tmp/live-setup && rm /tmp/live-setup
-COPY script/oblivion/display/*.service script/oblivion/display/*.socket script/oblivion/display/manager.conf script/oblivion/display/foot.ini /usr/lib/oblivion/display/
+COPY script/oblivion/display/*.service script/oblivion/display/*.socket script/oblivion/display/manager.conf script/oblivion/display/foot.ini script/oblivion/display/start.sh script/oblivion/display/70-oblivion-clipboard.rules /usr/lib/oblivion/display/
 COPY script/oblivion/display/install.sh /tmp/display-setup
 RUN sh /tmp/display-setup && rm /tmp/display-setup \
     && LANG=C.UTF-8 foot --log-level=info --check-config --config=/etc/oblivion/foot.ini \
@@ -468,8 +717,11 @@ COPY --from=live-session / /session/
 COPY --from=gateway-system / /gateway/
 COPY --from=import-guest / /import/
 COPY --from=export-guest / /export/
+COPY --from=onion-gateway-system / /onion-gateway/
+COPY --from=live-onion-file / /onion-file/
 COPY --from=compiler /bundle/sources.sha256 /sources/host-sources.sha256
 COPY --from=gateway-compiler /gateway-bundle/sources.sha256 /sources/gateway-sources.sha256
+COPY --from=clipboard-compiler /clipboard/sources.sha256 /sources/clipboard-sources.sha256
 COPY script/oblivion/live-* script/oblivion/settings-catalog.py script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/Dockerfile.vm-lab /sources/
 COPY script/oblivion/display/ /sources/display/
 RUN OBLIVION_IMAGE_NAME="$OBLIVION_IMAGE_NAME" sh /sources/live-pack.sh
@@ -515,6 +767,8 @@ COPY --from=live-session / /session/
 COPY --from=gateway-system / /gateway/
 COPY --from=import-guest / /import/
 COPY --from=export-guest / /export/
+COPY --from=onion-gateway-system / /onion-gateway/
+COPY --from=live-onion-file / /onion-file/
 COPY --from=compiler /bundle/sources.sha256 /sources/host-sources.sha256
 COPY --from=gateway-compiler /gateway-bundle/sources.sha256 /sources/gateway-sources.sha256
 COPY script/oblivion/live-* script/oblivion/settings-catalog.py script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/Dockerfile.vm-lab /sources/

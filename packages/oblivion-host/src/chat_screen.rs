@@ -41,7 +41,15 @@ pub fn difference(screen: &vt100::Screen, previous: &vt100::Screen) -> String {
     screen.state_diff(previous)
 }
 
-pub fn bridge(mut stream: UnixStream) -> Result<()> {
+pub fn bridge(stream: UnixStream) -> Result<()> {
+    viewport(stream, true)
+}
+
+pub fn bridge_terminal(stream: UnixStream) -> Result<()> {
+    viewport(stream, false)
+}
+
+fn viewport(mut stream: UnixStream, chat: bool) -> Result<()> {
     stream.set_nonblocking(true)?;
     let mut parser = terminal::parser(24, 80);
     // The guest brackets complete updates with DEC mode 2026. Publishing a
@@ -51,6 +59,7 @@ pub fn bridge(mut stream: UnixStream) -> Result<()> {
     let mut bytes = Zeroizing::new([0u8; 8192]);
     let mut output = std::io::stdout().lock();
     let mut initialized = false;
+    let mut terminal_ready = false;
     let mut previous = None;
     let mut changed = false;
     let mut painted = Instant::now();
@@ -126,7 +135,7 @@ pub fn bridge(mut stream: UnixStream) -> Result<()> {
                 let (rows, cols) = parser.screen().size();
                 stream.write_all(format!("\x1b[8;{rows};{cols}t").as_bytes())?;
             }
-            if let Some(status) = parser.callbacks_mut().take_startup() {
+            if let Some(status) = parser.callbacks_mut().take_startup().filter(|_| chat) {
                 writeln!(
                     output,
                     "{}",
@@ -134,7 +143,9 @@ pub fn bridge(mut stream: UnixStream) -> Result<()> {
                 )?;
                 output.flush()?;
             }
-            if let Some(action) = parser.callbacks_mut().take_request() {
+            // Shell output is untrusted. It may draw cells but cannot request
+            // host navigation, close a volume or acknowledge chat readiness.
+            if let Some(action) = parser.callbacks_mut().take_request().filter(|_| chat) {
                 let action = match action {
                     terminal::Action::New => "new",
                     terminal::Action::Sessions => "sessions",
@@ -153,6 +164,14 @@ pub fn bridge(mut stream: UnixStream) -> Result<()> {
             && !parser.callbacks().synchronized(Instant::now())
             && (previous.is_none() || painted.elapsed() >= FRAME_INTERVAL)
         {
+            if !chat && !terminal_ready && !parser.screen().contents().trim().is_empty() {
+                writeln!(
+                    output,
+                    "{}",
+                    serde_json::json!({"type":"startup", "status":"started"})
+                )?;
+                terminal_ready = true;
+            }
             let (rows, cols) = parser.screen().size();
             let full = previous.is_none();
             let data = previous.as_ref().map_or_else(

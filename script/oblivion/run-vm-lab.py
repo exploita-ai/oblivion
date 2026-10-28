@@ -2,6 +2,7 @@
 """Disposable Debian host + nested session VMs with synthetic data; never physical disks."""
 import argparse
 import base64
+from contextlib import ExitStack
 import gzip
 import hashlib
 import json
@@ -17,19 +18,27 @@ import time
 import zlib
 from pathlib import Path
 from packet_capture import capture
+from onion_recipient import Recipient
 
-def online_vm(command, log, output):
+def online_vm(command, log, output, recipient=None, recipient_port=None, budget=900):
     # The guest waits for our acknowledgement before starting the online
     # gateway. Snapshot bytes at that barrier; PCAP and guest clocks differ.
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, bufsize=0) as process:
-        deadline = time.monotonic() + 900
+        deadline = time.monotonic() + budget
         pending = b""
         try:
+            if recipient is not None:
+                startup = time.monotonic() + 15
+                while not recipient_port.exists():
+                    assert process.poll() is None and time.monotonic() < startup, "Private recipient port unavailable"
+                    time.sleep(0.02)
+                recipient.attach(recipient_port)
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
                 while True:
                     assert time.monotonic() < deadline, "VM deadline"
+                    assert recipient is None or not recipient.failed.is_set(), "Private recipient bridge failed: " + str(recipient.failure)
                     if not selector.select(timeout=1):
                         continue
                     chunk = os.read(process.stdout.fileno(), 65536)
@@ -50,6 +59,7 @@ def online_vm(command, log, output):
                         process.stdin.write(b"go\n")
                         process.stdin.flush()
             process.wait(timeout=max(1, deadline - time.monotonic()))
+            assert recipient is None or recipient.closed, "Recipient lifecycle did not complete"
         finally:
             if process.poll() is None:
                 process.kill()
@@ -67,6 +77,8 @@ parser.add_argument("--refresh-tui-test", action="store_true",
     help="Load the current synthetic TUI test into the lab initramfs, without rebuilding Debian")
 parser.add_argument("--refresh-import-test", action="store_true",
     help="Load the current synthetic manager import test into the lab initramfs")
+parser.add_argument("--terminal-only", action="store_true", help="With --refresh-import-test, run the focused real controller/terminal lifecycle")
+parser.add_argument("--backup-only", action="store_true", help="With --refresh-import-test, exercise closed-session ciphertext backup/restore and cancellation")
 parser.add_argument("--services-bundle", type=Path,
     help="Load compiled host binaries, service units and the crash fixture into laboratory RAM")
 parser.add_argument("--gateway-bundle", type=Path,
@@ -75,13 +87,36 @@ parser.add_argument("--adapter-binary", type=Path,
     help="With --gateway-bundle, copy a compiled Linux ARM CLI into verified read-only laboratory RAM")
 parser.add_argument("--gateway-image", type=Path,
     help="With --services-bundle, exercise the real host owner and a nested gateway VM")
+parser.add_argument("--onion-host", action="store_true", help="Exercise the isolated transfer owner with gateway and file images")
+parser.add_argument("--onion-file-image", type=Path, help="Production file VM artifact directory for --onion-host")
+parser.add_argument("--onion-recipient", help="With --onion-host --tor-online, use this separately built Docker caller for a real receive/import round trip")
+parser.add_argument("--onion-share", action="store_true", help="With --onion-recipient, also qualify selected-file sharing and ephemeral guard-state isolation")
+parser.add_argument("--onion-backup-startup", action="store_true", help="Offline closed-backup preparation/descriptor/reopen-refusal/cleanup check")
+parser.add_argument("--onion-backup", action="store_true", help="With --onion-share, also qualify a closed 512 MiB ciphertext backup with authenticated public full/Range downloads")
 parser.add_argument("--session-image", type=Path,
     help="With --gateway-image, exercise a networked session and grant rotation")
 parser.add_argument("--tor-state", action="store_true", help="Exercise selective Tor state persistence in real LUKS")
 parser.add_argument("--stream", action="store_true", help="With laboratory gateway/session images, verify active streams through real storage revocation")
 parser.add_argument("--stream-socks", action="store_true", help="With --stream and stream-host, use an external synthetic SOCKS proxy in the offline host")
-parser.add_argument("--tor-online", action="store_true", help="With --tor-state, allow Tor bootstrap and capture the outer uplink")
+parser.add_argument("--tor-online", action="store_true", help="With --tor-state or --onion-host, allow Tor bootstrap and capture the outer uplink")
 args = parser.parse_args()
+if args.onion_host and (not args.services_bundle or not args.gateway_image or not args.onion_file_image
+        or args.session_image or args.tor_state or args.stream or args.refresh_import_test or args.refresh_tui_test):
+    parser.error("--onion-host requires services/gateway/file images and a plain host fixture")
+if args.onion_file_image and not args.onion_host:
+    parser.error("--onion-file-image requires --onion-host")
+if args.onion_recipient and not (args.onion_host and args.tor_online):
+    parser.error("--onion-recipient requires --onion-host --tor-online")
+if args.onion_backup_startup and (not args.onion_host or args.tor_online or args.onion_recipient or args.onion_backup):
+    parser.error("--onion-backup-startup requires offline --onion-host")
+if args.onion_backup and not args.onion_share:
+    parser.error("--onion-backup requires --onion-share")
+if args.onion_share and not args.onion_recipient:
+    parser.error("--onion-share requires --onion-recipient")
+if args.terminal_only and not args.refresh_import_test:
+    parser.error("--terminal-only requires --refresh-import-test")
+if args.backup_only and (not args.refresh_import_test or args.terminal_only):
+    parser.error("--backup-only requires --refresh-import-test and excludes --terminal-only")
 if args.stream_socks and not args.stream:
     parser.error("--stream-socks requires --stream")
 if args.stream and (not args.session_image or args.tor_state):
@@ -97,8 +132,8 @@ if adapter:
         adapter_manifest = {"sha256": hashlib.file_digest(file, "sha256").hexdigest(), "bytes": adapter.stat().st_size}
 if args.tor_state and not args.gateway_image:
     parser.error("--tor-state requires --gateway-image")
-if args.tor_online and not args.tor_state:
-    parser.error("--tor-online requires --tor-state")
+if args.tor_online and not (args.tor_state or args.onion_host):
+    parser.error("--tor-online requires --tor-state or --onion-host")
 if args.session_image and not args.gateway_image:
     parser.error("--session-image requires --gateway-image")
 session_image = args.session_image.resolve() if args.session_image else None
@@ -119,6 +154,16 @@ if gateway_image:
         digest, name = line.split()
         if Path(name).name != name or hashlib.sha256((gateway_image / name).read_bytes()).hexdigest() != digest:
             raise SystemExit("Gateway image integrity check failed")
+onion_file_image = args.onion_file_image.resolve() if args.onion_file_image else None
+onion_file_manifest = None
+if onion_file_image:
+    if "," in str(onion_file_image):
+        parser.error("Onion file image path contains a QEMU option separator")
+    onion_file_manifest = (onion_file_image / "SHA256SUMS").read_text()
+    for line in onion_file_manifest.splitlines():
+        digest, name = line.split()
+        if Path(name).name != name or hashlib.sha256((onion_file_image / name).read_bytes()).hexdigest() != digest:
+            raise SystemExit("Onion file image integrity check failed")
 if args.accelerator == "hvf" and ((platform.system(), platform.machine()) != ("Darwin", "arm64") or args.architecture != "aarch64"):
     raise SystemExit("HVF requires macOS ARM64.")
 if args.accelerator == "tcg" and platform.system() != "Linux":
@@ -129,6 +174,8 @@ if args.accelerator == "kvm" and (platform.system() != "Linux" or platform.machi
         f"readable={os.access('/dev/kvm', os.R_OK)}, writable={os.access('/dev/kvm', os.W_OK)}; no fallback.")
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 image = args.image.resolve()
+if (image / "backup-chat-lab").exists() and not args.backup_only:
+    parser.error("The native backup-chat image requires --backup-only")
 for line in (image / "SHA256SUMS").read_text().splitlines():
     expected, name = line.split()
     if Path(name).name != name or hashlib.sha256((image / name).read_bytes()).hexdigest() != expected:
@@ -141,7 +188,7 @@ initrd = image / "initrd"
 fixture = None
 bundle_manifest = None
 bundle = args.services_bundle or args.gateway_bundle
-fixture_name = "vm-import-test.py" if args.refresh_import_test else "vm-tor-state-test.py" if args.tor_state else "vm-session-network-test.py" if session_image else "vm-gateway-host-test.py" if gateway_image else "vm-gateway-test.py" if args.gateway_bundle else "vm-services-test.py" if args.services_bundle else "vm-tui-test.py"
+fixture_name = "vm-onion-host-test.py" if args.onion_host else "vm-import-test.py" if args.refresh_import_test else "vm-tor-state-test.py" if args.tor_state else "vm-session-network-test.py" if session_image else "vm-gateway-host-test.py" if gateway_image else "vm-gateway-test.py" if args.gateway_bundle else "vm-services-test.py" if args.services_bundle else "vm-tui-test.py"
 if sum(bool(option) for option in (args.refresh_tui_test, args.refresh_import_test, args.services_bundle, args.gateway_bundle)) > 1:
     raise SystemExit("Choose one laboratory fixture override.")
 if args.refresh_tui_test or args.refresh_import_test or bundle:
@@ -187,7 +234,7 @@ if args.refresh_tui_test or args.refresh_import_test or bundle:
                 bundle_hook += ('for binary in oblivion-storage oblivion-storage-lab oblivion-control oblivion-manager; do\n'
                     ' mount --bind "/run/oblivion-lab-bundle/$binary" "${rootmnt:-/root}/usr/bin/$binary"\n'
                     'done\n')
-        for role, source in [("gateway", gateway_image), ("session", session_image)]:
+        for role, source in [("gateway", gateway_image), ("session", session_image), ("file", onion_file_image)]:
             if not source:
                 continue
             (root / ("scripts/" + role + "-image")).mkdir()
@@ -205,6 +252,19 @@ if args.refresh_tui_test or args.refresh_import_test or bundle:
                 f'cp -a /scripts/{role}-image/. /run/oblivion-{role}-image/\n')
         if args.tor_online:
             bundle_hook += "touch /run/oblivion-tor-online\n"
+        if args.onion_host:
+            (root / "scripts/onion-host-firewall.nft").write_bytes(Path(__file__).with_name("host-firewall.nft").read_bytes())
+            bundle_hook += "cp /scripts/onion-host-firewall.nft /run/oblivion-onion-host.nft\n"
+        if args.onion_recipient:
+            bundle_hook += "touch /run/oblivion-onion-recipient\n"
+        if args.onion_backup_startup:
+            bundle_hook += "touch /run/oblivion-onion-backup-startup\n"
+        if args.onion_backup:
+            bundle_hook += ("touch /run/oblivion-onion-backup\n"
+                'sed "s/^TimeoutStartSec=15min$/TimeoutStartSec=65min/" "${rootmnt:-/root}/etc/systemd/system/oblivion-lab.service" > /run/oblivion-large-backup-lab.service\n'
+                'mount --bind /run/oblivion-large-backup-lab.service "${rootmnt:-/root}/etc/systemd/system/oblivion-lab.service"\n')
+        if args.onion_share:
+            bundle_hook += "touch /run/oblivion-onion-share\n"
         if args.stream:
             bundle_hook += "touch /run/oblivion-stream-lab\n"
         if args.stream_socks:
@@ -228,7 +288,7 @@ if args.refresh_tui_test or args.refresh_import_test or bundle:
 disk = None if args.gateway_bundle else output / "data.raw"
 if disk:
     with disk.open("xb") as stream:
-        stream.truncate(1024 * 1024 * 1024)
+        stream.truncate((2 if args.backup_only else 1) * 1024 * 1024 * 1024)
 import_source = output / "import-source.raw" if (image / "import-lab").exists() else None
 if import_source:
     # Each fault-injection run owns its media. A mistaken test selection must
@@ -238,15 +298,23 @@ import_digest = hashlib.sha256(import_source.read_bytes()).hexdigest() if import
 export_target = output / "export-target.raw" if (image / "export-lab").exists() else None
 if export_target:
     shutil.copyfile(image / "export-target.raw", export_target)
+    if args.backup_only:
+        with export_target.open("r+b") as target:
+            target.truncate(1024 * 1024 * 1024)
 started = time.monotonic()
-with (output / "serial.log").open("xb") as log:
+with ExitStack() as cleanup, (output / "serial.log").open("xb") as log:
+    recipient_runtime = cleanup.enter_context(tempfile.TemporaryDirectory(prefix="onion-peer-", dir="/tmp")) if args.onion_recipient else None
+    recipient = Recipient(args.onion_recipient, args.onion_share, args.onion_backup) if args.onion_recipient else None
+    if recipient is not None:
+        cleanup.callback(recipient.stop)
+    recipient_port = Path(recipient_runtime) / "control.sock" if recipient_runtime else None
     command = [
         "qemu-system-" + args.architecture, "-machine", "virt" if args.architecture == "aarch64" else "q35", "-accel", args.accelerator,
         "-cpu", "max" if args.accelerator == "tcg" else "host",
         "-m", "2048" if args.gateway_bundle else "4096", "-smp", "4", "-nodefaults", "-no-reboot", "-display", "none",
         "-monitor", "none", "-serial", "stdio", "-nic", "none",
         "-kernel", str(image / "kernel"), "-initrd", str(initrd),
-        "-append", "console=" + ("ttyAMA0" if args.architecture == "aarch64" else "ttyS0") + " root=/dev/vda rootfstype=squashfs ro panic=-1 systemd.getty_auto=no systemd.show_status=false",
+        "-append", "console=" + ("ttyAMA0" if args.architecture == "aarch64" else "ttyS0") + " root=/dev/vda rootfstype=squashfs ro panic=-1 systemd.getty_auto=no systemd.show_status=false" + (" oblivion.lab-terminal=1" if args.terminal_only else "") + (" oblivion.lab-backup=1" if args.backup_only else ""),
         "-drive", f"file={image / 'host.squashfs'},format=raw,if=none,id=root,readonly=on",
         "-device", "virtio-blk-pci,drive=root",
     ] + ([
@@ -265,19 +333,26 @@ with (output / "serial.log").open("xb") as log:
         "-drive", f"file={session_image / 'session.squashfs'},format=raw,if=none,id=session-image,readonly=on",
         "-device", "virtio-blk-pci,drive=session-image,serial=oblivion-ss-image",
     ] if session_image else []) + ([
+        "-drive", f"file={onion_file_image / 'file.squashfs'},format=raw,if=none,id=file-image,readonly=on",
+        "-device", "virtio-blk-pci,drive=file-image,serial=oblivion-file-image",
+    ] if onion_file_image else []) + ([
         "-drive", f"file={adapter},format=raw,if=none,id=adapter,readonly=on",
         "-device", "virtio-blk-pci,drive=adapter,serial=oblivion-adapter",
     ] if adapter else []) + ([
+        "-device", "virtio-serial-pci",
+        "-chardev", f"socket,id=recipient,path={recipient_port},server=on,wait=off",
+        "-device", "virtserialport,chardev=recipient,name=oblivion.onion.lab",
+    ] if recipient is not None else []) + ([
         "-netdev", "user,id=uplink,ipv6=off", "-device", "virtio-net-pci,netdev=uplink,mac=52:54:00:6f:00:04",
         "-object", f"filter-dump,id=uplink-capture,netdev=uplink,file={output / 'uplink.pcap'}",
     ] if args.tor_online else [])
-    result = online_vm(command, log, output) if args.tor_online else subprocess.run(
+    result = online_vm(command, log, output, recipient, recipient_port, 3900 if args.onion_backup else 900) if args.tor_online else subprocess.run(
         # The expanded 31-check stream lifecycle took 870 seconds on CI x86;
         # keep room for real VM startups without changing any per-operation check.
         command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
         timeout=1200 if args.stream else 900)
 serial = (output / "serial.log").read_text(errors="replace")
-fixture_prefix = "OBLIVION_IMPORT_FIXTURE_SHA256 " if args.refresh_import_test else "OBLIVION_TOR_STATE_FIXTURE_SHA256 " if args.tor_state else "OBLIVION_SESSION_NETWORK_FIXTURE_SHA256 " if session_image else "OBLIVION_GATEWAY_HOST_FIXTURE_SHA256 " if gateway_image else "OBLIVION_GATEWAY_FIXTURE_SHA256 " if args.gateway_bundle else "OBLIVION_SERVICES_FIXTURE_SHA256 " if args.services_bundle else "OBLIVION_TUI_FIXTURE_SHA256 "
+fixture_prefix = "OBLIVION_ONION_HOST_FIXTURE_SHA256 " if args.onion_host else "OBLIVION_IMPORT_FIXTURE_SHA256 " if args.refresh_import_test else "OBLIVION_TOR_STATE_FIXTURE_SHA256 " if args.tor_state else "OBLIVION_SESSION_NETWORK_FIXTURE_SHA256 " if session_image else "OBLIVION_GATEWAY_HOST_FIXTURE_SHA256 " if gateway_image else "OBLIVION_GATEWAY_FIXTURE_SHA256 " if args.gateway_bundle else "OBLIVION_SERVICES_FIXTURE_SHA256 " if args.services_bundle else "OBLIVION_TUI_FIXTURE_SHA256 "
 fixture_verified = fixture is None or (fixture_prefix + hashlib.sha256(fixture).hexdigest()) in serial.splitlines()
 bundle_prefix = "OBLIVION_GATEWAY_BUNDLE_SHA256 " if args.gateway_bundle else "OBLIVION_HOST_BUNDLE_SHA256 "
 bundle_verified = bundle_manifest is None or (bundle_prefix + hashlib.sha256(bundle_manifest.encode()).hexdigest()) in serial.splitlines()
@@ -293,11 +368,17 @@ if import_source:
     markers.extend([b"OBLIVION_USB_SELECTED_CANARY_82f1", b"OBLIVION_USB_EDIT_CANARY_1b72", b"OBLIVION_USB_UNSELECTED_CANARY_29a1", b"OBLIVION_IMPORT_PARTIAL_CANARY_c26a"])
 if export_target:
     markers.append(b"OBLIVION_EXPORT_EXISTING_CANARY_f4a8")
+if args.onion_host:
+    markers.extend([b"OBLIVION_ONION_MODEL_KEY_42e1", b"OBLIVION_ONION_PROXY_PASSWORD_3c11"])
+if args.onion_recipient:
+    markers.extend([b"OBLIVION_ONION_PUBLIC_APPROVED_9b72", b"OBLIVION_ONION_PUBLIC_UNSELECTED_841c"])
 if args.stream:
     markers.extend([b"OBLIVION_STREAM_REQUEST", b"Synthetic open stream"])
     markers.extend([b"OBLIVION_WEB_TOOLS_REQUEST", b"OBLIVION_WEB_TOOLS_VERIFIED", b"OBLIVION_WEB_HTTP", b"OBLIVION_WEB_HTTPS"])
 if (image / "opencode.sha256").exists():
     markers.append(b"OBLIVION_GUEST_CHAT_CANARY_7eaf")
+if (image / "backup-chat-lab").exists():
+    markers.extend([b"OBLIVION_BACKUP_SHARED_DOCUMENT_79bd", b"OBLIVION_BACKUP_MESSAGE_a081", b"OBLIVION_BACKUP_PENDING_3da2"])
 if (image / "tui-lab").exists():
     markers.append(b"OBLIVION_TUI_CANARY_8ac4")
     for line in serial.splitlines():
@@ -333,7 +414,9 @@ if args.stream_socks:
                 source == "10.0.2.2" and source_port == 9050 and destination == "10.0.2.15")
 summary = {
     "scope": "gateway component tests over synthetic loopback SOCKS/TLS; no Tor or provider connection" if args.gateway_bundle else "real LUKS/systemd/QEMU lifecycle with synthetic data; nested TCG is NOT an isolation guarantee",
-    "workload": "selective Tor state persistence and bootstrap" if args.tor_state else "session gateway grant, private token delivery and network isolation" if session_image else "general LUKS credentials and real host gateway lifecycle" if gateway_image else "gateway API validation, transport, revocation and Linux activation" if args.gateway_bundle else "systemd service crash/recovery with real manager and VM" if args.services_bundle else ("trusted manager TUI + " if (image / "manager.sha256").exists() else "") + ("compiled interactive OpenCode TUI" if (image / "tui-lab").exists() else "compiled OpenCode CLI" if (image / "opencode.sha256").exists() else "synthetic shell"),
+    "encrypted_backup": args.backup_only,
+    "native_chat_backup": (image / "backup-chat-lab").exists(),
+    "workload": "isolated transfer owner and session lifecycle" if args.onion_host else "selective Tor state persistence and bootstrap" if args.tor_state else "session gateway grant, private token delivery and network isolation" if session_image else "general LUKS credentials and real host gateway lifecycle" if gateway_image else "gateway API validation, transport, revocation and Linux activation" if args.gateway_bundle else "systemd service crash/recovery with real manager and VM" if args.services_bundle else ("trusted manager TUI + " if (image / "manager.sha256").exists() else "") + ("compiled interactive OpenCode TUI" if (image / "tui-lab").exists() else "compiled OpenCode CLI" if (image / "opencode.sha256").exists() else "synthetic shell"),
     "import_source_sha256": import_digest,
     "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
     "export_target_sha256": hashlib.sha256(export_target.read_bytes()).hexdigest() if export_target else None,
@@ -356,6 +439,13 @@ summary = {
     "runtime_gateway_bundle": {"manifest": bundle_manifest, "sources": (bundle / "sources.sha256").read_text(), "verified_in_guest": bundle_verified} if args.gateway_bundle else None,
     "fixture_verified": fixture_verified,
     "gateway_image_manifest": gateway_manifest,
+    "onion_file_image_manifest": onion_file_manifest,
+    "onion_host": args.onion_host,
+    "onion_recipient": recipient.metadata if recipient is not None else None,
+    "onion_share": args.onion_share,
+    "onion_backup": args.onion_backup,
+    "onion_backup_startup": args.onion_backup_startup,
+    "onion_host_firewall_sha256": hashlib.sha256(Path(__file__).with_name("host-firewall.nft").read_bytes()).hexdigest() if args.onion_host else None,
     "session_image_manifest": session_manifest,
     "tor_online": args.tor_online,
     "synthetic_streams": args.stream,

@@ -18,8 +18,12 @@ case "$(blkid -o value -s TYPE /dev/vdb)" in
 esac
 exec 3<>/dev/virtio-ports/oblivion.export
 printf 'ready\n' >&3
-[ "$(dd bs=1 count=1 <&3 2>/dev/null)" = G ]
-/usr/bin/oblivion-copy "$role" /target 300000
+case "$(dd bs=1 count=1 <&3 2>/dev/null)" in
+    G) budget=300000 ;;
+    B) budget=3600000 ;;
+    *) exit 1 ;;
+esac
+/usr/bin/oblivion-copy "$role" /target "$budget"
 # The receipt alone is not an eject confirmation. Only a successful unmount
 # and block-device flush authorize the relay to acknowledge the export.
 umount /target

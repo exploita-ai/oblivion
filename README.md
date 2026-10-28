@@ -72,7 +72,8 @@ incomplete download; signed release provenance is not available yet.
 2. For direct boot, write the ISO to a dedicated writable drive with a trusted
    image writer. This erases the selected drive.
 3. For a VM, turn the ISO into a larger writable raw disk with the repository's
-   `bun run vm:disk` helper. A read-only virtual DVD cannot persist vaults.
+   [Python helper](docs/DEVELOPMENT.md#apple-silicon-with-utm). A read-only
+   virtual DVD cannot persist vaults.
 4. Enable VT-x/AMD-V or nested virtualization and boot the writable image in
    UEFI mode.
 5. Follow the first-run setup to create the general encrypted vault, then create
@@ -203,14 +204,21 @@ gateway VMs use about 1.8 GiB of guest memory.
 
 Direct boot currently targets Intel/AMD PCs. The persistence implementation
 uses free space after the read-only live image. In a VM, expose the prepared
-raw disk as writable storage and disable shared folders, clipboard integration
-and host-disk passthrough for meaningful privacy testing. A Debian-supported
+raw disk as writable storage and disable shared folders and host-disk
+passthrough. Development images now include optional host/guest text clipboard
+support; see the [UTM and VirtualBox setup guide](docs/DEVELOPMENT.md#text-copypaste-in-a-vm).
+Copied text is deliberately shared with the outer OS. A Debian-supported
 Ethernet or Wi-Fi adapter is required for remote inference.
 
 ## Next: complete the remote-API experience
 
 The next managed beta focuses on reliable protected sessions, provider keys,
-Tor/SOCKS5, Documents and recovery. Keep the coding agent and existing chat UI;
+Tor/SOCKS5, Documents and recovery. The operational roadmap adds a session
+terminal and process controls, file intake/export, encrypted session
+backup/restore and OnionShare receive/share.
+These additions are planned, not included in the current public release.
+See the [ordered milestones and acceptance gates](docs/STATUS.md#ordered-milestones).
+Keep the coding agent and existing chat UI;
 make installation, normal use and upgrades work without manual server setup
 or configuration-file repairs.
 
@@ -271,6 +279,8 @@ architectures with checksums. Full build, VM and release instructions live in
 - `packages/oblivion-gateway` — Tor/SOCKS5 egress and firewall policy.
 - `packages/oblivion-manager` — full-screen host TUI.
 - `packages/oblivion-transfer` — bounded import/export operations.
+- `packages/oblivion-onion` — isolated OnionShare adapter and guest profile.
+- `packages/oblivion-clipboard` — text-only Wayland/SPICE clipboard adapter.
 - `packages/cli`, `packages/tui`, `packages/core` and related packages — the
   retained OpenCode agent runtime.
 - `script/oblivion` — image construction and security laboratories.
@@ -308,5 +318,10 @@ remains under its MIT license. See [NOTICE](NOTICE) and [LICENSE](LICENSE).
 
 ## License
 
-MIT. Copyright notices for upstream OpenCode and Oblivion contributors are
-preserved in [LICENSE](LICENSE).
+The main repository code uses MIT; copyright notices for OpenCode and Oblivion
+are preserved in [LICENSE](LICENSE). The separate OnionShare adapter uses
+[GPL-3.0-or-later](packages/oblivion-onion/LICENSE). Image builds retain the
+licenses and pinned source inventory of their bundled third-party components.
+The Debian SPICE broker and the selected VirtualBox clipboard client retain
+their upstream licenses and run separately from the manager. Their version,
+source and checksum records ship with the image.

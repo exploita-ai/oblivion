@@ -67,7 +67,20 @@ hashes.
 The host may have an Internet connection for Wi-Fi, time and gateway setup. A
 chat session must not receive a direct host-network interface. Its egress is
 routed through the gateway VM using either Tor or an explicitly configured
-SOCKS5 proxy. There is no intended direct fallback.
+SOCKS5 proxy. Destination names are sent to that transport for remote
+resolution (`socks5h`); both the broker and tool client reject local resolver
+use. The external proxy itself must be configured as a numeric IPv4 endpoint.
+There is no direct fallback. An application that ignores the controlled proxy
+cannot obtain an alternative route.
+
+Application UDP is blocked, including direct DNS, QUIC and NTP. The connector
+supports SOCKS CONNECT, not UDP ASSOCIATE. Direct DNS over TCP and DoT are also
+blocked for application identities. DoH can only be reached as an authorized
+HTTPS destination through the selected transport. Host DHCP and link-layer
+ARP/Wi-Fi authentication establish the local connection; the gateway's
+connection to Tor relays or the chosen proxy is its only public TCP path.
+These restrictions apply inside Oblivion; a surrounding Mac/Windows/Linux
+host is outside its network policy.
 
 The UI distinguishes three facts:
 
@@ -165,12 +178,19 @@ The beta includes:
   archives. Explain the additional outer-host retention boundary in VM use.
 - Clear startup, transport and recovery errors, verified updates and a
   documented restore/rollback path that preserves user data.
+- The [operational milestones](STATUS.md#ordered-milestones): interactive
+  terminal/processes, USB/virtual-media intake, conversation exports, encrypted
+  session backup/restore, redacted diagnostics and OnionShare receive/share.
+  These are planned additions, delivered in stages;
+  the current implementation list remains in [STATUS.md](STATUS.md#implemented).
 
 Out of the active roadmap: native OS ports and native Mac encrypted storage,
 replacement of gateway/transfer VMs with host processes, llama.cpp, local
 models/downloads, GPUs, DGX Spark, inference nodes, air-gap deployment workflows,
-HuggingBay/torrents, OnionShare, cross-session copies, simultaneous protected
-sessions and a disposable browser. No GPU passthrough or inference VM work.
+HuggingBay/torrents, live copies between sessions and simultaneous protected
+sessions. No GPU passthrough or inference VM work.
+The additional Files/Git UI, browser/project previews and MCP
+integrations are also deferred for now, with no scheduled delivery milestone.
 Do not introduce cross-platform abstractions solely for deferred ports.
 
 ### Retained architecture
@@ -217,11 +237,19 @@ must also cover forced outer-VM termination and later recovery without silently
 resetting chat history. Do not use saved-state resume as the normal shutdown
 path, and do not rely on snapshots as an encrypted-session backup strategy.
 
-Disable automatic shared folders, host filesystem integration, clipboard
-synchronization and unnecessary device passthrough in the supplied profile.
-Document and test explicit transfers separately. Offer only a bounded,
-user-initiated clipboard path where implemented; it deliberately releases the
-selected data to the outer host. Import/export must work with tested media or
+Disable automatic shared folders, host filesystem integration and unnecessary
+device passthrough in the supplied profile. Host/guest text clipboard sharing
+is an explicit VM profile option. The trusted display uses a restricted
+Wayland/SPICE adapter with Debian's broker, or the pinned VirtualBox clipboard
+client on amd64. Neither the compositor socket nor the hypervisor device is
+available to session VMs. Guest terminal clipboard escapes stay filtered;
+copy requires a manager selection and paste is a user action. The SPICE
+adapter serves only UTF-8 text up to 256 KiB and fetches host bytes lazily on
+paste. Its broker runs as the display user with a fixed virtio device and no
+network, uinput device, session files or general vault. Native desktop/clipboard
+history on the outer OS is outside this boundary. Document and test explicit
+transfers separately. Clipboard copying deliberately releases the selected
+text to the outer host. Import/export must work with tested media or
 explicit transfer endpoints without mounting session files on that host.
 
 Debian's tmpfs/no-swap policy does not control the outer host's swap, diagnostic
@@ -269,21 +297,165 @@ tested paths, not an absolute guarantee of no forensic residue.
 
 ### Ordered roadmap and deliverables
 
+The table below retains the foundational release gates. The active feature
+sequence is [M0–M5 in STATUS.md](STATUS.md#ordered-milestones), updated on
+2026-10-28. It adds terminal, transfers, exports, backup/restore and OnionShare
+while retaining the Debian host, gateway, session and transfer boundaries.
+
 | Step | Work | Exit evidence |
 | --- | --- | --- |
 | 1. Finish the focused audit | Debian/controller, inner VMs, provider and tool requests, credentials, filesystem writes, network policy and outer-VM integration. Stop native-vault and GPU research. | [Source audit and targeted tests completed](STATUS.md#audit-results); ranked defects and pending runtime qualification are recorded separately. Full-image tracing and destructive VM tests remain release gates. |
 | 2. Protect persistence and recovery | Exercise general/session vaults, multi-chat history, transfer interruption, low disk, normal/forced shutdown and upgrades. Fix measured defects first. | Real chat/file contents survive close/reopen, Debian reboot and outer-VM stop/restart. Wrong passwords and failed cleanup cannot falsely report success. |
 | 3. Complete API and transport reliability | Keys/grants, selected provider, Tor bootstrap, SOCKS5, certificate checks, cancellation, network loss and controlled tool egress. | Real agent file task plus invalid-key, provider-error, proxy/gateway-failure and bypass tests; no direct fallback or stale protection status. |
-| 4. Finish setup and delivery usability | Existing TUI polish, automatic internal services, live persistence and tested VM import/profile, correct resource checks, Documents and explicit transfers. | Fresh setup to useful work and later recovery through the product UI. Keyboard, mouse, clipboard, resize and scroll pass on each declared profile. |
+| 4. Finish setup and delivery usability | Existing TUI polish, automatic internal services, live persistence and tested VM import/profile, correct resource checks, Documents and explicit transfers. | Fresh setup to useful work and later recovery through the product UI. Keyboard, mouse, existing copy/paste, resize and scroll pass on each declared profile. |
 | 5. Minimize, qualify and release | Remove only audited unnecessary Debian packages/services, check release/debug separation, build artifacts/manifests/signatures and test upgrades/rollback. | Physical amd64 and declared virtualized profiles pass full regression. At least five non-author testers across qualified paths complete the workflow without developer repairs; publish unsupported combinations and review status. |
 
 The [completed source audit](STATUS.md#audit-results) sets the fix order:
 chat startup/recovery, durability, complete teardown, legacy upgrade safety,
 then transport/key reliability. Finish runtime leak/egress qualification before
-producing a new candidate. No architecture rewrite, native port, archive conversion or new ISO
-is authorized merely by updating this plan. Use disposable fixtures and copies;
+producing a new candidate. The operational additions use the same boundaries.
+No native port, archive conversion or new ISO is produced merely by updating
+this plan. Use disposable fixtures and copies;
 do not alter the user's running VM, personal archives or host networking for
 audit convenience.
+
+### Operational feature boundaries
+
+Chat, Documents and Terminal are views of the same protected
+session. A terminal runs as an unprivileged process inside that session VM,
+independent of a provider key. Offline terminal access preserves the offline
+guest's absent network device and agent. Moving an offline guest to chat still
+requires an orderly VM transition: report and stop its running processes
+before restarting on the same unlocked volume. During chat, view changes keep
+the agent and selected jobs alive. Close/lock stops all of them and confirms
+teardown before closing the volume.
+
+USB/virtual-media imports and OnionShare uploads converge on
+the existing manifest/approval/verified-copy boundary. Remote intake is staged
+with a storage quota in RAM or encrypted storage, outside the active workspace.
+The manager receives metadata; an approved copy publishes files into session
+`imports`. Untrusted files are not opened or extracted on arrival. Uploading
+or sharing session files requires an explicit selection and destination.
+
+Encrypted session backups are controller-owned exports of a closed LUKS2
+container with compatible encrypted session metadata. They are separate from
+document export and have independent streaming/size limits. Restore preserves
+the source, refuses unsupported formats and validates the copy in an offline
+guest, keeping one open session at a time. Provider keys stay in the general
+vault. Markdown/JSON conversation exports are deliberate readable disclosures;
+diagnostic exports contain only approved metadata, never a VM-memory dump.
+
+Backup preparation checkpoints versioned metadata inside an offline session,
+then stops that VM and closes its mapping. A nonroot descriptor-only sender
+streams the ciphertext to the existing export VM; the host never mounts the
+session filesystem. Restore reverses this boundary: the read-only import VM
+offers one selected encrypted file, and a nonroot receiver writes only a new,
+empty inherited descriptor inside the general vault. Its independently bounded
+copy authority does not widen ordinary document transfers. The controller saves
+a durable private receipt before acknowledging a complete copy. After source
+detach, a separate password operation opens that disposable copy in an offline
+guest, checks the format/database through private snapshots, closes it again
+and publishes a fresh archive entry without replacing an original. Failed
+passwords leave the verified copy retryable; cancellation deletes only the
+new pending copy. After a crash, unfinished entries remain explicitly
+discardable. Transport completion alone never publishes a restored session.
+
+Conversation export uses a fresh, controller-authorized virtio port and a
+nonroot maintenance service inside the active session VM. SQLite backup makes
+a consistent copy including WAL commits on the session volume. An isolated,
+unregistered OpenCode server reads that copy using its own export API, without
+provider credentials, configured extensions or execution recovery. Its private
+network namespace exposes only loopback. The controller receives bounded
+chat-list metadata or the generated path/size, never the transcript. Readable
+outputs are capped at 64 MiB, published only after a complete write/flush and
+never replace an existing file. Private snapshot/runtime directories and
+unfinished outputs are removed after that operation's service stops; boot
+cleanup covers an interrupted VM. Per-operation service instances avoid
+reusing a still-stopping service when Linux reuses a virtio port number.
+Diagnostics take a separate controller-owned allowlist of enum/boolean/numeric
+platform and lifecycle fields, previewed before an explicit export. Full
+status objects, arbitrary error strings, paths and logs are not serializable
+as a diagnostic report.
+
+OnionShare's network-facing file service belongs in the transfer boundary.
+Tor service publication remains under the gateway's authorized lifecycle; the
+implementation must qualify its dedicated service/control channel without
+giving a session raw Tor administration or broker credentials. Private
+transfer addresses/keys are temporary and stop on completion, cancellation,
+timeout or lock. An OnionShare operation has its own verified Tor status and
+does not silently change a SOCKS5 inference selection. Expanding host firewall
+egress for a transfer VM is not part of this design.
+
+The M4 gateway implementation is a separate Tor-only profile, with no model
+credential/broker or SOCKS listener. Its private virtio controller permits only
+initialization, bootstrap/observation, selective infrastructure snapshots,
+fixed-backend authenticated publication and shutdown. The backend is
+`10.89.0.2:8080` on its own point-to-point wire; forwarding stays disabled and
+the file selector stays empty before publication. A Tor-owned control
+connection uses `TAKEOWNERSHIP`, so controller death terminates the dedicated
+daemon. Cleanup restores the empty firewall selectors even after abnormal
+termination. The host still has to confirm complete gateway/file-VM teardown
+before claiming a lock. The separate file VM now has a single private NIC, no
+default route, a root lifecycle controller, an AF_UNIX-only HTTP worker and a
+bounded unprivileged socat relay. Sharing uses a verified snapshot sealed and
+bound read-only into the HTTP unit. Review stops/reaps the relay and worker,
+then exposes the actual frozen intake only through the existing copy endpoint.
+Seven real private-wire guest scenarios cover these paths and controller
+failure/expiry. The Linux host owner now connects preparation, receive
+publication, revoke/freeze, approved session copy and close cleanup in source.
+The manager now generates a RAM-only recipient pair and connects receive/review
+to the retained Documents picker and manifest confirmation. Sharing from session
+files now uses the same approval boundary in the reverse direction. A public
+ARM64 laboratory has passed independent recipient authorization, upload,
+approved import/reopening, selected-file download, revocation and ephemeral
+archive byte identity. Supported-image acceptance remains separate. The state store requires a `Model` or `Transfer` purpose:
+it preserves legacy `profile/tor-state` and isolates transfers in
+`profile/onion-tor-state`, with no fallback or proxy/profile writes. The owner
+checkpoints only selective transfer infrastructure state and respects the
+writable/ephemeral policy.
+
+The network-only QEMU uplink reuses the existing user/stream/hub backend without
+a machine, CPU or disk. Its source launcher retains the host's existing
+public-uplink identity; Tor and file VMs use distinct UIDs, AF_UNIX-only access
+and private network/PID namespaces. The network-only actor also has a private
+PID namespace so it cannot inspect the legacy model hypervisor with the same
+uplink UID. Only Tor receives the private NAT wire; the file VM stays on its
+separate inside link. All auxiliary units are bound to one root-only owner;
+exact peer/session pidfds and a dedicated session lifetime monitor avoid
+numeric-PID reuse and console/QMP contention.
+
+Receive publication requires a canonical recipient public key, current Tor
+bootstrap/isolation and an acknowledged HTTP worker. The recipient private key
+never enters the owner/gateway/file protocols; only an explicit manager action
+reveals it. Its owned byte buffer is cleared on disposal, without claiming
+complete erasure of copies made by the managed runtime or terminal. Bounded background file RPCs
+leave the ownership loop available for Tor heartbeats and cancellation. Before
+review, the owner confirms Tor shutdown/revocation, reaps the network actors
+and waits for sealed intake. A separate manager-UID socket then reuses the
+ordinary browser/manifest/hash/approval protocol to import selected files. It
+never mounts the session filesystem on the host or stages payloads there;
+receipt delivery waits for session-port removal. File/copy threads are joined
+before cleanup removes the port. Polling returns metadata only; the temporary URL
+is an explicit separate response and stays out of job/profile files. Close,
+lock and expiry reap the auxiliary units before storage closure. Configuration
+is optional for older controllers and included in newly built Live images.
+The existing distributed candidate is unchanged. The Tor/file hypervisors use
+UIDs 1105/1106; UID 1104 remains reserved for display/input.
+
+Encrypted backup sharing is a separate authority from the 256 MiB document
+copy path. The controller checkpoints metadata offline, stops the session VM
+and closes its mapping. It passes one already-open O_RDONLY LUKS2 file to the
+file hypervisor using QMP/SCM_RIGHTS, as a read-only virtio block device. The
+hypervisor gets no general-vault directory and the guest never decrypts or
+mounts that device. Its unprivileged HTTP worker verifies the read-only device,
+size and LUKS2 header, then reuses the pinned upstream streaming/Range handler
+without eager hashing, compression or RAM staging of the whole container.
+The fixed filename is `session.oblivion`; the independent limit is 1 TiB and
+one hour. A backup owner watches the storage controller instead of a session
+VM. Session opening/mutation is blocked during this share. Cancellation, expiry
+or general lock revokes publication and reaps the hypervisor/descriptor before
+storage closure. The user explicitly authorizes preparation and confirms
+publication separately. No session password enters a transfer guest or URL.
 
 ### Acceptance and honest claims
 

@@ -1,5 +1,6 @@
 use oblivion_transfer::channel::Channel;
 use oblivion_transfer::endpoint;
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 mod runtime;
@@ -14,13 +15,47 @@ fn main() {
 fn execute() -> Result<(), Box<dyn std::error::Error>> {
     runtime::harden()?;
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|role| matches!(role.as_str(), "send-open-file" | "receive-open-file"))
+    {
+        if args.len() != 3 {
+            return Err("invalid_arguments".into());
+        }
+        let maximum: u64 = args[1].parse()?;
+        let budget: u64 = args[2].parse()?;
+        if !(1..=3_600_000).contains(&budget) {
+            return Err("invalid_deadline".into());
+        }
+        let mut channel = Channel::new(runtime::inherited(3)?, Duration::from_millis(budget))?;
+        if args[0] == "send-open-file" {
+            endpoint::send_open_file(&mut channel, runtime::inherited(4)?, maximum)?;
+        } else {
+            endpoint::receive_open_file(&mut channel, runtime::inherited(4)?, maximum)?;
+        }
+        // The relay watches this process's pidfd. Stay alive after the final
+        // data acknowledgement until the controller has released the exchange.
+        let mut released = [0; 9];
+        channel.read_exact(&mut released)?;
+        if &released != b"released\n" {
+            return Err("invalid_release".into());
+        }
+        return Ok(());
+    }
     let import = args
         .first()
         .is_some_and(|role| matches!(role.as_str(), "import" | "recover"));
     if args.len() != if import { 4 } else { 3 }
         || !matches!(
             args[0].as_str(),
-            "send" | "receive" | "import" | "recover" | "documents" | "export" | "export-portable"
+            "send"
+                | "send-encrypted"
+                | "receive"
+                | "import"
+                | "recover"
+                | "documents"
+                | "export"
+                | "export-portable"
         )
         || !Path::new(&args[1]).is_absolute()
         || (import && !Path::new(&args[2]).is_absolute())
@@ -36,6 +71,9 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
     let mut channel = Channel::new(runtime::inherited(3)?, Duration::from_millis(budget))?;
     if args[0] == "send" {
         endpoint::send(&mut channel, Path::new(&args[1]))?;
+    }
+    if args[0] == "send-encrypted" {
+        endpoint::send_encrypted(&mut channel, Path::new(&args[1]))?;
     }
     if args[0] == "receive" {
         endpoint::accept(&mut channel, Path::new(&args[1]))?;

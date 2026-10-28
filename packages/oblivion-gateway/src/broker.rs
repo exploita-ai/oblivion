@@ -209,10 +209,18 @@ impl Broker {
             return error(StatusCode::BAD_GATEWAY, "provider_unavailable");
         };
         match upstream.status() {
-            StatusCode::UNAUTHORIZED => return error(StatusCode::UNAUTHORIZED, "provider_credentials_rejected"),
-            StatusCode::FORBIDDEN => return error(StatusCode::FORBIDDEN, "provider_request_denied"),
-            StatusCode::TOO_MANY_REQUESTS => return error(StatusCode::TOO_MANY_REQUESTS, "provider_limit"),
-            status if status.is_server_error() => return error(StatusCode::BAD_GATEWAY, "provider_unavailable"),
+            StatusCode::UNAUTHORIZED => {
+                return error(StatusCode::UNAUTHORIZED, "provider_credentials_rejected");
+            }
+            StatusCode::FORBIDDEN => {
+                return error(StatusCode::FORBIDDEN, "provider_request_denied");
+            }
+            StatusCode::TOO_MANY_REQUESTS => {
+                return error(StatusCode::TOO_MANY_REQUESTS, "provider_limit");
+            }
+            status if status.is_server_error() => {
+                return error(StatusCode::BAD_GATEWAY, "provider_unavailable");
+            }
             _ => {}
         }
         if upstream.status() != StatusCode::OK
@@ -263,10 +271,16 @@ struct StreamState {
 
 fn error(status: StatusCode, code: &'static str) -> Response<Body> {
     let message = match code {
-        "provider_credentials_rejected" => "The provider rejected the API key. Close the session and replace the key in API keys.",
-        "provider_request_denied" => "The provider denied this request. Check the key permissions and model access.",
+        "provider_credentials_rejected" => {
+            "The provider rejected the API key. Close the session and replace the key in API keys."
+        }
+        "provider_request_denied" => {
+            "The provider denied this request. Check the key permissions and model access."
+        }
         "provider_limit" => "The provider rate limit was reached. Wait before retrying.",
-        "provider_unavailable" => "The provider could not be reached or is temporarily unavailable. Retry later.",
+        "provider_unavailable" => {
+            "The provider could not be reached or is temporarily unavailable. Retry later."
+        }
         _ => code,
     };
     Response::builder()

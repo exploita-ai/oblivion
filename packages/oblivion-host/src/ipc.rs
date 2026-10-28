@@ -31,6 +31,8 @@ enum Operation {
     ChatRecover,
     CancelChat,
     Browse,
+    ChatExport,
+    Diagnostics,
     NetworkMenu,
     Connections,
     DiscardGeneralPending,
@@ -47,12 +49,14 @@ enum Operation {
     Status,
     Debug,
     Console,
+    Terminal,
     SetApiKey,
     ClearApiKey,
     ApiKeys,
     Egress,
     NetworkPolicy,
     Transfers,
+    Onion,
 }
 
 #[derive(Deserialize)]
@@ -150,11 +154,13 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
                 request.operation,
                 Operation::ApiKeys
                     | Operation::Browse
+                    | Operation::ChatExport
                     | Operation::PrepareUsb
                     | Operation::Settings
                     | Operation::Egress
                     | Operation::NetworkPolicy
                     | Operation::Transfers
+                    | Operation::Onion
                     | Operation::Connections
             ) {
                 4096
@@ -194,8 +200,11 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
             | Operation::Egress
             | Operation::NetworkPolicy
             | Operation::Transfers
+            | Operation::Onion
             | Operation::Settings
             | Operation::Browse
+            | Operation::ChatExport
+            | Operation::Diagnostics
             | Operation::Connections
             | Operation::Debug
     );
@@ -207,11 +216,17 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
     channel
         .read_exact(&mut secret)
         .map_err(|_| Error("incomplete_secret"))?;
-    if matches!(request.operation, Operation::Console) {
+    if matches!(request.operation, Operation::Console | Operation::Terminal) {
         let _lock = lock_named("storage.lock")?;
+        require(!crate::storage::recovery_required()?, "recovery_required")?;
         require(!crate::vm::stopped()?, "vm_not_running")?;
-        let console = UnixStream::connect("/run/oblivion-session/console.sock")
-            .map_err(|_| Error("console_unavailable"))?;
+        let path = if matches!(request.operation, Operation::Terminal) {
+            "/run/oblivion-session/terminal.sock"
+        } else {
+            "/run/oblivion-session/console.sock"
+        };
+        let console = UnixStream::connect(path).map_err(|_| Error("console_unavailable"))?;
+        crate::gateway::peer(&console, crate::vm::VM_UID)?;
         return Ok(Response {
             ok: true,
             output: String::new(),
@@ -233,6 +248,8 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
         Operation::ChatRecover => "chat-recover",
         Operation::CancelChat => "cancel-chat",
         Operation::Browse => "browse",
+        Operation::ChatExport => "chat-export",
+        Operation::Diagnostics => "diagnostics",
         Operation::NetworkMenu => "network-menu",
         Operation::Connections => "connections",
         Operation::DiscardGeneralPending => "discard-general-pending",
@@ -254,7 +271,8 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
         Operation::Egress => "egress",
         Operation::NetworkPolicy => "network-policy",
         Operation::Transfers => "transfers",
-        Operation::Console => unreachable!(),
+        Operation::Onion => "onion",
+        Operation::Console | Operation::Terminal => unreachable!(),
     };
     let mut command =
         Command::new(std::env::current_exe().map_err(|_| Error("executable_unavailable"))?);

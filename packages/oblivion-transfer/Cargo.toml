@@ -17,6 +17,10 @@ path = "src/main.rs"
 name = "oblivion-copy-relay"
 path = "src/relay-main.rs"
 
+[[bin]]
+name = "oblivion-onion-file"
+path = "src/onion-file-main.rs"
+
 [dependencies]
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

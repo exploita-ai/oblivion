@@ -1,0 +1,39 @@
+[Unit]
+Description=Oblivion isolated file transfer controller
+BindsTo=oblivion-onion-file-network.service
+After=oblivion-onion-file-network.service systemd-tmpfiles-setup.service
+RequiresMountsFor=/run/oblivion-onion /run/oblivion-onion-stage
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/oblivion-onion-file
+ExecStopPost=/usr/bin/systemctl stop oblivion-onion-relay.service oblivion-onion-worker.socket oblivion-onion-worker@*.service oblivion-onion-source.service oblivion-onion-stage.service
+ExecStopPost=/usr/bin/systemctl --no-block poweroff
+RuntimeDirectory=oblivion-onion-state
+RuntimeDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER
+DevicePolicy=closed
+DeviceAllow=/dev/virtio-ports/oblivion.onion.file rw
+ProtectSystem=strict
+ReadWritePaths=/run/oblivion-onion /run/oblivion-onion-stage
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=128M
+TasksMax=32
+StandardInput=null
+StandardOutput=null
+StandardError=null
+Restart=no
+KillMode=control-group
+TimeoutStopSec=15

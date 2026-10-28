@@ -3,7 +3,7 @@ set -eu
 mkdir -p /out /iso/live /iso/boot/grub /host/usr/lib/oblivion/vm/qemu-root
 cp /host/boot/vmlinuz-* /iso/live/vmlinuz
 cp /host/boot/initrd.img-* /iso/live/initrd.img
-for role in session gateway import export; do
+for role in session gateway import export onion-gateway onion-file; do
     mkdir -p "/host/usr/lib/oblivion/vm/$role"
     cp /"$role"/boot/vmlinuz-* "/host/usr/lib/oblivion/vm/$role/kernel"
     cp /"$role"/boot/initrd.img-* "/host/usr/lib/oblivion/vm/$role/initrd"
@@ -27,7 +27,7 @@ for binary in /host/usr/bin/qemu-system-* /host/usr/lib/*/qemu/*.so; do
         (cd /host && cp -L --parents ".$library" /host/usr/lib/oblivion/vm/qemu-root/)
     done
 done
-for directory in dev proc sys run/oblivion-session run/oblivion-gateway-vm run/oblivion-import-vm run/oblivion-export-vm tmp; do
+for directory in dev proc sys run/oblivion-session run/oblivion-gateway-vm run/oblivion-import-vm run/oblivion-export-vm run/oblivion-onion-uplink run/oblivion-onion-gateway-vm run/oblivion-onion-file-vm tmp; do
     mkdir -p "/host/usr/lib/oblivion/vm/qemu-root/$directory"
 done
 touch /host/usr/lib/oblivion/vm/qemu-root/kernel /host/usr/lib/oblivion/vm/qemu-root/initrd /host/usr/lib/oblivion/vm/qemu-root/root.squashfs

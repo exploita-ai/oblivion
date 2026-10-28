@@ -1,5 +1,5 @@
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
-import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js"
+import { createEffect, createSignal, onCleanup, onMount, Show, Switch, Match } from "solid-js"
 import { ControlError, type Request } from "./control"
 import { BusyModal } from "./busy-modal"
 import { FormView, type Form } from "./form"
@@ -7,6 +7,11 @@ import { Picker } from "./picker"
 import { palette, theme } from "./theme"
 import { SelectList } from "@opencode/tui-kit"
 import { PageHeader } from "./page-header"
+import { ChatExport } from "./chat-export"
+import { Diagnostics } from "./diagnostics"
+import { OnionReceive } from "./onion-receive"
+import { OnionShare } from "./onion-share"
+import { onionCopySocket, onionStatus } from "./onion"
 import { FilePicker } from "./vendor/termcn/file-picker"
 import { connectTransfer, devicesSchema, pageSchema, startedSchema, type Offer, type Page, type Recovery, type Transfer } from "./transfer"
 
@@ -32,6 +37,7 @@ export function Documents(props: {
   const [device, setDevice] = createSignal("")
   const [devices, setDevices] = createSignal<{ export: boolean; choices: { value: string; label: string }[] }>()
   const [form, setForm] = createSignal<Form>()
+  const [exportView, setExportView] = createSignal<"chat" | "diagnostics" | "onion" | "share">()
   const [offer, setOffer] = createSignal<{ manifest: Offer; export: boolean }>()
   const [recovery, setRecovery] = createSignal<Extract<Recovery, { result: "inventory" }>>()
   const [busy, setBusy] = createSignal("")
@@ -39,6 +45,7 @@ export function Documents(props: {
   const [failed, setFailed] = createSignal(false)
   let transfer: Transfer | undefined
   let job: string | undefined
+  let onion = false
   let cancelling: Promise<void> | undefined
   let cancelled = false
   let disposed = false
@@ -50,7 +57,7 @@ export function Documents(props: {
 
   // Keep the transfer workflow open until it has finished or been cancelled.
   // Ordinary browsing may switch directly to the host menu or the running chat.
-  createEffect(() => props.onNavigationLock?.(!!busy() || !!form() || !!devices() || !!recovery() || !!offer() || mode() === "import" || !!job))
+  createEffect(() => props.onNavigationLock?.(!!exportView() || !!busy() || !!form() || !!devices() || !!recovery() || !!offer() || mode() === "import" || !!job))
 
   async function command(value: object) {
     return props.request({ operation: "transfers", payload: new TextEncoder().encode(JSON.stringify(value)) })
@@ -58,7 +65,7 @@ export function Documents(props: {
   async function cleanup() {
     transfer?.close(); transfer = undefined
     if (!job) return
-    cancelling ??= command({ operation: "cancel" }).then(() => { job = undefined }).finally(() => { cancelling = undefined })
+    cancelling ??= (onion ? onionStatus(props.request, { action: "cancel" }) : command({ operation: "cancel" })).then(() => { job = undefined; onion = false }).finally(() => { cancelling = undefined })
     await cancelling
   }
   async function run(label: string, task: () => Promise<void>) {
@@ -96,6 +103,13 @@ export function Documents(props: {
     if (exporting) { await makeOffer(true); return }
     setMode("import"); setSelected([]); setDevices(undefined); await browse(); setFocus("files")
   }
+  async function receiveImport(id: string) {
+    await run("Read received files", async () => {
+      job = id; onion = true; setExportView(undefined); setDevice("OnionShare · sealed intake")
+      transfer = await (props.connect ? props.connect(id) : connectTransfer(id, onionCopySocket))
+      setMode("import"); setSelected([]); await browse(); setFocus("files")
+    })
+  }
   async function makeOffer(exporting: boolean) {
     if (!transfer || !selected().length) return
     const paths = selected().filter((path, index, all) => !all.some((parent, other) => other !== index && path.startsWith(parent + "/")))
@@ -106,7 +120,11 @@ export function Documents(props: {
     if (exporting && !selected().length) { setNotice("Select one or more files or folders with Space."); return }
     const status = devicesSchema.parse(JSON.parse(await command({ operation: "list" })))
     if (status.active) { setNotice("A transfer is already active. Cancel it before starting another."); return }
-    setDevices({ export: exporting, choices: status.sources.map((source) => ({ value: source.id, label: `${source.name} · ${Math.round(source.bytes / 1048576)} MiB` })) })
+    setDevices({ export: exporting, choices: status.sources.filter((source) => !exporting || !source.read_only).map((source) => ({ value: source.id, label: `${source.name} · ${source.kind === "virtual" ? "Virtual media" : "USB"} · ${Math.round(source.bytes / 1048576)} MiB${source.read_only ? " · Read-only" : ""}` })) })
+  }
+  async function createdExport(path: string) {
+    await browse(path.split("/").slice(0, -1).join("/")); setSelected([path]); setFocus("files"); setExportView(undefined)
+    setNotice("Export created and selected. Export selected copies it to external media.")
   }
   async function recover(request: { operation: "list"; after: string | null } | { operation: "discard"; id: string }) {
     await cleanup()
@@ -122,13 +140,18 @@ export function Documents(props: {
     { name: "Review import", run: () => run("Reading and hashing selection", () => makeOffer(false)) },
     { name: "Cancel import", run: () => run("Cancel import", home) },
   ] : [
-    { name: "Import", run: () => run("List USB devices", () => chooseDevice(false)) },
-    { name: "Export selected", run: () => run("List USB devices", () => chooseDevice(true)) },
+    { name: "Import", run: () => run("List import media", () => chooseDevice(false)) },
+    { name: "Export selected", run: () => run("List export media", () => chooseDevice(true)) },
+    { name: "Export chat", run: () => setExportView("chat") },
+    { name: "Export diagnostics", run: () => setExportView("diagnostics") },
     { name: "Transfer history / recovery", run: () => run("Read transfer records", () => recover({ operation: "list", after: null })) },
+    { name: "Receive over Tor", run: () => setExportView("onion") },
+    { name: "Share selected over Tor", run: () => { if (!selected().length) { setNotice("Select one or more files or folders with Space."); return }; setExportView("share") } },
     { name: "Return", run: () => props.back() },
   ]
   useKeyboard((key) => {
     if (key.defaultPrevented || props.focused === false) return
+    if (exportView()) return
     if (form() || devices() || recovery()) return
     if (busy()) {
       if (key.name === "escape" && job) {
@@ -147,17 +170,22 @@ export function Documents(props: {
     if (key.name === "escape" && focus() === "actions") { key.preventDefault(); setFocus("files") }
   })
   onMount(() => { void run("Read session documents", () => browse()) })
-  onCleanup(() => { disposed = true; props.onNavigationLock?.(false); transfer?.close(); if (job) void command({ operation: "cancel" }).catch(() => undefined) })
+  onCleanup(() => { disposed = true; props.onNavigationLock?.(false); transfer?.close(); if (job) void cleanup().catch(() => undefined) })
 
-  return <box flexGrow={1} minHeight={0} flexDirection="column">
+  return <Show when={!exportView()} fallback={<Switch>
+    <Match when={exportView() === "chat"}><ChatExport request={props.request} back={() => setExportView(undefined)} saved={createdExport} /></Match>
+    <Match when={exportView() === "diagnostics"}><Diagnostics request={props.request} back={() => setExportView(undefined)} saved={createdExport} /></Match>
+    <Match when={exportView() === "onion"}><OnionReceive request={props.request} back={() => setExportView(undefined)} import={receiveImport} /></Match>
+    <Match when={exportView() === "share"}><OnionShare request={props.request} connect={props.connect} paths={selected()} back={() => setExportView(undefined)} /></Match>
+  </Switch>}><box flexGrow={1} minHeight={0} flexDirection="column">
     <Show when={!form() && !devices() && !recovery()}><PageHeader title={offer() ? "Review transfer" : "Documents"}
       description={props.chat ? "Chat remains active while you browse." : "Offline documents · no network device"} /></Show>
     <Show when={!form()} fallback={<FormView form={form()!} cancel={() => setForm(undefined)} submit={(values) => { const current = form()!; setForm(undefined); void run(current.title, () => current.run(values)) }} />}>
-      <Show when={!devices()} fallback={<Picker title={devices()?.export ? "Export / Destination device" : "Import / Source device"} description={devices()?.choices.length ? "Choose a removable device. The Oblivion USB is excluded." : "No removable USB devices found. Connect a device, then reopen Import or Export."} choices={devices()?.choices ?? []} back={() => setDevices(undefined)} choose={(id) => {
+      <Show when={!devices()} fallback={<Picker title={devices()?.export ? "Export / Destination device" : "Import / Source device"} description={devices()?.choices.length ? "Choose USB or prepared virtual media. Oblivion system storage is excluded." : "No eligible media found. Attach USB or prepared virtual media, then retry. Export requires writable media."} choices={devices()?.choices ?? []} back={() => setDevices(undefined)} choose={(id) => {
         const selected = devices()!
         setDevice(selected.choices.find((choice) => choice.value === id)!.label)
         if (!selected.export) { void run("Prepare read-only source", () => prepare(false, id)); return }
-        setForm({ title: "Authorize writing to USB", description: `Destination: ${device()}. Exported files will be ordinary readable copies. Mounting may update filesystem metadata. Existing files are preserved.`, fields: [], submit: "Authorize and prepare export", run: () => prepare(true, id) })
+        setForm({ title: "Authorize writing to media", description: `Destination: ${device()}. Exported files will be ordinary readable copies. Mounting may update filesystem metadata. Existing files are preserved.`, fields: [], submit: "Authorize and prepare export", run: () => prepare(true, id) })
       }} />}>
         <Show when={!recovery()} fallback={<Picker title="Transfer history / Recovery" description="Published copies remain editable by chat. Only unfinished private copies can be discarded." choices={[
           ...(recovery()?.records ?? []).map((record) => ({ value: record.id, label: `${record.id.slice(0, 8)} · ${record.state}`, description: record.receipt ? `${record.receipt.entries} entries · ${record.receipt.bytes} bytes verified` : "No complete receipt" })),
@@ -192,10 +220,10 @@ export function Documents(props: {
             <Show when={page().skipped}><text fg={theme.text.muted}>Some unsupported names, links or special files were omitted.</text></Show>
             <box width={wide() ? 40 : "100%"} flexShrink={0} flexDirection="column" paddingTop={wide() ? 1 : 0}>
             <Show when={wide()}><text fg={theme.text.muted}>Transfers</text><box height={1} /></Show>
-            <SelectList theme={palette} height={actions().length * (spacious() ? 2 : 1)} spacing={spacious() ? 1 : 0} focused={props.focused !== false && focus() === "actions"} disabled={!!busy()}
+            <SelectList theme={palette} height={wide() ? actions().length * (spacious() ? 2 : 1) : Math.min(actions().length, Math.max(3, Math.floor(dimensions().height / 4)))} spacing={spacious() ? 1 : 0} focused={props.focused !== false && focus() === "actions"} disabled={!!busy()}
               onFocus={() => focusArea("actions")} items={actions().map((action) => ({ title: action.name }))}
               onSelect={(index) => { void actions()[index]?.run() }} />
-            <Show when={wide()}><box height={1} /><text fg={theme.text.muted}>{mode() === "import" ? "Select documents, then review the copy before importing." : "Import from a USB device. To export, first mark files with Space."}</text></Show>
+            <Show when={wide()}><box height={1} /><text fg={theme.text.muted}>{mode() === "import" ? "Select documents, then review the copy before importing." : "Import from USB or virtual media. To export, first mark files with Space."}</text></Show>
             </box></box>
           </Show>
         </Show>
@@ -203,5 +231,5 @@ export function Documents(props: {
     </Show>
     <Show when={busy()}><BusyModal text={busy()} cancellable={!!job} /></Show>
     <text height={1} flexShrink={0} fg={failed() ? theme.feedback.error : theme.text.muted}>{notice() || `Focus: ${props.focused === false ? "MENU" : focus().toUpperCase()} · Tab switches area · Esc returns`}</text>
-  </box>
+  </box></Show>
 }

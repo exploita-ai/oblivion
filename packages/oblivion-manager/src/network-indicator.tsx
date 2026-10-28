@@ -3,8 +3,9 @@ import type { Status } from "./state"
 import { theme } from "./theme"
 
 export type NetworkLabel = NonNullable<Status["network_status"]>["label"]
+export type NetworkConnection = NonNullable<Status["connections"]>["internet"]
 
-export function NetworkIndicator(props: { label: NetworkLabel; host: string; blocked: boolean; internet: string; transport: string }) {
+export function NetworkIndicator(props: { label: NetworkLabel; host: string; blocked: boolean; connection: NetworkConnection; transport: string }) {
   const ready = () => props.blocked && props.host === "CONNECTED"
   const route = (mode: string) => {
     if (props.label === "STATUS UNKNOWN") return "?"
@@ -13,7 +14,7 @@ export function NetworkIndicator(props: { label: NetworkLabel; host: string; blo
     return " "
   }
   const indicators = () => [
-    { name: "Internet", mark: props.internet === "available" ? "+" : props.internet === "offline" ? " " : "?" },
+    { name: "Network", mark: props.connection === "available" || props.connection === "local" ? "+" : props.connection === "offline" ? " " : "?" },
     { name: "Tor", mark: route("tor") },
     { name: "SOCKS5", mark: route("socks5") },
   ]

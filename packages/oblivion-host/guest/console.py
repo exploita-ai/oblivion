@@ -13,6 +13,7 @@ import re
 import selectors
 import signal
 import struct
+import subprocess
 import sys
 import termios
 import time
@@ -54,7 +55,7 @@ class Input:
         return bytes(output), sizes
 
 
-def main(command):
+def main(command, persistent=False, refresh=None):
     # Headless OpenCode commands such as `run --format json` deliberately use
     # pipes or /dev/null. They need no viewer resize protocol or guest PTY.
     if not os.isatty(0):
@@ -64,6 +65,7 @@ def main(command):
     decoder = Input()
     child = None
     master = None
+    client_tty = None
     ready_at = 0.0
     try:
         with selectors.DefaultSelector() as selector:
@@ -81,20 +83,29 @@ def main(command):
                     try:
                         data = os.read(key.fd, 65536)
                     except OSError as error:
-                        if key.fd == master and error.errno == errno.EIO:
-                            os.write(1, FAILED)
-                            return
-                        raise
+                        if key.fd != master or error.errno != errno.EIO:
+                            raise
+                        data = b""
                     if not data:
                         if key.fd == master:
+                            if persistent:
+                                selector.unregister(master)
+                                os.close(master)
+                                os.waitpid(child, 0)
+                                master = child = None
+                                client_tty = None
+                                ready_at = time.monotonic() + 0.1
+                                continue
                             os.write(1, FAILED)
                         return
                     if key.fd == master:
                         os.write(1, data)
                         continue
                     data, sizes = decoder.decode(data, time.monotonic())
+                    attached = child is not None
                     if child is None and sizes:
                         master, slave = pty.openpty()
+                        client_tty = os.ttyname(slave)
                         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", *sizes[-1], 0, 0))
                         child = os.fork()
                         if child == 0:
@@ -111,6 +122,12 @@ def main(command):
                     if master is not None:
                         for size in sizes:
                             fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", *size, 0, 0))
+                        # A new viewer may have the same dimensions. tmux must
+                        # redraw its retained screen even without SIGWINCH.
+                        if sizes and attached and refresh:
+                            subprocess.run([*refresh, "-t", client_tty], stdin=subprocess.DEVNULL,
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                           timeout=2, check=False)
                         if data:
                             os.write(master, data)
     finally:
@@ -127,4 +144,10 @@ def main(command):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    if sys.argv[1:] == ["--terminal"]:
+        socket = "/run/oblivion-terminal/tmux.sock"
+        main(["/usr/bin/tmux", "-f", "/etc/oblivion/tmux.conf", "-S", socket,
+              "new-session", "-A", "-s", "workspace", "-c", "/vault/workspace"],
+             persistent=True, refresh=["/usr/bin/tmux", "-S", socket, "refresh-client"])
+    else:
+        main(sys.argv[1:])

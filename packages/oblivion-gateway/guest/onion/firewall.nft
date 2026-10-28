@@ -1,0 +1,40 @@
+#!/usr/sbin/nft -f
+# Dedicated transfer gateway. No model API, tool proxy, SOCKS or DNS listener.
+flush ruleset
+table inet oblivion {
+    set reserved4 {
+        type ipv4_addr
+        flags interval
+        elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8,
+            169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24,
+            192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24,
+            224.0.0.0/4, 240.0.0.0/4 }
+    }
+    set tor_owners { type uid; }
+    set file_ports { type inet_service; }
+    chain input {
+        type filter hook input priority filter; policy drop;
+        meta nfproto ipv6 counter drop
+        ct state invalid counter drop
+        # This exception precedes general established traffic so clearing
+        # file_ports also blocks existing transfers on the private wire.
+        iifname "inside0" ip saddr 10.89.0.2 ip daddr 10.89.0.1 tcp sport @file_ports ct state established counter accept
+        iifname "inside0" counter drop
+        iifname "outside0" ct state established,related counter accept
+        counter drop
+    }
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        counter drop
+    }
+    chain output {
+        type filter hook output priority filter; policy drop;
+        meta nfproto ipv6 counter drop
+        ct state invalid counter drop
+        oifname "inside0" meta skuid @tor_owners ip daddr 10.89.0.2 tcp dport @file_ports counter accept
+        oifname "inside0" counter drop
+        oifname "outside0" ip daddr @reserved4 counter drop
+        oifname "outside0" meta skuid @tor_owners meta l4proto tcp counter accept
+        counter drop
+    }
+}

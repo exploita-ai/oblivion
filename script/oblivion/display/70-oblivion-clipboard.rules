@@ -1,0 +1,2 @@
+SUBSYSTEM=="virtio-ports", ATTR{name}=="com.redhat.spice.0", GROUP="oblivion-display", MODE="0660", TAG+="systemd", ENV{SYSTEMD_WANTS}+="oblivion-clipboard-broker.service"
+KERNEL=="vboxuser", GROUP="oblivion-display", MODE="0660"

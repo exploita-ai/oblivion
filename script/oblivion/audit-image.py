@@ -82,12 +82,32 @@ def inventory(image, role, work, manifests):
     policy = {}
     for entry in files:
         path = entry["path"]
-        if (path in ("/etc/fstab", "/etc/systemd/journald.conf", "/etc/oblivion/firewall.nft", "/etc/oblivion/host-firewall.nft", "/etc/oblivion/torrc")
+        if (path in ("/etc/fstab", "/etc/systemd/journald.conf", "/etc/oblivion/firewall.nft", "/etc/oblivion/host-firewall.nft", "/etc/oblivion/torrc", "/etc/oblivion/onion-file.nft", "/etc/oblivion/onion/firewall.nft", "/etc/oblivion/onion/torrc")
             or path.startswith(("/etc/systemd/journald.conf.d/", "/usr/lib/systemd/journald.conf.d/",
                                 "/etc/systemd/system.conf.d/", "/etc/modules-load.d/", "/etc/sysctl.d/",
                                 "/etc/NetworkManager/conf.d/", "/etc/systemd/system/NetworkManager.service.d/"))
             or (path.startswith("/etc/systemd/system/oblivion-") and path.endswith((".service", ".conf")))):
             policy[path] = run("unsquashfs", "-cat", str(image), path.lstrip("/"))
+    # Bundled components are not necessarily installed Debian packages. Keep
+    # their pinned source/hash/license records visible alongside dpkg inventory.
+    bundled_tools = {}
+    bundled_components = {}
+    for entry in files:
+        if entry["path"] == "/usr/lib/oblivion/session-tools.json":
+            if entry["bytes"] > 1024 * 1024:
+                raise ValueError("Session tools manifest exceeds the audit limit")
+            bundled_tools = json.loads(run("unsquashfs", "-cat", str(image), entry["path"].lstrip("/")))
+        if entry["path"] == "/opt/oblivion-onionshare/inventory.json":
+            if entry["bytes"] > 1024 * 1024:
+                raise ValueError("OnionShare manifest exceeds the audit limit")
+            bundled_components["onionshare"] = json.loads(run("unsquashfs", "-cat", str(image), entry["path"].lstrip("/")))
+        if entry["path"] in ("/usr/share/doc/oblivion-clipboard/upstream.json", "/usr/lib/oblivion/virtualbox/provenance.json"):
+            if entry["bytes"] > 1024 * 1024:
+                raise ValueError("Clipboard provenance exceeds the audit limit")
+            name = "clipboard_adapter" if entry["path"].endswith("upstream.json") else "virtualbox_clipboard"
+            bundled_components[name] = json.loads(run("unsquashfs", "-cat", str(image), entry["path"].lstrip("/")))
+        if entry["path"] in ("/usr/share/doc/spice-vdagent/package.control", "/usr/share/doc/spice-vdagent/SHA256SUMS"):
+            bundled_components.setdefault("spice_clipboard_broker", {})[Path(entry["path"]).name] = run("unsquashfs", "-cat", str(image), entry["path"].lstrip("/"))
     return {
         "filesystem_bytes": image.stat().st_size, "filesystem_sha256": digest(image),
         "package_manifest_matches": matched, "package_count": len(packages), "packages": packages,
@@ -105,6 +125,8 @@ def inventory(image, role, work, manifests):
                                         if entry["path"].startswith("/usr/share/dbus-1/system-services/")),
         "diagnostic_image_marker": any(entry["path"] == "/etc/oblivion/hardware/authorized_key.pub" for entry in files),
         "system_policy_files": policy,
+        "bundled_tools": bundled_tools,
+        "bundled_components": bundled_components,
     }
 
 
@@ -126,7 +148,10 @@ def main():
         host = work / "live/filesystem.squashfs"
         roles = {"host": inventory(host, "host", work, iso.parent)}
         boot = {"host": initramfs(work / "live/initrd.img")} if args.initramfs else {}
-        for role in ("session", "gateway", "import", "export"):
+        available = set(run("unsquashfs", "-ll", str(host)).splitlines())
+        for role in ("session", "gateway", "import", "export", "onion-gateway", "onion-file"):
+            if role.startswith("onion-") and not any(line.endswith(f"/usr/lib/oblivion/vm/{role}/root.squashfs") for line in available):
+                continue
             image = work / f"{role}.squashfs"
             cat(host, f"usr/lib/oblivion/vm/{role}/root.squashfs", image)
             roles[role] = inventory(image, role, work, iso.parent)
