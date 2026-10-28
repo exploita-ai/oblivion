@@ -22,6 +22,7 @@ ID = "0123456789abcdef0123456789abcdef"
 PAYLOAD = b"Oblivion file VM synthetic payload\n"
 FILES = {"z.txt": b"second fixture", "a.txt": PAYLOAD}
 LIMITS = {"entries": 1024, "bytes": 256 * 1024 * 1024}
+SCENARIOS = ("share", "receive", "owner-death", "disconnect", "malformed", "partial", "expiry", "backup", "backup-writable", "backup-invalid")
 
 
 def exact(stream, length):
@@ -240,7 +241,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--scenario", choices=("share", "receive", "owner-death", "disconnect", "malformed", "partial", "expiry", "backup", "backup-writable", "backup-invalid"))
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--scenario", choices=SCENARIOS)
+    selection.add_argument("--group", choices=("files", "backups"))
     parser.add_argument("--accelerator", choices=("hvf", "tcg"), default="hvf")
     args = parser.parse_args()
     assert (platform.system(), platform.machine()) == ("Darwin", "arm64") if args.accelerator == "hvf" else platform.system() == "Linux"
@@ -252,7 +255,8 @@ def main():
     started = time.monotonic()
     success = False
     try:
-        for scenario in ([args.scenario] if args.scenario else ("share", "receive", "owner-death", "disconnect", "malformed", "partial", "expiry", "backup", "backup-writable", "backup-invalid")):
+        for scenario in ([args.scenario] if args.scenario else [value for value in SCENARIOS
+                if args.group is None or value.startswith("backup") == (args.group == "backups")]):
             with tempfile.TemporaryDirectory(prefix="onion-file-", dir="/tmp") as directory:
                 runtime = Path(directory)
                 backup = runtime / "ciphertext-fixture.raw" if scenario.startswith("backup") else None
@@ -329,7 +333,7 @@ def main():
         (args.output / "summary.json").write_text(json.dumps({"passed": success, "checks": checks,
             "image_manifest_sha256": hashlib.sha256(manifest.encode()).hexdigest(),
             "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-            "seconds": round(time.monotonic() - started, 2), "accelerator": args.accelerator,
+            "seconds": round(time.monotonic() - started, 2), "accelerator": args.accelerator, "group": args.group,
             "scope": "Production file VM units, read-only share snapshot, HTTP upload/freeze, approved copy protocol and teardown on a private two-VM wire. Backup cases verify raw read-only block streaming and refusal of writable/invalid inputs, using synthetic sparse bytes with a LUKS magic marker, not a real encrypted archive. No public Tor, provider or supported-image acceptance."}, indent=2) + "\n")
 
 

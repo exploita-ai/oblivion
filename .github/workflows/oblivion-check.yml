@@ -228,10 +228,15 @@ jobs:
           if-no-files-found: error
 
   onionshare-file-vm:
-    name: OnionShare isolated file VM ARM64
+    name: OnionShare isolated file VM ARM64 (${{ matrix.group }})
     runs-on: ubuntu-24.04-arm
-    # Ten cold Debian VM pairs run under TCG, including a full 512 MiB stream.
+    # Keep cold-boot file lifecycles and full-size backups in separate jobs.
+    # Together they exceed 35 minutes under TCG; per-operation limits stay fixed.
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [files, backups]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -252,6 +257,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qemu-system-arm
           python3 -B script/oblivion/run-onion-file-lab.py --accelerator tcg \
+            --group ${{ matrix.group }} \
             --image artifacts/ci/onion-file/image --output artifacts/ci/onion-file/results
       - name: Remove reconstructible guest files from the evidence upload
         if: always()
@@ -264,7 +270,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: oblivion-onion-file-arm64-${{ github.sha }}
+          name: oblivion-onion-file-arm64-${{ matrix.group }}-${{ github.sha }}
           path: |
             artifacts/ci/onion-file/
             artifacts/ci/transfer/
