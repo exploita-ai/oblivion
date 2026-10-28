@@ -12,6 +12,25 @@ backup qualification is tracked in [STATUS.md](../../docs/STATUS.md).
 These laboratories do not establish supported ISO/UTM/KVM/physical-media
 acceptance or reliability on other Tor networks.
 
+## Using the development build
+
+- In Documents, use **Receive over Tor** to prepare a private receiver. Reveal
+  the temporary access details only when needed, then **Stop receiving and
+  review** before choosing files and approving their import into the session.
+- Select files or folders and use **Share selected over Tor** to publish an
+  approved snapshot. Later changes in the live workspace do not alter that snapshot.
+- The encrypted-session backup flow can share a closed `session.oblivion`
+  volume. The receiver needs its original session password to restore it;
+  that password is not given to the file VM or HTTP worker.
+- Cancel or close/lock the session to revoke the transfer and clean up its
+  auxiliary actors. A cleanup error is surfaced for recovery.
+
+These flows are implemented in source and are not all present in the original
+public beta ISO. Ordinary files are limited to 256 MiB and 1,024 entries;
+closed ciphertext backups have a separate size policy. Receiving a large
+backup directly over Tor is not implemented. Full public large-backup transfer,
+supported-candidate acceptance and release hardening remain qualification gates.
+
 The upstream CLI's `--local-only` output is not a production credential. This
 worker never constructs upstream's Onion/OnionShare CLI network objects. Only
 the separate gateway may publish a fresh authenticated onion service; the file
@@ -45,7 +64,7 @@ worker gets neither Tor administration nor a provider credential.
 The version-1 private protocol is newline-delimited JSON. The initial command:
 
 ```json
-{"op":"start","mode":"receive","max_bytes":268435456,"max_files":1024,"ttl_seconds":3600}
+{ "op": "start", "mode": "receive", "max_bytes": 268435456, "max_files": 1024, "ttl_seconds": 3600 }
 ```
 
 `mode` is `share`, `receive` or `backup`. Ordinary documents are bounded to
@@ -121,6 +140,9 @@ frames, version 1, with hello role `onion-file`. Fixed operations are
 The controller polls at least every five seconds; idle ownership expires after
 15 seconds and a started operation has a TTL of at most one hour. No peer can
 choose a listener, source root, system command or privileged service name.
+Cold HTTP-worker startup has a separate 120-second budget. Laboratory clients
+must respect that budget and maintain observations during long peer downloads;
+an idle test client is revoked just like any other absent owner.
 
 Sharing first starts the existing receive endpoint on `oblivion.onion.stage`.
 After the verified copy completes, `share` accepts its `receipt`, original
@@ -280,6 +302,9 @@ to import` reuses the existing Documents picker and explicit manifest/copy
 confirmation. Cancellation owns the OnionShare job rather than a removable-media
 transfer. Renderer tests cover both terminal sizes, startup cancellation,
 unconfigured images, hidden keys and handoff into the existing approval flow.
-Native Unix-socket tests use the real file sender and session import endpoints;
-they are not an integrated Linux owner or public Tor acceptance result. The
-optional image configuration remains off until those runtime gates pass.
+Native Unix-socket tests use the real file sender and session import endpoints.
+Separate Linux-owner and public Tor laboratories exercise their integration;
+the ordinary-file acceptance and outstanding large-backup tests are recorded
+in [STATUS.md](../../docs/STATUS.md). Current live-image definitions include
+the transfer profiles. Existing distributed images require a new build, and
+supported operational-candidate qualification remains open.
