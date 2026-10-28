@@ -21,7 +21,7 @@
 <p align="center">
   <a href="#download-oblivion">Download</a> ·
   <a href="#quick-start">Quick start</a> ·
-  <a href="#in-the-development-build">Features</a> ·
+  <a href="#included-in-beta-2">Features</a> ·
   <a href="#why-oblivion">Why Oblivion</a> ·
   <a href="#privacy-model">Privacy</a> ·
   <a href="#where-oblivion-runs">Platforms</a> ·
@@ -46,29 +46,33 @@ coding agent operate on files you explicitly place inside an isolated workspace.
 ## Download Oblivion
 
 The current public build is
-[`v0.1.0-beta.1`](https://github.com/exploita-ai/oblivion/releases/tag/v0.1.0-beta.1).
-It predates the operational features described below. For those features, build
-the current source; a passing branch image build does not publish a new release
-or update an existing installation.
+[`v0.1.0-beta.2`](https://github.com/exploita-ai/oblivion/releases/tag/v0.1.0-beta.2).
+It packages the session terminal, file transfers, conversation exports,
+encrypted backups, OnionShare and text clipboard features described below.
+The original `v0.1.0-beta.1` remains available as an older build.
+Images are experimental pre-releases; full operational-candidate qualification
+is still in progress.
 
 | Image               | Choose it for                                    | Download                                                                                                                                                                                                                                 |
 | ------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `amd64` / `x86_64`  | 64-bit Intel or AMD PCs and x86 virtual machines | [ISO](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.1/oblivion-v0.1.0-beta.1-amd64.iso) · [SHA-256](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.1/oblivion-v0.1.0-beta.1-amd64.sha256) |
-| `arm64` / `aarch64` | Apple Silicon M3+ with UTM and other ARM64 hosts | [ISO](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.1/oblivion-v0.1.0-beta.1-arm64.iso) · [SHA-256](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.1/oblivion-v0.1.0-beta.1-arm64.sha256) |
+| `amd64` / `x86_64`  | 64-bit Intel or AMD PCs and x86 virtual machines | [ISO](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.2/oblivion-v0.1.0-beta.2-amd64.iso) · [SHA-256](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.2/oblivion-v0.1.0-beta.2-amd64.sha256) |
+| `arm64` / `aarch64` | Apple Silicon M3+ with UTM and other ARM64 hosts | [ISO](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.2/oblivion-v0.1.0-beta.2-arm64.iso) · [SHA-256](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.2/oblivion-v0.1.0-beta.2-arm64.sha256) |
 
 Download the matching checksum next to the ISO, then verify it before booting:
 
 ```sh
 # Linux
-sha256sum --check oblivion-v0.1.0-beta.1-amd64.sha256
+sha256sum --check oblivion-v0.1.0-beta.2-amd64.sha256
 
 # macOS
-shasum -a 256 --check oblivion-v0.1.0-beta.1-arm64.sha256
+shasum -a 256 --check oblivion-v0.1.0-beta.2-arm64.sha256
 ```
 
 Windows users can run `certutil -hashfile <image.iso> SHA256` and compare the
 result with the downloaded checksum file. These hashes detect a damaged or
 incomplete download; signed release provenance is not available yet.
+[SHA256SUMS](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.2/SHA256SUMS)
+contains the checksums for both architectures.
 
 ## Quick start
 
@@ -87,7 +91,7 @@ Use the [VM guide](docs/DEVELOPMENT.md#run-from-a-virtual-machine) for UTM,
 QEMU/KVM and VirtualBox. Running inside a VM is convenient for evaluation, but
 the outer OS and hypervisor can observe input, display, memory and virtual disk.
 
-### Working in a source build
+### Working in a session
 
 Create or unlock Oblivion, configure your connection and provider key, then
 create a named protected session. One session can contain several chats; all
@@ -107,11 +111,10 @@ keeps the active VM and its work running. Starting chat from an offline VM
 restarts the guest on the same unlocked volume; locking stops its processes.
 Use the explicit import/export flow to move files across the session boundary.
 
-## In the development build
+## Included in beta 2
 
-These features are implemented in the current source on `main` and `dev`.
-They are undergoing candidate qualification and are **not all included in
-the published `v0.1.0-beta.1` ISO**.
+These features are packaged in `v0.1.0-beta.2`. Inclusion in this experimental
+release does not establish complete hardware, hypervisor or security qualification.
 
 | Feature                          | What you can do                                                                                                                                                                 |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -120,13 +123,14 @@ the published `v0.1.0-beta.1` ISO**.
 | **Documents**                    | Browse `workspace` and `imports`; approve file/folder imports and exports through isolated media VMs, with manifests, hashes, progress and recovery.                            |
 | **Conversation exports**         | Save settled messages as Markdown or OpenCode JSON inside the encrypted workspace, then export the selected transcript.                                                         |
 | **Encrypted session backups**    | Back up a closed session and restore an independent copy with its chats and documents. The original session password is required; host settings and provider keys are excluded. |
-| **OnionShare**                   | Receive files into a private intake, review them before import, share selected documents, or publish a closed encrypted backup through a separate Tor transfer path.            |
+| **OnionShare**                   | Receive and review ordinary files; share approved documents or a closed encrypted backup through dedicated Tor transfer VMs.                                                    |
 | **Provider keys and networking** | Keep multiple encrypted keys, select a global default or an override for one opening, and route session traffic through Tor or an explicit SOCKS5 proxy.                        |
 | **Host/guest text clipboard**    | Explicit text copy/paste in UTM; the amd64 image also packages the selected VirtualBox clipboard client. No shared folders or clipboard file transfers.                         |
 | **Diagnostics**                  | Export an allowlisted report for troubleshooting, with a review step before sending it outside the session.                                                                     |
 
-UTM text copy/paste has been tested in both directions. VirtualBox clipboard
-acceptance, full large-backup transfer over public Tor, supported-candidate
+Direct large-backup receipt over Tor is not implemented; restore uses removable
+or prepared virtual media. UTM text copy/paste has been tested in both directions.
+VirtualBox clipboard acceptance, full large-backup sharing over public Tor, supported-candidate
 hardware tests and release hardening remain open. See the
 [implementation progress and acceptance gates](docs/STATUS.md#implementation-progress-2026-10-28).
 
@@ -246,32 +250,36 @@ fallback in the production profile.
 
 ### Practical requirements
 
-The published beta ISO is about 1.2 GB. Source builds include additional tools
-and transfer components, so their image and RAM costs differ. The general
-vault defaults to 2 GiB, a new session reserves 512 MiB inside it, and the
-session plus model gateway allocate about 1.8 GiB of guest memory. OnionShare
-starts additional VMs; its full candidate resource profile is still being qualified.
+The beta 2 ISOs are about 1.58 GB for amd64 and 1.54 GB for arm64, including
+the expanded tools and transfer components. The general vault defaults to 2 GiB, a new session
+reserves 512 MiB inside it, and the session plus model gateway allocate about
+1.8 GiB of guest memory. OnionShare starts additional VMs; its full resource
+profile is still being qualified.
 
-| Resource                  | Minimum for the current beta     | Recommended                                                  |
-| ------------------------- | -------------------------------- | ------------------------------------------------------------ |
-| Writable boot disk        | 4 GB for the published base beta | 16 GB or more for development builds, sessions and documents |
-| System or outer-VM memory | 4 GB for the base chat profile   | 8 GiB for the expanded operational profile                   |
-| CPU                       | 64-bit, virtualization, 2 cores  | 4 cores for smoother nested guests                           |
-| Firmware                  | UEFI; Secure Boot disabled       | Hardware virtualization enabled                              |
+| Resource                  | Starting configuration for beta 2 | Notes                                                    |
+| ------------------------- | --------------------------------- | -------------------------------------------------------- |
+| Writable boot disk        | 16 GB or more                     | Leave room for vaults, sessions, documents and backups.  |
+| System or outer-VM memory | 8 GiB                             | Full-profile peak memory is still being measured.        |
+| CPU                       | 64-bit, virtualization, 4 cores   | Nested guests require support from the outer hypervisor. |
+| Firmware                  | UEFI; Secure Boot disabled        | Enable hardware virtualization.                          |
+
+These are starting recommendations, not certified minimums. The earlier
+chat-only profile was exercised with 4 GiB; that does not qualify the expanded
+beta 2 profile at the same memory limit.
 
 Direct boot currently targets Intel/AMD PCs. The persistence implementation
 uses free space after the read-only live image. In a VM, expose the prepared
 raw disk as writable storage and disable shared folders and host-disk
-passthrough. Development images now include optional host/guest text clipboard
+passthrough. Beta 2 includes optional host/guest text clipboard
 support; see the [UTM and VirtualBox setup guide](docs/DEVELOPMENT.md#text-copypaste-in-a-vm).
 Copied text is deliberately shared with the outer OS. A Debian-supported
 Ethernet or Wi-Fi adapter is required for remote inference.
 
 ## Next: qualify the operational beta
 
-The operational features above are implemented in source. The remaining work
-is to qualify them together on the actual candidate: complete public Tor
-backup transfers, physical-media failures, supported VM profiles, upgrades,
+The operational features above are packaged for evaluation in beta 2. The
+remaining work is to qualify them together on the actual candidate: complete
+public Tor backup transfers, physical-media failures, supported VM profiles, upgrades,
 rollback and independent user testing. Component tests and successful ISO
 builds are distinct from full candidate acceptance. Follow the
 [ordered milestones and acceptance gates](docs/STATUS.md#ordered-milestones).
@@ -295,15 +303,18 @@ See the [beta scope](docs/STATUS.md#remote-api-beta-scope) and
 
 ## Project status
 
-`v0.1.0-beta.1` is the first public pre-release. Both `amd64` and `arm64`
-images are built and verified by GitHub Actions, encrypted persistence and a
-real provider response have been tested on physical amd64 hardware, and nested
-ARM sessions have been validated in UTM on M4 Pro.
+`v0.1.0-beta.2` is the current experimental pre-release, built from
+[`b959035`](https://github.com/exploita-ai/oblivion/tree/b95903520a2562f7de7c884d5d5efeea6a67b37a).
+The matching commit passed all 42 checks on both
+[`main`](https://github.com/exploita-ai/oblivion/actions/runs/40758638222) and
+[`dev`](https://github.com/exploita-ai/oblivion/actions/runs/40758638690).
+The [release workflow](https://github.com/exploita-ai/oblivion/actions/runs/40764719849)
+built and verified both `amd64` and `arm64` images before publication.
 
-Current source contains the expanded operational feature set. GitHub Actions
-checks the source and disposable VM laboratories and builds both image
-architectures. The badges above reflect live workflow results; development
-features reach users through a separately qualified release.
+Earlier baselines passed encrypted persistence and a real provider response on
+physical amd64 hardware, and nested ARM sessions were validated in UTM on M4 Pro.
+Full beta 2 operational-candidate testing on those profiles remains open;
+component and VM-laboratory results are not a substitute for that acceptance.
 
 Hardening is still in progress: reproducible signed provenance, a minimal Debian
 package audit, broader hardware coverage and an independent security review are

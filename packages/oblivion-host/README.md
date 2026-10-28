@@ -10,7 +10,9 @@ Documents and Terminal, remote chat startup, media transfers, conversation
 exports, encrypted backup/restore, redacted diagnostics and OnionShare
 orchestration. Source implementation, laboratory tests and supported-image
 acceptance have separate status in [STATUS.md](../../docs/STATUS.md).
-The published beta does not automatically acquire newer source features.
+These operations are packaged in the experimental `v0.1.0-beta.2` images.
+See [downloads and release limits](../../README.md#download-oblivion);
+packaging does not close the remaining supported-image acceptance gates.
 
 ## Storage and session lifetime
 

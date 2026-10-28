@@ -25,6 +25,8 @@ only metadata reaches the controller. It has no listener or retry loop.
 The host manager integrates USB import, recovery and export. The controller owns
 authorization, isolated source/destination environments, storage placement,
 close/lock integration, filesystem-stall recovery and release to the chat.
+These operations are packaged in the experimental
+[`v0.1.0-beta.2` images](../../README.md#download-oblivion).
 The relay binary requires Linux; Mac tests exercise its library with explicit
 lifetime channels, while Linux tests and the VM laboratory exercise real pidfds.
 

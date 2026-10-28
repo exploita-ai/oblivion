@@ -12,7 +12,7 @@ backup qualification is tracked in [STATUS.md](../../docs/STATUS.md).
 These laboratories do not establish supported ISO/UTM/KVM/physical-media
 acceptance or reliability on other Tor networks.
 
-## Using the development build
+## Using OnionShare in beta 2
 
 - In Documents, use **Receive over Tor** to prepare a private receiver. Reveal
   the temporary access details only when needed, then **Stop receiving and
@@ -25,8 +25,8 @@ acceptance or reliability on other Tor networks.
 - Cancel or close/lock the session to revoke the transfer and clean up its
   auxiliary actors. A cleanup error is surfaced for recovery.
 
-These flows are implemented in source and are not all present in the original
-public beta ISO. Ordinary files are limited to 256 MiB and 1,024 entries;
+These flows are packaged in the experimental `v0.1.0-beta.2` images; the
+original beta 1 ISO predates them. Ordinary files are limited to 256 MiB and 1,024 entries;
 closed ciphertext backups have a separate size policy. Receiving a large
 backup directly over Tor is not implemented. Full public large-backup transfer,
 supported-candidate acceptance and release hardening remain qualification gates.

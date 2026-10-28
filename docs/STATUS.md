@@ -4,9 +4,15 @@ Oblivion is early beta. The architecture works end to end and public
 pre-release images are available, but the project is not yet ready for
 sensitive or irreplaceable data.
 
+`v0.1.0-beta.2` packages the operational features below for experimental use.
+Its source commit `b959035` passed all 42 GitHub checks on both `main` and `dev`;
+the release workflow rebuilt and verified both image architectures before
+publication. This does not close the supported-candidate, public large-backup,
+hardware, upgrade or independent-review gates documented here.
+
 ## Implemented
 
-- **Host/guest text clipboard in development images.** UTM uses Debian's SPICE
+- **Host/guest text clipboard in beta 2 images.** UTM uses Debian's SPICE
   broker and a pinned open-source Wayland adapter restricted to UTF-8 text and
   256 KiB payloads. The host announces formats; bytes are requested only on
   paste. Guest terminal clipboard escapes remain filtered and manager copy
