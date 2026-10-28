@@ -98,7 +98,7 @@ class VM:
                 self.ports["file"].settimeout(120)
                 assert read(self.ports["file"]) == {"ready": True, "version": 1, "role": "onion-file"}
                 self.ports["file"].settimeout(30)
-            deadline = time.monotonic() + 60
+            deadline = time.monotonic() + 120
             while True:
                 remaining = deadline - time.monotonic()
                 assert remaining > 0, "Guest fixture did not start"
@@ -133,10 +133,19 @@ class VM:
         write(self.ports["file"], {"operation": operation, **fields})
         return read(self.ports["file"])
 
-    def diagnostic(self, operation):
+    def diagnostic(self, operation, keepalive=None, timeout=30):
         self.process.stdin.write(json.dumps({"operation": operation}).encode() + b"\n")
         self.process.stdin.flush()
-        value = self.messages.get(timeout=30)
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, "Guest diagnostic did not complete"
+            try:
+                value = self.messages.get(timeout=min(3, remaining))
+                break
+            except queue.Empty:
+                if keepalive is not None:
+                    assert keepalive().get("ok")
         assert value.get("ok"), value
         return value
 
@@ -265,13 +274,17 @@ def main():
                     assert vm.command("observe") == {"ok": True, "phase": "fresh", "worker": None}
                     assert peer.diagnostic("refused")["refused"]
                     if scenario.startswith("backup"):
-                        result = vm.command("backup", ttl_seconds=60)
+                        result = vm.command("backup", ttl_seconds=180)
                         if scenario != "backup":
                             assert result["ok"] is False
                             assert peer.diagnostic("refused")["refused"]
                         else:
                             assert result == {"ok": True, "phase": "sharing"}
-                            assert peer.diagnostic("backup-ranges")["raw_ranges_verified"]
+                            # Full ciphertext streaming under TCG can exceed
+                            # the 15s idle watchdog. Observe the owner as the
+                            # production host does, without extending its limit.
+                            assert peer.diagnostic("backup-ranges", timeout=180,
+                                keepalive=lambda: vm.command("observe"))["raw_ranges_verified"]
                             state = vm.command("observe")["worker"]
                             assert state["mode"] == "backup" and state["bytes"] == 512 * 1024**2
                             assert vm.command("shutdown") == {"ok": True, "phase": "closed"}

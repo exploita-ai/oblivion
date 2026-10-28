@@ -145,7 +145,8 @@ def peer(operation):
             for _ in range(510):
                 expected.update(bytes(1024**2))
             expected.update(bytes(1024**2-32) + b"OBLIVION_BACKUP_FIXTURE_12345678")
-            assert length == size and actual.digest() == expected.digest()
+            assert length == size, ("incomplete_backup", length, size)
+            assert actual.digest() == expected.digest(), "backup_hash_mismatch"
             return {"raw_ranges_verified":True, "resumed_bytes":length, "complete_hash_verified":True}
         if operation == "download":
             connection.request("GET", "/download")

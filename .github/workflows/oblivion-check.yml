@@ -230,7 +230,8 @@ jobs:
   onionshare-file-vm:
     name: OnionShare isolated file VM ARM64
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 20
+    # Ten cold Debian VM pairs run under TCG, including a full 512 MiB stream.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
