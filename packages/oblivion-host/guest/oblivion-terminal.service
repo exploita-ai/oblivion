@@ -1,5 +1,7 @@
 [Unit]
-Description=Oblivion protected session terminal
+Description=Oblivion offline workspace
+ConditionKernelCommandLine=!oblivion.resize=1
+ConditionKernelCommandLine=oblivion.documents=1
 Requires=oblivion-vault.service
 After=oblivion-vault.service oblivion-session-network.service
 
@@ -26,8 +28,8 @@ TTYPath=/dev/hvc1
 TTYReset=yes
 TTYVHangup=yes
 UMask=0077
-NoNewPrivileges=yes
-CapabilityBoundingSet=
+# sudo is intentionally available inside this session VM.
+NoNewPrivileges=no
 LimitCORE=0
 KillMode=control-group
 TimeoutStopSec=10s

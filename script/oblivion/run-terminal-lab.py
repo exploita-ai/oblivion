@@ -27,6 +27,7 @@ parser.add_argument("--output", type=Path, required=True)
 parser.add_argument("--accelerator", choices=["hvf", "kvm", "tcg"], default="hvf")
 parser.add_argument("--exports", action="store_true", help="Also qualify the deployed chat export service; requires an opencode-guest image")
 parser.add_argument("--tools", action="store_true", help="Also qualify the production session tools; requires a session-tools or opencode-guest image")
+parser.add_argument("--admin", action="store_true", help="Install a local deb using sudo, reboot, and check isolation from a second session")
 parser.add_argument("--bridge", type=Path, default=Path(__file__).resolve().parents[2] / "packages/oblivion-host/target/debug/examples/viewport-probe")
 args = parser.parse_args()
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
@@ -57,7 +58,7 @@ def marker(value):
     return "printf '" + "".join(f"\\{byte:03o}" for byte in (value + "\n").encode()) + "'"
 
 
-def boot(index, verify):
+def boot(index, verify, isolated=False):
     terminal = channels / "terminal.sock"
     qmp = channels / "qmp.sock"
     terminal.unlink(missing_ok=True)
@@ -69,7 +70,7 @@ def boot(index, verify):
                "-kernel", str(image / "kernel"), "-initrd", str(image / "initrd"),
                "-append", f"root=/dev/vda ro rootfstype=squashfs console={uart} systemd.getty_auto=no oblivion.documents=1 quiet loglevel=0",
                "-drive", f"file={image}/root.squashfs,format=raw,if=virtio,readonly=on",
-               "-drive", f"file={output}/vault.raw,format=raw,if=virtio,cache=none",
+               "-drive", f"file={output}/{'other' if isolated else 'vault'}.raw,format=raw,if=virtio,cache=none",
                "-device", "virtio-serial-pci,id=serial", "-chardev", "null,id=unused", "-device", "virtconsole,chardev=unused,bus=serial.0",
                "-chardev", f"socket,id=terminal,path={terminal},server=on,wait=off", "-device", "virtconsole,chardev=terminal,bus=serial.0",
                "-chardev", "null,id=ready", "-device", "virtserialport,chardev=ready,name=oblivion.documents,bus=serial.0",
@@ -168,16 +169,20 @@ def boot(index, verify):
                     return result
 
                 resize(24, 80)
-                expect("TERMINAL")
+                expect("WORKSPACE")
                 run('test "$(id -u)" = 1000 && test "$(ls /sys/class/net | wc -l)" = 1 && test ! -e /run/oblivion-api/token && test -z "${HTTP_PROXY-}"', "OFFLINE_NONROOT_NO_KEY")
-                if not verify:
+                if args.admin:
+                    phase = "isolated" if isolated else "verify" if verify else "seed"
+                    run("python3 -B /usr/lib/oblivion/lab/test-session-admin.py " + phase, "ADMIN_" + phase.upper() + "_PASSED")
+                    checks.append("guest sudo/package persistence: " + phase)
+                elif not verify:
                     run("printf terminal-persistence > /vault/workspace/terminal-check.txt", "FIRST_FILE_WRITTEN")
                     input(b"\x02c")
                     run('test "$(tmux -S /run/oblivion-terminal/tmux.sock list-windows | wc -l)" = 2', "SECOND_WINDOW_RUNNING")
                     input(b"\x02p")
-                    expect("top -")
+                    run('test "$(tmux -S /run/oblivion-terminal/tmux.sock display-message -p \'#{window_index}\')" = 0', "NATIVE_PREVIOUS_WINDOW")
                     input(b"\x02c")
-                    run('tmux -S /run/oblivion-terminal/tmux.sock kill-window -t Processes', "PROCESS_VIEW_CLOSED")
+                    run('test "$(tmux -S /run/oblivion-terminal/tmux.sock list-windows | wc -l)" = 3', "THIRD_WINDOW_RUNNING")
                     resize(30, 120)
                     run('test "$(stty size)" = "29 120"', "RESIZE_OK")
                     input(("sh -c \"" + marker("FOREGROUND_RUNNING") + "; exec sleep 30\"\n").encode())
@@ -260,6 +265,10 @@ with tempfile.TemporaryDirectory(prefix="oblivion-terminal-", dir="/tmp") as dir
     channels = Path(directory)
     boot(1, False)
     boot(2, True)
+    if args.admin:
+        shutil.copyfile(image / "vault.raw", output / "other.raw")
+        boot(3, False, isolated=True)
+        boot(4, True)
 report = {"passed": True, "scope": __doc__.strip(), "architecture": architecture, "accelerator": args.accelerator,
           "image_manifest": (image / "SHA256SUMS").read_text(), "checks": checks}
 (output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")

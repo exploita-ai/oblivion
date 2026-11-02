@@ -1,0 +1,32 @@
+{
+  "sources": [
+    {
+      "package": "arpy",
+      "version": "1.1.1",
+      "url": "https://files.pythonhosted.org/packages/d2/15/09fbfc0d43b66a3845098377249539aa44edcd541e17eabe2e11b4e3855e/arpy-1.1.1.tar.gz",
+      "sha256": "3ec36309d2234648ef8dcd2118fe7d81c30195087e0353473546583f3434e776",
+      "members": ["arpy-1.1.1/arpy.py"]
+    },
+    {
+      "package": "pyserial",
+      "version": "3.5",
+      "url": "https://files.pythonhosted.org/packages/1e/7d/ae3f0a63f41e4d2f6cb66a5b57197850f919f59e558159a4dd3a818f5082/pyserial-3.5.tar.gz",
+      "sha256": "3c77e014170dfffbd816e6ffc205e9842efb10be9f58ec16d3e8675b4925cddb",
+      "members": ["pyserial-3.5/LICENSE.txt"]
+    },
+    {
+      "package": "unicorn",
+      "version": "2.1.2",
+      "url": "https://files.pythonhosted.org/packages/90/12/a10f01a3e1dafcd21e2eb0c0d99bb51d5bda1d3fee20047cb2a4b2de6285/unicorn-2.1.2.tar.gz",
+      "sha256": "e4a9d671bdea71806f29a396734cfb83317f82943b52d0001d3bca1dcbaee893",
+      "members": ["unicorn-2.1.2/src/qemu/COPYING", "unicorn-2.1.2/src/qemu/COPYING.LIB", "unicorn-2.1.2/src/qemu/LICENSE", "unicorn-2.1.2/src/README.md", "unicorn-2.1.2/src/AUTHORS.TXT", "unicorn-2.1.2/src/CREDITS.TXT"]
+    },
+    {
+      "package": "z3-solver",
+      "version": "5.3.1.0",
+      "url": "https://files.pythonhosted.org/packages/95/e1/153dadafb44e67feaffde028d7ec337e7aabadaad40eff450cf29ca9b4b9/z3_solver-5.3.1.0.tar.gz",
+      "sha256": "efa420092193e1e65f90fedb0905e230deb1673634e0c66cccf4aab14d533473",
+      "members": ["z3_solver-5.3.1.0/core/LICENSE.txt"]
+    }
+  ]
+}

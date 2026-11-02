@@ -1,0 +1,3 @@
+# Session debugging is local; downloading symbols is an explicit user action.
+set debuginfod enabled off
+set history save off

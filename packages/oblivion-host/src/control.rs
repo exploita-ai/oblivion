@@ -36,6 +36,7 @@ fn connect(operation: &str, session: Option<&str>, secret: &[u8]) -> Result<Unix
         > if matches!(
             operation,
             "api-keys"
+                | "session-storage"
                 | "egress"
                 | "network-policy"
                 | "transfers"
@@ -82,7 +83,14 @@ fn connect(operation: &str, session: Option<&str>, secret: &[u8]) -> Result<Unix
 
 pub fn request(operation: &str, session: Option<&str>, secret: &[u8]) -> Result<String> {
     let stream = connect(operation, session, secret)?;
-    response(Channel::new(&stream, Duration::from_secs(120)))
+    response(Channel::new(
+        &stream,
+        Duration::from_secs(if operation == "session-storage" {
+            1800
+        } else {
+            120
+        }),
+    ))
 }
 
 fn response(channel: Channel<'_>) -> Result<String> {

@@ -117,7 +117,7 @@ def run():
         assert not Path(f"/proc/{pid}/root/run/oblivion/general").exists()
         assert Path(f"/proc/{pid}/root/dev/oblivion-session").is_block_device()
         check("QEMU runs unprivileged without capabilities in private filesystem and network namespaces")
-        check("guest user is unprivileged, root is readonly and temporary files are RAM-backed")
+        check("guest starts unprivileged with guest-only sudo, encrypted system overlay and RAM-backed temporary files")
         command(LAB, "enter", b, secret=b"synthetic-session-password-b", fail="vm_already_running")
         if CHAT:
             send(stream, "chat-a", "OBLIVION_CHAT_CREATED")

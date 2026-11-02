@@ -94,13 +94,16 @@ export function Home() {
         <box height={3} minHeight={0} flexShrink={1} />
         <box
           flexShrink={0}
+          maxWidth={Oblivion.enabled ? "100%" : undefined}
           onSizeChange={function () {
             setLogoWidth(this.width)
           }}
         >
           <Logo />
           <Show when={Oblivion.enabled}>
-            <text fg={theme.text.muted}>Conversations and documents</text>
+            <text fg={theme.text.muted} wrapMode="word">
+              A privacy-first live OS for conversations, research, documents and code
+            </text>
           </Show>
         </box>
         <box height={1} flexShrink={0} />

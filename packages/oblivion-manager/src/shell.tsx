@@ -5,24 +5,27 @@ import { ActionBar } from "./action-bar"
 import { BusyModal } from "./busy-modal"
 import { theme } from "./theme"
 
-export const sections = ["Sessions", "Network", "API keys", "Keyboard & time zone", "System"] as const
+export const sections = ["Sessions", "Settings", "System"] as const
 export const accessSections = ["Keyboard & time zone"] as const
 
 export function Shell(props: {
   children: JSX.Element; mounted: boolean; welcome?: boolean;
   breadcrumb: string; page: number; navigation: boolean; editing: boolean;
   network: NetworkLabel; host: string; blocked: boolean; connection: NetworkConnection; transport: string;
+  access?: "strict" | "open" | "offline"; onNetwork?: () => void;
   busy: string; cancellable?: boolean; onClose?: () => void; notice: string; feedback: "info" | "success" | "error";
-  chat?: boolean; terminal?: boolean; documents?: boolean; activeSession?: string | null; onSection?: (index: number) => void;
+  workspace?: boolean; documents?: boolean; activeSession?: string | null; onSection?: (index: number) => void;
   debugAvailable?: boolean; debugActive?: boolean;
-  onChat?: () => void; onDocuments?: () => void; onTerminal?: () => void; accessSetting?: number;
+  onWorkspace?: () => void; onDocuments?: () => void; onStartChat?: () => void; accessSetting?: number;
+  onActivity?: () => void;
 }) {
   const dimensions = useTerminalDimensions()
   const wide = () => dimensions().width >= 110
   const spacious = () => wide() && dimensions().height >= 32
-  const viewport = () => props.chat || props.terminal
-  const hostSelected = (index: number) => props.page === index && !props.chat && !props.documents
-  return <box width="100%" height="100%" flexDirection="column" backgroundColor={theme.background.base}>
+  const viewport = () => props.workspace
+  const hostSelected = (index: number) => props.page === index && !props.workspace && !props.documents
+  return <box width="100%" height="100%" flexDirection="column" backgroundColor={theme.background.base}
+    onMouseDown={() => props.onActivity?.()} onMouseScroll={() => props.onActivity?.()}>
     <box flexGrow={1} minHeight={0} flexDirection={wide() ? "row" : "column"}>
       <Show when={!props.activeSession}><box width={wide() ? 32 : "100%"} height={wide() ? "100%" : "auto"} flexShrink={0} flexDirection="column"
         paddingLeft={wide() ? 3 : 2} paddingRight={wide() ? 3 : 2} paddingTop={spacious() ? 2 : 1} gap={wide() ? 1 : 0}
@@ -38,7 +41,7 @@ export function Shell(props: {
         </box>}>
           <box flexDirection={wide() ? "column" : "row"} gap={1} paddingTop={spacious() ? 2 : 0} paddingBottom={1}>
             <For each={sections}>{(name, index) => <NavigationRow
-              title={name === "Keyboard & time zone" && !wide() ? "Keyboard / Time" : name}
+              title={name}
               active={hostSelected(index())} focused={props.navigation && props.page === index()}
               disabled={props.editing} onSelect={() => props.onSection?.(index())} />}</For>
           </box>
@@ -64,12 +67,13 @@ export function Shell(props: {
     </Show>
     <box flexShrink={0} flexDirection={wide() || !props.activeSession ? "row" : "column"} justifyContent="space-between" paddingLeft={wide() ? 3 : 1} paddingRight={wide() ? 3 : 1}
       paddingTop={spacious() ? 1 : 0} paddingBottom={spacious() ? 1 : 0} border={["top"]} borderColor={theme.border.base}>
-      <NetworkIndicator label={props.network} host={props.host} blocked={props.blocked} connection={props.connection} transport={props.transport} />
+      <NetworkIndicator label={props.network} host={props.host} blocked={props.blocked} connection={props.connection} transport={props.transport} access={props.mounted ? props.access : undefined} />
       <Show when={props.mounted}><box alignSelf="flex-end"><ActionBar disabled={props.editing} actions={props.activeSession ? [
-        { title: "Chat", key: "F6", run: () => props.onChat?.() },
+        { title: "Workspace", key: "F6", run: () => props.onWorkspace?.() },
         { title: "Documents", key: "F7", run: () => props.onDocuments?.() },
-        { title: "Terminal", key: "F8", run: () => props.onTerminal?.() },
-        { title: "Close", key: "Ctrl+Q", run: () => props.onClose?.() },
+        { title: "Network", key: "F9", run: () => props.onNetwork?.() },
+        ...(props.onStartChat ? [{ title: "Start chat", key: "F8", run: props.onStartChat }] : []),
+        { title: "Lock", key: "Ctrl+Q", run: () => props.onClose?.() },
       ] : [{ title: "Lock Oblivion", key: "Ctrl+Q", run: () => props.onClose?.() }]} /></box></Show>
     </box>
     <Show when={props.busy}><BusyModal text={props.busy} cancellable={props.cancellable} /></Show>

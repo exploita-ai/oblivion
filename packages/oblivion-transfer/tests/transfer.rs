@@ -16,6 +16,58 @@ const LIMITS: Limits = Limits {
 };
 
 #[test]
+fn thousands_of_files_stream_with_a_bounded_number_of_open_descriptors() {
+    // Run under a low descriptor limit in a separate process: other parallel
+    // tests keep their own sockets and temporary files unaffected.
+    if std::env::var_os("OBLIVION_LOW_FD_TEST").is_none() {
+        assert!(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "thousands_of_files_stream_with_a_bounded_number_of_open_descriptors",
+                    "--nocapture"
+                ])
+                .env("OBLIVION_LOW_FD_TEST", "1")
+                .status()
+                .unwrap()
+                .success()
+        );
+        return;
+    }
+    let limit = libc::rlimit {
+        rlim_cur: 64,
+        rlim_max: 64,
+    };
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+    let source = Tree::new();
+    let target = Tree::new();
+    fs::create_dir(source.0.join("project")).unwrap();
+    for n in 0..5000 {
+        fs::write(source.0.join(format!("project/file-{n:05}")), b"selected").unwrap();
+    }
+    let limits = Limits {
+        entries: oblivion_transfer::MAX_ENTRIES,
+        bytes: oblivion_transfer::MAX_DOCUMENT_BYTES,
+    };
+    let mut selection = Selection::prepare(&source.0, &["project".into()], limits).unwrap();
+    assert_eq!(selection.manifest().entries().len(), 5001);
+    let mut stream = Vec::new();
+    selection.send_data(&mut stream).unwrap();
+    let receipt = receive(
+        &mut Cursor::new(stream),
+        selection.manifest(),
+        &target.0,
+        ID,
+    )
+    .unwrap();
+    assert_eq!(receipt.bytes, 40000);
+    assert_eq!(
+        fs::read(target.0.join(format!("{ID}/files/project/file-04999"))).unwrap(),
+        b"selected"
+    );
+}
+
+#[test]
 fn external_export_preserves_existing_data_and_never_reuses_a_destination() {
     let source = Tree::new();
     let target = Tree::new();
@@ -376,7 +428,7 @@ fn source_links_fifo_socket_and_unselected_paths_are_rejected() {
 }
 
 #[test]
-fn pinned_source_descriptors_survive_path_replacement_without_following_new_links() {
+fn replaced_source_paths_abort_without_following_new_links() {
     let source = Tree::new();
     let outside = Tree::new();
     let target = Tree::new();
@@ -386,12 +438,9 @@ fn pinned_source_descriptors_survive_path_replacement_without_following_new_link
     fs::rename(source.0.join("selected"), source.0.join("old")).unwrap();
     symlink(outside.0.join("secret"), source.0.join("selected")).unwrap();
     let mut data = Vec::new();
-    selection.send_data(&mut data).unwrap();
-    receive(&mut Cursor::new(data), selection.manifest(), &target.0, ID).unwrap();
-    assert_eq!(
-        fs::read(target.0.join(ID).join("files/selected")).unwrap(),
-        b"approved"
-    );
+    assert!(selection.send_data(&mut data).is_err());
+    assert!(data.is_empty());
+    assert!(!target.0.join(ID).exists());
 }
 
 #[test]

@@ -57,7 +57,7 @@ def inspect():
     assert Path("/proc/sys/net/ipv4/ip_forward").read_text().strip() == "0"
     assert sorted(path.name for path in Path("/sys/class/net").iterdir()) == ["file0", "lo"]
     assert " / squashfs ro," in Path("/proc/mounts").read_text()
-    assert not any(Path("/usr/bin", name).exists() for name in ("tor", "curl", "oblivion-api", "oblivion-egress"))
+    assert not any(Path("/usr/bin", name).exists() for name in ("tor", "curl", "oblivion-api", "oblivion-egress", "oblivion-web"))
     devices = sorted(p.name for p in Path("/sys/block").glob("vd*"))
     assert devices in (["vda"], ["vda", "vdb"])
     if len(devices) == 2:

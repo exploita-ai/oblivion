@@ -19,6 +19,14 @@ pub fn configure(transport: &Transport) -> io::Result<()> {
     apply(&policy)
 }
 
+pub fn offline() -> io::Result<()> {
+    // Drop established traffic as well, before the established/related rules.
+    let policy = include_str!("../guest/firewall.nft")
+        .replace("type filter hook input priority filter; policy drop;", "type filter hook input priority filter; policy drop;\n        iifname \"outside0\" drop")
+        .replace("type filter hook output priority filter; policy drop;", "type filter hook output priority filter; policy drop;\n        oifname \"outside0\" drop");
+    apply(&policy)
+}
+
 pub fn apply(policy: &str) -> io::Result<()> {
     let mut child = Command::new("/usr/sbin/nft")
         .args(["-f", "-"])

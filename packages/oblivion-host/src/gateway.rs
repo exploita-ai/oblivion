@@ -26,6 +26,9 @@ enum Request<'a> {
         tools: Option<Tools>,
     },
     Revoke {},
+    Policy {
+        tools: Tools,
+    },
     Check {},
     Observe {},
     Stop {},
@@ -115,17 +118,20 @@ pub fn shutdown() -> Result<bool> {
     Ok(checkpoint.is_ok())
 }
 
-fn destroy() -> Result<()> {
+pub(crate) fn destroy() -> Result<()> {
     // Always inspect both units: the host process may have died before its
     // ExecStopPost, or a previous cleanup may have been interrupted.
     if !matches!(state()?.as_str(), "inactive" | "failed") {
         vm::execute("/usr/bin/systemctl", &["stop".to_owned(), UNIT.to_owned()])?;
     }
     vm::stop_role(Role::Gateway, true)?;
-    require(
-        matches!(state()?.as_str(), "inactive" | "failed"),
-        "gateway_still_running",
-    )
+    if state()? == "failed" {
+        vm::execute(
+            "/usr/bin/systemctl",
+            &["reset-failed".to_owned(), UNIT.to_owned()],
+        )?;
+    }
+    require(state()? == "inactive", "gateway_still_running")
 }
 
 pub fn prepare() -> Result<Zeroizing<String>> {
@@ -166,6 +172,15 @@ pub fn revoke() -> Result<()> {
     // A missing acknowledgement is not a successful revocation. Destroy the
     // entire gateway before allowing storage closure or another session.
     destroy()
+}
+
+pub fn policy(tools: Tools) -> Result<()> {
+    if let Err(error) = request(&Request::Policy { tools }, true) {
+        // Never keep an old, more permissive grant after an unconfirmed change.
+        destroy()?;
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub fn ready() -> Result<()> {
@@ -348,6 +363,10 @@ fn connected(key: crate::storage::ApiKey, transport: Transport, network: bool) -
                         true
                     }
                     Request::Revoke {} => false,
+                    Request::Policy { .. } => {
+                        require(active, "gateway_grant_required")?;
+                        true
+                    }
                     Request::Check {} => active,
                     Request::Stop {} | Request::Observe {} => unreachable!(),
                 };
@@ -361,6 +380,11 @@ fn connected(key: crate::storage::ApiKey, transport: Transport, network: bool) -
                     next,
                 )?;
                 active = next;
+                if matches!(request, Request::Policy { .. }) {
+                    observed = observe(&stream)?;
+                    observed_at = Instant::now();
+                    network_ready = observed.isolated && observed.ready;
+                }
                 if !active {
                     session = None;
                 }

@@ -18,6 +18,17 @@ binary = os.environ.get("OBLIVION_TEST_CLIENT", "/usr/bin/oblivion")
 
 
 class ChatExportTest(unittest.TestCase):
+    def test_storage_usage_does_not_start_the_engine_or_create_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            vault = Path(directory)
+            result = exporter.execute({"action": "storage"}, vault, "/nonexistent-engine")
+            space = os.statvfs(vault)
+            self.assertEqual(result["result"], "storage")
+            self.assertEqual(result["usage"]["capacity"], space.f_blocks * space.f_frsize)
+            self.assertGreaterEqual(result["usage"]["used"], 0)
+            self.assertLessEqual(result["usage"]["used"] + result["usage"]["available"], result["usage"]["capacity"])
+            self.assertEqual(list(vault.iterdir()), [])
+
     def test_restore_inspection_uses_a_private_engine_snapshot_and_preserves_pending_chats(self):
         with tempfile.TemporaryDirectory() as directory:
             vault = Path(directory)

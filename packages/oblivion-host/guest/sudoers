@@ -1,0 +1,7 @@
+# Full administration of this disposable guest, never of the Oblivion host.
+oblivion ALL=(ALL:ALL) NOPASSWD: ALL
+Defaults:oblivion !log_input, !log_output, !syslog
+# Retain the revocable tool proxy, not the provider or OpenCode credentials.
+Defaults:oblivion env_keep += "http_proxy https_proxy all_proxy no_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY"
+Defaults:oblivion env_keep += "HISTFILE LESSHISTFILE SQLITE_HISTORY NODE_REPL_HISTORY PYTHON_HISTORY PYTHONDONTWRITEBYTECODE PIP_DISABLE_PIP_VERSION_CHECK DEBUGINFOD_URLS DEBUGINFOD_CACHE_PATH"
+Defaults:oblivion env_keep += "NODE_USE_ENV_PROXY XDG_CACHE_HOME PIP_CACHE_DIR npm_config_cache npm_config_logs_max npm_config_update_notifier npm_config_audit npm_config_fund"

@@ -63,6 +63,7 @@ function connectScreen(mode: string, receive: Parameters<ChatConnect>[0], failed
 export function ChatViewport(props: {
   connection: ChatConnection; focused: boolean; activate: () => void;
   attach: (receive: ((frame: ChatFrame) => void) | undefined) => void;
+  activity?: () => void;
 }) {
   const [terminal, setTerminal] = createSignal<EmbeddedTerminalRenderable>()
   let size = { cols: 0, rows: 0 }
@@ -83,6 +84,10 @@ export function ChatViewport(props: {
       setTerminal(value)
     }} width="100%" height="100%" maxScrollback={0} selectable={true}
       onTerminalResize={(cols, rows) => { restored = false; size = { cols, rows }; props.connection.resize(cols, rows) }}
-      onData={(data, source) => { if (source === "input" && props.focused) props.connection.input(data) }} />
+      onData={(data, source) => {
+        if (source !== "input" || !props.focused) return
+        props.activity?.()
+        props.connection.input(data)
+      }} />
   </box>
 }

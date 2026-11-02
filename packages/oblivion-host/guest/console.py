@@ -55,7 +55,7 @@ class Input:
         return bytes(output), sizes
 
 
-def main(command, persistent=False, refresh=None):
+def main(command, persistent=False, refresh=None, notifications=None):
     # Headless OpenCode commands such as `run --format json` deliberately use
     # pipes or /dev/null. They need no viewer resize protocol or guest PTY.
     if not os.isatty(0):
@@ -66,10 +66,19 @@ def main(command, persistent=False, refresh=None):
     child = None
     master = None
     client_tty = None
+    event_fd = None
     ready_at = 0.0
     try:
         with selectors.DefaultSelector() as selector:
             selector.register(0, selectors.EVENT_READ)
+            if notifications:
+                # tmux consumes private OSCs. Fixed lifecycle hints use a RAM
+                # FIFO instead; no terminal passthrough or chat text is allowed.
+                if not os.path.exists(notifications):
+                    os.mkfifo(notifications, 0o600)
+                event_fd = os.open(notifications, os.O_RDWR | os.O_NONBLOCK)
+                selector.register(event_fd, selectors.EVENT_READ)
+            pending_event = bytearray()
             while True:
                 if child is None and time.monotonic() >= ready_at:
                     os.write(1, READY)
@@ -98,6 +107,15 @@ def main(command, persistent=False, refresh=None):
                                 continue
                             os.write(1, FAILED)
                         return
+                    if notifications and key.fd == event_fd:
+                        for byte in data:
+                            if byte == 10:
+                                if pending_event in (b"started", b"storage-failed", b"client-failed", b"close"):
+                                    os.write(1, b"\x1b]777;oblivion;" + pending_event + b"\x07")
+                                pending_event.clear()
+                            elif len(pending_event) < 32:
+                                pending_event.append(byte)
+                        continue
                     if key.fd == master:
                         os.write(1, data)
                         continue
@@ -131,6 +149,8 @@ def main(command, persistent=False, refresh=None):
                         if data:
                             os.write(master, data)
     finally:
+        if event_fd is not None:
+            os.close(event_fd)
         termios.tcsetattr(0, termios.TCSANOW, original)
         if master is not None:
             os.close(master)
@@ -144,10 +164,14 @@ def main(command, persistent=False, refresh=None):
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--terminal"]:
+    if sys.argv[1:] in (["--terminal"], ["--workspace"]):
         socket = "/run/oblivion-terminal/tmux.sock"
-        main(["/usr/bin/tmux", "-f", "/etc/oblivion/tmux.conf", "-S", socket,
-              "new-session", "-A", "-s", "workspace", "-c", "/vault/workspace"],
-             persistent=True, refresh=["/usr/bin/tmux", "-S", socket, "refresh-client"])
+        command = ["/usr/bin/tmux", "-f", "/etc/oblivion/tmux.conf", "-S", socket,
+                   "new-session", "-A", "-s", "workspace", "-c", "/vault/workspace"]
+        if sys.argv[1:] == ["--workspace"]:
+            command += ["/usr/bin/chat --continue; exec /bin/bash --noprofile --norc"]
+        main(command, persistent=True,
+             refresh=["/usr/bin/tmux", "-S", socket, "refresh-client"],
+             notifications="/run/oblivion-terminal/events")
     else:
         main(sys.argv[1:])

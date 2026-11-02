@@ -1,5 +1,5 @@
 use oblivion_host::{egress, keys, network, persistence, settings, transfers};
-use oblivion_transport::policy::{Policy, Session, Tools};
+use oblivion_transport::policy::{Access, Policy, Session, Tools};
 use oblivion_transport::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
@@ -61,6 +61,8 @@ struct Status {
     incomplete_sessions: Vec<String>,
     available_bytes: Option<u64>,
     session_bytes: u64,
+    session_sizes: std::collections::BTreeMap<String, u64>,
+    pending_growth: Vec<String>,
     vm_state: Option<String>,
     laboratory_emulation: bool,
     recovery_required: bool,
@@ -164,12 +166,25 @@ pub fn main() -> Result<()> {
             .open(RECOVERY)
             .map_err(|_| Error("recovery_marker_failed"))?;
     }
-    let _lock = lock()?;
+    let _lock = if matches!(op, "lock" | "recover") {
+        recovery_lock()?
+    } else {
+        lock()?
+    };
     // A broken transfer record must not prevent teardown from revoking the
     // current grant. Admission guards apply to new work, not close/recovery.
     if !matches!(
         op,
-        "status" | "transfers" | "onion" | "close" | "leave" | "force-leave" | "lock" | "recover"
+        "status"
+            | "transfers"
+            | "onion"
+            | "settings"
+            | "network-policy"
+            | "close"
+            | "leave"
+            | "force-leave"
+            | "lock"
+            | "recover"
     ) {
         require(
             !crate::transfer_host::archiving()? && !crate::onion_host::archiving()?,
@@ -185,6 +200,7 @@ pub fn main() -> Result<()> {
             | "unlock-ephemeral"
             | "create"
             | "rename-session"
+            | "session-storage"
             | "open"
             | "enter"
             | "enter-ephemeral"
@@ -215,6 +231,18 @@ pub fn main() -> Result<()> {
             let command: oblivion_host::onion::Command =
                 serde_json::from_slice(&payload).map_err(|_| Error("invalid_onion_request"))?;
             command.validate().map_err(Error)?;
+            if matches!(
+                command,
+                oblivion_host::onion::Command::Receive { .. }
+                    | oblivion_host::onion::Command::Share { .. }
+                    | oblivion_host::onion::Command::PrepareBackup { .. }
+                    | oblivion_host::onion::Command::Prepare { .. }
+            ) {
+                require(
+                    crate::host_settings::status(true)?.current.web_access != "offline",
+                    "network_offline",
+                )?;
+            }
             let status = match command {
                 oblivion_host::onion::Command::Status {} => {
                     crate::onion_host::status(config.onion.is_some())?
@@ -376,7 +404,30 @@ pub fn main() -> Result<()> {
             clear_network_selection()?;
             Ok(())
         }
-        "create" => config.create(&password(true)?),
+        "create" => config.create(&password(true)?, config.session_mib),
+        "session-storage" => {
+            let request: oblivion_host::volume::Request =
+                serde_json::from_slice(&read_storage_request()?)
+                    .map_err(|_| Error("invalid_storage_request"))?;
+            request.validate().map_err(Error)?;
+            match request {
+                oblivion_host::volume::Request::Create { mib, password } => {
+                    config.create(password.as_bytes(), mib)
+                }
+                oblivion_host::volume::Request::Grow { id, mib, password } => {
+                    config.grow(&id, mib, password.as_bytes())
+                }
+                oblivion_host::volume::Request::Discard { id } => discard_growth(&id),
+                oblivion_host::volume::Request::Usage {} => {
+                    let response = session_export(oblivion_host::chat_export::Request::Storage {})?;
+                    println!(
+                        "{}",
+                        serde_json::to_string(&response).map_err(|_| Error("encode_failed"))?
+                    );
+                    Ok(())
+                }
+            }
+        }
         "rename-session" => {
             let command: oblivion_host::session_title::Rename =
                 serde_json::from_slice(&password(false)?)
@@ -453,22 +504,29 @@ pub fn main() -> Result<()> {
             let id = session_info()?.ok_or(Error("session_not_open"))?.0;
             let vm = config.vm.as_ref().ok_or(Error("vm_not_configured"))?;
             require(api_key_present()?, "api_key_missing")?;
+            if crate::gateway::state()? == "failed" {
+                crate::gateway::shutdown()?;
+                return Err(Error("gateway_start_failed"));
+            }
             config.start_gateway(false)?;
+            if crate::gateway::state()? == "failed" {
+                crate::gateway::shutdown()?;
+                return Err(Error("gateway_start_failed"));
+            }
             require(crate::gateway::state()? == "active", "gateway_not_ready")?;
             crate::gateway::ready()?;
             let provider = selected_provider()?;
-            let (saved, selected) = policy_profiles()?;
-            let tools = selected
-                .or(saved)
-                .map(|policy| Session::new(&id).map(|session| Tools { session, policy }))
-                .transpose()
-                .map_err(Error)?;
+            let web_access = crate::host_settings::status(true)?.current.web_access;
+            let tools = Some(session_policy(
+                &id,
+                Access::parse(&web_access).map_err(Error)?,
+            )?);
             // Block credential edits throughout the transition, including partial startup.
             write_session_info(&id, "starting")?;
             let result = (|| {
                 crate::vm::stop(false)?;
                 let token = crate::gateway::prepare()?;
-                vm.start(Some(&token), Some(provider), tools)
+                vm.start(Some(&token), Some(provider), &web_access, tools)
             })();
             if result.is_err() {
                 recover_chat(&config)?;
@@ -604,10 +662,6 @@ pub fn main() -> Result<()> {
             )
         }
         "settings" => {
-            require(
-                !mapping_open("oblivion-session")? && crate::vm::stopped()?,
-                "session_must_be_closed",
-            )?;
             let mut bytes = Vec::new();
             std::io::stdin()
                 .take(4097)
@@ -616,11 +670,29 @@ pub fn main() -> Result<()> {
             require(bytes.len() <= 4096, "invalid_settings")?;
             let command: settings::Command =
                 serde_json::from_slice(&bytes).map_err(|_| Error("invalid_settings"))?;
+            if let settings::Command::Access { mode, save } = command {
+                return config.change_access(mode, save);
+            }
+            require(
+                !mapping_open("oblivion-session")? && crate::vm::stopped()?,
+                "session_must_be_closed",
+            )?;
             match command {
+                settings::Command::Access { .. } => unreachable!(),
                 settings::Command::Apply { preferences } => {
+                    require(
+                        preferences.web_access
+                            == crate::host_settings::status(true)?.current.web_access,
+                        "use_global_network_settings",
+                    )?;
                     crate::host_settings::apply(&preferences)
                 }
                 settings::Command::Save { preferences } => {
+                    require(
+                        preferences.web_access
+                            == crate::host_settings::status(true)?.current.web_access,
+                        "use_global_network_settings",
+                    )?;
                     require(
                         mount_mode()? == MountMode::ReadWrite,
                         "general_not_writable",
@@ -862,12 +934,11 @@ pub fn main() -> Result<()> {
                 args[3].clone()
             };
             let tools = if config.gateway.is_some() {
-                let (saved, selected) = policy_profiles()?;
-                selected
-                    .or(saved)
-                    .map(|policy| Session::new(&id).map(|session| Tools { session, policy }))
-                    .transpose()
-                    .map_err(Error)?
+                Some(session_policy(
+                    &id,
+                    Access::parse(&crate::host_settings::status(true)?.current.web_access)
+                        .map_err(Error)?,
+                )?)
             } else {
                 None
             };
@@ -877,6 +948,7 @@ pub fn main() -> Result<()> {
                 config.open(&id, &password(false)?)?;
             }
             write_session_info(&id, "chat")?;
+            let web_access = crate::host_settings::status(true)?.current.web_access;
             // Failed startup keeps the vault interlocked until explicit leave/lock.
             let result = (|| {
                 let token = if config.gateway.is_some() {
@@ -889,7 +961,12 @@ pub fn main() -> Result<()> {
                 } else {
                     None
                 };
-                vm.start(token.as_deref().map(String::as_str), provider, tools)
+                vm.start(
+                    token.as_deref().map(String::as_str),
+                    provider,
+                    &web_access,
+                    tools,
+                )
             })();
             if result.is_err() && config.gateway.is_some() {
                 crate::gateway::revoke()?;
@@ -1035,6 +1112,27 @@ pub fn main() -> Result<()> {
                     None
                 },
                 session_bytes: config.session_mib * MIB,
+                session_sizes: if mode == MountMode::ReadWrite {
+                    sessions(".luks")?
+                        .into_iter()
+                        .map(|id| {
+                            let bytes = trusted_file(
+                                &Path::new(MOUNT).join(format!("sessions/{id}.luks")),
+                            )?
+                            .metadata()
+                            .map_err(|_| Error("image_check_failed"))?
+                            .len();
+                            Ok((id, bytes))
+                        })
+                        .collect::<Result<_>>()?
+                } else {
+                    Default::default()
+                },
+                pending_growth: if mode == MountMode::ReadWrite {
+                    sessions(".growing")?
+                } else {
+                    Vec::new()
+                },
                 vm_state: if config.vm.is_some() {
                     Some(crate::vm::state()?)
                 } else {
@@ -1080,15 +1178,59 @@ pub fn main() -> Result<()> {
     }
 }
 
+fn session_policy(id: &str, access: Access) -> Result<Tools> {
+    let (saved, selected) = policy_profiles()?;
+    Ok(Tools {
+        session: Session::new(id).map_err(Error)?,
+        policy: selected.or(saved).unwrap_or_default(),
+        access,
+    })
+}
+
 impl Config {
+    fn change_access(&self, access: Access, save: bool) -> Result<()> {
+        require(mount_mode()? != MountMode::Closed, "general_not_open")?;
+        require(
+            !save || mount_mode()? == MountMode::ReadWrite,
+            "general_not_writable",
+        )?;
+        require(
+            !session_info()?.is_some_and(|(_, mode)| mode == "starting"),
+            "chat_starting",
+        )?;
+        let gateway = crate::gateway::state()?;
+        if gateway == "active" {
+            if let Some((id, _)) = session_info()?.filter(|(_, mode)| mode == "chat") {
+                crate::gateway::policy(session_policy(&id, access)?)?;
+            } else {
+                crate::gateway::stop()?;
+            }
+        } else if gateway != "inactive" && access == Access::Offline {
+            crate::gateway::stop()?;
+        }
+        if access == Access::Offline {
+            // Separate OnionShare uplinks must obey the same global switch.
+            require(crate::onion_host::shutdown()?, "onion_shutdown_unconfirmed")?;
+        }
+        if let Err(error) = crate::host_settings::access(access, save) {
+            crate::gateway::destroy()?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn change_network_policy(&self, command: network::Command) -> Result<()> {
         let mode = mount_mode()?;
         require(mode != MountMode::Closed, "general_not_open")?;
-        require(credentials_editable()?, "session_must_be_closed")?;
+        require(
+            !session_info()?.is_some_and(|(_, mode)| mode == "starting"),
+            "chat_starting",
+        )?;
         let (saved, selected) = policy_profiles()?;
-        let mut policy = selected.or(saved).unwrap_or_default();
+        let restore = matches!(command, network::Command::Saved {});
+        let mut policy = if restore { saved } else { selected.or(saved) }.unwrap_or_default();
         let save = match command {
-            network::Command::Saved {} => return clear_network_selection(),
+            network::Command::Saved {} => false,
             network::Command::Put { rule, save } => {
                 require(
                     !save || mode == MountMode::ReadWrite,
@@ -1106,18 +1248,37 @@ impl Config {
                 save
             }
         };
-        let path = Path::new(if save { PROFILE } else { RUN }).join(if save {
-            "network-policy.json"
-        } else {
-            "network-policy-selection.json"
-        });
-        write_network_policy(&path, &policy, save)?;
-        // Publish the complete saved policy before discarding a RAM selection.
-        // A failed write must preserve both the previous file and selection.
-        if save {
-            clear_network_selection()?;
+        // Revoke existing tunnels before publishing the new rules. A failed
+        // acknowledgement destroys the gateway instead of retaining old access.
+        if crate::gateway::state()? == "active" {
+            if let Some((id, _)) = session_info()?.filter(|(_, mode)| mode == "chat") {
+                crate::gateway::policy(Tools {
+                    session: Session::new(&id).map_err(Error)?,
+                    policy: policy.clone(),
+                    access: Access::parse(&crate::host_settings::status(true)?.current.web_access)
+                        .map_err(Error)?,
+                })?;
+            }
         }
-        Ok(())
+        let result = (|| {
+            if restore {
+                return clear_network_selection();
+            }
+            let path = Path::new(if save { PROFILE } else { RUN }).join(if save {
+                "network-policy.json"
+            } else {
+                "network-policy-selection.json"
+            });
+            write_network_policy(&path, &policy, save)?;
+            if save {
+                clear_network_selection()?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            crate::gateway::destroy()?;
+        }
+        result
     }
 
     fn change_transport(&self, command: egress::Command) -> Result<()> {
@@ -1275,6 +1436,10 @@ impl Config {
     }
 
     fn start_gateway(&self, wait: bool) -> Result<()> {
+        require(
+            crate::host_settings::status(true)?.current.web_access != "offline",
+            "network_offline",
+        )?;
         if self.gateway.is_some()
             && api_key_present()?
             && matches!(crate::gateway::state()?.as_str(), "inactive" | "failed")
@@ -1408,15 +1573,20 @@ impl Config {
         Ok(())
     }
 
-    fn create(&self, secret: &[u8]) -> Result<()> {
+    fn create(&self, secret: &[u8], mib: u64) -> Result<()> {
+        let bytes = oblivion_host::volume::size(mib).map_err(Error)?;
         require(
             mount_mode()? == MountMode::ReadWrite && mapping_open("oblivion-general")?,
             "general_not_writable",
         )?;
         require(!mapping_open("oblivion-session")?, "session_already_open")?;
+        require(
+            available_bytes()? >= bytes + oblivion_host::volume::RESERVE_BYTES,
+            "insufficient_space",
+        )?;
         let id = random_id()?;
         let path = PathBuf::from(format!("{MOUNT}/sessions/{id}.pending"));
-        create_image(&path, self.session_mib)?;
+        create_image(&path, mib)?;
         self.format(&path, secret)?;
         crypt_open(&path, "oblivion-session", secret, false)?;
         let formatted = format_session();
@@ -1426,6 +1596,72 @@ impl Config {
         publish(&path, &PathBuf::from(format!("{MOUNT}/sessions/{id}.luks")))?;
         println!("{id}");
         Ok(())
+    }
+
+    fn grow(&self, id: &str, mib: u64, secret: &[u8]) -> Result<()> {
+        let mut original = closed_session_file(id)?;
+        let current = original
+            .metadata()
+            .map_err(|_| Error("metadata_failed"))?
+            .len();
+        let target =
+            oblivion_host::volume::growth(current, mib, available_bytes()?).map_err(Error)?;
+        let vm = self.vm.as_ref().ok_or(Error("vm_not_configured"))?;
+        vm.validate()?;
+        let path = Path::new(MOUNT).join(format!("sessions/{id}.luks"));
+        let candidate = Path::new(MOUNT).join(format!("sessions/{id}.growing"));
+        require(
+            !candidate
+                .try_exists()
+                .map_err(|_| Error("image_check_failed"))?,
+            "pending_session_growth",
+        )?;
+        // Reject a bad password before allocating or copying anything.
+        crypt_open(&path, "oblivion-session", secret, false)?;
+        crypt_close("oblivion-session")?;
+        create_image(&candidate, mib)?;
+        let result = (|| {
+            let mut copy = OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&candidate)
+                .map_err(|_| Error("growth_copy_failed"))?;
+            require(
+                std::io::copy(&mut original, &mut copy).map_err(|_| Error("growth_copy_failed"))?
+                    == current,
+                "growth_copy_failed",
+            )?;
+            copy.sync_all().map_err(|_| Error("sync_failed"))?;
+            crypt_open(&candidate, "oblivion-session", secret, false)?;
+            // Only the copy is exposed to the networkless maintenance guest.
+            let resized = vm.resize_session(target);
+            close_maintenance_session()?;
+            resized
+        })();
+        result?;
+        trusted_file(&candidate)?
+            .sync_all()
+            .map_err(|_| Error("sync_failed"))?;
+        let source = CString::new(candidate.as_os_str().as_encoded_bytes())
+            .map_err(|_| Error("invalid_path"))?;
+        let destination =
+            CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| Error("invalid_path"))?;
+        // A crash sees either the original or the verified replacement at .luks.
+        // The other copy stays at .growing until the directory commit is durable.
+        require(
+            unsafe {
+                libc::renameat2(
+                    libc::AT_FDCWD,
+                    source.as_ptr(),
+                    libc::AT_FDCWD,
+                    destination.as_ptr(),
+                    libc::RENAME_EXCHANGE,
+                )
+            } == 0,
+            "growth_publish_failed",
+        )?;
+        sync_directory(path.parent().ok_or(Error("invalid_path"))?)?;
+        discard_growth(id)
     }
 
     fn prepare_backup(&self, id: &str, secret: &[u8]) -> Result<()> {
@@ -1556,8 +1792,13 @@ impl Config {
                 &self.pbkdf_memory_kib.to_string(),
                 "--pbkdf-parallel",
                 "1",
-                "--iter-time",
-                "1000",
+                // Keep LUKS setup deterministic across bare metal and virtual
+                // machines. cryptsetup's time calibration can take minutes on
+                // Apple Virtualization before it writes the first keyslot.
+                // Four Argon2id passes at the configured memory cost retain a
+                // deliberately expensive KDF without making setup look hung.
+                "--pbkdf-force-iterations",
+                "4",
                 "--key-file",
                 "-",
                 path.to_str().ok_or(Error("invalid_path"))?,
@@ -2149,6 +2390,11 @@ fn close_maintenance_session() -> Result<()> {
     clear_key_file("session-info")
 }
 
+fn discard_growth(id: &str) -> Result<()> {
+    closed_session_file(id)?;
+    discard_pending(&Path::new(MOUNT).join(format!("sessions/{id}.growing")))
+}
+
 fn format_session() -> Result<()> {
     // The host formats the block device but never mounts a session filesystem.
     run(
@@ -2252,6 +2498,21 @@ fn secure_process() -> Result<()> {
 
 fn lock() -> Result<File> {
     lock_named("storage.lock")
+}
+
+fn recovery_lock() -> Result<File> {
+    // A status poll may still own the operation lock when the display exits.
+    // Recovery is latched already: wait for that worker, never skip teardown.
+    // A stuck worker still leaves recovery required after this bounded wait.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match lock() {
+            Err(Error("controller_busy")) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
 }
 
 pub(crate) fn lock_named(name: &str) -> Result<File> {
@@ -2562,6 +2823,16 @@ fn password(creating: bool) -> Result<Zeroizing<Vec<u8>>> {
     Ok(bytes)
 }
 
+fn read_storage_request() -> Result<Zeroizing<Vec<u8>>> {
+    let mut bytes = Zeroizing::new(Vec::new());
+    std::io::stdin()
+        .take(4097)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Error("secret_read_failed"))?;
+    require(bytes.len() <= 4096, "invalid_storage_request")?;
+    Ok(bytes)
+}
+
 pub(crate) fn require(condition: bool, code: &'static str) -> Result<()> {
     if condition {
         return Ok(());
@@ -2762,6 +3033,10 @@ fn network_observation(mode: Option<&str>) -> network::Observation {
         && (mode.is_none() || crate::vm::network_devices().is_ok_and(|count| count == 1));
     result.label = if !result.direct_blocked {
         "STATUS UNKNOWN"
+    } else if crate::host_settings::status(true)
+        .is_ok_and(|status| status.current.web_access == "offline")
+    {
+        "OFFLINE"
     } else if !observed.ready {
         "CONNECTING"
     } else if observed.tor {

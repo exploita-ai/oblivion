@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 
 const CURRENT: &str = "/run/oblivion/system-settings.json";
 const SAVED: &str = "/run/oblivion/general/profile/system-settings.json";
+const COMMAND_TIMEOUT: &str = "5";
 
 pub fn catalog() -> Result<Catalog> {
     // The installed catalog is public data, unlike the private saved profile.
@@ -39,6 +40,21 @@ pub fn restore() -> Result<()> {
     Ok(())
 }
 
+pub fn access(mode: oblivion_transport::policy::Access, save: bool) -> Result<()> {
+    let mut preferences = status(true)?.current;
+    preferences.web_access = match mode {
+        oblivion_transport::policy::Access::Open => "open",
+        oblivion_transport::policy::Access::Strict => "strict",
+        oblivion_transport::policy::Access::Offline => "offline",
+    }
+    .to_owned();
+    write(CURRENT, &preferences)?;
+    if save {
+        write(SAVED, &preferences)?;
+    }
+    Ok(())
+}
+
 pub fn save(preferences: &Preferences) -> Result<()> {
     apply(preferences)?;
     write(SAVED, preferences)
@@ -46,6 +62,7 @@ pub fn save(preferences: &Preferences) -> Result<()> {
 
 pub fn apply(preferences: &Preferences) -> Result<()> {
     catalog()?.validate(preferences).map_err(Error)?;
+    let current = read(CURRENT)?;
     let zone = Path::new("/usr/share/zoneinfo")
         .join(&preferences.timezone)
         .canonicalize()
@@ -59,56 +76,65 @@ pub fn apply(preferences: &Preferences) -> Result<()> {
         .and_then(|mut file| file.read_exact(&mut magic))
         .map_err(|_| Error("invalid_timezone"))?;
     require(&magic == b"TZif", "invalid_timezone")?;
-    let keymap = Command::new("/usr/bin/ckbcomp")
-        .args([
-            "-model",
-            "pc105",
-            "-layout",
-            &preferences.keyboard,
-            "-variant",
-            &preferences.variant,
-        ])
-        .env_clear()
-        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-        .env("LC_ALL", "C.UTF-8")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|_| Error("keyboard_tools_unavailable"))?;
-    require(
-        keymap.status.success() && keymap.stdout.len() < 1024 * 1024,
-        "keyboard_apply_failed",
-    )?;
-    let mut child = Command::new("/usr/bin/loadkeys")
-        .args(["--unicode", "-C", "/dev/tty1"])
-        .env_clear()
-        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| Error("keyboard_apply_failed"))?;
-    child
-        .stdin
-        .take()
-        .ok_or(Error("keyboard_apply_failed"))?
-        .write_all(&keymap.stdout)
-        .map_err(|_| Error("keyboard_apply_failed"))?;
-    require(
+    if current.as_ref().is_none_or(|value| {
+        value.keyboard != preferences.keyboard || value.variant != preferences.variant
+    }) {
+        let keymap = bounded("/usr/bin/ckbcomp")
+            .args([
+                "-model",
+                "pc105",
+                "-layout",
+                &preferences.keyboard,
+                "-variant",
+                &preferences.variant,
+            ])
+            .env_clear()
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .env("LC_ALL", "C.UTF-8")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|_| Error("keyboard_tools_unavailable"))?;
+        require(
+            keymap.status.success() && keymap.stdout.len() < 1024 * 1024,
+            "keyboard_apply_failed",
+        )?;
+        let mut child = bounded("/usr/bin/loadkeys")
+            .args(["--unicode", "-C", "/dev/tty1"])
+            .env_clear()
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| Error("keyboard_apply_failed"))?;
         child
-            .wait()
-            .map_err(|_| Error("keyboard_apply_failed"))?
-            .success(),
-        "keyboard_apply_failed",
-    )?;
-    apply_display_keymap(preferences)?;
-    let pending = Path::new("/etc/localtime.oblivion-pending");
-    if pending.symlink_metadata().is_ok() {
-        fs::remove_file(pending).map_err(|_| Error("timezone_apply_failed"))?;
+            .stdin
+            .take()
+            .ok_or(Error("keyboard_apply_failed"))?
+            .write_all(&keymap.stdout)
+            .map_err(|_| Error("keyboard_apply_failed"))?;
+        require(
+            child
+                .wait()
+                .map_err(|_| Error("keyboard_apply_failed"))?
+                .success(),
+            "keyboard_apply_failed",
+        )?;
+        apply_display_keymap(preferences)?;
     }
-    symlink(&zone, pending)
-        .and_then(|_| fs::rename(pending, "/etc/localtime"))
-        .map_err(|_| Error("timezone_apply_failed"))?;
+    if current
+        .as_ref()
+        .is_none_or(|value| value.timezone != preferences.timezone)
+    {
+        let pending = Path::new("/etc/localtime.oblivion-pending");
+        if pending.symlink_metadata().is_ok() {
+            fs::remove_file(pending).map_err(|_| Error("timezone_apply_failed"))?;
+        }
+        symlink(&zone, pending)
+            .and_then(|_| fs::rename(pending, "/etc/localtime"))
+            .map_err(|_| Error("timezone_apply_failed"))?;
+    }
     write(CURRENT, preferences)
 }
 
@@ -117,7 +143,7 @@ fn apply_display_keymap(preferences: &Preferences) -> Result<()> {
     if !Path::new("/etc/oblivion/foot.ini").exists() {
         return Ok(());
     }
-    let keymap = Command::new("/usr/bin/xkbcli")
+    let keymap = bounded("/usr/bin/xkbcli")
         .args([
             "compile-keymap",
             "--rules",
@@ -158,7 +184,7 @@ fn apply_display_keymap(preferences: &Preferences) -> Result<()> {
         .map_err(|_| Error("keyboard_apply_failed"))?
         .ino();
     fs::rename(pending, "/run/oblivion-keymap.xkb").map_err(|_| Error("keyboard_apply_failed"))?;
-    let active = Command::new("/usr/bin/systemctl")
+    let active = bounded("/usr/bin/systemctl")
         .args(["is-active", "--quiet", "oblivion-display.service"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -168,7 +194,7 @@ fn apply_display_keymap(preferences: &Preferences) -> Result<()> {
     if !active.success() {
         return Ok(());
     }
-    let reload = Command::new("/usr/bin/systemctl")
+    let reload = bounded("/usr/bin/systemctl")
         .args([
             "kill",
             "--kill-whom=main",
@@ -194,6 +220,12 @@ fn apply_display_keymap(preferences: &Preferences) -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     Err(Error("keyboard_apply_failed"))
+}
+
+fn bounded(program: &str) -> Command {
+    let mut command = Command::new("/usr/bin/timeout");
+    command.args(["--signal=KILL", COMMAND_TIMEOUT, program]);
+    command
 }
 
 fn read(path: &str) -> Result<Option<Preferences>> {

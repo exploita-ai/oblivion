@@ -1,6 +1,6 @@
 use oblivion_transport::Transport;
 pub use oblivion_transport::policy::Tools;
-use oblivion_transport::policy::{Action, Destination};
+use oblivion_transport::policy::{Access, Action, Destination};
 use oblivion_transport::provider::Provider;
 use serde::Deserialize;
 use std::{
@@ -21,6 +21,7 @@ use zeroize::Zeroizing;
 
 const USER: &[u8] = b"oblivion-api";
 const TOOLS_USER: &[u8] = b"oblivion-tools";
+const WEB_USER: &[u8] = b"oblivion-web";
 const HANDSHAKE: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
@@ -121,7 +122,8 @@ impl Egress {
         let mut password = Zeroizing::new(vec![0; size]);
         client.read_exact(&mut password).await?;
         let tools = username.as_slice() == TOOLS_USER && self.credentials.tools.is_some();
-        if (!tools && username.as_slice() != USER)
+        let web = username.as_slice() == WEB_USER;
+        if (!tools && !web && username.as_slice() != USER)
             || !bool::from(
                 password
                     .as_slice()
@@ -162,14 +164,33 @@ impl Egress {
         };
         let port = client.read_u16().await?;
         let destination = Destination::new(&host, port).ok();
-        let allowed = match (&destination, tools) {
-            (Some(destination), true) => self.credentials.tools.as_ref().is_some_and(|tools| {
-                tools.policy.decision(&tools.session, destination) == Action::Allow
-            }),
-            (Some(_), false) => host == self.credentials.provider.host() && port == 443,
+        let allowed = match (&destination, tools, web) {
+            (Some(destination), true, false) => self
+                .credentials
+                .tools
+                .as_ref()
+                .is_some_and(|tools| tools.decision(destination) == Action::Allow),
+            (Some(destination), false, true) => {
+                destination.port() == 443
+                    && destination.host().parse::<IpAddr>().is_err()
+                    && self
+                        .credentials
+                        .tools
+                        .as_ref()
+                        .is_some_and(|tools| tools.decision(destination) == Action::Allow)
+            }
+            (Some(destination), false, false) => {
+                host == self.credentials.provider.host()
+                    && port == 443
+                    && self.credentials.tools.as_ref().is_none_or(|tools| {
+                        tools.access != Access::Offline
+                            && tools.policy.matched(&tools.session, destination)
+                                != Some(Action::Deny)
+                    })
+            }
             _ => false,
         };
-        // Ask is closed until the trusted manager approval channel is wired.
+        // Ask stays closed until the user adds an allow rule in the host manager.
         // No DNS or upstream TCP connection precedes this decision.
         if !allowed {
             client.write_all(&[5, 2, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
@@ -180,7 +201,13 @@ impl Egress {
         let mut upstream = TcpStream::connect(self.credentials.transport.endpoint()).await?;
         let authentication = match &self.credentials.transport {
             Transport::Tor {} => Some((
-                if tools { TOOLS_USER } else { USER },
+                if tools {
+                    TOOLS_USER
+                } else if web {
+                    WEB_USER
+                } else {
+                    USER
+                },
                 self.credentials.session_token.as_bytes(),
             )),
             Transport::Socks5 { authentication, .. } => authentication

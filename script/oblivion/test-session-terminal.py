@@ -25,12 +25,12 @@ class SessionTerminalTest(unittest.TestCase):
             socket = str(Path(directory) / "tmux.sock")
             command = [tmux, "-f", str(CONFIG), "-S", socket, "new-session", "-A", "-s", "workspace", "-c", directory]
             refresh = [tmux, "-S", socket, "refresh-client"]
-            launcher = "import importlib.util,sys; sys.dont_write_bytecode=True; s=importlib.util.spec_from_file_location('guest',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.main(__import__('json').loads(sys.argv[2]),persistent=True,refresh=__import__('json').loads(sys.argv[3]))"
+            launcher = "import importlib.util,sys; sys.dont_write_bytecode=True; s=importlib.util.spec_from_file_location('guest',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.main(__import__('json').loads(sys.argv[2]),persistent=True,refresh=__import__('json').loads(sys.argv[3]),notifications=sys.argv[4])"
 
             def attach():
                 import json
                 master, slave = pty.openpty()
-                child = subprocess.Popen([sys.executable, "-c", launcher, str(SOURCE), json.dumps(command), json.dumps(refresh)], stdin=slave, stdout=slave, stderr=slave,
+                child = subprocess.Popen([sys.executable, "-c", launcher, str(SOURCE), json.dumps(command), json.dumps(refresh), str(Path(directory) / "events")], stdin=slave, stdout=slave, stderr=slave,
                                          env={"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "TERM": "xterm-256color", "HISTFILE": "/dev/null", "HOME": directory, "TMPDIR": directory}, close_fds=True)
                 os.close(slave)
                 captured = bytearray()
@@ -64,11 +64,35 @@ class SessionTerminalTest(unittest.TestCase):
             try:
                 os.write(master, b"printf alpha > first.txt\n")
                 wait_file("first.txt", "alpha")
+                # Native split shortcuts create independent PTYs in this same
+                # tmux session. No manager-specific panel commands intervene.
+                os.write(master, b"\x02%")
+                os.write(master, b"printf split > split.txt\n")
+                wait_file("split.txt", "split")
+                os.write(master, b'\x02"')
+                os.write(master, b"printf stacked > stacked.txt\n")
+                wait_file("stacked.txt", "stacked")
+                panes = subprocess.check_output([tmux, "-S", socket, "list-panes", "-F", "#{pane_pid}"], text=True).splitlines()
+                self.assertEqual(len(set(panes)), 3)
+                os.write(master, b"\x02z")
+                os.write(master, b"printf zoomed > zoom.txt\n")
+                wait_file("zoom.txt", "zoomed")
+                self.assertEqual(subprocess.check_output([tmux, "-S", socket, "display-message", "-p", "#{window_zoomed_flag}"], text=True).strip(), "1")
+                # Private lifecycle hints survive tmux without enabling escape
+                # passthrough; the viewer forwards only the fixed vocabulary.
+                with (Path(directory) / "events").open("wb", buffering=0) as events:
+                    events.write(b"started\n")
+                wait_output(b"\x1b]777;oblivion;started\x07")
                 os.write(master, b"\x02c")
                 os.write(master, b"printf beta > second.txt\n")
                 wait_file("second.txt", "beta")
                 windows = subprocess.check_output([tmux, "-S", socket, "list-windows", "-F", "#{window_index}"], text=True)
                 self.assertEqual(windows.splitlines(), ["0", "1"])
+                os.write(master, b"\x02p")
+                os.write(master, b"printf previous > previous.txt\n")
+                wait_file("previous.txt", "previous")
+                self.assertEqual(subprocess.check_output([tmux, "-S", socket, "display-message", "-p", "#{window_index}"], text=True).strip(), "0")
+                os.write(master, b"\x02n")
                 os.write(master, b"\x1b[8;30;120t")
                 os.write(master, b"stty size > size.txt\n")
                 wait_file("size.txt", "29 120\n")

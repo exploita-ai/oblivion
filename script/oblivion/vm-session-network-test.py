@@ -551,7 +551,7 @@ if SOCKS:
     assert not Path("/dev/mapper/oblivion-session").exists() and not Path("/run/oblivion-session/console.sock").exists()
     assert stream_status()["active"] == [] and stream_status()["closed"] == [1, 2]
     assert tor_state.stat().st_uid == 0 and tor_state.stat().st_mode & 0o777 == 0o600
-    assert "TorVersion Tor 0.4.9.14\n" in tor_state.read_text()
+    assert "TorVersion Tor 0.4.9.15\n" in tor_state.read_text()
     assert guard_id in tor_state.read_text()
     assert all(line.startswith(("Guard ", "TorVersion ", "LastWritten ")) for line in tor_state.read_text().splitlines())
     check("SOCKS-to-Tor imports its saved guard and replaces the gateway; absent bootstrap still rejects opening before any session mapping or VM, with no SOCKS fallback")

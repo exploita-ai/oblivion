@@ -107,6 +107,9 @@ class SessionToolsTest(unittest.TestCase):
         self.assertEqual(self.command("node", "--version").stdout.decode().strip(), "v" + manifest["components"]["node"]["version"])
         self.assertEqual(self.command("npm", "--version").stdout.decode().strip(), manifest["components"]["node"]["npm"])
         self.assertTrue(manifest["components"]["node"]["npm_packages"])
+        analysis = manifest["components"]["analysis"]
+        self.assertTrue({"angr", "pwntools", "ropper"} <= {item["name"] for item in analysis["components"]})
+        self.assertTrue(all(len(item["sha256"]) == 64 for item in analysis["components"]))
         environment = json.loads(self.command("python3", "-c", "import json,os; print(json.dumps(dict(os.environ)))").stdout)
         for name in ("HISTFILE", "LESSHISTFILE", "SQLITE_HISTORY", "NODE_REPL_HISTORY", "PYTHON_HISTORY"):
             self.assertEqual(environment[name], "/dev/null")
@@ -120,6 +123,77 @@ class SessionToolsTest(unittest.TestCase):
         self.assertEqual(self.command("npm", "config", "get", "logs-max").stdout.strip(), b"0")
         self.assertEqual(self.command("npm", "config", "get", "audit").stdout.strip(), b"false")
         self.assertEqual(self.command("node", "-e", "process.stdout.write(String(typeof fetch))").stdout, b"function")
+
+    def test_binary_analysis(self):
+        work = self.root / "binary-analysis"
+        work.mkdir()
+        sample = b"ASCII_FIXTURE\x00" + "UTF16_FIXTURE".encode("utf-16le") + b"\x00\x00"
+        (work / "strings.bin").write_bytes(sample)
+        self.assertIn(b"ASCII_FIXTURE", self.command("strings", str(work / "strings.bin")).stdout)
+        self.assertIn(b"UTF16_FIXTURE", self.command("strings", "-e", "l", str(work / "strings.bin")).stdout)
+        dump = self.command("xxd", str(work / "strings.bin")).stdout
+        self.assertEqual(self.command("xxd", "-r", input=dump).stdout, sample)
+        self.assertIn(b"ASCII_FIXTURE", self.command("hexdump", "-C", str(work / "strings.bin")).stdout)
+        self.assertIn(b"ELF", self.command("readelf", "-h", "/bin/true").stdout)
+        self.assertIn(b"file format", self.command("objdump", "-f", "/bin/true").stdout)
+        self.assertIn(b" U ", self.command("nm", "-D", "/bin/true").stdout)
+        self.assertIn(b"ELF", self.command("binwalk", "/bin/true").stdout)
+        self.command("cp", "/bin/true", str(work / "patched"))
+        self.command("patchelf", "--set-rpath", "/fixture-library", str(work / "patched"))
+        self.assertEqual(self.command("patchelf", "--print-rpath", str(work / "patched")).stdout.strip(), b"/fixture-library")
+
+    def test_python_analysis(self):
+        result = self.command("python3", "-c", """
+import angr, imghdr, pwn, pwnlib.update, ropper
+from angr import claripy
+import importlib.metadata, importlib.util, json
+from pathlib import Path
+inventory = json.loads(Path('/opt/oblivion-analysis/inventory.json').read_text())
+for item in inventory['components']:
+    assert importlib.metadata.version(item['name']) == item['version']
+for module in ('PyQt5', 'PyQt6', 'PySide6', 'pyqtgraph'):
+    assert importlib.util.find_spec(module) is None
+assert pwn.p32(0x12345678) == bytes.fromhex('78563412')
+assert pwnlib.update.disabled
+assert not pwnlib.update.should_check()
+assert pwn.context.cache_dir.startswith(__import__('os').environ['XDG_CACHE_HOME'])
+assert imghdr.what(None, h=b'GIF89a' + bytes(32)) == 'gif'
+project = angr.Project('/bin/true', auto_load_libs=False)
+assert project.loader.main_object.entry > 0
+assert project.factory.block(project.entry).size > 0
+state = project.factory.blank_state()
+value = claripy.BVS('fixture', 8)
+state.solver.add(value == 42)
+assert state.solver.eval(value) == 42
+service = ropper.RopperService({'color': False, 'all': False, 'inst_count': 2, 'multiprocessing': False})
+service.addFile('fixture', bytes=bytes.fromhex('90c3'), raw=True, arch='x86_64')
+service.loadGadgetsFor('fixture')
+assert service.getFileFor('fixture').gadgets
+print('analysis-ok')
+""")
+        self.assertIn(b"analysis-ok", result.stdout)
+        self.assertIn(b"usage", self.command("ropper", "--help").stdout.lower())
+        self.assertIn(b"usage", self.command("pwn", "--help").stdout.lower())
+
+    def test_debugger_configuration(self):
+        self.assertIn(b"off", self.command("gdb", "-nh", "--batch", "-ex", "show debuginfod enabled").stdout)
+        self.assertIn(b"off", self.command("gdb", "-nh", "--batch", "-ex", "show history save").stdout)
+        environment = json.loads(self.command("python3", "-c", "import json,os; print(json.dumps(dict(os.environ)))").stdout)
+        self.assertEqual(environment["DEBUGINFOD_URLS"], "")
+        self.assertTrue(environment["DEBUGINFOD_CACHE_PATH"].startswith("/tmp/"))
+
+    def test_debuggers(self):
+        # Requires a native kernel ABI. User-mode amd64 emulation on ARM can
+        # run the tools but does not provide accurate ptrace syscall registers.
+        trace = self.command("strace", "-e", "trace=write", "/bin/echo", "TRACE_FIXTURE")
+        self.assertEqual(trace.stdout, b"TRACE_FIXTURE\n")
+        self.assertIn(b"write(1,", trace.stderr)
+        trace = self.command("ltrace", "/bin/echo", "TRACE_FIXTURE")
+        self.assertEqual(trace.stdout, b"TRACE_FIXTURE\n")
+        self.assertIn(b"+++ exited (status 0) +++", trace.stderr)
+        debug = self.command("gdb", "-nh", "--batch", "-ex", "set disable-randomization off", "-ex", "run", "--args", "/bin/echo", "DEBUG_FIXTURE")
+        self.assertIn(b"DEBUG_FIXTURE", debug.stdout)
+        self.assertIn(b"exited normally", debug.stdout)
 
     def test_files_archives_json_sqlite_and_pdf(self):
         work = self.root / "files"

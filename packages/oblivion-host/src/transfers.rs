@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 pub const SOCKET: &str = "/run/oblivion-transfer-host/control.sock";
-pub const MAX_BYTES: u64 = 256 * 1024 * 1024;
-pub const MAX_ENTRIES: usize = 1024;
-pub const BUDGET_SECONDS: u64 = 300;
+pub const MAX_BYTES: u64 = oblivion_transfer::MAX_DOCUMENT_BYTES;
+pub const MAX_ENTRIES: usize = oblivion_transfer::MAX_ENTRIES;
+pub const BUDGET_SECONDS: u64 = 3600;
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "operation", rename_all = "kebab-case", deny_unknown_fields)]

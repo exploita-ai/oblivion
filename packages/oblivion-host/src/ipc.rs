@@ -41,6 +41,7 @@ enum Operation {
     UnlockEphemeral,
     Create,
     RenameSession,
+    SessionStorage,
     Open,
     OpenEphemeral,
     Close,
@@ -153,6 +154,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
             <= if matches!(
                 request.operation,
                 Operation::ApiKeys
+                    | Operation::SessionStorage
                     | Operation::Browse
                     | Operation::ChatExport
                     | Operation::PrepareUsb
@@ -193,6 +195,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
             | Operation::UnlockEphemeral
             | Operation::Create
             | Operation::RenameSession
+            | Operation::SessionStorage
             | Operation::Open
             | Operation::OpenDocuments
             | Operation::SetApiKey
@@ -258,6 +261,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
         Operation::UnlockEphemeral => "unlock-ephemeral",
         Operation::Create => "create",
         Operation::RenameSession => "rename-session",
+        Operation::SessionStorage => "session-storage",
         Operation::Open => "enter",
         Operation::OpenEphemeral => "enter-ephemeral",
         Operation::Close => "leave",

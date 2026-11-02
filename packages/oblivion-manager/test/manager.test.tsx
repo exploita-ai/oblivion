@@ -54,20 +54,20 @@ test.each([[80, 24], [160, 50]])("navigation changes both content and breadcrumb
     await app.mockInput.pressKey("TAB")
     await app.mockInput.pressArrow("right")
     await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("HOST / Network")
-    expect(app.captureCharFrame()).toContain("Connection")
-    expect(app.captureCharFrame()).not.toContain("Settings")
+    expect(app.captureCharFrame()).toContain("HOST / Settings")
+    expect(app.captureCharFrame()).toContain("Network & Wi-Fi")
     expect(app.captureCharFrame()).not.toContain("Your protected sessions")
-    await app.mockInput.pressArrow("down")
+    await app.mockInput.pressEnter()
+    for (let row = 0; row < 4; row++) await app.mockInput.pressArrow("down")
     await app.mockInput.pressEnter()
     await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("HOST / API keys")
+    expect(app.captureCharFrame()).toContain("HOST / Settings / API keys")
     await app.mockInput.pressKey("TAB")
     await app.mockInput.pressKey("1")
     await app.renderOnce()
     expect(app.captureCharFrame()).toContain("HOST / Sessions")
     expect(app.captureCharFrame()).toContain("Your protected sessions")
-    expect(app.captureCharFrame()).not.toContain("+ Add API key")
+    expect(app.captureCharFrame()).not.toContain("Add API key N")
   } finally { app.renderer.destroy(); await app.renderer.closed }
 })
 
@@ -150,16 +150,17 @@ test("welcome keyboard settings apply only temporarily, then ephemeral access us
     await app.mockInput.pressEnter()
     await app.renderOnce()
     expect(app.captureCharFrame()).toContain("HOST / Sessions")
-    expect(app.captureCharFrame()).toContain("API keys")
+    expect(app.captureCharFrame()).toContain("Settings")
     expect(app.captureCharFrame()).toContain("System")
     expect(status.parse(JSON.parse(await runtime.request({ operation: "status" }))).general_readonly).toBe(true)
   } finally { await app.dispose() }
 })
 
-test("encrypted storage setup submits passwords, then opens the saved-settings wizard", async () => {
+test("encrypted storage setup saves the verified preferences and returns to the access choice", async () => {
   const base = preview(() => {})
   const initial = status.parse(JSON.parse(await base.request({ operation: "status" })))
-  let current = { ...initial, general_present: false, general_open: false, general_mounted: false, sessions: [] }
+  const selected = { version: 1 as const, completed: false, keyboard: "it", variant: "winkeys", timezone: "Europe/Rome" }
+  let current: typeof initial = { ...initial, general_present: false, general_open: false, general_mounted: false, sessions: [], settings: { current: selected, saved: null } }
   const mutations: string[] = []
   const runtime = { ...base, request: async (input: Parameters<typeof base.request>[0]) => {
     if (input.operation === "status") return JSON.stringify(current)
@@ -173,6 +174,18 @@ test("encrypted storage setup submits passwords, then opens the saved-settings w
       expect(new TextDecoder().decode(input.payload)).toBe("synthetic-archive-password")
       mutations.push(input.operation)
       current = { ...current, general_open: true, general_mounted: true }
+      return ""
+    }
+    if (input.operation === "settings") {
+      const value = JSON.parse(new TextDecoder().decode(input.payload))
+      expect(value).toEqual({ action: "save", preferences: { ...selected, completed: true } })
+      mutations.push(input.operation)
+      current = { ...current, settings: { current: value.preferences, saved: value.preferences } }
+      return ""
+    }
+    if (input.operation === "lock") {
+      mutations.push(input.operation)
+      current = { ...current, general_open: false, general_mounted: false }
       return ""
     }
     return base.request(input)
@@ -193,12 +206,12 @@ test("encrypted storage setup submits passwords, then opens the saved-settings w
     await app.mockInput.pressEnter()
     await app.mockInput.pressEnter()
     await app.renderOnce()
-    expect(mutations).toEqual(["prepare-usb", "unlock"])
-    expect(app.captureCharFrame()).toContain("HOST / Sessions")
-    expect(app.captureCharFrame()).toContain("Keyboard / Layout")
-    await app.mockInput.pressEscape()
-    await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("New session")
+    expect(mutations).toEqual(["prepare-usb", "unlock", "settings", "lock"])
+    expect(app.captureCharFrame()).toContain("Welcome back")
+    expect(app.captureCharFrame()).toContain("Unlock Oblivion")
+    expect(app.captureCharFrame()).toContain("Ephemeral mode")
+    expect(app.captureCharFrame()).not.toContain("Keyboard / Layout")
+    expect(current.settings?.saved).toEqual({ ...selected, completed: true })
   } finally { app.renderer.destroy(); await app.renderer.closed }
 })
 
@@ -408,10 +421,12 @@ test.each([[80, 24], [160, 50]])("API key actions have dedicated forms and rejec
   const app = await testRender(() => <App runtime={runtime} initial={initial} />, { width, height, kittyKeyboard: true })
   try {
     await app.renderOnce()
-    await app.mockInput.pressKey("3")
+    await app.mockInput.pressKey("2")
+    for (let row = 0; row < 4; row++) await app.mockInput.pressArrow("down")
+    await app.mockInput.pressEnter()
     await app.mockInput.pressEnter()
     await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("HOST / API keys / Personal")
+    expect(app.captureCharFrame()).toContain("HOST / Settings / API keys / Personal")
     expect(app.captureCharFrame()).toContain("Set as default")
     expect(app.captureCharFrame()).toContain("Replace secret")
     expect(app.captureCharFrame()).not.toContain("New secret (replace only)")
@@ -430,7 +445,7 @@ test.each([[80, 24], [160, 50]])("API key actions have dedicated forms and rejec
     expect(app.captureCharFrame()).toContain("› New API key")
     expect(app.captureCharFrame()).not.toContain("short12")
     expect(app.captureCharFrame()).not.toContain("Operation not completed")
-    expect(app.captureCharFrame()).toContain("HOST / API keys / Personal")
+    expect(app.captureCharFrame()).toContain("HOST / Settings / API keys / Personal")
     await app.mockInput.pressKey("u", { ctrl: true })
     await app.mockInput.typeText("synthetic-key-for-ui-test")
     await app.mockInput.pressEnter()
@@ -453,7 +468,7 @@ test("resize preserves navigation, session context and documents focus", async (
     expect(app.captureCharFrame()).toContain("SESSION / aaaaaaaa / Documents")
     app.resize(80, 24)
     await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("Close Ctrl+Q")
+    expect(app.captureCharFrame()).toContain("Lock Ctrl+Q")
     await app.renderOnce()
     expect(app.captureCharFrame()).toContain("workspace/")
     app.resize(160, 50)
@@ -479,7 +494,7 @@ test("new session remains accessible after a chat startup failure and cancelled 
     await app.renderOnce()
     expect(app.captureCharFrame()).toContain("Your protected sessions")
     await app.mockInput.pressKey("n")
-    await app.mockInput.typeText("Research"); await app.mockInput.pressEnter()
+    await app.mockInput.typeText("Research"); await app.mockInput.pressEnter(); await app.mockInput.pressEnter()
     await app.mockInput.typeText("synthetic-new-password")
     await app.mockInput.pressEnter()
     await app.mockInput.typeText("mismatch")
@@ -492,8 +507,8 @@ test("new session remains accessible after a chat startup failure and cancelled 
     await app.mockInput.pressEnter()
     await app.renderOnce()
     expect(app.captureCharFrame()).toContain("/ Documents")
-    expect(app.captureCharFrame()).toContain("Close Ctrl+Q")
-    await app.mockInput.pressKey("F6")
+    expect(app.captureCharFrame()).toContain("Lock Ctrl+Q")
+    await app.mockInput.pressKey("F8")
     await app.renderOnce()
     expect(app.captureCharFrame()).toContain("Connect and start chat")
   } finally { await app.dispose() }
@@ -536,14 +551,16 @@ test.each([[80, 24], [160, 50]])("menus, forms and catalog pickers share the sam
     await app.renderOnce()
     expect(app.captureCharFrame().split("\n").find((row) => row.includes("Open protected session"))!.indexOf("Open protected session")).toBe(column)
     await app.mockInput.pressEscape()
-    await app.mockInput.pressKey("4")
+    await app.mockInput.pressKey("2")
+    for (let row = 0; row < 5; row++) await app.mockInput.pressArrow("down")
+    await app.mockInput.pressEnter()
     await app.mockInput.pressEnter()
     await app.renderOnce()
     expect(app.captureCharFrame().split("\n").find((row) => row.includes("Keyboard / Layout"))!.indexOf("Keyboard / Layout")).toBe(column)
     expect(app.captureCharFrame()).toContain("[Keyboard]")
     await app.mockInput.pressEscape()
     await app.mockInput.pressKey("2")
-    await app.mockInput.pressArrow("right")
+    await app.mockInput.pressArrow("down")
     await app.mockInput.pressEnter()
     await app.renderOnce()
     expect(app.captureCharFrame()).toContain("[x] Tor")
@@ -554,7 +571,7 @@ test.each([[80, 24], [160, 50]])("menus, forms and catalog pickers share the sam
     expect(app.captureCharFrame()).toContain("Use SOCKS5")
     await app.mockInput.pressEscape()
     await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("HOST / Network")
+    expect(app.captureCharFrame()).toContain("HOST / Settings")
     expect(app.captureCharFrame()).not.toContain("Use SOCKS5")
   } finally { await app.dispose() }
 })

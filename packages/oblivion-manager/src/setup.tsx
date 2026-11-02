@@ -32,7 +32,7 @@ export function Setup(props: { catalog: Catalog; current: Preferences; writable:
     <Show when={step() === 3}><Picker title={`Time zone / ${area()}`} description="Choose the nearest city in your time zone." choices={props.catalog.timezones.filter((zone) => zone.startsWith(area() + "/")).map((value) => ({ value, label: value.slice(area().length + 1).replaceAll("_", " ") }))} selected={timezone()} choose={(value) => { setTimezone(value); setStep(4) }} back={() => setStep(2)} /></Show>
     <Show when={step() === 4}><FormView form={{ title: "Review your setup", description: `${keyboard()}${variant() ? ` / ${variant()}` : ""} · ${timezone()} · Local time: ${new Intl.DateTimeFormat("en-GB", { timeZone: timezone(), dateStyle: "medium", timeStyle: "short" }).format(new Date())}`, fields: [], submit: props.writable ? "Apply preferences" : "Apply temporarily", run: async () => {} }} cancel={() => setStep(2)} submit={() => {
       setSaving(true)
-      void props.save({ version: 1, completed: props.writable, keyboard: keyboard(), variant: variant(), timezone: timezone() }, props.writable).catch((error) => { setSaving(false); props.failed(error) })
+      void props.save({ ...props.current, version: 1, completed: props.writable, keyboard: keyboard(), variant: variant(), timezone: timezone() }, props.writable).catch((error) => { setSaving(false); props.failed(error) })
     }} /></Show>
   </Show></box>
 }

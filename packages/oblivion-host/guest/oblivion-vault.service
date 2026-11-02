@@ -1,5 +1,6 @@
 [Unit]
 Description=Prepare the dedicated session filesystem
+ConditionKernelCommandLine=!oblivion.resize=1
 RequiresMountsFor=/vault
 Before=oblivion-conversation.service
 

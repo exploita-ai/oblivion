@@ -6,7 +6,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { connectTransfer } from "../src/transfer"
 
-test.each([false, true])("only an explicit backup authority accepts a 512 MiB manifest: backup=%s", async (backup) => {
+test.each([false, true])("document and backup limits both accept a 512 MiB manifest: backup=%s", async (backup) => {
   const directory = await mkdtemp(join(tmpdir(), "oblivion-backup-client-"))
   const path = join(directory, "control.sock")
   const id = "a".repeat(32)
@@ -28,11 +28,11 @@ test.each([false, true])("only an explicit backup authority accepts a 512 MiB ma
         buffered = Buffer.concat([buffered, chunk])
         while (buffered.length >= 4 && buffered.length >= 4 + buffered.readUInt32BE()) {
           const size = buffered.readUInt32BE()
-          const request = JSON.parse(buffered.subarray(4, 4 + size).toString()) as { id: string; limits: { entries: number; bytes: number }; manifest_sha256: string }
+          const request = JSON.parse(buffered.subarray(4, 4 + size).toString()) as { id: string; limits: { entries: number; bytes: number }; manifest_sha256: string; progress?: boolean }
           buffered = buffered.subarray(4 + size)
           if (!offered) {
             expect(request.id).toBe(id)
-            expect(request.limits).toEqual(backup ? { entries: 1, bytes } : { entries: 1024, bytes: 268435456 })
+            expect(request.limits).toEqual(backup ? { entries: 1, bytes } : { entries: 16384, bytes: 16 * 1024 ** 3 })
             const size = Buffer.alloc(4); size.writeUInt32BE(encoded.length)
             socket.write(Buffer.concat([Buffer.from("OBLVCP01"), size, encoded]))
             offered = true
@@ -40,6 +40,7 @@ test.each([false, true])("only an explicit backup authority accepts a 512 MiB ma
             continue
           }
           expect(request.manifest_sha256).toBe(digest)
+          if (request.progress) socket.write(frame({ progress: bytes / 2 }))
           socket.end(frame({ id, entries: 1, bytes, manifest_sha256: digest }))
           observed.resolve()
         }
@@ -49,14 +50,11 @@ test.each([false, true])("only an explicit backup authority accepts a 512 MiB ma
   server.listen(path); await once(server, "listening")
   const transfer = await connectTransfer(id, path, backup ? { entries: 1, bytes, budgetMs: 3_600_000 } : undefined)
   try {
-    if (!backup) {
-      await expect(transfer.offer(["session.oblivion"])).rejects.toThrow("invalid_manifest")
-      await observed.promise
-      return
-    }
     const offer = await transfer.offer(["session.oblivion"])
     expect(offer.bytes).toBe(bytes)
-    expect(await transfer.approve(offer)).toMatchObject({ id, bytes, entries: 1, manifest_sha256: digest })
+    const progress: number[] = []
+    expect(await transfer.approve(offer, (bytes) => progress.push(bytes))).toMatchObject({ id, bytes, entries: 1, manifest_sha256: digest })
+    expect(progress).toEqual([bytes / 2])
     await observed.promise
   } finally {
     transfer.close()

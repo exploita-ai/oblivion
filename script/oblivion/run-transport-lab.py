@@ -28,9 +28,9 @@ def main():
     parser.add_argument("--accelerator", choices=["hvf", "tcg"], default="hvf", help="Explicit lab backend: Mac HVF or Linux software emulation; never falls back")
     parser.add_argument("--authentication", choices=["required", "none"], default="required")
     parser.add_argument("--tools", action="store_true", help="Also exercise the supervised HTTP/CONNECT tools path with an explicit synthetic policy")
-    parser.add_argument("--fault", choices=["revoke", "egress-crash", "broker-crash", "tools-crash", "supervisor-crash", "control-disconnect", "reconfigure"], default="egress-crash")
+    parser.add_argument("--fault", choices=["revoke", "egress-crash", "broker-crash", "tools-crash", "supervisor-crash", "control-disconnect", "reconfigure", "policy"], default="egress-crash")
     args = parser.parse_args()
-    assert args.fault != "tools-crash" or args.tools
+    assert args.fault not in ["tools-crash", "policy"] or args.tools
     network.validate_accelerator(args.accelerator)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     image, output = args.image.resolve(), args.output.resolve()
@@ -126,7 +126,7 @@ def main():
             gateway.call("forwarding-on")
             probes = chat.call("probes")
             assert probes["interfaces"] == ["chat0", "lo"] and probes["ipv6_denied"]
-            assert gateway.call("proxy-probes", port=proxy.port, other_port=canary.getsockname()[1]) == {"denied": 7}
+            assert gateway.call("proxy-probes", port=proxy.port, other_port=canary.getsockname()[1]) == {"denied": 9}
             assert not select.select([canary], [], [], 0)[0]
             assert proxy.snapshot()["contacts"] == initial_contacts
             rules = gateway.call("rules")
@@ -167,7 +167,9 @@ def main():
             if args.tools:
                 assert chat.call("tools-stream-start", token=next_token) == {"active": 2}
                 proxy.wait("tools_stream_started", 2)
-            if args.fault == "revoke":
+            if args.fault == "policy":
+                assert control.call("policy", tools={"session": "a" * 32, "access": "offline", "policy": {"version": 1, "rules": []}})["active"]
+            elif args.fault == "revoke":
                 assert not control.call("revoke")["active"]
             elif args.fault == "control-disconnect":
                 control.close()
@@ -185,7 +187,34 @@ def main():
             proxy.wait("finished", contacts + (3 if args.tools else 1))
             assert chat.call("stream-closed") == {"closed": True}
             check(args.fault + " closes an established upstream TLS stream and the chat response")
-            if args.fault == "revoke":
+            if args.fault == "policy":
+                proxy.mode = "normal"
+                contacts = proxy.snapshot()["contacts"]
+                body = b'{"operation":"observe"}'
+                control.socket.sendall(len(body).to_bytes(4, "big") + body)
+                observed = control.receive()
+                assert observed["isolated"] and not observed["ready"]
+                assert chat.call("request", token=next_token)["status"] == 502
+                for scheme in ["http", "https"]:
+                    assert chat.call("tools-request", token=next_token, scheme=scheme)["status"] == (403 if scheme == "https" else 502)
+                assert proxy.snapshot()["contacts"] == contacts
+                check("Offline closes existing API/HTTP/CONNECT streams, rejects new requests and reports an isolated but unready route")
+                assert control.call("policy", tools={"session": "a" * 32, "access": "strict", "policy": {"version": 1, "rules": []}})["active"]
+                assert chat.call("tools-request", token=next_token, scheme="https")["status"] == 403
+                assert proxy.snapshot()["contacts"] == contacts
+                assert chat.call("request", token=next_token)["status"] == 200
+                proxy.wait("finished", contacts + 1)
+                check("Strict restores only the fixed provider route; the unchanged session token cannot bypass destination rules")
+                assert control.call("policy", tools={"session": "a" * 32, "access": "open", "policy": {"version": 1, "rules": []}})["active"]
+                for scheme in ["http", "https"]:
+                    assert chat.call("tools-request", token=next_token, scheme=scheme)["status"] == 200
+                proxy.wait("finished", contacts + 3)
+                assert control.call("policy", tools={"session": "a" * 32, "access": "open", "policy": {"version": 1, "rules": [{"destination": "api.abliteration.ai", "port": 443, "action": "deny"}]}})["active"]
+                assert chat.call("tools-request", token=next_token, scheme="https")["status"] == 403
+                assert chat.call("request", token=next_token)["status"] == 502
+                assert proxy.snapshot()["contacts"] == contacts + 3
+                check("Open Web allows HTTP/HTTPS without rules, while an explicit block overrides tool and provider access")
+            if args.fault in ["revoke", "policy"]:
                 assert not control.call("shutdown")["active"]
             # EOF from a crashed connector precedes the supervisor's child-exit
             # observation. Require its bounded shutdown before checking listeners.

@@ -1,0 +1,19 @@
+[Unit]
+Description=Verify and grow an unmounted candidate session volume
+ConditionKernelCommandLine=oblivion.resize=1
+Requires=dev-vdb.device systemd-logind.service
+After=dev-vdb.device systemd-logind.service systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -B /usr/lib/oblivion/guest/resize.py
+TimeoutStartSec=1200
+RemainAfterExit=yes
+NoNewPrivileges=yes
+PrivateNetwork=yes
+LimitCORE=0
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

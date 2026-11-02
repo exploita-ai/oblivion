@@ -547,6 +547,65 @@ async fn tools_rules_cannot_expand_the_api_role() {
 }
 
 #[tokio::test]
+async fn open_web_role_allows_only_public_domain_https() {
+    use futures_util::FutureExt;
+    timeout(Duration::from_secs(5), async {
+        let (egress, mut client, upstream, server) = configured_fixture(
+            false,
+            Some(Tools {
+                access: Access::Open,
+                ..tools(json!([]))
+            }),
+        )
+        .await;
+        assert_eq!(
+            authenticate_as(&mut client, WEB_USER, TOKEN.as_bytes()).await,
+            [1, 0]
+        );
+        let expected = b"\x05\x01\x00\x03\x0bexample.com\x01\xbb";
+        let proxy = tokio::spawn(async move {
+            let mut proxy = external_request(upstream, false, expected).await;
+            assert_eq!(proxy.read(&mut [0]).await.unwrap(), 0);
+        });
+        request(&mut client, b"EXAMPLE.COM.", 443).await;
+        let mut reply = [0; 10];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [5, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+        egress.revoke();
+        server.await.unwrap().unwrap();
+        proxy.await.unwrap();
+
+        for (host, port) in [
+            (b"example.com".as_slice(), 80),
+            (b"127.0.0.1".as_slice(), 443),
+            (b"service.internal".as_slice(), 443),
+        ] {
+            let (egress, mut client, upstream, server) = configured_fixture(
+                false,
+                Some(Tools {
+                    access: Access::Open,
+                    ..tools(json!([]))
+                }),
+            )
+            .await;
+            assert_eq!(
+                authenticate_as(&mut client, WEB_USER, TOKEN.as_bytes()).await,
+                [1, 0]
+            );
+            request(&mut client, host, port).await;
+            let mut reply = [0; 10];
+            client.read_exact(&mut reply).await.unwrap();
+            assert_eq!(reply[1], 2);
+            assert!(upstream.accept().now_or_never().is_none());
+            egress.revoke();
+            server.await.unwrap().unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn readiness_negotiates_authentication_without_sending_connect_or_a_target() {
     for authenticated in [false, true] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -576,4 +635,153 @@ async fn readiness_negotiates_authentication_without_sending_connect_or_a_target
         drop(stream);
         peer.await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn global_access_rejects_before_dns_or_upstream_connections() {
+    use futures_util::FutureExt;
+    timeout(Duration::from_secs(5), async {
+        for (access, rules, user, host, port) in [
+            (
+                Access::Strict,
+                json!([]),
+                TOOLS_USER,
+                b"example.com".as_slice(),
+                443,
+            ),
+            (
+                Access::Strict,
+                json!([]),
+                WEB_USER,
+                b"example.com".as_slice(),
+                443,
+            ),
+            (
+                Access::Open,
+                json!([]),
+                TOOLS_USER,
+                b"example.com".as_slice(),
+                22,
+            ),
+            (
+                Access::Open,
+                json!([]),
+                TOOLS_USER,
+                b"127.0.0.1".as_slice(),
+                443,
+            ),
+            (
+                Access::Open,
+                json!([]),
+                TOOLS_USER,
+                b"169.254.169.254".as_slice(),
+                80,
+            ),
+            (
+                Access::Open,
+                json!([]),
+                TOOLS_USER,
+                b"service.internal".as_slice(),
+                443,
+            ),
+            (
+                Access::Open,
+                json!([{"destination":"example.com","port":443,"action":"deny"}]),
+                TOOLS_USER,
+                b"example.com".as_slice(),
+                443,
+            ),
+            (
+                Access::Open,
+                json!([{"destination":"example.com","port":443,"action":"deny"}]),
+                WEB_USER,
+                b"example.com".as_slice(),
+                443,
+            ),
+            (
+                Access::Open,
+                json!([{"destination":"api.abliteration.ai","port":443,"action":"deny"}]),
+                USER,
+                HOST,
+                443,
+            ),
+            (Access::Offline, json!([]), USER, HOST, 443),
+            (
+                Access::Offline,
+                json!([{"destination":"example.com","port":443,"action":"allow"}]),
+                TOOLS_USER,
+                b"example.com".as_slice(),
+                443,
+            ),
+            (
+                Access::Offline,
+                json!([{"destination":"example.com","port":443,"action":"allow"}]),
+                WEB_USER,
+                b"example.com".as_slice(),
+                443,
+            ),
+        ] {
+            let (egress, mut client, upstream, server) = configured_fixture(
+                false,
+                Some(Tools {
+                    access,
+                    ..tools(rules)
+                }),
+            )
+            .await;
+            assert_eq!(
+                authenticate_as(&mut client, user, TOKEN.as_bytes()).await,
+                [1, 0]
+            );
+            request(&mut client, host, port).await;
+            let mut reply = [0; 10];
+            client.read_exact(&mut reply).await.unwrap();
+            assert_eq!(reply[1], 2);
+            assert!(upstream.accept().now_or_never().is_none());
+            egress.revoke();
+            server.await.unwrap().unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn global_open_allows_http_https_and_strict_keeps_the_provider_route() {
+    timeout(Duration::from_secs(5), async {
+        for (access, user, host, port) in [
+            (Access::Open, TOOLS_USER, b"example.com".as_slice(), 80u16),
+            (Access::Open, TOOLS_USER, b"example.com".as_slice(), 443),
+            (Access::Strict, USER, HOST, 443),
+        ] {
+            let (egress, mut client, upstream, server) = configured_fixture(
+                false,
+                Some(Tools {
+                    access,
+                    ..tools(json!([]))
+                }),
+            )
+            .await;
+            assert_eq!(
+                authenticate_as(&mut client, user, TOKEN.as_bytes()).await,
+                [1, 0]
+            );
+            let mut expected = vec![5, 1, 0, 3, host.len() as u8];
+            expected.extend_from_slice(host);
+            expected.extend_from_slice(&port.to_be_bytes());
+            let proxy = tokio::spawn(async move {
+                let mut connection = external_request(upstream, false, &expected).await;
+                assert_eq!(connection.read(&mut [0]).await.unwrap(), 0);
+            });
+            request(&mut client, host, port).await;
+            let mut reply = [0; 10];
+            client.read_exact(&mut reply).await.unwrap();
+            assert_eq!(reply[1], 0);
+            egress.revoke();
+            server.await.unwrap().unwrap();
+            proxy.await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
 }

@@ -20,7 +20,7 @@ test.skipIf(!Oblivion.enabled)("Oblivion never exposes the shared clipboard boun
   }
 })
 
-test.skipIf(!Oblivion.enabled).each([100, 44])("Oblivion limits the actual app surface at width %i", async (width) => {
+test.skipIf(!Oblivion.enabled).each([100, 80, 44])("Oblivion limits the actual app surface at width %i", async (width) => {
   const location = { directory, project: { id: "project", directory, canonical: directory } }
   const mutations: string[] = []
   await using setup = await createAppFixture({
@@ -63,16 +63,22 @@ test.skipIf(!Oblivion.enabled).each([100, 44])("Oblivion limits the actual app s
   await visible(
     setup,
     (frame) =>
-      frame.includes("OBLIVION") &&
-      frame.includes("Allowed model") &&
+      frame.includes("A privacy-first live OS") &&
+      (width < 52 || frame.includes("Allowed model")) &&
       setup.renderer.currentFocusedRenderable instanceof TextareaRenderable,
   )
-  expect(setup.captureCharFrame()).toContain("Conversations and documents")
+  const home = setup.captureCharFrame()
+  expect(home.replace(/\s+/g, " ")).toContain(
+    "A privacy-first live OS for conversations, research, documents and code",
+  )
+  expect(home).toContain(width >= 96 ? "████████" : width >= 52 ? "████" : "OBLIVION")
+  expect(home).not.toContain("Web STRICT")
+  expect(home).not.toContain("Web OPEN")
   expect(setup.captureCharFrame()).not.toContain("DevTools")
-  setup.mockInput.pressKey("F4")
+  await setup.mockInput.pressKey("F4")
   await setup.renderOnce()
   expect(setup.captureCharFrame()).not.toContain("Select agent")
-  setup.mockInput.pressKey("F2")
+  await setup.mockInput.pressKey("F2")
   await visible(
     setup,
     (frame) =>
@@ -80,12 +86,13 @@ test.skipIf(!Oblivion.enabled).each([100, 44])("Oblivion limits the actual app s
   )
   const palette = setup.captureCharFrame()
   expect(palette).toContain("Resume chat")
+  expect(palette).not.toContain("Privacy Web")
   expect(palette).not.toContain("Connect integration")
   expect(palette).not.toContain("Switch agent")
   expect(palette).not.toContain("worktree")
-  setup.mockInput.pressEscape()
+  await setup.mockInput.pressEscape()
   await visible(setup, () => setup.renderer.currentFocusedRenderable instanceof TextareaRenderable)
-  setup.mockInput.pressKey("F3")
+  await setup.mockInput.pressKey("F3")
   await visible(
     setup,
     (frame) => frame.includes("Select model") && setup.renderer.currentFocusedRenderable instanceof InputRenderable,
@@ -121,27 +128,32 @@ test.skipIf(!Oblivion.enabled)("Oblivion resume manages chats in the same server
   })
   await setup.ready
   await visible(setup, () => setup.renderer.currentFocusedRenderable instanceof TextareaRenderable)
-  setup.mockInput.pressKey("F5")
+  await setup.mockInput.pressKey("F5")
   await visible(setup, (frame) => frame.includes("First chat") && frame.includes("Second chat") && setup.renderer.currentFocusedRenderable instanceof InputRenderable)
   expect(setup.captureCharFrame()).toContain("Chats in this session")
   expect(setup.captureCharFrame()).not.toContain("Switch protected session")
-  setup.mockInput.pressKey("r", { ctrl: true })
+  await setup.mockInput.pressKey("r", { ctrl: true })
   await visible(setup, (frame) => frame.includes("Rename chat") && setup.renderer.currentFocusedRenderable instanceof TextareaRenderable)
-  setup.mockInput.pressKey("HOME"); setup.mockInput.pressKey("END", { shift: true }); setup.mockInput.typeText("Renamed chat"); setup.mockInput.pressEnter()
+  await setup.mockInput.pressKey("HOME"); await setup.mockInput.pressKey("END", { shift: true }); await setup.mockInput.typeText("Renamed chat"); await setup.mockInput.pressEnter()
   await visible(setup, () => renamed.length === 1)
   expect(renamed).toEqual(["Renamed chat"])
-  setup.mockInput.pressKey("F5")
+  await setup.mockInput.pressKey("F5")
   await visible(setup, (frame) => frame.includes("First chat") && setup.renderer.currentFocusedRenderable instanceof InputRenderable)
-  setup.mockInput.pressKey("d", { ctrl: true })
+  await setup.mockInput.pressKey("d", { ctrl: true })
   await visible(setup, (frame) => frame.includes("again to confirm"))
   expect(removed).toHaveLength(0)
-  setup.mockInput.pressKey("d", { ctrl: true })
+  await setup.mockInput.pressKey("d", { ctrl: true })
   await visible(setup, (frame) => removed.length === 1 && !frame.includes("First chat") && frame.includes("Second chat"))
   expect(removed).toEqual(["ses_chat0"])
-  setup.mockInput.pressEscape(); setup.mockInput.pressKey("F6")
+  await setup.mockInput.pressEscape(); await setup.mockInput.pressKey("F6")
   await visible(setup, (frame) => frame.includes("/new new chat") && setup.renderer.currentFocusedRenderable instanceof TextareaRenderable)
-  setup.mockInput.typeText("/")
+  await setup.mockInput.typeText("/")
   await visible(setup, (frame) => frame.includes("/resume"))
   expect(setup.captureCharFrame()).not.toContain("/sessions")
   expect(setup.captureCharFrame()).not.toContain("/continue")
+  expect(setup.captureCharFrame()).not.toContain("/web")
+  // The production draft stash survives prompt unmounts within this process.
+  // Do not leave the slash query for the next fixture or repeated run.
+  await setup.mockInput.pressKey("u", { ctrl: true })
+  await visible(setup, () => setup.renderer.currentFocusedRenderable instanceof TextareaRenderable && setup.renderer.currentFocusedRenderable.plainText === "")
 })

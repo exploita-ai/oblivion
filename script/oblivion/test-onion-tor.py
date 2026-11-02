@@ -18,7 +18,7 @@ import subprocess
 import time
 import unittest
 
-VERSION = "0.4.9.14"
+VERSION = "0.4.9.15"
 
 
 class Tor:

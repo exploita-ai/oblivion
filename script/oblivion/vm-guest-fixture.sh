@@ -12,9 +12,11 @@ while IFS= read -r command; do
             [ ! -r /dev/vdb ]
             [ "$(wc -l < /proc/swaps)" = 1 ]
             if touch /etc/oblivion-write 2>/dev/null; then exit 1; fi
-            grep -q ' / squashfs ro,' /proc/mounts
+            grep -q ' / overlay rw,' /proc/mounts
+            [ "$(sudo -n id -u)" = 0 ]
             grep -q ' /tmp tmpfs ' /proc/mounts
-            grep -q ' /var tmpfs ' /proc/mounts
+            grep -q ' /var/log tmpfs ' /proc/mounts
+            grep -q ' /var/tmp tmpfs ' /proc/mounts
             [ "$(ls /sys/class/net)" = lo ]
             systemctl show systemd-logind.service --property=ActiveState,SubState,Result
             systemctl show systemd-udevd.service --property=ActiveState,SubState,Result

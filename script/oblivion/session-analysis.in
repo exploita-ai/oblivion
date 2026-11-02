@@ -1,0 +1,7 @@
+# Resolve with Python 3.13 and pip-tools 7.6.2 in session-analysis-lock-builder.
+angr==10.0.5
+pwntools==4.15.0
+ropper==1.13.13
+# Source-only pure Python dependencies use this pinned build backend.
+setuptools==80.9.0
+wheel==0.45.1

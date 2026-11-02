@@ -35,7 +35,7 @@ export default Runtime.handler(Commands, (input) =>
     )
     const server = yield* ServerConnection.resolve({
       server: requestedServer,
-      standalone: Oblivion.enabled || input.standalone,
+      standalone: (Oblivion.enabled && requestedServer === undefined) || input.standalone,
       mismatch: "replace",
       onStart: (reason, previousVersion) => {
         Queue.offerUnsafe(serviceStarts, { reason, previousVersion })
@@ -51,7 +51,7 @@ export default Runtime.handler(Commands, (input) =>
         Effect.promise(() => preflight.fail("OpenCode update could not start the new background service")),
       ),
     )
-    const session = Oblivion.enabled
+    const session = Oblivion.enabled && (process.env.OBLIVION_WORKSPACE !== "1" || input.continue)
       ? (yield* Effect.tryPromise(() =>
           OpenCode.make({ baseUrl: server.endpoint.url, headers: Service.headers(server.endpoint) }).session.list({
             limit: 1,

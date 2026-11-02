@@ -124,7 +124,7 @@ function promptMetadataLayout(input: {
   if (fit) return fit
 
   const prefix = agent ? `${agent} · ` : ""
-  const suffix = input.variant ? ` · ${input.variant}` : ""
+  const suffix = [input.variant].filter(Boolean).map((value) => ` · ${value}`).join("")
   return {
     agent,
     model: Locale.truncateWidth(

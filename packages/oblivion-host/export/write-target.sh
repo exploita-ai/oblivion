@@ -19,7 +19,7 @@ esac
 exec 3<>/dev/virtio-ports/oblivion.export
 printf 'ready\n' >&3
 case "$(dd bs=1 count=1 <&3 2>/dev/null)" in
-    G) budget=300000 ;;
+    G) budget=3600000 ;;
     B) budget=3600000 ;;
     *) exit 1 ;;
 esac

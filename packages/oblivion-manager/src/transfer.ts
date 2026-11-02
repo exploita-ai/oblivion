@@ -22,7 +22,7 @@ const entry = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("directory"), path: relative }),
   z.object({ kind: z.literal("file"), path: relative, size: z.number().int().nonnegative().safe(), sha256: digest }),
 ])
-export const receiptSchema = z.object({ id, manifest_sha256: digest, entries: z.number().int().positive().max(1024), bytes: z.number().int().nonnegative().max(268435456) })
+export const receiptSchema = z.object({ id, manifest_sha256: digest, entries: z.number().int().positive().max(16384), bytes: z.number().int().nonnegative().max(16 * 1024 ** 3) })
 export const recoverySchema = z.discriminatedUnion("result", [
   z.object({ result: z.literal("inventory"), records: z.array(z.object({ id, state: z.enum(["private", "available", "published", "missing"]), receipt: receiptSchema.nullable() })).max(64), next: id.nullable() }),
   z.object({ result: z.literal("discarded"), id }),
@@ -32,20 +32,20 @@ export type Offer = { entries: z.infer<typeof entry>[]; bytes: number; sha256: s
 export type Transfer = {
   browse: (path: string, after?: string) => Promise<Page>
   offer: (paths: string[]) => Promise<Offer>
-  approve: (offer: Offer) => Promise<z.infer<typeof receiptSchema>>
+  approve: (offer: Offer, progress?: (bytes: number) => void) => Promise<z.infer<typeof receiptSchema>>
   recover: (request: { operation: "list"; after: string | null } | { operation: "discard"; id: string }) => Promise<Recovery>
   close: () => void
 }
 
 const authoritySchema = z.object({
-  entries: z.number().int().positive().max(1024),
+  entries: z.number().int().positive().max(16384),
   bytes: z.number().int().positive().max(1024 ** 4),
   budgetMs: z.number().int().positive().max(3_600_000),
 })
 
 // The existing Rust relay owns authorization, manifest validation, hashing and
 // publication. This client sees metadata and receipts, never document bytes.
-export async function connectTransfer(id: string, path = "/run/oblivion-transfer-host/control.sock", limits = { entries: 1024, bytes: 268435456, budgetMs: 300_000 }): Promise<Transfer> {
+export async function connectTransfer(id: string, path = "/run/oblivion-transfer-host/control.sock", limits = { entries: 16384, bytes: 16 * 1024 ** 3, budgetMs: 3_600_000 }): Promise<Transfer> {
   const authority = authoritySchema.parse(limits)
   const receipt = receiptSchema.extend({ entries: z.number().int().positive().max(authority.entries), bytes: z.number().int().nonnegative().max(authority.bytes) })
   const socket = createConnection({ path })
@@ -71,16 +71,25 @@ export async function connectTransfer(id: string, path = "/run/oblivion-transfer
       send({ id, paths: paths.map((path) => relative.parse(path)), limits: { entries: authority.entries, bytes: authority.bytes } })
       if ((await reader.read(8)).toString("ascii") !== "OBLVCP01") throw new ControlError("invalid_manifest")
       const size = (await reader.read(4)).readUInt32BE()
-      if (!size || size > 1048576) throw new ControlError("invalid_manifest")
+      if (!size || size > 8 * 1048576) throw new ControlError("invalid_manifest")
       const encoded = await reader.read(size)
       const entries = z.array(entry).min(1).max(authority.entries).parse(JSON.parse(encoded.toString("utf8")))
       const bytes = entries.reduce((sum, entry) => sum + (entry.kind === "file" ? entry.size : 0), 0)
       if (bytes > authority.bytes) throw new ControlError("invalid_manifest")
       return { entries, bytes, sha256: new Bun.CryptoHasher("sha256").update(encoded).digest("hex") }
     },
-    async approve(offer) {
-      send({ id, manifest_sha256: offer.sha256 })
-      const result = receipt.parse(await reader.json(1024))
+    async approve(offer, progress) {
+      send({ id, manifest_sha256: offer.sha256, ...(progress ? { progress: true } : {}) })
+      const event = z.union([z.object({ progress: z.number().int().nonnegative().max(offer.bytes) }).strict(), receipt])
+      let previous = 0
+      let message = event.parse(await reader.json(1024))
+      while ("progress" in message) {
+        if (!progress || message.progress < previous) throw new ControlError("invalid_transfer_progress")
+        previous = message.progress
+        progress(previous)
+        message = event.parse(await reader.json(1024))
+      }
+      const result = message
       if (result.id !== id || result.manifest_sha256 !== offer.sha256 || result.entries !== offer.entries.length || result.bytes !== offer.bytes) throw new ControlError("invalid_receipt")
       return result
     },

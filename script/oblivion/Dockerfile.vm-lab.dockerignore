@@ -55,7 +55,12 @@ script/oblivion/*
 !script/oblivion/test-chat-export.py
 !script/oblivion/test-session-backup.py
 !script/oblivion/test-session-tools.py
+!script/oblivion/test-session-admin.py
 !script/oblivion/session-packages.txt
+!script/oblivion/session-analysis.in
+!script/oblivion/session-analysis.lock
+!script/oblivion/session-analysis-licenses.json
+!script/oblivion/install-session-analysis.py
 !script/oblivion/session-node.json
 !script/oblivion/onionshare-source.json
 !script/oblivion/onionshare-licenses.json

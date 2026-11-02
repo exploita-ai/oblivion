@@ -6,15 +6,43 @@ import { tint } from "../theme/color"
 import { go, logo } from "../logo"
 import { Oblivion } from "@opencode/util/oblivion"
 
+const oblivion = [
+  ["1111", "1001", "1001", "1001", "1111"],
+  ["1110", "1001", "1110", "1001", "1110"],
+  ["1000", "1000", "1000", "1000", "1111"],
+  ["111", "010", "010", "010", "111"],
+  ["10001", "10001", "10001", "01010", "00100"],
+  ["111", "010", "010", "010", "111"],
+  ["1111", "1001", "1001", "1001", "1111"],
+  ["1001", "1101", "1011", "1001", "1001"],
+]
+
 export function Logo() {
   const theme = useTheme()
   const dimensions = useTerminalDimensions()
-  if (Oblivion.enabled)
+  if (Oblivion.enabled) {
+    if (dimensions().height < 18 || dimensions().width < 52)
+      return (
+        <text fg={theme.text.brand} attributes={TextAttributes.BOLD} selectable={false}>
+          OBLIVION
+        </text>
+      )
+
+    const scale = dimensions().width >= 96 ? 2 : 1
     return (
-      <text fg={theme.text.base} attributes={TextAttributes.BOLD}>
-        OBLIVION
-      </text>
+      <box>
+        <For each={[0, 1, 2, 3, 4]}>
+          {(row) => (
+            <text fg={theme.text.brand} attributes={TextAttributes.BOLD} selectable={false}>
+              {oblivion
+                .map((glyph) => glyph[row].replaceAll("1", "█".repeat(scale)).replaceAll("0", " ".repeat(scale)))
+                .join(" ".repeat(scale))}
+            </text>
+          )}
+        </For>
+      </box>
     )
+  }
 
   const renderLine = (line: string, fg: RGBA, bold: boolean): JSX.Element[] => {
     const shadow = tint(theme.background.base, fg, 0.25)

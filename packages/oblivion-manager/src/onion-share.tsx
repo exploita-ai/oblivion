@@ -68,7 +68,7 @@ export function OnionShare(props: {
     }
     if (value.phase === "staging" && !connected) {
       connected = true; setBusy("Reading and hashing the selected documents")
-      transfer = await (props.connect ? props.connect(id!) : connectTransfer(id!, onionCopySocket))
+      transfer = await (props.connect ? props.connect(id!) : connectTransfer(id!, onionCopySocket, { entries: 1024, bytes: 268435456, budgetMs: 300_000 }))
       const paths = props.paths.filter((path, index, all) => !all.some((parent, other) => other !== index && path.startsWith(parent+"/")))
       const manifest = await transfer.offer(paths)
       if (!disposed && !cancelled) setOffer(manifest)

@@ -43,7 +43,7 @@ def inspect():
     assert Path("/proc/swaps").read_text().count("\n") == 1
     assert Path("/proc/sys/net/ipv4/ip_forward").read_text().strip() == "0"
     assert Path("/proc/sys/net/ipv6/conf/all/disable_ipv6").read_text().strip() == "1"
-    assert not any(Path("/usr/bin", name).exists() for name in ("oblivion-api", "oblivion-egress", "oblivion-tools", "oblivion-gateway-control"))
+    assert not any(Path("/usr/bin", name).exists() for name in ("oblivion-api", "oblivion-egress", "oblivion-tools", "oblivion-web", "oblivion-gateway-control"))
     assert not any(Path("/var/lib/tor").rglob("hs_ed25519*"))
     return {"owner": owner, "tor": tor, "selectors": selectors,
             "controller_sha256": hashlib.sha256(Path("/usr/bin/oblivion-onion-gateway").read_bytes()).hexdigest(),

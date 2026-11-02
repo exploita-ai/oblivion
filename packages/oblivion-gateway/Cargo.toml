@@ -26,6 +26,8 @@ subtle = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 zeroize = { version = "1.9.1", features = ["serde"] }
+wreq = { version = "=6.0.0-rc.31", default-features = false, features = ["webpki-roots", "tokio-rt", "socks", "stream", "brotli", "gzip", "deflate", "zstd"] }
+wreq-util = { version = "=3.0.0-rc.14", default-features = false, features = ["emulation", "tokio-rt"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["process"] }
@@ -48,6 +50,10 @@ path = "src/egress_main.rs"
 [[bin]]
 name = "oblivion-tools"
 path = "src/tools_main.rs"
+
+[[bin]]
+name = "oblivion-web"
+path = "src/web_main.rs"
 
 [[example]]
 name = "onion-probe"

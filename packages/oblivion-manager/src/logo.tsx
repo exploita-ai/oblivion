@@ -25,6 +25,6 @@ export function BootLogo(props: { elapsed: number }) {
   const dimensions = useTerminalDimensions()
   return <box width="100%" height="100%" backgroundColor={theme.background.boot} justifyContent="center" alignItems="center" flexDirection="column" gap={2}>
     <text fg={theme.text.brand}>{wordmark(dimensions().width - 4, Math.min(8, Math.floor(props.elapsed / 60) + 1))}</text>
-    <text fg={theme.text.muted}>PRIVATE WORKSPACE</text>
+    <text width="90%" wrapMode="word" textAlign="center" fg={theme.text.muted}>A privacy-first live OS for conversations, research, documents and code</text>
   </box>
 }

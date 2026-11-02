@@ -19,7 +19,9 @@ use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"OBLVCP01";
 const END: &[u8; 8] = b"OBLVEND1";
-const HEADER_LIMIT: usize = 1024 * 1024;
+const HEADER_LIMIT: usize = 8 * 1024 * 1024;
+pub const MAX_ENTRIES: usize = 16384;
+pub const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 pub const ENCRYPTED_VOLUME_NAME: &str = "session.oblivion";
 pub const MAX_ENCRYPTED_VOLUME_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 
@@ -61,7 +63,7 @@ pub struct Manifest {
 impl Manifest {
     pub fn new(entries: Vec<Entry>, limits: Limits) -> io::Result<Self> {
         require(
-            limits.entries > 0 && limits.entries <= 4096,
+            limits.entries > 0 && limits.entries <= MAX_ENTRIES,
             "invalid_entry_limit",
         )?;
         require(
@@ -133,11 +135,19 @@ impl Manifest {
     }
 }
 
-/// Holds opened source files, so path replacement cannot change the selection.
+/// Pins the root and source identities; files are reopened without following links.
 /// The source environment must be isolated; this object is not a host authority.
 pub struct Selection {
     manifest: Manifest,
-    files: Vec<File>,
+    files: Sources,
+}
+
+enum Sources {
+    Volume(File),
+    Tree {
+        root: Directory,
+        identities: Vec<(u64, u64)>,
+    },
 }
 
 impl Selection {
@@ -195,13 +205,13 @@ impl Selection {
                     bytes: maximum,
                 },
             )?,
-            files: vec![file],
+            files: Sources::Volume(file),
         })
     }
 
     pub fn prepare(root: &Path, paths: &[String], limits: Limits) -> io::Result<Self> {
         require(
-            limits.entries > 0 && limits.entries <= 4096,
+            limits.entries > 0 && limits.entries <= MAX_ENTRIES,
             "invalid_entry_limit",
         )?;
         let root = Directory::open(root)?;
@@ -242,7 +252,10 @@ impl Selection {
         }
         Ok(Self {
             manifest: Manifest::new(entries, limits)?,
-            files,
+            files: Sources::Tree {
+                root,
+                identities: files,
+            },
         })
     }
 
@@ -253,13 +266,35 @@ impl Selection {
     /// Writes the already offered files; a changed source aborts before END.
     /// The caller owns transport deadlines, cancellation and the final receipt.
     pub fn send_data(&mut self, writer: &mut impl Write) -> io::Result<()> {
-        let mut files = self.files.iter_mut();
+        let mut index = 0;
         for entry in &self.manifest.entries {
-            if let Entry::File { size, sha256, .. } = entry {
-                let file = files.next().ok_or_else(|| invalid("source_missing"))?;
+            if let Entry::File { path, size, sha256 } = entry {
+                let mut file = match &self.files {
+                    Sources::Volume(file) => file.try_clone()?,
+                    Sources::Tree { root, identities } => {
+                        let mut components = path.split('/').collect::<Vec<_>>();
+                        let name = components.pop().ok_or_else(|| invalid("invalid_path"))?;
+                        let parent = components
+                            .into_iter()
+                            .try_fold(root.clone()?, |parent, name| parent.directory(name))?;
+                        let file = parent.source(name)?;
+                        let meta = file.metadata()?;
+                        require(
+                            meta.is_file()
+                                && meta.nlink() == 1
+                                && identities.get(index) == Some(&(meta.dev(), meta.ino())),
+                            "source_changed",
+                        )?;
+                        file
+                    }
+                };
                 file.rewind()?;
                 require(file.metadata()?.len() == *size, "source_changed")?;
-                require(&copy_hash(file, writer, *size)? == sha256, "source_changed")?;
+                require(
+                    &copy_hash(&mut file, writer, *size)? == sha256,
+                    "source_changed",
+                )?;
+                index += 1;
             }
         }
         writer.write_all(END)?;
@@ -504,7 +539,7 @@ fn collect(
     path: &str,
     limits: Limits,
     entries: &mut Vec<Entry>,
-    files: &mut Vec<File>,
+    files: &mut Vec<(u64, u64)>,
     bytes: &mut u64,
 ) -> io::Result<()> {
     validate_path(path)?;
@@ -544,7 +579,7 @@ fn collect(
         size: metadata.len(),
         sha256,
     });
-    files.push(file);
+    files.push((metadata.dev(), metadata.ino()));
     Ok(())
 }
 

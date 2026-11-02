@@ -144,13 +144,18 @@ impl Config {
         &self,
         token: Option<&str>,
         provider: Option<Provider>,
+        web_access: &str,
         tools: Option<Tools>,
     ) -> Result<()> {
         require(
             token.is_some() == provider.is_some(),
             "invalid_provider_grant",
         )?;
-        self.launch(Role::Session, token.is_some(), false)?;
+        require(
+            matches!(web_access, "strict" | "open"),
+            "invalid_web_access",
+        )?;
+        self.launch(Role::Session, token.is_some(), false, false)?;
         if let Some(token) = token {
             let stream = UnixStream::connect("/run/oblivion-session/token.sock")
                 .map_err(|_| Error("session_channel_unavailable"))?;
@@ -178,6 +183,9 @@ impl Config {
                 )
                 .map_err(|_| Error("session_channel_failed"))?;
             channel
+                .write_all(format!("{web_access}\n").as_bytes())
+                .map_err(|_| Error("session_channel_failed"))?;
+            channel
                 .read_exact(&mut ready)
                 .map_err(|_| Error("session_channel_failed"))?;
             require(&ready == b"ready\n", "invalid_session_ready")?;
@@ -186,11 +194,11 @@ impl Config {
     }
 
     pub fn start_role(&self, role: Role) -> Result<()> {
-        self.launch(role, false, false)
+        self.launch(role, false, false, false)
     }
 
     pub fn start_documents(&self) -> Result<()> {
-        self.launch(Role::Session, false, true)?;
+        self.launch(Role::Session, false, true, false)?;
         let stream = UnixStream::connect("/run/oblivion-session/ready.sock")
             .map_err(|_| Error("session_channel_unavailable"))?;
         crate::gateway::peer(&stream, VM_UID)?;
@@ -205,9 +213,28 @@ impl Config {
         require(&ready == b"ready\n", "invalid_session_ready")
     }
 
-    fn launch(&self, role: Role, network: bool, documents: bool) -> Result<()> {
+    pub fn resize_session(&self, target: u64) -> Result<()> {
+        self.launch(Role::Session, false, false, true)?;
+        let stream = UnixStream::connect("/run/oblivion-session/ready.sock")
+            .map_err(|_| Error("session_channel_unavailable"))?;
+        crate::gateway::peer(&stream, VM_UID)?;
+        let mut channel = Channel::new(&stream, Duration::from_secs(1200));
+        qmp(Role::Session, "cont")?;
+        let mut result = [0u8; 16];
+        channel
+            .read_exact(&mut result)
+            .map_err(|_| Error("session_resize_failed"))?;
+        let device = u64::from_be_bytes(result[..8].try_into().unwrap());
+        let filesystem = u64::from_be_bytes(result[8..].try_into().unwrap());
+        require(
+            oblivion_host::volume::resized(target, device, filesystem),
+            "session_resize_failed",
+        )
+    }
+
+    fn launch(&self, role: Role, network: bool, documents: bool, resize: bool) -> Result<()> {
         if matches!(role, Role::OnionUplink) {
-            require(!network && !documents, "invalid_onion_launch")?;
+            require(!network && !documents && !resize, "invalid_onion_launch")?;
             return self.launch_onion_uplink();
         }
         require(stopped_role(role)?, "vm_already_running")?;
@@ -402,7 +429,7 @@ impl Config {
             // binary; the production gateway never exposes a serial console.
             "-serial".to_owned(), if !matches!(role, Role::Session) && cfg!(feature = "lab-emulation") { format!("unix:{}/console.sock,server=on,wait=off", role.runtime()) } else { "null".to_owned() },
             "-kernel".to_owned(), "/kernel".to_owned(), "-initrd".to_owned(), "/initrd".to_owned(),
-            "-append".to_owned(), format!("root=/dev/vda ro rootfstype=squashfs console={console} quiet loglevel=0 systemd.show_status=false panic=-1{}{}", if network { " oblivion.network=1" } else { "" }, if documents { " oblivion.documents=1" } else { "" }),
+            "-append".to_owned(), format!("root=/dev/vda ro rootfstype=squashfs console={console} quiet loglevel=0 systemd.show_status=false panic=-1{}{}{}", if network { " oblivion.network=1" } else { "" }, if documents { " oblivion.documents=1" } else { "" }, if resize { " oblivion.resize=1" } else { "" }),
             "-drive".to_owned(), "file=/root.squashfs,format=raw,if=none,id=root,readonly=on".to_owned(),
             "-device".to_owned(), "virtio-blk-pci,drive=root,serial=oblivion-root".to_owned(),
         ]);
@@ -495,7 +522,7 @@ impl Config {
             ]);
         }
         if matches!(role, Role::OnionGateway | Role::OnionFile) {
-            require(!network && !documents, "invalid_onion_launch")?;
+            require(!network && !documents && !resize, "invalid_onion_launch")?;
             args.extend(
                 if matches!(role, Role::OnionGateway) {
                     oblivion_host::onion_vm::Kind::Gateway
@@ -506,15 +533,17 @@ impl Config {
                 .map_err(Error)?,
             );
         }
-        if documents {
+        if documents || resize {
             args.extend([
                 "-S".to_owned(),
                 "-chardev".to_owned(),
                 "socket,id=ready,path=/run/oblivion-session/ready.sock,server=on,wait=off"
                     .to_owned(),
                 "-device".to_owned(),
-                "virtserialport,chardev=ready,bus=oblivion-serial.0,name=oblivion.documents"
-                    .to_owned(),
+                format!(
+                    "virtserialport,chardev=ready,bus=oblivion-serial.0,name=oblivion.{}",
+                    if resize { "resize" } else { "documents" }
+                ),
             ]);
         }
         if network {

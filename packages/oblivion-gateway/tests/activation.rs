@@ -405,3 +405,84 @@ fn tools_reject_invalid_credentials_frames_and_missing_descriptors_without_logs(
     assert!(output.stdout.is_empty());
     assert_eq!(output.stderr, b"oblivion-tools: service_failed\n");
 }
+
+fn web_request(address: SocketAddr, token: &str, url: &str) -> String {
+    let mut client = TcpStream::connect(address).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let body = format!(r#"{{"url":"{url}"}}"#);
+    write!(
+        client,
+        "POST /fetch HTTP/1.1\r\nHost: web\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).unwrap();
+    response
+}
+
+#[test]
+fn web_private_configuration_authenticates_and_every_control_exit_revokes() {
+    for revoke in [0, 1, 2] {
+        let (mut process, mut control, address) = launch_binary(env!("CARGO_BIN_EXE_oblivion-web"));
+        writeln!(
+            control,
+            "{}",
+            json!({"session_token": TOKEN, "socks": "127.0.0.1:1"})
+        )
+        .unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut control).read_line(&mut line).unwrap();
+        assert_eq!(line, "{\"ready\":true}\n");
+        assert!(
+            web_request(address, "invalid", "https://example.org/").starts_with("HTTP/1.1 401")
+        );
+        assert!(web_request(address, TOKEN, "http://example.org/").starts_with("HTTP/1.1 400"));
+        assert!(web_request(address, TOKEN, "https://example.org/").starts_with("HTTP/1.1 502"));
+        if revoke == 1 {
+            control.write_all(b"revoke").unwrap();
+        }
+        if revoke == 2 {
+            assert_eq!(
+                unsafe { libc::kill(process.0.id() as i32, libc::SIGTERM) },
+                0
+            );
+        }
+        if revoke == 0 {
+            drop(control);
+        }
+        let output = process.finish();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty() && output.stderr.is_empty());
+        assert!(TcpStream::connect(address).is_err());
+    }
+}
+
+#[test]
+fn web_rejects_invalid_configuration_and_missing_descriptors_without_logs() {
+    for (field, value) in [
+        ("api_key", json!(KEY)),
+        ("session_token", json!("short")),
+        ("socks", json!("192.0.2.1:9051")),
+        ("socks", json!("127.0.0.1:0")),
+    ] {
+        let (mut process, mut control, _) = launch_binary(env!("CARGO_BIN_EXE_oblivion-web"));
+        let mut config = json!({"session_token": TOKEN, "socks": "127.0.0.1:1"});
+        config[field] = value;
+        writeln!(control, "{config}").unwrap();
+        let output = process.finish();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, b"oblivion-web: service_failed\n");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_oblivion-web"))
+        .env_clear()
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(output.stderr, b"oblivion-web: service_failed\n");
+}

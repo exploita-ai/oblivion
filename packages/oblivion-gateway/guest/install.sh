@@ -14,6 +14,8 @@ groupadd --gid 1300 oblivion-api
 useradd --uid 1300 --gid 1300 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin oblivion-api
 groupadd --gid 1301 oblivion-tools
 useradd --uid 1301 --gid 1301 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin oblivion-tools
+groupadd --gid 1302 oblivion-web
+useradd --uid 1302 --gid 1302 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin oblivion-web
 # /var is a fresh tmpfs. The controller needs its writable mount before Tor
 # starts; create only an empty private directory, also in SOCKS mode.
 mkdir -p /etc/tmpfiles.d

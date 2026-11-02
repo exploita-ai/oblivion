@@ -16,6 +16,7 @@ from pathlib import Path
 ROLE = sys.argv[1]
 API = ("10.88.0.1", 8111)
 TOOLS = ("10.88.0.1", 8112)
+WEB = ("10.88.0.1", 8113)
 canaries = []
 stream = None
 tools_streams = []
@@ -126,10 +127,12 @@ def probes():
 
 
 def gateway(operation, configuration):
+    if operation == "tor-network-state":
+        return {"disabled": "DisableNetwork=1" in tor("GETCONF DisableNetwork")}
     if operation == "supervisor-info":
         pid = int(run("systemctl", "show", "oblivion-gateway-control.service", "--property=MainPID", "--value"))
         children = Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
-        expected = {"oblivion-api": 1300, "oblivion-egress": 1201}
+        expected = {"oblivion-api": 1300, "oblivion-egress": 1201, "oblivion-web": 1302}
         if configuration.get("tools", False):
             expected["oblivion-tools"] = 1301
         assert len(children) == len(expected)
@@ -152,13 +155,14 @@ def gateway(operation, configuration):
         assert set(processes) == set(expected)
         return {"supervisor_pid": pid, "broker_pid": processes["oblivion-api"], "broker_uid": 1300, "broker_caps": 0,
             "egress_pid": processes["oblivion-egress"], "egress_uid": 1201, "egress_caps": 0,
+            "web_pid": processes["oblivion-web"], "web_uid": 1302, "web_caps": 0,
             **({"tools_pid": processes["oblivion-tools"], "tools_uid": 1301, "tools_caps": 0} if "oblivion-tools" in processes else {})}
-    if operation in ["supervisor-crash", "broker-crash", "egress-crash", "tools-crash"]:
+    if operation in ["supervisor-crash", "broker-crash", "egress-crash", "tools-crash", "web-crash"]:
         pid = int(run("systemctl", "show", "oblivion-gateway-control.service", "--property=MainPID", "--value"))
         if operation != "supervisor-crash":
-            name = {"broker-crash": "oblivion-api", "egress-crash": "oblivion-egress", "tools-crash": "oblivion-tools"}[operation]
+            name = {"broker-crash": "oblivion-api", "egress-crash": "oblivion-egress", "tools-crash": "oblivion-tools", "web-crash": "oblivion-web"}[operation]
             children = Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
-            assert len(children) in [2, 3]
+            assert len(children) in [3, 4]
             pid = next(int(value) for value in children if Path(f"/proc/{value}/comm").read_text().strip() == name)
         os.kill(pid, signal.SIGKILL)
         return {"signalled": True}
@@ -171,10 +175,11 @@ def gateway(operation, configuration):
                 break
             assert time.monotonic() < deadline, (state, tor_state)
             time.sleep(0.01)
-        assert not any(path.read_text().strip() in ["oblivion-api", "oblivion-egress", "oblivion-tools"] for path in Path("/proc").glob("[0-9]*/comm"))
+        assert not any(path.read_text().strip() in ["oblivion-api", "oblivion-egress", "oblivion-tools", "oblivion-web"] for path in Path("/proc").glob("[0-9]*/comm"))
         selectors = gateway("transport-state", {})["selectors"]
         assert all(not values for values in selectors.values())
-        return {"supervisor": state, "tor": tor_state, "broker_absent": True, "egress_absent": True, "tools_absent": True, "routes_empty": True}
+        return {"supervisor": state, "tor": tor_state, "broker_absent": True, "egress_absent": True,
+            "tools_absent": True, "web_absent": True, "routes_empty": True}
     if operation == "transport-state":
         active = run("systemctl", "show", "oblivion-tor.service", "--property=ActiveState", "--value").decode().strip()
         sets = {entry["set"]["name"]: entry["set"].get("elem", []) for entry in json.loads(run("nft", "-j", "list", "ruleset"))["nftables"] if "set" in entry}
@@ -189,12 +194,13 @@ def gateway(operation, configuration):
             canary.listen()
             for uid, address, target in [(1300, "10.0.2.2", port), (1200, "10.0.2.2", port),
                 (1201, "10.0.2.2", other), (1300, "127.0.0.1", 9050), (1201, "127.0.0.1", 9050),
-                (1301, "10.0.2.2", port), (1301, "127.0.0.1", 9050)]:
+                (1301, "10.0.2.2", port), (1301, "127.0.0.1", 9050),
+                (1302, "10.0.2.2", port), (1302, "127.0.0.1", 9050)]:
                 result = subprocess.run(["setpriv", f"--reuid={uid}", f"--regid={uid}", "--clear-groups", "--",
                     "python3", "-c", "import socket,sys; s=socket.socket(); s.settimeout(.4); assert s.connect_ex((sys.argv[1],int(sys.argv[2]))) != 0", address, str(target)],
                     capture_output=True, timeout=5, env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"})
                 assert result.returncode == 0
-        return {"denied": 7}
+        return {"denied": 9}
     if operation == "rules":
         return json.loads(run("nft", "-j", "list", "ruleset"))
     if operation == "forwarding-on":
@@ -251,7 +257,7 @@ for port in (53,123,443,9999):
   except OSError: continue
   raise AssertionError('UDP bypass')
 """
-        for uid in (1300, 1301):
+        for uid in (1300, 1301, 1302):
             result = subprocess.run(["setpriv", f"--reuid={uid}", f"--regid={uid}", "--clear-groups", "--", "python3", "-c", code], capture_output=True, timeout=5, env={"PATH":"/usr/bin:/bin"})
             assert result.returncode == 0
         return {"api_uid_direct_denied": True, "api_and_tools_dns_tcp_udp_denied": True}

@@ -161,7 +161,7 @@ seed = guard + "TorVersion Tor 0.4.9.14\nLastWritten 2026-10-24 00:02:00\n"
 def selective():
     data = state.read_text()
     assert all(line.startswith(("Guard ", "TorVersion ", "LastWritten ")) for line in data.splitlines())
-    assert "TorVersion Tor 0.4.9.14\n" in data
+    assert "TorVersion Tor 0.4.9.15\n" in data
     metadata = state.stat()
     assert metadata.st_uid == 0 and metadata.st_mode & 0o777 == 0o600 and metadata.st_nlink == 1
     assert KEY.decode() not in data and NEXT.decode() not in data

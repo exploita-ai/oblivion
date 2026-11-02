@@ -9,6 +9,7 @@ import { Mime } from "../../mime.js"
 import { Permission } from "../../permission.js"
 import { convertHTMLToMarkdown, MAX_MARKDOWN_BYTES } from "../html-markdown.js"
 import { collectBoundedResponseBody } from "../http-body.js"
+import { Oblivion } from "@opencode/util/oblivion"
 
 export const name = "webfetch"
 export const MAX_RESPONSE_BYTES = MAX_MARKDOWN_BYTES
@@ -75,6 +76,19 @@ const assertHttpUrl = (url: URL) => {
 const execute = (http: HttpClient.HttpClient, url: string, format: Format, userAgent = openCodeUserAgent) =>
   http.execute(request(url, format, userAgent)).pipe(Effect.flatMap(HttpClientResponse.filterStatusOk))
 
+const executePrivacy = (http: HttpClient.HttpClient, url: string) => {
+  const token = process.env.OBLIVION_API_TOKEN
+  if (!token || !/^[a-f0-9]{64}$/.test(token)) return Effect.fail(new Error("Privacy Web capability unavailable"))
+  return http
+    .execute(
+      HttpClientRequest.post("http://10.88.0.1:8113/fetch").pipe(
+        HttpClientRequest.setHeader("Authorization", `Bearer ${token}`),
+        HttpClientRequest.bodyJsonUnsafe({ url }),
+      ),
+    )
+    .pipe(Effect.flatMap(HttpClientResponse.filterStatusOk))
+}
+
 const collectBody = (response: HttpClientResponse.HttpClientResponse) =>
   collectBoundedResponseBody(
     response,
@@ -108,32 +122,45 @@ export const Plugin = {
           output: Output,
           execute: (input, context) =>
             Effect.gen(function* () {
-              yield* Effect.try({
-                try: () => assertHttpUrl(new URL(input.url)),
+              const url = yield* Effect.try({
+                try: () => {
+                  const url = new URL(input.url)
+                  assertHttpUrl(url)
+                  if (Oblivion.enabled && url.protocol !== "https:")
+                    throw new Error("Privacy Web requires an HTTPS URL")
+                  return url
+                },
                 catch: (error) => error,
               })
 
-              yield* permission.assert({
-                action: name,
-                resources: [input.url],
-                save: ["*"],
-                metadata: input,
-                sessionID: context.sessionID,
-                agent: context.agent,
-                source: { type: "tool", messageID: context.messageID, id: context.id },
-              })
+              if (!Oblivion.enabled)
+                yield* permission.assert({
+                  action: name,
+                  resources: [url.href],
+                  save: Oblivion.enabled ? [`${url.origin}/*`] : ["*"],
+                  metadata: { ...input, url: url.href },
+                  sessionID: context.sessionID,
+                  agent: context.agent,
+                  source: { type: "tool", messageID: context.messageID, id: context.id },
+                })
 
-              const { body, contentType } = yield* Effect.gen(function* () {
-                const response = yield* execute(http, input.url, input.format).pipe(
-                  Effect.catchIf(isCloudflareChallenge, () => execute(http, input.url, input.format, "opencode")),
-                )
+              const { body, contentType, finalUrl } = yield* Effect.gen(function* () {
+                const response = yield* (Oblivion.enabled
+                  ? executePrivacy(http, url.href)
+                  : execute(http, url.href, input.format).pipe(
+                      Effect.catchIf(isCloudflareChallenge, () => execute(http, url.href, input.format, "opencode")),
+                    ))
                 const contentType = response.headers["content-type"] || ""
                 const mime = mimeFrom(contentType)
                 if (isImageAttachment(mime))
                   return yield* Effect.fail(new Error(`Unsupported fetched image content type: ${mime}`))
                 if (!Mime.isTextual(mime))
                   return yield* Effect.fail(new Error(`Unsupported fetched file content type: ${mime}`))
-                return { body: yield* collectBody(response), contentType }
+                return {
+                  body: yield* collectBody(response),
+                  contentType,
+                  finalUrl: response.headers["x-oblivion-final-url"] || url.href,
+                }
               }).pipe(
                 Effect.timeoutOrElse({
                   duration: Duration.seconds(input.timeout ?? DEFAULT_TIMEOUT_SECONDS),
@@ -146,7 +173,7 @@ export const Plugin = {
                 catch: (error) => error,
               })
               const result = {
-                url: input.url,
+                url: finalUrl,
                 contentType,
                 format: input.format,
                 output,

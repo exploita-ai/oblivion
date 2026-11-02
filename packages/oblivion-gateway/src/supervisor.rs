@@ -1,5 +1,6 @@
 use oblivion_gateway::egress::Tools;
 use oblivion_transport::Transport;
+use oblivion_transport::policy::Access;
 use oblivion_transport::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -30,6 +31,9 @@ enum Request {
         tools: Option<Tools>,
     },
     Revoke {},
+    Policy {
+        tools: Tools,
+    },
     Status {},
     Observe {},
     Shutdown {},
@@ -90,6 +94,7 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
     let mut transport = None;
     let mut tor = None;
     let mut firewall = None;
+    let mut access = Access::Strict;
     loop {
         let bytes = channel.read(api)?;
         let request: Request =
@@ -181,12 +186,46 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                 if matches!(transport, Transport::Tor {}) && tor.is_none() {
                     return Err(io::Error::other("tor_not_initialized"));
                 }
+                access = tools.as_ref().map_or(Access::Strict, |tools| tools.access);
+                if access == Access::Offline {
+                    return Err(io::Error::other("offline_grant_denied"));
+                }
                 *api = Some(Grant::start(
                     provider,
                     key,
                     &token,
                     transport,
                     tools.as_ref(),
+                )?);
+            }
+            Request::Policy { tools } => {
+                let mut previous = api
+                    .take()
+                    .ok_or_else(|| io::Error::other("grant_required"))?;
+                previous.stop()?;
+                let transport = transport
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("not_configured"))?;
+                if tools.access == Access::Offline {
+                    crate::network::offline()?;
+                    if let Some(tor) = &tor {
+                        tor.disable()?;
+                    }
+                } else if access == Access::Offline {
+                    crate::network::configure(transport)?;
+                    if let Some(tor) = &tor {
+                        tor.enable()?;
+                    }
+                }
+                firewall = Some(crate::network::snapshot()?);
+                access = tools.access;
+                *api = Some(Grant::start(
+                    provider.ok_or_else(|| io::Error::other("not_configured"))?,
+                    key.as_ref()
+                        .ok_or_else(|| io::Error::other("not_configured"))?,
+                    &previous.token,
+                    transport,
+                    Some(&tools),
                 )?);
             }
             Request::Revoke {} | Request::Shutdown {} => {
@@ -206,16 +245,17 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                     .as_ref()
                     .ok_or_else(|| io::Error::other("not_configured"))?;
                 let progress = tor.as_ref().and_then(|tor| tor.progress().ok());
-                let ready = match transport {
-                    Transport::Tor {} => progress == Some(100),
-                    Transport::Socks5 { .. } => Process::start(
-                        Role::Probe,
-                        Zeroizing::new(serde_json::to_vec(
-                            &serde_json::json!({"probe": transport}),
-                        )?),
-                    )
-                    .is_ok(),
-                };
+                let ready = access != Access::Offline
+                    && match transport {
+                        Transport::Tor {} => progress == Some(100),
+                        Transport::Socks5 { .. } => Process::start(
+                            Role::Probe,
+                            Zeroizing::new(serde_json::to_vec(
+                                &serde_json::json!({"probe": transport}),
+                            )?),
+                        )
+                        .is_ok(),
+                    };
                 channel.write(
                     &serde_json::to_vec(
                         &serde_json::json!({"ready": ready, "isolated": isolated, "tor_progress": progress}),
@@ -240,9 +280,11 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
 }
 
 struct Grant {
+    token: Zeroizing<String>,
     api: Process,
     egress: Process,
     tools: Option<Process>,
+    web: Process,
 }
 
 impl Grant {
@@ -302,16 +344,31 @@ impl Grant {
                 )
             })
             .transpose()?;
-        Ok(Self { api, egress, tools })
+        let web = Process::start(
+            Role::Web,
+            Zeroizing::new(serde_json::to_vec(&ToolsCredentials {
+                session_token: token,
+                socks: "127.0.0.1:9051",
+            })?),
+        )?;
+        Ok(Self {
+            token: Zeroizing::new(token.to_owned()),
+            api,
+            egress,
+            tools,
+            web,
+        })
     }
 
     fn stop(&mut self) -> io::Result<()> {
         // Try every closure even if one fails. Process::drop also prevents a
         // startup error from leaving the other service or its sockets alive.
         let tools = self.tools.as_mut().map(Process::stop).transpose();
+        let web = self.web.stop();
         let api = self.api.stop();
         let egress = self.egress.stop();
         tools?;
+        web?;
         api?;
         egress
     }
@@ -321,6 +378,7 @@ enum Role {
     Api,
     Egress,
     Tools,
+    Web,
     Probe,
 }
 
@@ -335,6 +393,7 @@ impl Process {
             Role::Api => ("/usr/bin/oblivion-api", 1300, [10, 88, 0, 1], 8111u16),
             Role::Egress => ("/usr/bin/oblivion-egress", 1201, [127, 0, 0, 1], 9051u16),
             Role::Tools => ("/usr/bin/oblivion-tools", 1301, [10, 88, 0, 1], 8112u16),
+            Role::Web => ("/usr/bin/oblivion-web", 1302, [10, 88, 0, 1], 8113u16),
             Role::Probe => ("/usr/bin/oblivion-egress", 1201, [127, 0, 0, 1], 0u16),
         };
         let (control, inherited) = UnixStream::pair()?;
@@ -509,6 +568,7 @@ impl Channel {
                     .flatten()
                     .is_some();
                 if tools_exited
+                    || api.web.child.try_wait()?.is_some()
                     || api.api.child.try_wait()?.is_some()
                     || api.egress.child.try_wait()?.is_some()
                 {

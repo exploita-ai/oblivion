@@ -38,7 +38,7 @@ def request(value):
     if value.get("action") == "checkpoint" and set(value) == {"action", "metadata"}:
         session_backup.metadata(value["metadata"])
         return value
-    if value == {"action": "inspect"}:
+    if value in ({"action": "inspect"}, {"action": "storage"}):
         return value
     raise ValueError("invalid_chat_export_request")
 
@@ -103,6 +103,13 @@ def execute(value, vault=Path("/vault"), binary="/usr/bin/oblivion", owner="manu
     if not re.fullmatch(r"manual|vport[0-9]{1,5}p[0-9]{1,5}|oblivion\.archive\.[a-f0-9]{32}", owner):
         raise ValueError("invalid_export_owner")
     value = request(value)
+    if value["action"] == "storage":
+        space = os.statvfs(vault)
+        return {"result": "storage", "usage": {
+            "capacity": space.f_blocks * space.f_frsize,
+            "used": (space.f_blocks - space.f_bfree) * space.f_frsize,
+            "available": space.f_bavail * space.f_frsize,
+        }}
     if value["action"] in ("checkpoint", "inspect"):
         result = session_backup.execute(value, vault, owner)
         if value["action"] == "inspect" and result["result"] == "metadata":

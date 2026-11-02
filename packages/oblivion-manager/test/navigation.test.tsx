@@ -23,7 +23,7 @@ test("pending gateway startup waits visibly and cancellation keeps Documents ope
   }, console: async () => { throw new Error("Chat must not attach before the gateway is ready") } }} />, { width: 160, height: 50, kittyKeyboard: true })
   try {
     await app.renderOnce()
-    await app.mockInput.pressKey("F6"); await app.renderOnce()
+    await app.mockInput.pressKey("F8"); await app.renderOnce()
     await app.mockInput.pressEnter(); await app.mockInput.pressEnter(); await app.renderOnce()
     expect(operations).toContain("start-chat")
     expect(app.captureCharFrame()).toContain("Connecting to Tor")
@@ -42,6 +42,7 @@ test("pending gateway startup waits visibly and cancellation keeps Documents ope
 test("document pagination returns to the previous page without losing selections", async () => {
   const requests: (string | null)[] = []
   const app = await testRender(() => <Documents session={"a".repeat(32)} chat={false} back={() => {}} request={async (request) => {
+    if (request.operation === "session-storage") return JSON.stringify({ result: "storage", usage: { capacity: 512 * 1024 ** 2, used: 32 * 1024 ** 2, available: 480 * 1024 ** 2 } })
     const input = JSON.parse(new TextDecoder().decode(request.payload)) as { after: string | null }
     requests.push(input.after)
     return JSON.stringify({ path: "", entries: [{ name: input.after ? "workspace" : "imports", directory: true, bytes: 0 }], next: input.after ? null : "imports", skipped: 0 })
@@ -67,7 +68,8 @@ test("document pagination returns to the previous page without losing selections
 
 test("setup supports variants, a keyboard test and temporary-only UTC before unlock", async () => {
   const applied: string[][] = []
-  const app = await testRender(() => <Setup catalog={{ keyboards: [{ value: "it", label: "Italian", variants: [{ value: "", label: "Default" }, { value: "nodeadkeys", label: "No dead keys" }] }], timezones: ["UTC", "Europe/Rome"] }} current={{ version: 1, completed: false, keyboard: "it", variant: "", timezone: "UTC" }} writable={false} applyKeyboard={async (...values) => { applied.push(values) }} save={async () => {}} cancel={() => {}} failed={(error) => { throw error }} />, { width: 80, height: 24, kittyKeyboard: true })
+  const saved: Parameters<typeof Setup>[0]["current"][] = []
+  const app = await testRender(() => <Setup catalog={{ keyboards: [{ value: "it", label: "Italian", variants: [{ value: "", label: "Default" }, { value: "nodeadkeys", label: "No dead keys" }] }], timezones: ["UTC", "Europe/Rome"] }} current={{ version: 1, completed: false, keyboard: "it", variant: "", timezone: "UTC", session_idle_minutes: 10, host_idle_minutes: 60 }} writable={false} applyKeyboard={async (...values) => { applied.push(values) }} save={async (preferences) => { saved.push(preferences) }} cancel={() => {}} failed={(error) => { throw error }} />, { width: 80, height: 24, kittyKeyboard: true })
   try {
     await app.renderOnce(); await app.mockInput.pressEnter(); await app.renderOnce()
     await app.mockInput.typeText("No dead"); await app.mockInput.pressEnter(); await app.renderOnce()
@@ -78,6 +80,8 @@ test("setup supports variants, a keyboard test and temporary-only UTC before unl
     expect(app.captureCharFrame()).toContain("Local time:")
     expect(app.captureCharFrame()).toContain("Apply temporarily")
     expect(app.captureCharFrame()).not.toContain("Save encrypted")
+    await app.mockInput.pressEnter()
+    expect(saved[0]).toMatchObject({ session_idle_minutes: 10, host_idle_minutes: 60 })
   } finally { app.renderer.destroy(); await app.renderer.closed }
 })
 
@@ -159,7 +163,7 @@ test.each([[80, 24], [160, 50], [40, 16]])("wordmark fits at %ix%i and responds 
   const app = await testRender(() => <BootLogo elapsed={3000} />, { width, height })
   try {
     await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("PRIVATE WORKSPACE")
+    expect(app.captureCharFrame().replaceAll(/\s+/g, " ")).toContain("A privacy-first live OS for conversations, research, documents and code")
     app.resize(40, 16); await app.renderOnce()
     expect(app.captureCharFrame()).toContain("OBLIVION")
   } finally { app.renderer.destroy(); await app.renderer.closed }
@@ -184,6 +188,7 @@ test("cancelling a pending import cleans up once and returns to session roots", 
   const started = Promise.withResolvers<void>()
   let cancellations = 0
   const app = await testRender(() => <Documents session={"a".repeat(32)} chat={false} back={() => {}} request={async (request) => {
+    if (request.operation === "session-storage") return JSON.stringify({ result: "storage", usage: { capacity: 512 * 1024 ** 2, used: 32 * 1024 ** 2, available: 480 * 1024 ** 2 } })
     if (request.operation === "browse") return JSON.stringify({ path: "", entries: [{ name: "workspace", directory: true, bytes: 0 }], next: null, skipped: 0 })
     const input = JSON.parse(new TextDecoder().decode(request.payload)) as { operation: string }
     if (input.operation === "list") return JSON.stringify({ configured: true, export_configured: true, active: false, sources: [{ id: "8:16", name: "sdb", bytes: 33554432 }] })
@@ -237,27 +242,37 @@ test.each([
   } finally { await app.dispose() }
 })
 
-test.each([[80, 24], [160, 50]])("all former settings are directly reachable from navigation at %ix%i", async (width, height) => {
+test.each([[80, 24], [160, 50]])("settings groups every host preference behind one navigation entry at %ix%i", async (width, height) => {
   const runtime = preview(() => {})
   const initial = status.parse(JSON.parse(await runtime.request({ operation: "status" })))
   const app = await testRender(() => <App runtime={runtime} initial={initial} />, { width, height, kittyKeyboard: true })
   try {
     await app.renderOnce()
-    expect(app.captureCharFrame()).not.toContain("Settings")
-    expect(app.captureCharFrame()).not.toContain("PRIVATE WORKSPACE")
-    for (const [key, section, action] of [["2", "Network", "Connection"], ["3", "API keys", "Add API key"], ["4", "Keyboard & time zone", "Edit preferences"], ["5", "System", "CPU cores"]]) {
-      await app.mockInput.pressKey(key)
+    expect(app.captureCharFrame()).toContain("Settings")
+    expect(app.captureCharFrame()).not.toContain("A privacy-first live OS")
+    await app.mockInput.pressKey("2")
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("HOST / Settings")
+    for (const label of ["Network & Wi-Fi", "Privacy route", "Network access", "Network rules", "API keys", "Keyboard & time zone", "Auto-lock"]) {
+      expect(app.captureCharFrame()).toContain(label)
+    }
+    for (const [index, section, action] of [[0, "Network & Wi-Fi", "Ethernet"], [1, "Privacy route", "SOCKS5 proxy"], [2, "Network access", "Change global access"], [3, "Network rules", "Add rule"], [4, "API keys", "Add API key"], [5, "Keyboard & time zone", "Edit preferences"], [6, "Auto-lock", "Session auto-lock"]] as const) {
+      if (index > 0) await app.mockInput.pressEscape()
+      for (let row = 0; row < index; row++) await app.mockInput.pressArrow("down")
+      await app.mockInput.pressEnter()
       await app.renderOnce()
-      expect(app.captureCharFrame()).toContain(`HOST / ${section}`)
+      expect(app.captureCharFrame()).toContain(`HOST / Settings / ${section}`)
       expect(app.captureCharFrame()).toContain(action)
     }
-    await app.mockInput.pressKey("TAB")
-    await app.mockInput.pressArrow("up")
-    await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("HOST / Keyboard & time zone")
+    await app.mockInput.pressKey("2")
+    for (let row = 0; row < 5; row++) await app.mockInput.pressArrow("down")
     await app.mockInput.pressEnter()
     await app.mockInput.pressEnter()
     await app.renderOnce()
     expect(app.captureCharFrame()).toContain("Keyboard / Layout")
+    await app.mockInput.pressEscape(); await app.renderOnce()
+    await app.mockInput.pressKey("3"); await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("HOST / System")
+    expect(app.captureCharFrame()).toContain("CPU cores")
   } finally { await app.dispose() }
 })

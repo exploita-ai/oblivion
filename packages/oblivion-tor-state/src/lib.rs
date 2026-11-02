@@ -1,8 +1,9 @@
 //! Version-pinned, selective Tor persistence. No filesystem or network access.
 use std::collections::HashSet;
 
-pub const VERSION: &str = "0.4.9.14";
+pub const VERSION: &str = "0.4.9.15";
 pub const LIMIT: usize = 128 * 1024;
+const PREVIOUS_VERSIONS: &[&str] = &["0.4.9.14"];
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct InvalidState;
@@ -105,7 +106,12 @@ impl State {
                 continue;
             }
             if let Some(value) = line.strip_prefix("TorVersion ") {
-                if version.replace(value).is_some() || value != format!("Tor {VERSION}") {
+                const PREFIX: &str = "Tor ";
+                if version.replace(value).is_some()
+                    || !value.strip_prefix(PREFIX).is_some_and(|candidate| {
+                        candidate == VERSION || PREVIOUS_VERSIONS.contains(&candidate)
+                    })
+                {
                     return Err(InvalidState);
                 }
             }
@@ -182,7 +188,7 @@ mod tests {
     use super::State;
 
     const GUARD: &str = "Guard in=default rsa_id=0123456789ABCDEF0123456789ABCDEF01234567 nickname=TestGuard sampled_on=2026-10-24T01:02:03 sampled_idx=0 sampled_by=0.4.9.14 listed=1 confirmed_on=2026-10-24T01:03:04 confirmed_idx=0 pb_circ_attempts=4.000000 pb_circ_successes=3.000000\n";
-    const META: &str = "TorVersion Tor 0.4.9.14\nLastWritten 2026-10-24 01:04:05\n";
+    const META: &str = "TorVersion Tor 0.4.9.15\nLastWritten 2026-10-24 01:04:05\n";
 
     #[test]
     fn retains_guard_identity_order_and_path_bias_without_traffic_history() {
@@ -200,7 +206,7 @@ mod tests {
     fn rejects_unreviewed_or_invalid_state_instead_of_resetting_guards() {
         let input = format!("{GUARD}{META}");
         for invalid in [
-            input.replace("Tor 0.4.9.14", "Tor 0.4.10.0"),
+            input.replace("Tor 0.4.9.15", "Tor 0.4.10.0"),
             input.replace("listed=1", "listed=2"),
             input.replace("sampled_idx=0", "sampled_idx=-1"),
             input.replace("sampled_idx=0", "sampled_idx=0 unknown=1"),
@@ -226,5 +232,11 @@ mod tests {
         assert!(before.same_guards(&after));
         assert!(!before.same_guards(&State::parse(META).unwrap()));
         assert!(!State::parse(META).unwrap().has_guards());
+    }
+
+    #[test]
+    fn accepts_the_reviewed_previous_patch_for_guard_migration() {
+        let previous = format!("{GUARD}{}", META.replace("0.4.9.15", "0.4.9.14"));
+        assert_eq!(State::parse(&previous).unwrap().as_str(), previous);
     }
 }

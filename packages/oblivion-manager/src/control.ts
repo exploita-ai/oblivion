@@ -26,6 +26,7 @@ export type Operation =
   | "unlock-ephemeral"
   | "create"
   | "rename-session"
+  | "session-storage"
   | "open"
   | "open-ephemeral"
   | "close"
@@ -59,7 +60,7 @@ export class ControlError extends Error {
 // The UI can only reach the existing authenticated Unix socket. Credentials
 // travel in the framed body, never in arguments, environment or diagnostics.
 export function request(input: Request, path = "/run/oblivion-control.sock"): Promise<string> {
-  const limit = ["api-keys", "egress", "network-policy", "transfers", "prepare-usb", "settings", "browse", "chat-export", "connections"].includes(
+  const limit = ["session-storage", "api-keys", "egress", "network-policy", "transfers", "prepare-usb", "settings", "browse", "chat-export", "connections"].includes(
     input.operation,
   )
     ? 4096
@@ -76,7 +77,7 @@ export function request(input: Request, path = "/run/oblivion-control.sock"): Pr
     const socket = createConnection({ path })
     const chunks: Buffer[] = []
     let size = 0
-    socket.setTimeout(input.timeoutMs ?? 120_000)
+    socket.setTimeout(input.timeoutMs ?? (input.operation === "session-storage" ? 1_800_000 : 120_000))
     socket.once("connect", () => socket.end(frame, () => frame.fill(0)))
     socket.on("data", (chunk: Buffer) => {
       size += chunk.length

@@ -3254,7 +3254,7 @@ function Grep(props: ToolProps) {
 function WebFetch(props: ToolProps) {
   return (
     <InlineTool icon="%" pending="Fetching from the web…" complete={stringValue(props.input.url)} part={props.part}>
-      WebFetch {stringValue(props.input.url)}
+      {Oblivion.enabled ? "Privacy WebFetch" : "WebFetch"} {stringValue(props.input.url)}
     </InlineTool>
   )
 }

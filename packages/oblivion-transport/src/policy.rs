@@ -3,6 +3,26 @@ use std::net::IpAddr;
 
 pub const RULE_LIMIT: usize = 128;
 
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Access {
+    Open,
+    #[default]
+    Strict,
+    Offline,
+}
+
+impl Access {
+    pub fn parse(value: &str) -> Result<Self, &'static str> {
+        match value {
+            "open" => Ok(Self::Open),
+            "strict" => Ok(Self::Strict),
+            "offline" => Ok(Self::Offline),
+            _ => Err("invalid_web_access"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
@@ -47,6 +67,25 @@ pub struct Session(String);
 pub struct Tools {
     pub session: Session,
     pub policy: Policy,
+    #[serde(default)]
+    pub access: Access,
+}
+
+impl Tools {
+    pub fn decision(&self, destination: &Destination) -> Action {
+        if self.access == Access::Offline {
+            return Action::Deny;
+        }
+        self.policy
+            .matched(&self.session, destination)
+            .unwrap_or_else(|| {
+                if self.access == Access::Open && matches!(destination.port(), 80 | 443) {
+                    Action::Allow
+                } else {
+                    Action::Ask
+                }
+            })
+    }
 }
 
 impl Session {
@@ -65,7 +104,7 @@ impl TryFrom<String> for Session {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(try_from = "Input")]
 pub struct Policy {
     version: u8,
@@ -215,6 +254,10 @@ impl Policy {
     // Order-independent and restrictive: any matching deny wins, then ask,
     // then allow. An unknown destination stays pending, never implicitly allowed.
     pub fn decision(&self, session: &Session, destination: &Destination) -> Action {
+        self.matched(session, destination).unwrap_or(Action::Ask)
+    }
+
+    pub fn matched(&self, session: &Session, destination: &Destination) -> Option<Action> {
         self.rules
             .iter()
             .filter(|rule| {
@@ -228,7 +271,6 @@ impl Policy {
             })
             .map(|rule| rule.action)
             .max()
-            .unwrap_or(Action::Ask)
     }
 }
 

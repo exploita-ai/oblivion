@@ -16,8 +16,14 @@ case "$provider" in
     abliteration-ai|refuseless|openrouter) ;;
     *) exit 1 ;;
 esac
+IFS= read -r web_access <&3
+case "$web_access" in
+    strict|open) ;;
+    *) exit 1 ;;
+esac
 printf '%s\n' "$provider" > /run/oblivion-api/provider
-chmod 0640 /run/oblivion-api/token /run/oblivion-api/provider
+printf '%s\n' "$web_access" > /run/oblivion-api/web-access
+chmod 0640 /run/oblivion-api/token /run/oblivion-api/provider /run/oblivion-api/web-access
 busybox sysctl -q -w net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1
 for address in /sys/class/net/*/address; do
     if [ "$(cat "$address")" = 52:54:00:6f:00:03 ]; then

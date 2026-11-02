@@ -53,6 +53,7 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
             | "open-documents"
             | "set-api-key"
             | "api-keys"
+            | "session-storage"
             | "egress"
             | "network-policy"
             | "transfers"
@@ -63,6 +64,7 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
     let limit = if matches!(
         operation.as_str(),
         "api-keys"
+            | "session-storage"
             | "egress"
             | "network-policy"
             | "transfers"
@@ -88,7 +90,13 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
         "operation": operation, "session": args.get(1), "secret_len": secret.len(),
     }))?;
     let mut stream = UnixStream::connect("/run/oblivion-control.sock")?;
-    stream.set_read_timeout(Some(Duration::from_secs(120)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(
+        if operation == "session-storage" {
+            1800
+        } else {
+            120
+        },
+    )))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     stream.write_all(&(header.len() as u32).to_be_bytes())?;
     stream.write_all(&header)?;

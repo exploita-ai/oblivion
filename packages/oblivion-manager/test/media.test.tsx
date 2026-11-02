@@ -5,6 +5,7 @@ import { Documents } from "../src/documents"
 test.each([false, true])("media picker distinguishes virtual inputs and excludes read-only export targets: export=%s", async (exporting) => {
   const operations: string[] = []
   const app = await testRender(() => <Documents session={"a".repeat(32)} chat={false} back={() => {}} request={async (request) => {
+    if (request.operation === "session-storage") return JSON.stringify({ result: "storage", usage: { capacity: 512 * 1024 ** 2, used: 32 * 1024 ** 2, available: 480 * 1024 ** 2 } })
     if (request.operation === "browse") return JSON.stringify({ path: "", entries: [{ name: "workspace", directory: true, bytes: 0 }], next: null, skipped: 0 })
     const command = JSON.parse(new TextDecoder().decode(request.payload)) as { operation: string }
     operations.push(command.operation)

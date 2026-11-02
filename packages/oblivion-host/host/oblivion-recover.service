@@ -2,6 +2,8 @@
 Description=Oblivion verified storage recovery
 After=oblivion-controller.service
 Before=oblivion-manager.service
+# Every manager exit must attempt cleanup, including rapid display restarts.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot

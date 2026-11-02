@@ -266,6 +266,25 @@ assert command("unlock", secret=GENERAL, success=False) == "recovery_required"
 command("lock")
 locked()
 check("recovery latches before a busy operation lock and only verified closure clears it")
+# A display restart can overlap a short status poll. Recovery must remain
+# pending while it owns no lock, then finish without a manual second attempt.
+with Path("/run/oblivion/storage.lock").open("rb") as operation_lock:
+    fcntl.flock(operation_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    recovering = subprocess.Popen(
+        ["/usr/bin/oblivion-storage-lab", "--config", CONFIG, "recover"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    deadline = time.monotonic() + 5
+    while not Path("/run/oblivion/recovery-required").exists():
+        assert recovering.poll() is None, "recovery exited before latching"
+        assert time.monotonic() < deadline, "recovery did not latch"
+        time.sleep(0.01)
+    assert recovering.poll() is None, "recovery abandoned a busy controller"
+    fcntl.flock(operation_lock, fcntl.LOCK_UN)
+    output, error = recovering.communicate(timeout=30)
+    assert recovering.returncode == 0, (output, error)
+locked()
+check("recovery waits for a transient operation and closes without a second request")
 # Older immutable lab images predate the dedicated manager account. Supply the
 # same public account records as the current Dockerfile, exclusively in RAM.
 if not any(user.pw_uid == 1000 for user in pwd.getpwall()):
@@ -296,6 +315,12 @@ for file in bundle.glob("*.service"):
     (directory / "lab.conf").write_text("[Service]\n" + override)
 systemctl("daemon-reload")
 try:
+    assert property(RECOVER, "StartLimitIntervalUSec") == "0"
+    for _ in range(6):
+        systemctl("start", RECOVER)
+        assert property(RECOVER, "Result") == "success"
+    locked()
+    check("repeated cleanup activations are never suppressed by a service start limit")
     systemctl("start", CONTROLLER)
     wait_screen("Preparazione generale interrotta")
     manager_pid = int(property(MANAGER, "MainPID"))
@@ -619,9 +644,10 @@ with socket.socket(socket.AF_UNIX) as client:
     assert transport_file.read_bytes() == saved_transport
     check("active chat blocks persistent, temporary and saved-profile transport changes")
     for body in [WEB_SAVE, WEB_SELECT, SAVED_POLICY]:
-        assert command("network-policy", secret=body, success=False) == "session_must_be_closed"
+        command("network-policy", secret=body)
+        assert status()["session_open"] and status()["active_session"] == session_id
     assert policy_file.read_bytes() == saved_policy
-    check("an active chat blocks every saved or temporary web policy change")
+    check("active sessions accept global rules without closing their volume; gateway stream revocation is qualified separately")
     check("key picker chooses the opening credential; an active session blocks key mutations and identity changes")
     send(b"\x1d", "Sessioni protette")
     send(b"g", "chiavi Abliteration")

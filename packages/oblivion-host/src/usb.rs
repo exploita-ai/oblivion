@@ -119,11 +119,7 @@ fn discover(minimum_bytes: u64) -> Result<Inspection> {
     } else {
         device
     };
-    require(
-        disk.ancestors()
-            .any(|p| fs::read_link(p.join("subsystem")).is_ok_and(|s| s.ends_with("usb"))),
-        "usb_boot_device_required",
-    )?;
+    require(supported_boot_transport(&disk), "usb_boot_device_required")?;
     require(
         fs::read_to_string(disk.join("ro")).is_ok_and(|s| s.trim() == "0"),
         "usb_medium_readonly",
@@ -223,6 +219,16 @@ fn discover(minimum_bytes: u64) -> Result<Inspection> {
             unavailable: None,
         },
         source,
+    })
+}
+
+// Only the device backing the mounted live image reaches this check. A virtual
+// VirtIO boot disk avoids Apple Virtualization's unsafe removable-disk I/O path;
+// physical internal SATA/NVMe disks must still never be preparation targets.
+fn supported_boot_transport(disk: &Path) -> bool {
+    disk.ancestors().any(|path| {
+        fs::read_link(path.join("subsystem"))
+            .is_ok_and(|bus| bus.ends_with("usb") || bus.ends_with("virtio"))
     })
 }
 
@@ -342,14 +348,23 @@ pub fn prepare(plan: &Plan, minimum: u64) -> Result<PathBuf> {
             .as_bytes(),
         ),
     )?;
-    command(
+    if !command_succeeds(
         "/usr/bin/partx",
         // udev may already have registered the new partition. Update handles
         // both cases; discover below checks the kernel's resulting geometry.
         &["--update", "--nr", &plan.partition.to_string(), &disk],
-        None,
-    )?;
-    command("/usr/bin/udevadm", &["settle", "--timeout=10"], None)?;
+    ) {
+        // Apple Virtualization can reject UPDATE while accepting ADD for a
+        // newly appended partition. Both calls are advisory: the authenticated
+        // sysfs geometry check below remains the source of truth.
+        command_succeeds(
+            "/usr/bin/partx",
+            &["--add", "--nr", &plan.partition.to_string(), &disk],
+        );
+    }
+    // A slow udev queue must not turn a partition that is already registered
+    // into a failed setup. The bounded poll below performs the real check.
+    command_succeeds("/usr/bin/udevadm", &["settle", "--timeout=10"]);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let current = inspect(minimum);
@@ -475,9 +490,51 @@ fn command(program: &str, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>
     Ok(output.stdout)
 }
 
+fn command_succeeds(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .env_clear()
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boot_transport_uses_sysfs_bus_not_device_name() {
+        let root = std::env::temp_dir().join(format!(
+            "oblivion-boot-bus-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for (name, bus, allowed) in [
+            ("usb1/target/block/sda", "usb", true),
+            ("virtio0/block/vda", "virtio", true),
+            ("ata1/target/block/sda", "scsi", false),
+            ("nvme0/nvme0n1", "nvme", false),
+            ("virtio-looking-name/block/vda", "pci", false),
+        ] {
+            let disk = root.join(name);
+            fs::create_dir_all(&disk).unwrap();
+            std::os::unix::fs::symlink(
+                format!("/sys/bus/{bus}"),
+                root.join(name.split('/').next().unwrap()).join("subsystem"),
+            )
+            .unwrap();
+            assert_eq!(supported_boot_transport(&disk), allowed, "{name}");
+        }
+        assert!(!supported_boot_transport(&root.join("vda")));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn table() -> Table {
         // Geometry from the actual GRUB diagnostic ISO. The USB has additional
@@ -507,6 +564,10 @@ mod tests {
         assert_eq!(
             partition_path(Path::new("/dev/sda"), 5),
             Path::new("/dev/sda5")
+        );
+        assert_eq!(
+            partition_path(Path::new("/dev/vda"), 5),
+            Path::new("/dev/vda5")
         );
         assert_eq!(
             partition_path(Path::new("/dev/nvme0n1"), 5),

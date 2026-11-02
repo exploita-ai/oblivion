@@ -25,6 +25,7 @@ for (const mode of ["open", "create", "ephemeral"] as const) {
       if (mode === "open") await app.mockInput.pressEnter()
       if (mode !== "open") await app.mockInput.pressKey("n")
       if (mode !== "open") { await app.mockInput.typeText("Research session"); await app.mockInput.pressEnter() }
+      if (mode === "create") await app.mockInput.pressEnter()
       if (mode !== "ephemeral") {
         await app.mockInput.typeText("synthetic-session-password"); await app.mockInput.pressEnter()
         if (mode === "create") { await app.mockInput.typeText("synthetic-session-password"); await app.mockInput.pressEnter() }

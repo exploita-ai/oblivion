@@ -1,5 +1,7 @@
 export * as OblivionTui from "./oblivion"
 
+import { closeSync, constants, openSync, writeSync } from "node:fs"
+
 // Presentation surface only; VM and network isolation are enforced outside it.
 const commands = new Set([
   "command.palette.show",
@@ -61,10 +63,21 @@ export type Action = "new" | "sessions" | "close"
 export function request(action: Action) {
   // An untrusted hint only: the host asks for a fresh physical Ctrl+] before
   // closing anything. This channel carries no password or administrative IPC.
-  process.stdout.write(`\x1b]777;oblivion;${action}\x07`)
+  signal(action)
 }
 
 // Fixed application status only, never exceptions, paths or conversation text.
 export function startup(status: "started" | "storage-failed") {
-  process.stdout.write(`\x1b]777;oblivion;${status}\x07`)
+  signal(status)
+}
+
+function signal(value: Action | "started" | "storage-failed") {
+  if (process.env.OBLIVION_WORKSPACE !== "1") {
+    process.stdout.write(`\x1b]777;oblivion;${value}\x07`)
+    return
+  }
+  // tmux owns terminal escape sequences. Only these fixed lifecycle hints
+  // leave the pane, through a session-local RAM FIFO consumed by the viewer.
+  const descriptor = openSync("/run/oblivion-terminal/events", constants.O_WRONLY | constants.O_NONBLOCK)
+  try { writeSync(descriptor, `${value}\n`) } finally { closeSync(descriptor) }
 }

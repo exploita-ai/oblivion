@@ -4,6 +4,9 @@ export EDITOR=nano VISUAL=nano PAGER=less
 export HISTFILE=/dev/null LESSHISTFILE=/dev/null SQLITE_HISTORY=/dev/null
 export NODE_REPL_HISTORY=/dev/null PYTHON_HISTORY=/dev/null
 export PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+export DEBUGINFOD_URLS=
+DEBUGINFOD_CACHE_PATH="$XDG_CACHE_HOME/debuginfod"
+export DEBUGINFOD_CACHE_PATH
 PIP_CACHE_DIR="$XDG_CACHE_HOME/pip"
 npm_config_cache="$XDG_CACHE_HOME/npm"
 npm_config_prefix="$HOME/.local"

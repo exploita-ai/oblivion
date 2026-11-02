@@ -215,7 +215,20 @@ fn exchange(
     write_message(source, &request)?;
     let manifest = Manifest::read(source, request.limits)?;
     manifest.write(control)?;
-    let approval: Approval = read_message(control, 1024)?;
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Decision {
+        id: String,
+        manifest_sha256: String,
+        #[serde(default)]
+        progress: bool,
+    }
+    let decision: Decision = read_message(control, 1024)?;
+    let progress = decision.progress;
+    let approval = Approval {
+        id: decision.id,
+        manifest_sha256: decision.manifest_sha256,
+    };
     require(
         approval.id == request.id && approval.manifest_sha256 == manifest.sha256(),
         "offer_not_approved",
@@ -230,12 +243,21 @@ fn exchange(
     destination.read_exact(&mut ready)?;
     require(&ready == b"receive\n", "receiver_not_ready")?;
     write_message(source, &grant.approval)?;
-    for entry in manifest.entries() {
-        if let Entry::File { size, sha256, .. } = entry {
-            require(
-                copy_hash(source, destination, *size)? == *sha256,
-                "content_changed",
-            )?;
+    {
+        let mut writer = Progress {
+            destination,
+            control,
+            enabled: progress,
+            bytes: 0,
+            last: Instant::now(),
+        };
+        for entry in manifest.entries() {
+            if let Entry::File { size, sha256, .. } = entry {
+                require(
+                    copy_hash(source, &mut writer, *size)? == *sha256,
+                    "content_changed",
+                )?;
+            }
         }
     }
     let mut end = [0; 8];
@@ -260,6 +282,30 @@ fn exchange(
         receipt,
         paths: request.paths,
     })
+}
+
+struct Progress<'a> {
+    destination: &'a mut Channel,
+    control: &'a mut Channel,
+    enabled: bool,
+    bytes: u64,
+    last: Instant,
+}
+
+impl Write for Progress<'_> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let count = self.destination.write(buffer)?;
+        self.bytes += count as u64;
+        if self.enabled && self.last.elapsed() >= Duration::from_millis(250) {
+            write_message(self.control, &serde_json::json!({"progress": self.bytes}))?;
+            self.last = Instant::now();
+        }
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.destination.flush()
+    }
 }
 
 /// Linux 6.5+ pins the process that established this private Unix connection.

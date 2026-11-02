@@ -8,6 +8,7 @@ pub enum Request {
     Diagnostics { report: crate::diagnostics::Report },
     Checkpoint { metadata: crate::backup::Metadata },
     Inspect,
+    Storage {},
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -30,7 +31,7 @@ impl Request {
             Self::Export { id, .. } => valid_id(id),
             Self::Diagnostics { report } => report.valid(),
             Self::Checkpoint { metadata } => metadata.valid(),
-            Self::Inspect => true,
+            Self::Inspect | Self::Storage {} => true,
         }
     }
 }
@@ -59,12 +60,16 @@ pub enum Response {
     Rejected {
         error: crate::backup::Rejection,
     },
+    Storage {
+        usage: crate::volume::Usage,
+    },
     Unavailable,
 }
 
 impl Response {
     pub fn valid(&self, request: &Request) -> bool {
         match (self, request) {
+            (Self::Storage { usage }, Request::Storage {}) => usage.valid(),
             (Self::Metadata { metadata }, Request::Checkpoint { metadata: expected }) => {
                 metadata.valid() && metadata == expected
             }

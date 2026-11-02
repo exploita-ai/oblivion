@@ -424,28 +424,30 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                           <LocalProvider>
                                                             <PromptStashProvider>
                                                               <DialogProvider>
-                                                                <FrecencyProvider>
-                                                                  <PromptHistoryProvider>
-                                                                    <PromptRefProvider>
-                                                                      <EditorContextProvider>
-                                                                        <AttentionProvider>
-                                                                          <UpdateNotificationProvider
-                                                                            updater={input.updater}
-                                                                          >
-                                                                            <PanelProvider>
-                                                                              <PluginProvider
-                                                                                packages={input.packages}
-                                                                                directories={pluginDirectories}
-                                                                              >
-                                                                                <App />
-                                                                              </PluginProvider>
-                                                                            </PanelProvider>
-                                                                          </UpdateNotificationProvider>
-                                                                        </AttentionProvider>
-                                                                      </EditorContextProvider>
-                                                                    </PromptRefProvider>
-                                                                  </PromptHistoryProvider>
-                                                                </FrecencyProvider>
+                                                                <>
+                                                                  <FrecencyProvider>
+                                                                    <PromptHistoryProvider>
+                                                                      <PromptRefProvider>
+                                                                        <EditorContextProvider>
+                                                                          <AttentionProvider>
+                                                                            <UpdateNotificationProvider
+                                                                              updater={input.updater}
+                                                                            >
+                                                                              <PanelProvider>
+                                                                                <PluginProvider
+                                                                                  packages={input.packages}
+                                                                                  directories={pluginDirectories}
+                                                                                >
+                                                                                  <App />
+                                                                                </PluginProvider>
+                                                                              </PanelProvider>
+                                                                            </UpdateNotificationProvider>
+                                                                          </AttentionProvider>
+                                                                        </EditorContextProvider>
+                                                                      </PromptRefProvider>
+                                                                    </PromptHistoryProvider>
+                                                                  </FrecencyProvider>
+                                                                </>
                                                               </DialogProvider>
                                                             </PromptStashProvider>
                                                           </LocalProvider>

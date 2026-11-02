@@ -161,6 +161,13 @@ impl Tor {
         Ok(())
     }
 
+    pub fn disable(&self) -> io::Result<()> {
+        if !control("SETCONF DisableNetwork=1\r\n")?.is_empty() {
+            return Err(io::Error::other("unexpected_tor_reply"));
+        }
+        Ok(())
+    }
+
     pub fn bootstrapped(&self) -> io::Result<bool> {
         Ok(self.progress()? == 100)
     }

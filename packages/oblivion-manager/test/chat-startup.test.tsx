@@ -66,7 +66,7 @@ test("cancelling an in-flight startup waits for the controller then revokes it",
     connectChat: () => { throw new Error("A cancelled opening must not attach chat") },
   }} />, { width: 80, height: 24, kittyKeyboard: true })
   try {
-    await app.renderOnce(); await app.mockInput.pressKey("F6")
+    await app.renderOnce(); await app.mockInput.pressKey("F8")
     await app.mockInput.pressEnter(); await app.mockInput.pressEnter()
     await accepted.promise
     await app.mockInput.pressEscape(); await app.renderOnce()

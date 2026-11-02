@@ -7,7 +7,7 @@ import type { Runtime } from "./app"
 // starts a VM, writes preferences or sends a provider request.
 export function preview(exit: () => void): Runtime {
   let state: Status = {
-    session_titles: {}, debug_available: false,
+    session_titles: {}, session_sizes: {}, pending_growth: [], debug_available: false,
     general_present: true, general_incomplete: false, general_open: true, general_mounted: true,
     general_readonly: false, session_open: false, session_mode: null, active_session: null,
     network_status: { label: "NOT STARTED", host_link: "CONNECTED", age_ms: 0, direct_blocked: false },
@@ -87,6 +87,22 @@ export function preview(exit: () => void): Runtime {
       if (input.operation === "chat-ready") { state = { ...state, session_mode: "chat" }; return "" }
       if (input.operation === "chat-recover" || input.operation === "cancel-chat") { state = { ...state, session_mode: "documents" }; return "" }
       if (input.operation === "close") { state = { ...state, session_open: false, session_mode: null, active_session: null, api_keys: state.api_keys ? { ...state.api_keys, selected: null } : null, network_status: { label: "NOT STARTED", host_link: "CONNECTED", age_ms: 0, direct_blocked: false } }; return "" }
+      if (input.operation === "session-storage") {
+        const value = z.discriminatedUnion("action", [
+          z.object({ action: z.literal("create"), mib: z.number(), password: z.string() }),
+          z.object({ action: z.literal("grow"), id: z.string(), mib: z.number(), password: z.string() }),
+          z.object({ action: z.literal("discard"), id: z.string() }),
+          z.object({ action: z.literal("usage") }),
+        ]).parse(JSON.parse(new TextDecoder().decode(input.payload)))
+        if (value.action === "usage") {
+          const capacity = (state.session_sizes[state.active_session ?? ""] ?? state.session_bytes) - 16 * 1048576
+          return JSON.stringify({ result: "storage", usage: { capacity, used: 32 * 1048576, available: capacity - 32 * 1048576 } })
+        }
+        if (value.action === "discard") { state = { ...state, pending_growth: state.pending_growth.filter((id) => id !== value.id) }; return "" }
+        const id = value.action === "create" ? crypto.randomUUID().replaceAll("-", "") : value.id
+        state = { ...state, sessions: value.action === "create" ? [...state.sessions, id] : state.sessions, session_sizes: { ...state.session_sizes, [id]: value.mib * 1048576 } }
+        return value.action === "create" ? id : ""
+      }
       if (input.operation === "create") { const id = crypto.randomUUID().replaceAll("-", ""); state = { ...state, sessions: [...state.sessions, id] }; return id }
       if (input.operation === "open-documents-ephemeral") { state = { ...state, session_open: true, session_mode: "documents", active_session: "ephemeral", network_status: { label: "OFFLINE · NO NETWORK DEVICE", host_link: "CONNECTED", age_ms: 0, direct_blocked: true } }; return "" }
       if (input.operation === "api-keys") {
@@ -105,8 +121,14 @@ export function preview(exit: () => void): Runtime {
       if (input.operation === "lock") { state = { ...state, general_open: false, general_mounted: false, sessions: [], egress: { saved: state.egress!.saved, selected: { mode: "tor" }, temporary: false }, network_policy: { enabled: false, temporary: false, policy: { version: 1, rules: [] } } }; return "" }
       if (input.operation === "unlock" || input.operation === "unlock-ephemeral") { state = { ...state, general_open: true, general_mounted: true, general_readonly: input.operation === "unlock-ephemeral", sessions: ["a".repeat(32)], egress: { saved: state.egress!.saved, selected: state.egress!.saved, temporary: false }, network_policy: savedPolicy }; return "" }
       if (input.operation === "settings") {
-        const inputValue = z.object({ action: z.enum(["apply", "save"]), preferences }).parse(JSON.parse(new TextDecoder().decode(input.payload)))
-        state = { ...state, settings: { current: inputValue.preferences, saved: inputValue.action === "save" ? inputValue.preferences : state.settings?.saved ?? null } }
+        const value = z.discriminatedUnion("action", [
+          z.object({ action: z.enum(["apply", "save"]), preferences }),
+          z.object({ action: z.literal("access"), mode: z.enum(["strict", "open", "offline"]), save: z.boolean() }),
+        ]).parse(JSON.parse(new TextDecoder().decode(input.payload)))
+        const current = value.action === "access" ? { ...state.settings!.current, web_access: value.mode } : value.preferences
+        const save = value.action === "access" ? value.save : value.action === "save"
+        if (save && (!state.general_mounted || state.general_readonly)) throw new ControlError("general_not_writable")
+        state = { ...state, settings: { current, saved: save ? current : state.settings?.saved ?? null } }
         return ""
       }
       throw new ControlError("preview_only")

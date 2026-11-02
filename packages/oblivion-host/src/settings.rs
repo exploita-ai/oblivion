@@ -9,6 +9,12 @@ pub struct Preferences {
     #[serde(default)]
     pub variant: String,
     pub timezone: String,
+    #[serde(default = "default_web_access")]
+    pub web_access: String,
+    #[serde(default = "default_session_idle_minutes")]
+    pub session_idle_minutes: u16,
+    #[serde(default = "default_host_idle_minutes")]
+    pub host_idle_minutes: u16,
 }
 
 impl Default for Preferences {
@@ -19,6 +25,9 @@ impl Default for Preferences {
             keyboard: "us".into(),
             variant: String::new(),
             timezone: "UTC".into(),
+            web_access: "open".into(),
+            session_idle_minutes: default_session_idle_minutes(),
+            host_idle_minutes: default_host_idle_minutes(),
         }
     }
 }
@@ -53,8 +62,29 @@ impl Preferences {
         {
             return Err("invalid_timezone");
         }
+        if ![0, 5, 10, 15, 30, 60, 120].contains(&self.session_idle_minutes)
+            || ![0, 10, 15, 30, 60, 120, 240].contains(&self.host_idle_minutes)
+            || (self.session_idle_minutes > 0
+                && self.host_idle_minutes > 0
+                && self.host_idle_minutes < self.session_idle_minutes)
+        {
+            return Err("invalid_idle_lock");
+        }
+        oblivion_transport::policy::Access::parse(&self.web_access)?;
         Ok(())
     }
+}
+
+fn default_web_access() -> String {
+    "strict".into()
+}
+
+fn default_session_idle_minutes() -> u16 {
+    15
+}
+
+fn default_host_idle_minutes() -> u16 {
+    30
 }
 
 #[derive(Deserialize, Serialize)]
@@ -98,8 +128,16 @@ impl Catalog {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Command {
-    Apply { preferences: Preferences },
-    Save { preferences: Preferences },
+    Access {
+        mode: oblivion_transport::policy::Access,
+        save: bool,
+    },
+    Apply {
+        preferences: Preferences,
+    },
+    Save {
+        preferences: Preferences,
+    },
 }
 
 #[derive(Deserialize, Serialize)]

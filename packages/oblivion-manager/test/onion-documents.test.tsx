@@ -18,6 +18,7 @@ test.each([false, true])("sealed Tor intake reuses document review and the corre
       close: () => operations.push("disconnect"),
     }
   }} request={async (request) => {
+    if (request.operation === "session-storage") return JSON.stringify({ result: "storage", usage: { capacity: 512 * 1024 ** 2, used: 32 * 1024 ** 2, available: 480 * 1024 ** 2 } })
     if (request.operation === "browse") return JSON.stringify({ ...page, entries: [{ name: "workspace", directory: true, bytes: 0 }] })
     expect(request.operation).toBe("onion")
     const command = JSON.parse(new TextDecoder().decode(request.payload)) as { action: string }

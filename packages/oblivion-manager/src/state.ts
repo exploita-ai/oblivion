@@ -13,6 +13,9 @@ export const preferences = z.object({
   keyboard: z.string(),
   variant: z.string().default(""),
   timezone: z.string(),
+  web_access: z.enum(["strict", "open", "offline"]).optional(),
+  session_idle_minutes: z.number().int().nonnegative().optional(),
+  host_idle_minutes: z.number().int().nonnegative().optional(),
 })
 
 export const status = z.object({
@@ -43,6 +46,8 @@ export const status = z.object({
   incomplete_sessions: z.array(identifier),
   available_bytes: z.number().nullable(),
   session_bytes: z.number(),
+  session_sizes: z.record(z.string(), z.number().int().positive()).default({}),
+  pending_growth: z.array(identifier).default([]),
   vm_state: z.string().nullable(),
   laboratory_emulation: z.boolean(),
   recovery_required: z.boolean(),
@@ -95,5 +100,5 @@ export function capacity(bytes: number) {
 }
 
 export function defaults(): Preferences {
-  return { version: 1, completed: false, keyboard: "us", variant: "", timezone: "UTC" }
+  return { version: 1, completed: false, keyboard: "us", variant: "", timezone: "UTC", web_access: "open", session_idle_minutes: 15, host_idle_minutes: 30 }
 }

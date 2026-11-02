@@ -12,6 +12,8 @@ import { Diagnostics } from "./diagnostics"
 import { OnionReceive } from "./onion-receive"
 import { OnionShare } from "./onion-share"
 import { onionCopySocket, onionStatus } from "./onion"
+import { capacity } from "./state"
+import { importSpace, sizeField, storageUsage, suggestedSize } from "./session-storage"
 import { FilePicker } from "./vendor/termcn/file-picker"
 import { connectTransfer, devicesSchema, pageSchema, startedSchema, type Offer, type Page, type Recovery, type Transfer } from "./transfer"
 
@@ -20,6 +22,9 @@ export function Documents(props: {
   connect?: (id: string) => Promise<Transfer>
   session: string
   chat: boolean
+  capacity?: number
+  available?: number
+  grow?: (mib: number, password: string) => Promise<void>
   focused?: boolean
   focusSidebar?: () => void
   activate?: () => void
@@ -43,6 +48,8 @@ export function Documents(props: {
   const [busy, setBusy] = createSignal("")
   const [notice, setNotice] = createSignal("")
   const [failed, setFailed] = createSignal(false)
+  const [usage, setUsage] = createSignal<{ capacity: number; used: number; available: number }>()
+  let sourceID: string | undefined
   let transfer: Transfer | undefined
   let job: string | undefined
   let onion = false
@@ -99,6 +106,7 @@ export function Documents(props: {
   async function prepare(exporting: boolean, target: string) {
     const started = startedSchema.parse(JSON.parse(await command(exporting ? { operation: "export", target } : { operation: "import", source: target })))
     job = started.id
+    if (!exporting) sourceID = target
     transfer = await (props.connect ?? connectTransfer)(started.id)
     if (exporting) { await makeOffer(true); return }
     setMode("import"); setSelected([]); setDevices(undefined); await browse(); setFocus("files")
@@ -106,7 +114,7 @@ export function Documents(props: {
   async function receiveImport(id: string) {
     await run("Read received files", async () => {
       job = id; onion = true; setExportView(undefined); setDevice("OnionShare · sealed intake")
-      transfer = await (props.connect ? props.connect(id) : connectTransfer(id, onionCopySocket))
+      transfer = await (props.connect ? props.connect(id) : connectTransfer(id, onionCopySocket, { entries: 1024, bytes: 268435456, budgetMs: 300_000 }))
       setMode("import"); setSelected([]); await browse(); setFocus("files")
     })
   }
@@ -115,6 +123,55 @@ export function Documents(props: {
     const paths = selected().filter((path, index, all) => !all.some((parent, other) => other !== index && path.startsWith(parent + "/")))
     setOffer({ manifest: await transfer.offer(paths), export: exporting })
     setDevices(undefined)
+    if (!exporting) await readUsage()
+  }
+  async function readUsage() {
+    const response = storageUsage.parse(JSON.parse(await props.request({ operation: "session-storage", payload: new TextEncoder().encode('{"action":"usage"}') })))
+    setUsage(response.usage)
+    return response.usage
+  }
+  async function copyApproved() {
+    const current = offer()!
+    setBusy("Copying and verifying · Esc cancels")
+    const receipt = await transfer!.approve(current.manifest, (bytes) => {
+      if (!disposed) setBusy(`Copying ${capacity(bytes)} / ${capacity(current.manifest.bytes)} · Esc cancels`)
+    })
+    await home(); await readUsage().catch(() => setUsage(undefined))
+    setNotice(`Verified ${receipt.entries} entries, ${receipt.bytes.toLocaleString("en-US")} bytes. Transfer complete.`)
+  }
+  async function copyOrGrow() {
+    const current = offer()!
+    if (current.export) { await copyApproved(); return }
+    const free = (await readUsage()).available
+    const required = importSpace(current.manifest.bytes, current.manifest.entries.length)
+    if (required <= free) { await copyApproved(); return }
+    if (!props.grow || onion || !sourceID) {
+      setNotice("Not enough session storage. Import fewer files, or close this session and increase its storage from Sessions.")
+      return
+    }
+    const source = sourceID
+    const paths = selected()
+    setForm({ title: "Increase storage and import", description: `${capacity(free)} free; this import needs ${capacity(required)} including working space. Chat and terminal jobs will stop. The encrypted volume is verified before replacing the original, then the same selection is checked again and imported.`,
+      fields: [sizeField(suggestedSize(props.capacity ?? 0, required - free), props.available ?? 0, props.capacity ?? 0), { id: "password", label: "Session password", secret: true }],
+      submit: "Increase storage and import", run: async (values) => {
+        await cleanup()
+        setBusy("Increasing encrypted session storage")
+        await props.grow!(Number(values.mib), values.password)
+        setBusy("Rechecking the selected documents")
+        await prepare(false, source)
+        setSelected(paths)
+        await makeOffer(false)
+        if (offer()!.manifest.sha256 !== current.manifest.sha256) {
+          setNotice("The source changed during growth. Review the new selection before importing.")
+          return
+        }
+        if (importSpace(offer()!.manifest.bytes, offer()!.manifest.entries.length) > (await readUsage()).available) {
+          setNotice("The selected capacity is still too small. Increase it further or select fewer documents.")
+          return
+        }
+        await copyApproved()
+      },
+    })
   }
   async function chooseDevice(exporting: boolean) {
     if (exporting && !selected().length) { setNotice("Select one or more files or folders with Space."); return }
@@ -169,7 +226,7 @@ export function Documents(props: {
     if (offer() && key.name === "escape") { key.preventDefault(); void run("Cancel transfer", home); return }
     if (key.name === "escape" && focus() === "actions") { key.preventDefault(); setFocus("files") }
   })
-  onMount(() => { void run("Read session documents", () => browse()) })
+  onMount(() => { void run("Read session documents", async () => { await browse(); await readUsage().catch(() => undefined) }) })
   onCleanup(() => { disposed = true; props.onNavigationLock?.(false); transfer?.close(); if (job) void cleanup().catch(() => undefined) })
 
   return <Show when={!exportView()} fallback={<Switch>
@@ -179,7 +236,7 @@ export function Documents(props: {
     <Match when={exportView() === "share"}><OnionShare request={props.request} connect={props.connect} paths={selected()} back={() => setExportView(undefined)} /></Match>
   </Switch>}><box flexGrow={1} minHeight={0} flexDirection="column">
     <Show when={!form() && !devices() && !recovery()}><PageHeader title={offer() ? "Review transfer" : "Documents"}
-      description={props.chat ? "Chat remains active while you browse." : "Offline documents · no network device"} /></Show>
+      description={`${props.chat ? "Chat remains active while you browse." : "Offline documents · no network device"}${usage() ? ` · ${capacity(usage()!.used)} used / ${capacity(usage()!.available)} free` : ""}`} /></Show>
     <Show when={!form()} fallback={<FormView form={form()!} cancel={() => setForm(undefined)} submit={(values) => { const current = form()!; setForm(undefined); void run(current.title, () => current.run(values)) }} />}>
       <Show when={!devices()} fallback={<Picker title={devices()?.export ? "Export / Destination device" : "Import / Source device"} description={devices()?.choices.length ? "Choose USB or prepared virtual media. Oblivion system storage is excluded." : "No eligible media found. Attach USB or prepared virtual media, then retry. Export requires writable media."} choices={devices()?.choices ?? []} back={() => setDevices(undefined)} choose={(id) => {
         const selected = devices()!
@@ -204,10 +261,7 @@ export function Documents(props: {
             <SelectList theme={palette} height={2} focused={props.focused !== false && focus() === "actions"} disabled={!!busy()} onFocus={() => focusArea("actions")}
               items={[{ title: "Confirm copy" }, { title: "Cancel" }]} onSelect={(index) => {
               if (index === 1) { void run("Cancel transfer", home); return }
-              void run("Copying and verifying · Esc cancels", async () => {
-                const receipt = await transfer!.approve(offer()!.manifest)
-                await home(); setNotice(`Verified ${receipt.entries} entries, ${receipt.bytes.toLocaleString("en-US")} bytes. Transfer complete.`)
-              })
+              void run("Check available storage", copyOrGrow)
             }} />
           </box>}>
             <text height={1} flexShrink={0} fg={theme.text.muted}>{mode() === "import" ? `Source: ${device()} (read-only)` : "Roots: workspace / imports"}</text>

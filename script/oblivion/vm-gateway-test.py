@@ -221,6 +221,7 @@ try:
     target.symlink_to(BUNDLE / "oblivion-api-lab")
     (target.parent / "oblivion-egress").symlink_to(BUNDLE / "oblivion-egress-lab")
     (target.parent / "oblivion-tools").symlink_to(BUNDLE / "oblivion-tools-lab")
+    (target.parent / "oblivion-web").symlink_to(BUNDLE / "oblivion-web-lab")
     for executable in ["gateway-tests", "activation-tests"]:
         result = subprocess.run(["setpriv", "--reuid=1000", "--regid=1000", "--clear-groups",
             "--no-new-privs", "--", str(BUNDLE / executable)],
@@ -237,6 +238,8 @@ try:
     production(True, "oblivion-egress")
     production(False, "oblivion-tools")
     production(True, "oblivion-tools")
+    production(False, "oblivion-web")
+    production(True, "oblivion-web")
     with socket.socket() as proxy:
         proxy.bind(("127.0.0.1", 9050))
         proxy.listen()

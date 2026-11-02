@@ -347,6 +347,7 @@ fn selected_policy_and_private_grant_preserve_scope_without_a_default_allow() {
     let status = network::Status::new(None, None);
     assert!(!status.enabled && !status.temporary && status.policy.rules().is_empty());
     let tools = Tools {
+        access: oblivion_transport::policy::Access::Strict,
         session: Session::new(A).unwrap(),
         policy: policy(json!([
             {"destination":"EXAMPLE.COM.","port":443,"action":"allow","session":A}

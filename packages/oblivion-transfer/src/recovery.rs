@@ -200,7 +200,7 @@ fn validate_receipt(receipt: &Receipt, id: &str) -> io::Result<()> {
     require(
         receipt.id == id
             && receipt.entries > 0
-            && receipt.entries <= 4096
+            && receipt.entries <= crate::MAX_ENTRIES
             && receipt.manifest_sha256.len() == 64
             && receipt
                 .manifest_sha256

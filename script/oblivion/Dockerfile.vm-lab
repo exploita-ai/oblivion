@@ -40,7 +40,12 @@ COPY script/oblivion/journald-forwarding.conf /etc/systemd/journald.conf.d/90-ob
 RUN sh /tmp/setup && rm /tmp/setup
 
 FROM os AS rust-toolchain
-RUN apt-get update && apt-get install -y --no-install-recommends cargo rustc gcc libc6-dev && rm -rf /var/lib/apt/lists/*
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+RUN apt-get update && apt-get install -y --no-install-recommends rustup git gcc g++ libc6-dev cmake make perl libclang-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup toolchain install 1.88.0 --profile minimal --no-self-update \
+    && rustup default 1.88.0 \
+    && rustc --version && cargo --version
 
 FROM rust-toolchain AS clipboard-compiler
 WORKDIR /clipboard
@@ -127,7 +132,7 @@ FROM scratch AS transfer-vm-artifacts
 COPY --from=transfer-pack /out/ /
 
 FROM os AS guest
-RUN apt-get update && apt-get install -y --no-install-recommends python3 tmux procps \
+RUN apt-get update && apt-get install -y --no-install-recommends python3 tmux procps sudo \
     && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 1000 oblivion && useradd --uid 1000 --gid 1000 --no-create-home --home-dir /vault/home --shell /bin/sh oblivion \
     && useradd --uid 1001 --gid 1000 --no-create-home --shell /usr/sbin/nologin oblivion-import
@@ -258,7 +263,30 @@ RUN --mount=type=bind,from=onion-file-system,source=/,target=/file,ro \
 FROM scratch AS onion-file-artifacts
 COPY --from=onion-file-pack /out/ /
 
+# Resolve only when updating the checked-in lock, never when opening a session.
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS session-analysis-lock-builder
+RUN apt-get update && apt-get install -y --no-install-recommends python3-venv ca-certificates \
+    && rm -rf /var/lib/apt/lists/* && python3 -m venv /resolver \
+    && /resolver/bin/pip install --no-cache-dir pip-tools==7.6.2
+COPY script/oblivion/session-analysis.in /requirements.in
+RUN mkdir /out && /resolver/bin/pip-compile --generate-hashes --allow-unsafe --strip-extras \
+    --pip-args='--only-binary=:all: --no-binary=ropper,filebytes,mulpyplexer,arpy' \
+    --output-file=/out/session-analysis.lock /requirements.in
+
+FROM scratch AS session-analysis-lock-artifacts
+COPY --from=session-analysis-lock-builder /out/ /
+
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS session-analysis
+RUN apt-get update && apt-get install -y --no-install-recommends python3-venv ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY script/oblivion/install-session-analysis.py script/oblivion/session-analysis.lock script/oblivion/session-analysis-licenses.json /build/
+RUN python3 -B /build/install-session-analysis.py /build/session-analysis.lock /opt/oblivion-analysis
+RUN printf '[update]\ninterval=never\n' > /etc/pwn.conf
+
 FROM guest AS session-tools
+COPY --from=session-analysis /opt/oblivion-analysis/ /opt/oblivion-analysis/
+COPY --from=session-analysis /etc/pwn.conf /etc/pwn.conf
+COPY --from=session-analysis /usr/local/lib/python3.13/dist-packages/oblivion-analysis.pth /usr/local/lib/python3.13/dist-packages/oblivion-analysis.pth
 COPY script/oblivion/session-packages.txt /usr/lib/oblivion/session-packages.txt
 COPY script/oblivion/session-node.json /usr/lib/oblivion/session-node.json
 COPY --from=session-node /node/ /usr/lib/oblivion/node/
@@ -267,9 +295,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends $(cat /usr/lib/
     && ln -s /usr/lib/oblivion/node/bin/node /usr/local/bin/node \
     && ln -s /usr/lib/oblivion/node/bin/npm /usr/local/bin/npm \
     && ln -s /usr/lib/oblivion/node/bin/npx /usr/local/bin/npx \
+    && ln -s /opt/oblivion-analysis/bin/pwn /usr/local/bin/pwn \
+    && ln -s /opt/oblivion-analysis/bin/ropper /usr/local/bin/ropper \
     && python3 -B /usr/lib/oblivion/guest/session-tools.py --build \
     && ln -s /usr/lib/oblivion/guest/session-tools.py /usr/bin/oblivion-tools \
     && chmod 0755 /usr/lib/oblivion/guest/session-tools.py
+COPY packages/oblivion-host/guest/gdbinit /etc/gdb/gdbinit
+
+# Fast analysis qualification uses the same locked bundle and Debian package list.
+FROM session-analysis AS session-analysis-test
+COPY script/oblivion/session-packages.txt /build/session-packages.txt
+RUN apt-get update && apt-get install -y --no-install-recommends $(cat /build/session-packages.txt) \
+    && rm -rf /var/lib/apt/lists/* && groupadd --gid 1000 oblivion \
+    && useradd --uid 1000 --gid 1000 --no-create-home oblivion
+COPY packages/oblivion-host/guest/gdbinit /etc/gdb/gdbinit
+COPY packages/oblivion-host/guest/session-environment.sh /usr/lib/oblivion/guest/session-environment.sh
+COPY script/oblivion/test-session-tools.py /usr/lib/oblivion/test-session-tools.py
+USER 1000:1000
+ENTRYPOINT ["/usr/bin/python3", "-B", "/usr/lib/oblivion/test-session-tools.py", "SessionToolsTest.test_binary_analysis", "SessionToolsTest.test_python_analysis", "SessionToolsTest.test_debugger_configuration", "SessionToolsTest.test_debuggers"]
 
 FROM session-tools AS session-tools-test
 COPY --from=stream-tls-fixture --chown=1000:1000 /fixture/ /fixture/
@@ -292,6 +335,11 @@ COPY --from=session-tools-test --chown=1000:1000 /fixture/ /fixture/
 COPY --from=session-tools-test /usr/lib/oblivion/test-session-tools.py /usr/lib/oblivion/test-session-tools.py
 USER 1000:1000
 ENTRYPOINT ["/usr/bin/python3", "-B", "/usr/lib/oblivion/test-session-tools.py"]
+
+FROM opencode-guest AS growth-guest
+COPY script/oblivion/vm-growth-guest.py /usr/lib/oblivion/vm-growth-guest.py
+RUN mkdir -p /etc/systemd/system/oblivion-resize.service.d \
+    && printf '[Service]\nExecStart=\nExecStart=/usr/bin/python3 -B /usr/lib/oblivion/vm-growth-guest.py\n' > /etc/systemd/system/oblivion-resize.service.d/lab.conf
 
 # Native chat/database portability probes never enter a production session.
 FROM opencode-guest AS backup-chat-guest
@@ -330,6 +378,7 @@ COPY --from=conversation-pack /out/ /
 # Offline terminal acceptance uses the actual session filesystem and services,
 # without an agent binary, provider key or virtual network interface.
 FROM ${TERMINAL_GUEST} AS terminal-session
+COPY script/oblivion/test-session-admin.py /usr/lib/oblivion/lab/test-session-admin.py
 
 FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS terminal-pack
 RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools e2fsprogs && rm -rf /var/lib/apt/lists/*
@@ -385,6 +434,9 @@ RUN sh /tmp/setup && rm /tmp/setup
 FROM host AS manager-host
 COPY script/oblivion/vm-manager-test.py /usr/libexec/oblivion-vm-test
 RUN touch /usr/lib/oblivion/vm/manager-lab
+
+FROM host AS growth-host
+COPY script/oblivion/vm-growth-test.py /usr/libexec/oblivion-vm-test
 
 FROM manager-host AS import-host
 COPY --from=compiler /build/target/release/oblivion-console /usr/bin/oblivion-console
@@ -450,6 +502,7 @@ RUN --network=none cargo test --locked --offline --lib --features lab-emulation 
     && cp /tmp/target/debug/oblivion-api /gateway-bundle/oblivion-api-lab \
     && cp /tmp/target/debug/oblivion-egress /gateway-bundle/oblivion-egress-lab \
     && cp /tmp/target/debug/oblivion-tools /gateway-bundle/oblivion-tools-lab \
+    && cp /tmp/target/debug/oblivion-web /gateway-bundle/oblivion-web-lab \
     && cp $(find /tmp/target/debug/deps -type f -name 'oblivion_gateway-*' -executable) /gateway-bundle/gateway-tests \
     && cp $(find /tmp/target/debug/deps -type f -name 'activation-*' -executable) /gateway-bundle/activation-tests \
     && cargo build --locked --offline --bins \
@@ -457,6 +510,7 @@ RUN --network=none cargo test --locked --offline --lib --features lab-emulation 
     && cp /tmp/target/debug/oblivion-gateway-control /gateway-bundle/oblivion-gateway-control \
     && cp /tmp/target/debug/oblivion-egress /gateway-bundle/oblivion-egress \
     && cp /tmp/target/debug/oblivion-tools /gateway-bundle/oblivion-tools \
+    && cp /tmp/target/debug/oblivion-web /gateway-bundle/oblivion-web \
     && cp /tmp/target/debug/oblivion-onion-gateway /gateway-bundle/oblivion-onion-gateway \
     && strip /gateway-bundle/oblivion-* /gateway-bundle/*-tests \
     && find Cargo.toml Cargo.lock .cargo src tests examples guest/firewall.nft guest/onion chat-database.py chat-export.py session-backup.py test-chat-database.py test-chat-export.py test-session-backup.py test-host-firewall.py host-firewall.nft ../oblivion-tor-state/Cargo.toml ../oblivion-tor-state/src ../oblivion-transport/Cargo.toml ../oblivion-transport/src -type f -print0 | sort -z | xargs -0 sha256sum > /gateway-bundle/sources.sha256 \
@@ -489,7 +543,13 @@ COPY --from=gateway-compiler /gateway-bundle/oblivion-api /usr/bin/oblivion-api
 COPY --from=gateway-compiler /gateway-bundle/oblivion-gateway-control /usr/bin/oblivion-gateway-control
 COPY --from=gateway-compiler /gateway-bundle/oblivion-egress /usr/bin/oblivion-egress
 COPY --from=gateway-compiler /gateway-bundle/oblivion-tools /usr/bin/oblivion-tools
-RUN sh /gateway-config/install.sh && rm -rf /gateway-config
+COPY --from=gateway-compiler /gateway-bundle/oblivion-web /usr/bin/oblivion-web
+COPY packages/oblivion-tor-state/src/lib.rs /tmp/oblivion-tor-state.rs
+RUN expected="$(sed -n 's/^pub const VERSION: &str = "\([^"]*\)";$/\1/p' /tmp/oblivion-tor-state.rs)" \
+    && actual="$(tor --version | sed -n '1s/^Tor version \([0-9.]*\)\.$/\1/p')" \
+    && test -n "$expected" && test "$actual" = "$expected" \
+    && rm /tmp/oblivion-tor-state.rs \
+    && sh /gateway-config/install.sh && rm -rf /gateway-config
 # BuildKit mounts its own resolver read-only during RUN; COPY replaces the
 # image's file without touching that build-time mount.
 COPY packages/oblivion-gateway/guest/resolv.conf /etc/resolv.conf
@@ -642,7 +702,7 @@ RUN --mount=type=bind,from=transport-network-lab,source=/,target=/lab,ro \
     && cp /fixture/cert.pem /out/fixture-cert.pem \
     && cp /fixture/key.pem /out/fixture-key.pem \
     && cp /fixture/ca.pem /out/fixture-ca.pem \
-    && sha256sum /lab/usr/bin/oblivion-api /lab/usr/bin/oblivion-egress /lab/usr/bin/oblivion-tools /lab/usr/bin/oblivion-gateway-control > /out/binaries.sha256 \
+    && sha256sum /lab/usr/bin/oblivion-api /lab/usr/bin/oblivion-egress /lab/usr/bin/oblivion-tools /lab/usr/bin/oblivion-web /lab/usr/bin/oblivion-gateway-control > /out/binaries.sha256 \
     && cd /sources && find . -type f -print0 | sort -z | xargs -0 sha256sum > /out/sources.sha256 \
     && cp broker.sha256 /out/broker-sources.sha256 \
     && cd /out && sha256sum * > SHA256SUMS
