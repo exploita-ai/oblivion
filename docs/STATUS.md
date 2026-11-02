@@ -12,6 +12,94 @@ hardware, upgrade or independent-review gates documented here.
 
 ## Implemented
 
+- **Global network access and persistent session administration in development.**
+  New profiles default to Open Web; Strict and Offline apply to the entire
+  gateway, including API requests and command-line tools. Explicit deny rules
+  still take precedence. The manager footer shows the selected policy beside
+  Network; F9 opens the global control from Workspace. The chat's separate
+  Web label, `/web` command and Alt+W binding have been removed. Existing
+  connections are interrupted when access or rules change; the session VM and
+  local processes stay running. Offline also disables Tor networking, blocks
+  the gateway's outside interface and stops separate OnionShare workers. It
+  does not disconnect the host's physical network or establish an air gap.
+  Guest sudo is available without a separate password. Installed packages,
+  their package database and system changes use a writable layer on the
+  session volume; the base image stays read-only and logs/temp paths stay in
+  RAM. Root access is confined to the session guest, not the host or gateway.
+  Native ARM64 tests passed four boots across two volumes, confirming package,
+  configuration and document persistence, session separation, temporary-file
+  cleanup and sudo's proxy environment. That test used synthetic ext4 fixtures,
+  not the outer LUKS controller. A separate two-VM gateway test passed 16 checks
+  for live policy changes, stream revocation, rule precedence and constrained
+  egress. Six checks with the real Tor process verified DisableNetwork and
+  firewall transitions without contacting public relays. The 143 manager
+  tests, repeated chat-profile tests, affected Rust/Core suites and repository
+  check pass. A new ARM64 diagnostic ISO was built on 2026-11-02 and booted in
+  UTM to Unlock Oblivion. The existing general partition was migrated without
+  decryption and verified byte-for-byte by SHA-256 before replacing the old
+  virtual disk. Public Tor/provider and an unlocked session on this candidate
+  remain to be checked; boot acceptance does not establish those results.
+
+- **CLI analysis tools in development.** Session images now include binutils,
+  Binwalk, xxd, hexdump, patchelf, GDB, ltrace and strace. A hash-locked Python
+  bundle supplies Pwntools 4.15.0, Ropper 1.13.13 and angr 10.0.5; Debian supplies
+  imghdr compatibility on Python 3.13. No GUI extras are installed. The agent's
+  generated tool instructions and inventory describe these capabilities.
+  Pwntools update checks, automatic debuginfod downloads and GDB history saving
+  are disabled. Versions, artifact hashes and license notices are inventoried.
+  Four native ARM64 tests passed with no network, a read-only system filesystem,
+  uid 1000 and no Linux capabilities, including tracing/debugging child processes.
+  Three amd64 tests passed for binary analysis, Python libraries and debugger
+  configuration under Mac user-mode emulation. Actual amd64 ptrace qualification
+  remains for native CI: the emulator returned inconsistent syscall registers.
+  The native CI suite keeps the tracing test enabled. Repository checks pass.
+  The Python bundle alone occupies about 563 MiB uncompressed on ARM64; this
+  is not a measurement of the final ISO increase. These changes are in the build
+  sources and the 2026-11-02 local ARM64 candidate, not a published release.
+
+- **Unified Workspace in development.** Chat and Terminal now share a guest
+  tmux workspace, with native split/window/focus/zoom shortcuts and a `chat`
+  launcher for independent TUI clients. One authenticated loopback OpenCode
+  server owns execution and the canonical encrypted database. Documents stays
+  a separate host view; switching views preserves panes and processes. The
+  offline workspace starts a shell without a network device or provider key.
+  Manager tests (141), Oblivion chat profile tests (5), real PTY/tmux split and
+  reattachment tests, and the repository check pass. An isolated ARM64 session
+  image also passed two real chat clients on separate conversations, a fresh
+  `chat` pane, pane closure, file sharing, resize/reattachment and `/exit`
+  confirmation hints, without sending provider requests. Interactive UTM
+  acceptance restored an existing conversation, opened a fresh `chat` client
+  beside it, and preserved both views across Documents → Workspace. A human
+  tester confirmed the native Ctrl+B, % split using the physical keyboard;
+  automated modifier delivery through UTM was unsuitable for that check.
+  The updated manager and guest filesystem are included in the 2026-11-02
+  local ARM64 candidate installed in UTM. This is not a published release ISO.
+
+- **Configurable session capacity in development.** New sessions still default
+  to 512 MiB. The manager can reserve a different size and grow a closed session
+  through an encrypted replacement verified in a networkless maintenance VM.
+  Documents shows guest-reported used/free space and checks capacity before
+  import; a local-media import can offer growth and recheck the selection before
+  resuming. Current local-media limits are 16 GiB / 16,384 entries / one hour,
+  with bounded file descriptors and streamed progress. OnionShare retains its
+  separate 256 MiB / 1,024-entry limits. These changes are not in beta 2;
+  historical qualification notes below describe the earlier limits.
+  The ARM64 laboratory passed real LUKS growth from 128 to 512 MiB, password/
+  space/shrink rejection, orderly maintenance cleanup, and reopening the same
+  compiled OpenCode conversation and documents after locking both volumes.
+  A powered-off scan found none of the synthetic plaintext markers. This used
+  HVF outside and TCG for the nested test guest; it is not a KVM qualification
+  or a complete proof against retention. The affected Rust/Bun suites and the
+  repository check also pass, including a 5,000-file copy under a 64-FD limit.
+  The updated ARM64 ISO also passed growing a persistent UTM session from
+  512 MiB to 3 GiB, reopening it, and importing a 500,149,463-byte archive through
+  Documents. Extraction inside the session verified 3,331 files, 407 directories
+  and four symlinks against the source tree digest. An earlier offer ended with
+  `transfer_disconnected`; the isolated guest, a controller replay and the
+  subsequent complete TUI transfer passed without a runtime patch. Its cause
+  remains unconfirmed; this is not evidence that intermittent disconnects are
+  fixed. Real-media interruption and KVM qualification remain open.
+
 - **Host/guest text clipboard in beta 2 images.** UTM uses Debian's SPICE
   broker and a pinned open-source Wayland adapter restricted to UTF-8 text and
   256 KiB payloads. The host announces formats; bytes are requested only on
@@ -38,8 +126,11 @@ hardware, upgrade or independent-review gates documented here.
 - one active session VM and volume at a time
 - offline Documents mode without a network device or provider credential
 - Tor and configurable SOCKS5 gateway modes with no intended direct fallback
+- Privacy WebFetch with coherent browser emulation; current development uses the
+  same host-controlled Open Web / Strict / Offline policy as all other tools
 - multiple provider keys, a global default and a per-opening override
 - multiple chats sharing the documents of one encrypted session
+- encrypted session and host inactivity locks, driven only by human input
 - bounded removable-media import/export with manifests, hashes and recovery paths
 - full-screen host manager and retained OpenCode coding-agent TUI
 
@@ -67,6 +158,25 @@ artifacts instead of storing historical snapshots in this repository.
 
 ## Known limitations
 
+- UTM/Apple Virtualization on the tested M4 Pro/macOS 15.7.3 has suffered
+  guest-kernel crashes with the removable boot-disk profile. Diagnostic runs
+  captured faults in xHCI and DRM with zeroed instruction memory, so a frozen
+  display cannot be treated as only a manager/rendering defect. The replacement
+  profile uses an internal VirtIO boot disk, taking UTM's Linux cached-I/O
+  workaround. Source now permits preparing only that verified live boot disk;
+  physical internal SATA/NVMe devices remain ineligible. Linux component tests
+  and an internal-VirtIO UTM run passed twelve preference changes, three session
+  close/reopen cycles and a full shutdown/boot with two synthetic chat histories,
+  titles, pending input and a document intact. Eight display restarts with
+  concurrent status requests passed after fixing recovery lock contention and
+  systemd activation throttling. Tor reached verified readiness in 15.5 seconds.
+  The rebuilt ARM64 diagnostic ISO also passed fresh setup, close/reopen, a
+  second full power cycle, twelve preference changes and six further display
+  restarts without runtime patches. Its SHA-256 is
+  `b5d78f12b7f6b176e5aeed80dd5f02f0fdcca9b4da9e8dfbaf4690b2a8736a67`.
+  This is bounded testing, not a prolonged model workload; physical-media and
+  long-running session acceptance remain release gates. The exact corruption trigger is not yet
+  established; the workaround is not proof that every freeze is resolved.
 - cloud inference exposes approved context and output to the provider
 - running Oblivion inside another VM requires nested KVM; a booting manager
   does not establish full session support on that host/hypervisor combination
@@ -425,7 +535,7 @@ the reviewed paths; this is not an independent security certification.
 | Data or boundary | Evidence in the current implementation |
 | --- | --- |
 | Chat history | Stable `/vault/state/opencode/oblivion.db`, independent of client build channel. Legacy copy uses SQLite backup, including committed WAL frames; staging stays on the encrypted filesystem and originals are preserved. See [chat-database.py](../packages/oblivion-host/guest/chat-database.py), lines 25–27 and 86–156. |
-| Agent files and temporary data | HOME/config/state/workspace are inside the session volume; cache and temporary data use `/tmp`. Guest `/var` and `/tmp` use tmpfs, journald persistence/forwarding is disabled, swap/sleep units are masked. See [conversation service](../packages/oblivion-host/guest/oblivion-conversation.service) and [guest setup](../script/oblivion/vm-common-setup.sh). |
+| Agent files and temporary data | HOME/config/state/workspace are inside the session volume; cache and temporary data use `/tmp`. In current development the session root uses its encrypted system overlay; `/tmp`, `/var/tmp` and `/var/log` use tmpfs, journald persistence/forwarding is disabled, swap/sleep units are masked. See [conversation service](../packages/oblivion-host/guest/oblivion-conversation.service) and [guest setup](../script/oblivion/vm-common-setup.sh). |
 | Runtime and logging | Controller rejects active swap, requires tmpfs runtime storage and disables core dumps. The Oblivion application profile disables its logger/tracer. See [storage.rs](../packages/oblivion-host/src/storage.rs), lines 1780–1855, and [observability.ts](../packages/util/src/observability.ts), lines 27–30. These checks do not control the outer hypervisor. |
 | Real API keys | Stored under the encrypted general profile, using a mode-0600 pending file, file sync, atomic rename and directory sync. The session receives a revocable capability, not the provider key. See [storage.rs](../packages/oblivion-host/src/storage.rs), lines 1635–1681, and [network.sh](../packages/oblivion-host/guest/network.sh), lines 6–19. |
 | Network | Session has no default route or DNS; the gateway applies transport/tool rules. Broker tests cover TLS rejection, unavailable proxy without direct fallback and stream revocation. See [network.sh](../packages/oblivion-host/guest/network.sh), [gateway firewall](../packages/oblivion-gateway/guest/firewall.nft) and [broker.rs](../packages/oblivion-gateway/src/broker.rs). |

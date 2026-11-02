@@ -60,11 +60,76 @@ artifacts; generated evidence must not be committed as permanent documentation.
 Development images are not release images. They may contain diagnostics,
 temporary access keys or services that must be absent from a public build.
 
+### Persistent session administration
+
+Session-only `sudo` installs into an overlay root backed by the session volume.
+`/usr`, `/etc` and `/var/lib/dpkg` changes persist together. `/tmp`, `/var/tmp`,
+`/var/log` and `/run` remain volatile. The root overlay is assembled in initramfs;
+resize-maintenance boots skip it so ext4 remains unmounted. All other VM roles
+retain their read-only roots. Encrypted session backups include the upper layer.
+
+Qualify this with actual guest services, a local synthetic Debian package,
+clean shutdown/reopen and a second independent volume:
+
+```sh
+docker build -f script/oblivion/Dockerfile.vm-lab --target terminal-artifacts \
+  --output type=local,dest=artifacts/session-admin/image .
+python3 script/oblivion/run-terminal-lab.py --image artifacts/session-admin/image \
+  --output artifacts/session-admin/results --admin
+```
+
+This fixture runs without a NIC and uses plaintext synthetic ext4 backing
+files: it verifies guest package persistence and isolation, not host LUKS or
+physical power-loss guarantees. The production controller supplies an unlocked
+LUKS block instead. A customized upper layer may mask a future base update;
+base upgrades and reset/recovery are separate qualification work.
+
+### Global gateway policy
+
+The private `settings` action `access` updates the host-owned Open/Strict/Offline
+policy without applying keyboard settings or restarting the session. The chat
+has no mode setting. Legacy profiles without `web_access` remain Strict; new
+profiles default Open. Existing user choices are preserved. Changing a policy
+or rules revokes all in-flight grant streams. Offline also stops OnionShare.
+
+For real supervisor/firewall/SOCKS revocation with a loopback TLS fixture:
+
+```sh
+docker build -f script/oblivion/Dockerfile.vm-lab --target transport-network-artifacts \
+  --output type=local,dest=artifacts/network-access/image .
+python3 script/oblivion/run-transport-lab.py --image artifacts/network-access/image \
+  --output artifacts/network-access/results --tools --fault policy
+```
+
+The fixture proves live access-policy changes and denied direct/DNS/UDP traffic
+with two disposable Debian VMs. It does not make real provider requests or
+qualify a public Tor circuit. No diagnostic trust root belongs in a release ISO.
+`run-access-tor-lab.py` accepts the same image/output arguments on Mac and tests
+actual Tor `DisableNetwork` transitions plus firewall rule ordering with a
+restricted QEMU uplink. It deliberately does not bootstrap a public circuit.
+
 ### Session tools
 
 `script/oblivion/session-packages.txt` declares the session's Debian tools:
 shell/process utilities, Git/ripgrep, curl, jq/SQLite, file/tree/less/nano,
 ZIP/XZ/bzip2 and Poppler PDF tools. Python includes `venv` and its pip bootstrap.
+The default analysis set adds binutils (`strings`, `nm`, `objdump`, `readelf`),
+Binwalk, `xxd`, `hexdump` and `patchelf`. Debian's `python3-standard-imghdr`
+provides `import imghdr` on Python 3.13; it is a module, not a shell command.
+Pwntools (`import pwn`), Ropper and angr are built into an immutable Python
+bundle under `/opt/oblivion-analysis`, exposed to ordinary `python3`. `pwn` and
+`ropper` are also on PATH. Project virtualenvs remain isolated by default; use
+`python3 -m venv --system-site-packages .venv` to reuse the bundled modules.
+`session-analysis.in` pins the requested versions and `session-analysis.lock`
+pins all transitive dependencies and download hashes. Regenerate the lock with
+the `session-analysis-lock-artifacts` Docker target, then test both architectures.
+Build reports and packaged licenses stay with the bundle and its inventory is
+included in `oblivion-tools --json`. Sessions never install this set at startup.
+`gdb`, `ltrace` and `strace` are included for debugging session-owned processes,
+without extra capabilities. GDB symbol downloads and saved history are disabled;
+debuginfod URLs are empty and any explicitly enabled cache remains in RAM.
+All additions are CLI tools or Python libraries; GUI recommendations such as
+Binwalk's pyqtgraph are excluded.
 Node LTS and its bundled npm come from the upstream archives pinned by version
 and architecture-specific SHA-256 in `script/oblivion/session-node.json`.
 The build verifies the hash before extraction and keeps upstream licenses.
@@ -78,17 +143,28 @@ gateway or transfer images. Compilers, language-specific toolchains, browsers
 and office suites are outside this base set.
 
 Both terminal and agent disable shell/REPL/pager/SQLite histories and automatic
-npm audit/update checks; npm disk logs are disabled. Package caches use RAM;
+npm audit/update checks; npm disk logs are disabled. Python/npm caches use RAM;
 project dependencies and the npm user prefix stay inside the session volume.
 Python dependencies belong in a project virtualenv. HTTP(S) tools use the
-opening-scoped proxy and gateway Rules; Node enables native environment-proxy
+opening-scoped proxy and global Open Web / Strict / Offline policy; Node enables native environment-proxy
 support. Other networking libraries still need their own proxy support.
+Pwntools automatic update checks are disabled through `/etc/pwn.conf`, and its
+cache uses the RAM-backed XDG cache. Ropper's default `~/.ropper` cache is inside
+the encrypted session home. Binwalk signature scans work without downloading
+extractors; its optional extraction helpers are not all included.
 
 The `session-tools-test` Docker target exercises actual commands and local TLS/
 proxy fixtures with no external network, an unprivileged user and a read-only
 root. `session-tools-chat-test` additionally checks the real compiled client's
-launcher/configuration. CI runs this integration on ARM64 and amd64. For booted
-offline acceptance, build `terminal-artifacts` with
+launcher/configuration. CI runs this integration on ARM64 and amd64. For focused
+analysis checks, `session-analysis-test` exercises the same packages and
+locked bundle with synthetic files, ELF parsing/patching, a small gadget fixture
+and symbolic constraint solving. Run with no network, a read-only root and the
+same RAM-backed `/vault`, `/run` and `/tmp` mounts as `session-tools-test`.
+The debugger tracing test requires the native kernel ABI: amd64 user-mode
+emulation on an ARM Mac can run the binaries but return incorrect ptrace
+registers. Keep this test enabled on the native ARM64 and amd64 CI runners.
+For booted offline acceptance, build `terminal-artifacts` with
 `--build-arg TERMINAL_GUEST=opencode-guest`, then run
 `script/oblivion/run-terminal-lab.py --tools --exports` with its image/output
 arguments. These disposable laboratories do not modify a provisioned VM.
@@ -324,13 +400,14 @@ In UTM:
 2. Assign 8 GiB RAM and four CPU cores for sessions and the optional transfer
    VMs. The earlier chat-only candidate was tested with 4 GiB and two cores;
    that result does not qualify the expanded transfer profile.
-3. Use UEFI boot. Add a **removable** drive; after saving the VM, select
-   `oblivion-arm64.raw` with its drive/image selector. Keep it writable.
-   This is a virtual USB medium; no physical USB stick is required.
-4. Use that removable image as the boot medium. An ordinary internal virtio
-   disk can boot the welcome screen but the current persistence implementation
-   refuses it with `usb_boot_device_required`. Avoid importing the raw image as
-   an internal disk. A blank internal disk created by the wizard is unnecessary.
+3. Use UEFI boot. Import `oblivion-arm64.raw` as an **internal VirtIO drive**,
+   writable, with **Use NVMe Interface** disabled. Do not attach the boot image
+   as a removable USB drive. Remove the wizard's unused blank disk.
+4. Use that disk as the boot medium. Persistence uses only the free tail of the
+   disk backing the mounted Oblivion live image, after checking its exact ISO
+   and GPT layout. Other attached disks are never setup targets. This VirtIO
+   persistence support requires an image built with the fix below; beta.2 and
+   earlier images still reject internal boot disks.
 5. Use shared/NAT networking. Enable **Clipboard sharing** for host/guest text
    copy/paste. Keep shared directories, Rosetta and unnecessary device
    passthrough disabled. Clipboard sharing is optional and may be disabled for
@@ -349,12 +426,37 @@ states that removable raw images are supported. Apple independently documents
 [M3 as the minimum chip](https://developer.apple.com/documentation/virtualization/vzgenericplatformconfiguration/isnestedvirtualizationsupported)
 for nested virtualization.
 
-The current ARM candidate was exercised with UTM 5.0.8 on an Apple M4 Pro and
+**Why an internal VirtIO disk:** UTM has a
+[cached-I/O workaround for Linux disk/memory corruption](https://github.com/utmapp/UTM/pull/5919).
+In UTM 5.0.8 on macOS 15, its dynamic removable-drive path omits that workaround.
+An internal VirtIO disk uses it. A frozen terminal can therefore be a guest
+kernel failure, not a TUI failure. Do not use removable virtual USB as the
+persistent boot disk on this configuration. Physical USB boot is unaffected
+by this Apple virtual-disk issue.
+
+Earlier ARM candidates were exercised with UTM 5.0.8 on an Apple M4 Pro and
 macOS 15.7.3. The test verified an `aarch64` live boot, KVM API version 12, an
 unprivileged nested `aarch64` guest boot, RAM-backed runtime filesystems, no
 swap, LUKS2 creation and wrong-password rejection, and a production Documents
-VM with KVM enabled and no network device. This validates that configuration;
-it is not a claim about every Apple Silicon model or UTM release.
+VM with KVM enabled and no network device. Subsequent kernel crashes invalidate
+any stability qualification of the removable-USB boot profile. Those functional
+results do not establish long-running stability. On 2026-10-30, the internal
+VirtIO replacement passed encrypted setup, wrong-password rejection, three
+session close/reopen cycles and a full power cycle retaining two synthetic
+OpenCode histories, titles, pending input and a document. Twelve keyboard/time
+zone changes and eight display restarts with concurrent status polls also
+passed. The latter required fixes for recovery lock contention and systemd's
+repeated-activation limit. Tor reached 100% bootstrap with verified direct-access
+blocking in 15.5 seconds, then stopped on lock. These are bounded regression
+checks, not a prolonged real-provider workload or a claim about every Apple
+Silicon model or UTM release. The rebuilt ARM64 diagnostic ISO was then booted
+on a fresh internal VirtIO disk, without runtime patches: setup, twelve
+preference changes, close/reopen, a full power cycle and six additional display
+restarts passed. Two histories, pending input and the document remained intact;
+a powered-off scan of the 16 GiB disk found none of their synthetic text markers.
+This marker scan is not a comprehensive proof of zero retention. The old test
+disk was preserved separately. These tests do not replace the complete
+`vm-services-test.py` fixture suite or prolonged provider and physical-media tests.
 
 ### QEMU/KVM on Linux
 
@@ -522,14 +624,27 @@ The scripts under `script/oblivion` build minimal Debian roles and exercise
 storage, transfers, gateway policy, boot and chat startup. CI runs the supported
 QEMU laboratories on both architectures where practical.
 
-The session terminal uses the existing filtered viewport and guest-only tmux.
-Inside a session, F6 selects Chat, F7 Documents and F8 Terminal; Ctrl+Q asks to
-close and lock all session processes. In Terminal, Ctrl+B followed by C creates
-a window, W lists windows, P opens the user process view and X closes a pane
-with confirmation. Ctrl+C interrupts the foreground command. Terminal works
-in the offline session VM without a provider key; starting Chat from offline
-mode restarts that VM and stops its terminals/jobs. File changes stay on the
-same session volume.
+The Workspace uses the filtered viewport and guest-only tmux. F6 selects
+Workspace and F7 Documents; Ctrl+Q asks to lock all session processes. Native
+tmux shortcuts are unchanged: Ctrl+B then % / " splits, O changes panes, Z
+zooms, C creates a window, P/N selects the previous/next window, and ? lists
+bindings. A new pane starts a shell; `chat` opens an independent OpenCode TUI.
+The first pane uses `chat --continue` to restore the latest conversation.
+
+`oblivion-chat-server.service` owns the one authenticated loopback server and
+canonical database. Pane-local UI state stays under encrypted XDG state. The
+server password and tmux socket/FIFO stay in /run; output is not journaled.
+Fixed lifecycle hints bypass tmux through that FIFO, without enabling terminal
+passthrough or clipboard escapes. The host still confirms session closure.
+Shells work without a provider in the networkless documents VM; F8 starts chat
+with an explicit warning that this restarts the offline VM and stops its jobs.
+Moving between Workspace and Documents never restarts tmux or its processes.
+
+`test-workspace.py` runs as uid 1000 in an isolated installed session image with
+synthetic /vault data and RAM-only credentials, without external networking. It
+checks two real chat clients sharing one server, distinct conversation views,
+closing one pane, file sharing, reattachment and resizing. Never run this
+fixture against a user's session volume.
 
 Run the real PTY/tmux regression with `python3 script/oblivion/test-session-terminal.py`
 (requires tmux). For actual offline guest/service acceptance on an ARM Mac:
@@ -572,6 +687,22 @@ show their fixed field allowlist before creation under `workspace/diagnostics`.
 Neither operation sends content to a provider or copies it to external media
 automatically. JSON transcripts preserve settled message IDs and data; they do
 not include queued input or in-progress responses and are not session backups.
+
+Session capacity is chosen during creation (512 MiB by default). Use
+`Sessions / Increase storage` for a closed persistent session. The source
+manager shows actual volume sizes and queries used/free space inside the
+active guest. An oversized local-media import offers growth and retries the
+same selection only after verifying its manifest again. Growth reserves a
+complete replacement volume, plus 64 MiB, while keeping the original intact.
+Temporary growth copies appear as cleanup actions in Sessions after a failure.
+
+For the real LUKS growth regression, build the `artifacts` Docker target with
+`HOST=growth-host` and `GUEST=growth-guest`, supplying the compiled client and
+matching build-evidence inputs. Run `run-vm-lab.py --image <output>
+--output <fresh-directory>`. It uses only disposable synthetic data, checks
+failed growth admissions, and reopens the same chats/documents after growing
+and locking both encryption layers. This laboratory is separate from the
+user's UTM instance and is not a substitute for its acceptance test.
 
 To exercise the deployed maintenance services as well as Terminal, use the
 same terminal-image command above with `--build-arg TERMINAL_GUEST=opencode-guest`

@@ -41,6 +41,18 @@ Only one session volume and one session VM may be open at a time. Locking a
 session stops its VM, revokes runtime credentials, closes its encrypted volume
 and clears the per-opening API-key override.
 
+The manager also enforces two encrypted inactivity preferences. Session
+auto-lock performs the normal session close at its threshold; host auto-lock
+performs the normal full lock at its later threshold. Both timers share the
+last verified human keyboard, paste or mouse interaction. Model output and
+background guest activity never extend an unlocked period.
+
+At the host level, the manager exposes only three primary contexts: Sessions,
+Settings, and System. Settings owns the network connection, protected route,
+WebFetch admission mode, network rules, provider credentials, regional
+preferences, and inactivity locks. Before the general vault is unlocked, only
+the temporary keyboard/time-zone path is exposed.
+
 Ephemeral mode does not unlock or intentionally modify the general vault. Its
 state lives in RAM and is discarded on shutdown. Runtime directories and
 temporary files in both modes are placed on tmpfs where possible; this reduces
@@ -81,6 +93,53 @@ ARP/Wi-Fi authentication establish the local connection; the gateway's
 connection to Tor relays or the chosen proxy is its only public TCP path.
 These restrictions apply inside Oblivion; a surrounding Mac/Windows/Linux
 host is outside its network policy.
+
+Privacy WebFetch is a separate gateway role, not an expansion of the shell
+proxy. It accepts authenticated, bounded public HTTPS GET requests without
+caller-supplied headers, cookies or bodies and follows the selected Tor or
+SOCKS5 route with remote name resolution. A browser profile is selected once
+per session opening so its HTTP, TLS and user-agent characteristics remain
+coherent within a gateway grant. Policy changes revoke and recreate grants,
+including that profile. The host owns one access policy for all chats, WebFetch,
+shells and package managers: Open Web permits public ports 80/443 unless an
+explicit rule overrides it; Strict requires allow rules while retaining the
+fixed provider route; Offline denies external traffic, including the provider.
+Matching deny rules also block the provider. Missing legacy policy fields retain
+Strict; newly created profiles default to Open Web. The chat has no local mode
+switch or `/web` command. The host footer shows the policy next to `Network`;
+Settings / Network access and host F9 change it for the entire session.
+
+Changes stop existing API, HTTP and CONNECT streams before recreating the grant
+with the same local session capability. They do not restart the session VM.
+An unconfirmed update destroys the gateway. Offline also disables Tor networking,
+applies an outside-interface drop before established-connection rules, stops
+OnionShare workers and refuses new OnionShare/start-chat operations. It leaves
+local processes running. This is an application egress policy, not an air gap:
+the host can still maintain its Wi-Fi/Ethernet connection and DHCP.
+
+### Session administration and installed software
+
+Only the session VM has passwordless `sudo`. Its immutable squashfs base is the
+lower layer of an overlay root; upper/work directories live under
+`/vault/.oblivion-system` on that session's already-unlocked encrypted block
+device. Initramfs mounts this before starting services. Package payloads,
+`/etc`, `/var/lib/dpkg` and other system changes persist together in that volume.
+The host never mounts it. Root permissions inside one guest do not grant control
+of the gateway, host, other session volumes or the real provider key.
+
+`/tmp`, `/var/tmp`, `/var/log` and `/run` remain RAM-backed; swap and persistent
+journaling remain disabled. Sudo does not log command output, and apt/dpkg logs
+are disabled by the shipped configuration. Python/npm caches use the configured
+RAM paths; apt archives and arbitrary installed software can write to the
+session's encrypted system layer. Ephemeral sessions discard that layer with
+their RAM-backed volume. These defaults do not prevent guest root from changing
+guest configuration or a newly installed application from recording data.
+
+System changes consume the same capacity as documents and conversations. They
+can also break that guest. The encrypted session backup includes the system
+layer; it is not merely a document export. A system layer can mask files in a
+newer base image, so upgrades of customized sessions require separate
+qualification. There is no automatic merge or reset-system UI in this change.
 
 The UI distinguishes three facts:
 
@@ -321,8 +380,14 @@ audit convenience.
 
 ### Operational feature boundaries
 
-Chat, Documents and Terminal are views of the same protected
-session. A terminal runs as an unprivileged process inside that session VM,
+Workspace and Documents are views of the same protected session. Workspace
+uses tmux's native panes and windows for independent chat clients and shells.
+One session-local OpenCode service owns model execution and the canonical chat
+database; closing a client pane does not stop that service or delete chats.
+The server listens only on guest loopback with a RAM-only authentication
+secret. Each pane has separate encrypted client state. Fixed lifecycle hints
+use a bounded RAM FIFO, rather than enabling terminal escape passthrough.
+Pane layouts and processes are not restored across closing/locking the VM. A terminal runs as an unprivileged process inside that session VM,
 independent of a provider key. Offline terminal access preserves the offline
 guest's absent network device and agent. Moving an offline guest to chat still
 requires an orderly VM transition: report and stop its running processes
@@ -336,6 +401,25 @@ with a storage quota in RAM or encrypted storage, outside the active workspace.
 The manager receives metadata; an approved copy publishes files into session
 `imports`. Untrusted files are not opened or extracted on arrival. Uploading
 or sharing session files requires an explicit selection and destination.
+
+Session storage starts at 512 MiB by default; creation can reserve a different
+capacity. Increasing a closed session creates a fully allocated ciphertext
+copy inside the general vault. A networkless maintenance VM, with the vault
+unmounted and chat/terminal services disabled, checks and grows ext4, then
+checks it again. The controller closes that VM and mapping before atomically
+exchanging the verified copy with the original. A leftover `.growing` file
+never becomes an admitted session; explicit cleanup preserves the canonical
+volume. Growth needs free space for the entire replacement plus 64 MiB and
+does not support shrinking. No session filesystem is mounted on the host.
+
+Local-media document transfers allow up to 16 GiB and 16,384 entries within
+one hour, with an 8 MiB manifest ceiling. Source files are reopened from a
+pinned directory with no symlink traversal; identity, size and content hashes
+must still match the offer. Payloads stream through bounded buffers, with
+metadata-only progress and a final verified receipt. Documents checks available
+space before importing and can close, grow and reopen the same session offline,
+then require the identical manifest before continuing an approved import.
+OnionShare retains its separate, smaller intake limits.
 
 Encrypted session backups are controller-owned exports of a closed LUKS2
 container with compatible encrypted session metadata. They are separate from

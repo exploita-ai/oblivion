@@ -99,17 +99,48 @@ its chats and terminals share that session's documents.
 
 | Control                  | Action                                                                   |
 | ------------------------ | ------------------------------------------------------------------------ |
-| `F6`                     | Chat                                                                     |
+| `F6`                     | Workspace: chats and shells in tmux                                                                     |
 | `F7`                     | Documents, imports, exports and sharing                                  |
-| `F8`                     | Terminal and session processes                                           |
+| `F8`                     | Start chat (offline workspace only)                                           |
 | `Ctrl+Q`                 | Confirm session closure and locking; lock Oblivion from the host manager |
 | `/new` · `/resume`       | Create or resume a chat inside the current protected session             |
 | `/exit` · `/quit` · `/q` | Request closure of the protected session                                 |
 
-Documents and Terminal work offline without a provider key. Switching views
+In development builds, Chat and Terminal are unified in **Workspace**. It opens
+with the latest chat; split panes and manage windows with native tmux shortcuts:
+`Ctrl+B` then `%` for side-by-side panes, `"` for stacked panes, `O` to change
+pane, `Z` to zoom, and `?` for help. New panes start a shell; run `chat` to open
+another chat client, then `/new` or `/resume`. All clients use one session-local
+server. Closing a pane does not delete its conversations. Pane layouts and
+shell processes last until the protected session closes; chat history and
+workspace files remain encrypted in persistent sessions.
+
+Development session images also include CLI binary-analysis tools: `strings`,
+`binwalk`, `xxd`, `hexdump`, `nm`, `objdump`, `readelf`, `patchelf`, `gdb`,
+`ltrace` and `strace`, plus Pwntools, Ropper, angr and Python's `imghdr`
+compatibility module. No analysis GUI is installed. Run `oblivion-tools` for
+the inventory available in your image; this set is not in the published beta 2.
+
+The current source also adds a **global gateway mode** (Open Web by default,
+Strict or Offline) and **persistent sudo installations** inside each encrypted
+session. The mode appears next to `Network [ ]` and is managed in Settings or
+with F9 in Workspace. It applies to all chats and tools; there is no per-chat
+`/web` control. These additions are not in the published beta 2 ISO.
+
+Documents and workspace shells work offline without a provider key. Switching views
 keeps the active VM and its work running. Starting chat from an offline VM
 restarts the guest on the same unlocked volume; locking stops its processes.
 Use the explicit import/export flow to move files across the session boundary.
+
+Current development builds add encrypted **Auto-lock** preferences. By default,
+15 minutes without keyboard, paste or mouse input locks the active session, and
+30 minutes locks Oblivion itself. Agent output and background jobs do not count
+as human activity. Both intervals can be changed or disabled independently.
+
+The host manager keeps its primary navigation deliberately small: `Sessions`,
+`Settings`, and `System`. Connectivity, privacy routing, Privacy WebFetch,
+network rules, API keys, keyboard/time zone, and auto-lock preferences live in
+one structured Settings hierarchy instead of competing for sidebar space.
 
 ## Included in beta 2
 
@@ -125,6 +156,7 @@ release does not establish complete hardware, hypervisor or security qualificati
 | **Encrypted session backups**    | Back up a closed session and restore an independent copy with its chats and documents. The original session password is required; host settings and provider keys are excluded. |
 | **OnionShare**                   | Receive and review ordinary files; share approved documents or a closed encrypted backup through dedicated Tor transfer VMs.                                                    |
 | **Provider keys and networking** | Keep multiple encrypted keys, select a global default or an override for one opening, and route session traffic through Tor or an explicit SOCKS5 proxy.                        |
+| **Privacy WebFetch**             | Read public HTTPS pages through the selected protected route with a coherent browser profile. Strict mode asks per domain; Open mode removes only those WebFetch prompts.   |
 | **Host/guest text clipboard**    | Explicit text copy/paste in UTM; the amd64 image also packages the selected VirtualBox clipboard client. No shared folders or clipboard file transfers.                         |
 | **Diagnostics**                  | Export an allowlisted report for troubleshooting, with a review step before sending it outside the session.                                                                     |
 
@@ -191,6 +223,17 @@ mount the session filesystem. See the maintained
 - Runtime paths and temporary files live on tmpfs in the live system.
 - The gateway mediates session egress through Tor or a configured SOCKS5 proxy;
   direct access is deny-by-default.
+- One host-controlled access policy applies to every chat and tool: **Open Web**
+  (default for new profiles), **Strict**, or **Offline**. Open Web permits public
+  HTTP/HTTPS through Tor/SOCKS5; explicit block rules still apply. Strict requires
+  allow rules beyond the provider. Offline blocks provider and tool traffic.
+  Change it in **Settings → Network access**, or press **F9** in Workspace.
+  The footer shows the mode beside `Network [ ]`; the chat has no `/web` switch.
+- Session users can use `sudo` to install packages. Installed programs and system
+  changes stay in that session’s encrypted volume, alongside its documents, and
+  consume its available space. Ephemeral sessions discard them on closure.
+  Administrative access is limited to the session VM; host and gateway stay
+  separate. Customized system layers need upgrade qualification.
 - The gateway uses the provider key. The session receives a revocable
   capability for its opening, and closing revokes that access.
 - The production profile disables agent logs, telemetry, update checks,
@@ -255,6 +298,13 @@ the expanded tools and transfer components. The general vault defaults to 2 GiB,
 reserves 512 MiB inside it, and the session plus model gateway allocate about
 1.8 GiB of guest memory. OnionShare starts additional VMs; its full resource
 profile is still being qualified.
+
+In the development build, session capacity is selectable while **512 MiB remains
+the default**. `Sessions / Increase storage` enlarges a closed session without
+changing its password or contents. Growth keeps the original until the enlarged
+encrypted copy is verified, so the general vault needs enough free space for
+the complete new volume plus 64 MiB. Documents can offer this step before a
+large local-media import.
 
 | Resource                  | Starting configuration for beta 2 | Notes                                                    |
 | ------------------------- | --------------------------------- | -------------------------------------------------------- |
