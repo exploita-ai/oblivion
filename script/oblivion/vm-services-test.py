@@ -250,7 +250,7 @@ subprocess.run(["mount", "/dev/vdb", "/data"], check=True)
 Path(CONFIG).write_text(json.dumps({"general_image": "/data/general.luks", "general_mib": 768,
     "session_mib": 128, "pbkdf_memory_kib": 65536, "manager_uid": 1000,
     "vm": {"root": "/usr/lib/oblivion/vm/qemu-root", "kernel": "/usr/lib/oblivion/vm/kernel",
-           "initrd": "/usr/lib/oblivion/vm/initrd", "filesystem": "/usr/lib/oblivion/vm/guest.squashfs",
+           "initrd": "/usr/lib/oblivion/vm/session-initrd", "filesystem": "/usr/lib/oblivion/vm/guest.squashfs",
            "memory_mib": 1536, "cpus": 2, "accelerator": "tcg"}}))
 interrupt_creation("init-general", GENERAL, "mke2fs")
 assert status()["general_incomplete"] and not status()["general_present"]

@@ -32,6 +32,10 @@ struct Status {
     incomplete_sessions: Vec<String>,
     available_bytes: Option<u64>,
     session_bytes: u64,
+    #[serde(rename = "session_sizes")]
+    _session_sizes: std::collections::BTreeMap<String, u64>,
+    #[serde(rename = "pending_growth")]
+    _pending_growth: Vec<String>,
     vm_state: Option<String>,
     laboratory_emulation: bool,
     recovery_required: bool,

@@ -36,7 +36,7 @@ def config(accelerator):
         "general_image": "/data/general.luks", "general_mib": 768,
         "session_mib": 128, "pbkdf_memory_kib": 65536, "manager_uid": 1000,
         "vm": {"root": "/usr/lib/oblivion/vm/qemu-root", "kernel": "/usr/lib/oblivion/vm/kernel",
-               "initrd": "/usr/lib/oblivion/vm/initrd", "filesystem": "/usr/lib/oblivion/vm/guest.squashfs",
+               "initrd": "/usr/lib/oblivion/vm/session-initrd", "filesystem": "/usr/lib/oblivion/vm/guest.squashfs",
                "memory_mib": 1536 if CHAT else 512, "cpus": 2 if CHAT else 1, "accelerator": accelerator},
     }
     Path(CONFIG).write_text(json.dumps(value))

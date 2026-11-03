@@ -104,7 +104,7 @@ def status():
 def session_create(password):
     send(b"n", "Nuova sessione - password")
     send(password + b"\r", "Ripeti la password")
-    send(password + b"\r", "Conversations and documents")
+    send(password + b"\r", "A privacy-first live OS")
     wait("/exit lock session")
 
 
@@ -115,7 +115,7 @@ subprocess.run(["mount", "/dev/vdb", "/data"], check=True)
 Path(CONFIG).write_text(json.dumps({"general_image": "/data/general.luks", "general_mib": 768,
     "session_mib": 128, "pbkdf_memory_kib": 65536, "manager_uid": 1000,
     "vm": {"root": "/usr/lib/oblivion/vm/qemu-root", "kernel": "/usr/lib/oblivion/vm/kernel",
-           "initrd": "/usr/lib/oblivion/vm/initrd", "filesystem": "/usr/lib/oblivion/vm/guest.squashfs",
+           "initrd": "/usr/lib/oblivion/vm/session-initrd", "filesystem": "/usr/lib/oblivion/vm/guest.squashfs",
            "memory_mib": 1536, "cpus": 2, "accelerator": "tcg"}}))
 command("init-general", secret=GENERAL)
 daemon = subprocess.Popen(["/usr/bin/oblivion-storage-lab", "--config", CONFIG, "serve"],
@@ -169,7 +169,7 @@ try:
     send(b"\x1d", "Nuova sessione - password")
     assert not status()["session_open"]
     send(b"synthetic-session-password-b\r", "Ripeti la password")
-    send(b"synthetic-session-password-b\r", "Conversations and documents")
+    send(b"synthetic-session-password-b\r", "A privacy-first live OS")
     send(b"OBLIVION_TUI_B_REQUEST", "OBLIVION_TUI_B_REQUEST")
     send(b"\r", "OBLIVION_TUI_B_REPLY")
     check("confirmed new-session action closes A before password entry and opens isolated B")

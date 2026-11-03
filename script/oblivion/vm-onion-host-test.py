@@ -308,7 +308,7 @@ run("mkfs.ext4", "-q", "-m", "0", "/dev/vdb")
 run("mount", "/dev/vdb", "/data")
 config = {"general_image": "/data/general.luks", "general_mib": 768, "session_mib": 512 if Path("/run/oblivion-onion-backup").exists() or Path("/run/oblivion-onion-backup-startup").exists() else 128,
           "pbkdf_memory_kib": 65536, "manager_uid": 1000, "gateway_network": True,
-          "vm": {"root": str(root), "kernel": "/usr/lib/oblivion/vm/kernel", "initrd": "/usr/lib/oblivion/vm/initrd",
+          "vm": {"root": str(root), "kernel": "/usr/lib/oblivion/vm/kernel", "initrd": "/usr/lib/oblivion/vm/session-initrd",
                  "filesystem": "/usr/lib/oblivion/vm/guest.squashfs", "memory_mib": 512, "cpus": 1, "accelerator": "tcg"},
           "onion": {"gateway": {"root": str(root), "kernel": str(images["gateway"] / "kernel"),
                      "initrd": str(images["gateway"] / "initrd"), "filesystem": str(images["gateway"] / "gateway.squashfs"),

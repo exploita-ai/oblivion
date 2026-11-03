@@ -285,7 +285,8 @@ export_lab = Path("/usr/lib/oblivion/vm/export-lab").exists()
 backup_lab = "oblivion.lab-backup=1" in Path("/proc/cmdline").read_text().split()
 backup_chats = backup_lab and Path("/usr/lib/oblivion/vm/backup-chat-lab").exists()
 Path(CONFIG).write_text(json.dumps({"general_image": "/data/general.luks", "general_mib": 1536 if backup_lab else 768,
-    "session_mib": 512 if backup_lab else 128, "pbkdf_memory_kib": 65536, "manager_uid": 1000, "vm": vm,
+    "session_mib": 512 if backup_lab else 128, "pbkdf_memory_kib": 65536, "manager_uid": 1000,
+    "vm": {**vm, "initrd": "/usr/lib/oblivion/vm/session-initrd"},
     "import": {**vm, "filesystem": "/usr/lib/oblivion/vm/import.squashfs"},
     "export": {**vm, "filesystem": "/usr/lib/oblivion/vm/export.squashfs"} if export_lab else None}))
 dropin = Path("/run/systemd/system") / (WORKER + ".d")

@@ -36,7 +36,7 @@ output.mkdir(parents=True, exist_ok=False)
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 subprocess.run(["unsquashfs", "-no-progress", "-d", str(output / "extracted"),
     str(image / "host.squashfs"), "usr/lib/oblivion/vm/guest.squashfs",
-    "usr/lib/oblivion/vm/kernel", "usr/lib/oblivion/vm/initrd"], check=True)
+    "usr/lib/oblivion/vm/kernel", "usr/lib/oblivion/vm/session-initrd"], check=True)
 guest = output / "extracted/usr/lib/oblivion/vm"
 # A fresh, synthetic filesystem file: this diagnostic never opens a host device.
 vault = output / "vault.raw"
@@ -44,7 +44,7 @@ with vault.open("xb") as file:
     file.truncate(128 * 1024 * 1024)
 subprocess.run(["mkfs.ext4", "-q", "-m", "0", str(vault)], check=True)
 started = time.monotonic()
-markers = [b"OBLIVION", b"/new new chat", b"/resume chats"]
+markers = [b"A privacy-first live OS", b"/new new chat", b"/resume chats"]
 received = bytearray()
 with (output / "serial.log").open("xb") as log:
     with subprocess.Popen([
@@ -54,7 +54,7 @@ with (output / "serial.log").open("xb") as log:
         "-nodefaults", "-no-reboot", "-display", "none", "-monitor", "none",
         "-nic", "none", "-serial", "null",
         "-object", "rng-random,filename=/dev/urandom,id=rng", "-device", "virtio-rng-pci,rng=rng",
-        "-kernel", str(guest / "kernel"), "-initrd", str(guest / "initrd"),
+        "-kernel", str(guest / "kernel"), "-initrd", str(guest / "session-initrd"),
         "-append", "root=/dev/vda ro rootfstype=squashfs console=hvc0 quiet loglevel=0 systemd.show_status=false panic=-1",
         "-drive", f"file={guest / 'guest.squashfs'},format=raw,if=none,id=root,readonly=on",
         "-device", "virtio-blk-pci,drive=root,serial=oblivion-root",
