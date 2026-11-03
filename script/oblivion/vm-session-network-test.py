@@ -554,7 +554,12 @@ if SOCKS:
     assert status()["egress"]["selected"] == {"mode": "tor"} and status()["egress"]["temporary"]
     assert Path("/run/oblivion/general/profile/transport.json").read_bytes() == saved_transport
     assert command("start-chat", success=False) == "gateway_not_ready"
+    deadline = time.monotonic() + 150
+    while property(OWNER, "ActiveState") != "active":
+        assert property(OWNER, "ActiveState") != "failed" and time.monotonic() < deadline, "Tor gateway startup deadline"
+        time.sleep(.5)
     tor_gateway, _ = ready()
+    assert command("start-chat", success=False) == "gateway_not_ready"
     assert status()["session_open"] and status()["session_mode"] == "documents"
     assert int(property("oblivion-session.service", "MainPID")) == documents
     assert Path("/dev/mapper/oblivion-session").exists()
@@ -575,11 +580,20 @@ if SOCKS:
     assert guard_id.encode() in saved_tor_state
     check("restoring the saved SOCKS profile closes the Tor gateway and completes its selective state checkpoint before the next chat")
 
-    command("start-chat")
+    deadline = time.monotonic() + 150
+    while True:
+        result = subprocess.run(["/usr/bin/oblivion-storage-lab", "--config", CONFIG, "start-chat"],
+            capture_output=True, timeout=120)
+        if result.returncode == 0:
+            break
+        assert result.stderr.decode().strip() == "gateway_not_ready" and time.monotonic() < deadline, result.stderr
+        time.sleep(.5)
     restored_gateway, _ = ready()
     assert restored_gateway != tor_gateway
     assert gateway_status() == {"ok": True, "configured": True, "active": True}
     client = console()
+    command("chat-ready")
+    assert status()["session_mode"] == "chat"
     transition_token = probe(client)
     assert transition_token not in tokens
     tokens.append(transition_token)
