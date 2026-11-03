@@ -79,7 +79,7 @@ impl Tools {
         self.policy
             .matched(&self.session, destination)
             .unwrap_or_else(|| {
-                if self.access == Access::Open && matches!(destination.port(), 80 | 443) {
+                if self.access == Access::Open {
                     Action::Allow
                 } else {
                     Action::Ask

@@ -22,7 +22,7 @@ EOF
 # unused model services/binaries rather than leaving two controllers available.
 rm /etc/systemd/system/oblivion-gateway-control.service /etc/systemd/system/oblivion-gateway-network.service
 rm /etc/udev/rules.d/70-oblivion-gateway.rules /usr/libexec/oblivion-gateway-network
-rm /usr/bin/oblivion-api /usr/bin/oblivion-gateway-control /usr/bin/oblivion-egress /usr/bin/oblivion-tools /usr/bin/oblivion-web
+rm /usr/bin/oblivion-api /usr/bin/oblivion-gateway-control /usr/bin/oblivion-egress /usr/bin/oblivion-tools /usr/bin/oblivion-web /usr/bin/oblivion-rotation
 systemctl mask oblivion-gateway-control.service oblivion-gateway-network.service
 ln -sf /etc/systemd/system/oblivion-onion-gateway.target /etc/systemd/system/default.target
 setpriv --reuid=1200 --regid=1200 --clear-groups tor --verify-config -f /etc/oblivion/torrc

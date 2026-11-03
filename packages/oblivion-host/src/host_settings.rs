@@ -26,7 +26,7 @@ pub fn catalog() -> Result<Catalog> {
         .map_err(|_| Error("settings_catalog_unavailable"))
 }
 
-pub fn status(open: bool) -> Result<Status> {
+pub fn host_status(open: bool) -> Result<Status> {
     Ok(Status {
         current: read(CURRENT)?.unwrap_or_default(),
         saved: if open { read(SAVED)? } else { None },
@@ -40,19 +40,57 @@ pub fn restore() -> Result<()> {
     Ok(())
 }
 
+pub fn status(open: bool) -> Result<Status> {
+    let mut status = host_status(open)?;
+    if open && crate::storage::session_info()?.is_some() {
+        let temporary = crate::storage::runtime_record("access.json");
+        let saved = crate::storage::network_profile()?.join("access.json");
+        for path in [&saved, &temporary] {
+            if !path.exists() { continue; }
+            let mode: oblivion_transport::policy::Access = serde_json::from_reader(trusted_file(path)?.take(128))
+                .map_err(|_| Error("invalid_web_access"))?;
+            status.current.web_access = match mode {
+                oblivion_transport::policy::Access::Open => "open",
+                oblivion_transport::policy::Access::Strict => "strict",
+                oblivion_transport::policy::Access::Offline => "offline",
+            }.into();
+        }
+    }
+    Ok(status)
+}
+
 pub fn access(mode: oblivion_transport::policy::Access, save: bool) -> Result<()> {
-    let mut preferences = status(true)?.current;
-    preferences.web_access = match mode {
+    let value = match mode {
         oblivion_transport::policy::Access::Open => "open",
         oblivion_transport::policy::Access::Strict => "strict",
         oblivion_transport::policy::Access::Offline => "offline",
+    };
+    if crate::storage::session_info()?.is_some() {
+        let temporary = crate::storage::runtime_record("access.json");
+        let path = if save { crate::storage::network_profile()?.join("access.json") } else { temporary.clone() };
+        write_access(&path, value)?;
+        if save && temporary.exists() { fs::remove_file(temporary).map_err(|_| Error("settings_save_failed"))?; }
+        return Ok(());
     }
-    .to_owned();
+    let mut preferences = host_status(true)?.current;
+    preferences.web_access = value.into();
     write(CURRENT, &preferences)?;
     if save {
         write(SAVED, &preferences)?;
+        write_access(&crate::storage::network_profile()?.join("access.json"), value)?;
     }
     Ok(())
+}
+
+pub fn write_access(path: &Path, value: &str) -> Result<()> {
+    let mode = oblivion_transport::policy::Access::parse(value).map_err(Error)?;
+    let pending = path.with_extension("pending");
+    let mut file = OpenOptions::new().write(true).create(true).truncate(true).mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&pending).map_err(|_| Error("settings_save_failed"))?;
+    file.write_all(&serde_json::to_vec(&mode).map_err(|_| Error("encode_failed"))?)
+        .and_then(|_| file.sync_all()).map_err(|_| Error("settings_save_failed"))?;
+    fs::rename(pending, path).map_err(|_| Error("settings_save_failed"))?;
+    File::open(path.parent().ok_or(Error("invalid_path"))?).and_then(|file| file.sync_all()).map_err(|_| Error("settings_save_failed"))
 }
 
 pub fn save(preferences: &Preferences) -> Result<()> {

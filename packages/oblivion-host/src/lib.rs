@@ -22,3 +22,5 @@ pub mod terminal;
 pub mod tor_profile;
 pub mod transfers;
 pub mod volume;
+
+pub mod scope;

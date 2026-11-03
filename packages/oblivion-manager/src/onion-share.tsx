@@ -1,3 +1,4 @@
+import { sessionSocket } from "./session-tabs"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
 import { SelectList } from "@opencode/tui-kit"
@@ -11,12 +12,16 @@ import { palette, theme } from "./theme"
 import { connectTransfer, type Offer, type Transfer } from "./transfer"
 
 export function OnionShare(props: {
+  slot?: number
   request: (value: Request) => Promise<string>
   connect?: (id: string) => Promise<Transfer>
   paths: string[]
   backup?: { id: string; title: string }
   back: () => void
 }) {
+  const request = props.request
+  const targetSlot = props.slot ?? 0
+
   const dimensions = useTerminalDimensions()
   const spacious = () => dimensions().width >= 110 && dimensions().height >= 32
   const recipient = createOnionRecipient()
@@ -47,7 +52,7 @@ export function OnionShare(props: {
     closing ??= (async () => {
       await preparation?.catch(() => undefined)
       if (!owned) return
-      await onionStatus(props.request, { action: "cancel" })
+      await onionStatus(request, { action: "cancel" })
       owned = false
     })().finally(() => { closing = undefined })
     return closing
@@ -64,20 +69,20 @@ export function OnionShare(props: {
     setObservedAt(performance.now()); setStatus(value)
     if (value.phase === "ready" && value.tor_ready && !staging && !props.backup) {
       staging = true
-      await update(await onionStatus(props.request, { action: "stage" }))
+      await update(await onionStatus(request, { action: "stage" }))
     }
     if (value.phase === "staging" && !connected) {
       connected = true; setBusy("Reading and hashing the selected documents")
-      transfer = await (props.connect ? props.connect(id!) : connectTransfer(id!, onionCopySocket, { entries: 1024, bytes: 268435456, budgetMs: 300_000 }))
+      transfer = await (props.connect ? props.connect(id!) : connectTransfer(id!, sessionSocket(onionCopySocket, targetSlot), { entries: 1024, bytes: 268435456, budgetMs: 300_000 }))
       const paths = props.paths.filter((path, index, all) => !all.some((parent, other) => other !== index && path.startsWith(parent+"/")))
       const manifest = await transfer.offer(paths)
       if (!disposed && !cancelled) setOffer(manifest)
     }
     if (value.phase === "staged" && approved && !publishing) {
       publishing = true
-      await update(await onionStatus(props.request, { action: "share", client_auth: recipient.publicKey }))
+      await update(await onionStatus(request, { action: "share", client_auth: recipient.publicKey }))
     }
-    if (value.phase === "sharing" && value.tor_ready && !address()) setAddress(await onionAccess(props.request))
+    if (value.phase === "sharing" && value.tor_ready && !address()) setAddress(await onionAccess(request))
   }
   async function run(label: string, task: () => Promise<void>) {
     if (busy()) return
@@ -89,7 +94,7 @@ export function OnionShare(props: {
   async function poll() {
     if (checking || busy() || !owned || disposed || cancelled) return
     checking = true
-    try { await update(await onionStatus(props.request, { action: "status" })) }
+    try { await update(await onionStatus(request, { action: "status" })) }
     catch (error) { await failed(error) }
     finally { checking = false; if (!disposed) setBusy("") }
   }
@@ -105,7 +110,7 @@ export function OnionShare(props: {
       await transfer!.approve(offer()!)
       transfer!.close(); transfer = undefined
       approved = true; setOffer(undefined)
-      await update(await onionStatus(props.request, { action: "status" }))
+      await update(await onionStatus(request, { action: "status" }))
     })
   }
   const loading = () => {
@@ -120,7 +125,7 @@ export function OnionShare(props: {
   const timer = setInterval(() => { setClock(performance.now()); void poll() }, 1000)
   async function prepare(password?: string) { await run("Preparing a private Tor share", async () => {
     if (!props.backup && !props.paths.length) throw new ControlError("no_documents_selected")
-    preparation = onionStatus(props.request, props.backup ? { action: "prepare-backup", id: props.backup.id, password: password!, ttl_seconds: 3600 } : { action: "prepare", ttl_seconds: 3600 }).then((value) => { owned = value.active; id = value.id ?? undefined; return value })
+    preparation = onionStatus(request, props.backup ? { action: "prepare-backup", id: props.backup.id, password: password!, ttl_seconds: 3600 } : { action: "prepare", ttl_seconds: 3600 }).then((value) => { owned = value.active; id = value.id ?? undefined; return value })
     await update(await preparation)
   }) }
   onMount(() => { if (!props.backup) void prepare() })
@@ -129,7 +134,7 @@ export function OnionShare(props: {
   return <box flexGrow={1} minHeight={0} flexDirection="column" gap={spacious() ? 1 : 0}>
     <Show when={!props.backup}><PageHeader title={offer() ? "Review Tor share" : "Share over Tor"} description="Only an approved copy enters the separate sharing VM. Your session filesystem is never exposed." /></Show>
     <Show when={props.backup && !status() && !notice()}><FormView form={{ title: "Share encrypted backup over Tor", description: `${props.backup?.title}\nOblivion opens the session offline to checkpoint metadata, then closes and locks it. Only the read-only LUKS2 ciphertext enters the sharing VM. API keys are excluded.`, fields: [{ id: "password", label: "Session password", secret: true, validate: (value) => value ? undefined : "Enter the session password." }], submit: "Prepare encrypted backup", run: async (values) => prepare(values.password) }} cancel={() => { void cancel() }} submit={(values) => { void prepare(values.password) }} /></Show>
-    <Show when={props.backup && status()?.phase === "ready"}><FormView form={{ title: "Review encrypted backup share", description: `${props.backup?.title} · ${capacity(status()?.progress?.bytes ?? 0)}\nThe original session stays locked. The recipient needs this temporary address, its access key, and the separate session password to restore it. Sharing expires within one hour.`, fields: [], submit: "Confirm and start sharing", run: async () => update(await onionStatus(props.request, { action: "share", client_auth: recipient.publicKey })) }} cancel={() => { void cancel() }} submit={() => { void run("Publishing the encrypted backup", async () => update(await onionStatus(props.request, { action: "share", client_auth: recipient.publicKey }))) }} /></Show>
+    <Show when={props.backup && status()?.phase === "ready"}><FormView form={{ title: "Review encrypted backup share", description: `${props.backup?.title} · ${capacity(status()?.progress?.bytes ?? 0)}\nThe original session stays locked. The recipient needs this temporary address, its access key, and the separate session password to restore it. Sharing expires within one hour.`, fields: [], submit: "Confirm and start sharing", run: async () => update(await onionStatus(request, { action: "share", client_auth: recipient.publicKey })) }} cancel={() => { void cancel() }} submit={() => { void run("Publishing the encrypted backup", async () => update(await onionStatus(request, { action: "share", client_auth: recipient.publicKey }))) }} /></Show>
     <Show when={offer()}>{(value) => <>
       <text fg={theme.text.base}>{value().entries.length} entries · {value().bytes.toLocaleString("en-US")} bytes</text>
       <SelectList theme={palette} focused={false} items={value().entries.map((entry) => ({ title: `${entry.kind === "directory" ? "/" : " "} ${entry.path}` }))} />

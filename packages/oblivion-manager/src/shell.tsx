@@ -3,12 +3,14 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { NetworkIndicator, type NetworkLabel, type NetworkConnection } from "./network-indicator"
 import { ActionBar } from "./action-bar"
 import { BusyModal } from "./busy-modal"
+import { SessionTabs, type SessionTab } from "./session-tabs"
 import { theme } from "./theme"
 
 export const sections = ["Sessions", "Settings", "System"] as const
 export const accessSections = ["Keyboard & time zone"] as const
 
 export function Shell(props: {
+  tabs?: SessionTab[]; slot?: number; selectSlot?: (slot: number) => void;
   children: JSX.Element; mounted: boolean; welcome?: boolean;
   breadcrumb: string; page: number; navigation: boolean; editing: boolean;
   network: NetworkLabel; host: string; blocked: boolean; connection: NetworkConnection; transport: string;
@@ -26,6 +28,7 @@ export function Shell(props: {
   const hostSelected = (index: number) => props.page === index && !props.workspace && !props.documents
   return <box width="100%" height="100%" flexDirection="column" backgroundColor={theme.background.base}
     onMouseDown={() => props.onActivity?.()} onMouseScroll={() => props.onActivity?.()}>
+    <Show when={props.mounted && props.tabs?.length}><SessionTabs sessions={props.tabs ?? []} selected={props.slot ?? 0} disabled={props.editing} select={(slot) => props.selectSlot?.(slot)} /></Show>
     <box flexGrow={1} minHeight={0} flexDirection={wide() ? "row" : "column"}>
       <Show when={!props.activeSession}><box width={wide() ? 32 : "100%"} height={wide() ? "100%" : "auto"} flexShrink={0} flexDirection="column"
         paddingLeft={wide() ? 3 : 2} paddingRight={wide() ? 3 : 2} paddingTop={spacious() ? 2 : 1} gap={wide() ? 1 : 0}

@@ -27,6 +27,34 @@ pub fn offline() -> io::Result<()> {
     apply(&policy)
 }
 
+// This barrier precedes conntrack accepts. The supervisor refuses transport
+// policy changes while it is installed; only verified rotation can release it.
+pub fn rotation_block() -> io::Result<()> {
+    apply("add table inet oblivion_rotation\nflush table inet oblivion_rotation\n\
+        add chain inet oblivion_rotation input { type filter hook input priority -20; policy accept; }\n\
+        add rule inet oblivion_rotation input iifname \"inside0\" tcp dport 8114 return\n\
+        add rule inet oblivion_rotation input iifname \"inside0\" counter drop\n\
+        add rule inet oblivion_rotation input iifname \"outside0\" counter drop\n\
+        add chain inet oblivion_rotation output { type filter hook output priority -20; policy accept; }\n\
+        add rule inet oblivion_rotation output meta skuid { 1201, 1300, 1301, 1302 } counter drop\n\
+        add rule inet oblivion_rotation output oifname \"outside0\" counter drop\n")
+}
+
+pub fn rotation_tor_only() -> io::Result<()> {
+    // Called only after the data plane is joined and Tor has closed its old
+    // circuits. Keep the same table throughout; allow only Tor infrastructure.
+    apply("flush chain inet oblivion_rotation input\n\
+        add rule inet oblivion_rotation input iifname \"inside0\" tcp dport 8114 return\n\
+        add rule inet oblivion_rotation input iifname \"inside0\" counter drop\n\
+        flush chain inet oblivion_rotation output\n\
+        add rule inet oblivion_rotation output meta skuid { 1201, 1300, 1301, 1302 } counter drop\n\
+        add rule inet oblivion_rotation output oifname \"outside0\" meta skuid != 1200 counter drop\n")
+}
+
+pub fn rotation_release() -> io::Result<()> {
+    apply("delete table inet oblivion_rotation\n")
+}
+
 pub fn apply(policy: &str) -> io::Result<()> {
     let mut child = Command::new("/usr/sbin/nft")
         .args(["-f", "-"])

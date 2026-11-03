@@ -17,7 +17,7 @@ case "$OBLIVION_PROVIDER" in
     refuseless)
         REFUSELESS_API_KEY=$OBLIVION_API_TOKEN
         export REFUSELESS_API_KEY
-        export OPENCODE_CONFIG_CONTENT='{"model":"refuseless/glm-5.3-abliterated","snapshots":false,"providers":{"refuseless":{"name":"Refuseless","env":["REFUSELESS_API_KEY"],"package":"@opencode/ai/providers/openai-compatible","settings":{"baseURL":"http://10.88.0.1:8111/v1","provider":"refuseless"},"models":{"glm-5.3-abliterated":{"name":"GLM 5.3 Abliterated","capabilities":{"tools":true,"reasoning":{"supported":true}},"limit":{"context":1048576,"output":131072}},"glm-5.3-flash-abliterated":{"name":"GLM 5.3 Flash Abliterated","capabilities":{"tools":true,"reasoning":{"supported":true}},"limit":{"context":1048576,"output":131072}},"deepseek-v4.1-flash-abliterated":{"name":"DeepSeek V4.1 Flash Abliterated","capabilities":{"tools":true,"reasoning":{"supported":true}},"limit":{"context":1048576,"output":130000}},"deepseek-v4.1-flash-fast":{"name":"DeepSeek V4.1 Flash 1017","capabilities":{"tools":true,"reasoning":{"supported":true}},"limit":{"context":1048576,"output":262144}},"minimax-m3.1-flash":{"name":"Minimax M3.1 Flash","capabilities":{"tools":true,"reasoning":{"supported":true}},"limit":{"context":1048576,"output":512000}},"deepseek-v4.1-flash-free":{"name":"DeepSeek V4.1 Flash Free","capabilities":{"tools":true,"reasoning":{"supported":true}},"limit":{"context":524288,"output":131072}}}}}}'
+        export OPENCODE_CONFIG_CONTENT='{"model":"refuseless/glm-5.3-abliterated","snapshots":false,"providers":{"refuseless":{"settings":{"baseURL":"http://10.88.0.1:8111/v1","provider":"refuseless"}}}}'
         ;;
     openrouter)
         OPENROUTER_API_KEY=$OBLIVION_API_TOKEN

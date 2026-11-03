@@ -72,7 +72,7 @@ fn connect(operation: &str, session: Option<&str>, secret: &[u8]) -> Result<Unix
     }
     let mut channel = Channel::new(&stream, Duration::from_secs(10));
     let header = serde_json::to_vec(
-        &json!({"operation": operation, "session": session, "secret_len": secret.len()}),
+        &json!({"operation": operation, "session": session, "secret_len": secret.len(), "slot": crate::scope::current()}),
     )?;
     channel.write_all(&(header.len() as u32).to_be_bytes())?;
     channel.write_all(&header)?;

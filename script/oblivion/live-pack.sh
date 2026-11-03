@@ -30,6 +30,12 @@ done
 for directory in dev proc sys run/oblivion-session run/oblivion-gateway-vm run/oblivion-import-vm run/oblivion-export-vm run/oblivion-onion-uplink run/oblivion-onion-gateway-vm run/oblivion-onion-file-vm tmp; do
     mkdir -p "/host/usr/lib/oblivion/vm/qemu-root/$directory"
 done
+# Each runtime is mounted into its own immutable hypervisor root namespace.
+for slot in $(seq 1 31); do
+    for role in session gateway-vm import-vm export-vm onion-uplink onion-gateway-vm onion-file-vm; do
+        mkdir -p "/host/usr/lib/oblivion/vm/qemu-root/run/oblivion-$role-s$slot"
+    done
+done
 touch /host/usr/lib/oblivion/vm/qemu-root/kernel /host/usr/lib/oblivion/vm/qemu-root/initrd /host/usr/lib/oblivion/vm/qemu-root/root.squashfs
 chroot /host dpkg-query -W -f='${Package}\t${Version}\n' > /out/host-packages.tsv
 (cd /host && sha256sum usr/bin/oblivion-* usr/lib/oblivion/vm/*/root.squashfs) > /out/runtime.sha256

@@ -148,6 +148,14 @@ COPY script/oblivion/vm-import-seed.py /usr/lib/oblivion/lab/import-seed.py
 RUN mkdir -p /etc/systemd/system/oblivion-vault.service.d \
     && printf '[Service]\nExecStartPost=/usr/bin/python3 /usr/lib/oblivion/lab/import-seed.py\n' > /etc/systemd/system/oblivion-vault.service.d/lab.conf
 
+# A synthetic command loop with the production vault and private network setup.
+# No OpenCode server or public provider is used by the concurrency lifecycle test.
+FROM guest AS multisession-guest
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 nftables \
+    && rm -rf /var/lib/apt/lists/* \
+    && sed -i '/ConditionKernelCommandLine=!oblivion.documents=1/d; s/oblivion-chat-server.service/oblivion-session-network.service/g' /etc/systemd/system/oblivion-conversation.service \
+    && systemctl disable oblivion-chat-server.service oblivion-terminal.service
+
 FROM os AS import-guest
 COPY --from=compiler /bundle/oblivion-copy /usr/bin/oblivion-copy
 COPY packages/oblivion-host/import/ /usr/lib/oblivion/import/
@@ -427,6 +435,9 @@ COPY --from=compiler /build/target/release/oblivion-storage /usr/bin/oblivion-st
 COPY --from=compiler /build/target/release/oblivion-control /usr/bin/oblivion-control
 COPY --from=compiler /build/target/release/oblivion-manager /usr/bin/oblivion-manager
 COPY --from=compiler /bundle/oblivion-copy /usr/bin/oblivion-copy
+COPY packages/oblivion-host/host/*@.service /etc/systemd/system/
+COPY script/oblivion/session-identities.sh /tmp/session-identities
+RUN sh /tmp/session-identities && rm /tmp/session-identities
 COPY script/oblivion/vm-lab-test.py /usr/libexec/oblivion-vm-test
 COPY script/oblivion/vm-host-setup.sh /tmp/setup
 RUN sh /tmp/setup && rm /tmp/setup
@@ -449,7 +460,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends dosfstools exfa
 RUN touch /usr/lib/oblivion/vm/export-lab
 
 FROM manager-host AS tui-host
-RUN apt-get update && apt-get install -y --no-install-recommends python3-pyte python3-pil fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends python3-pyte python3-pil fonts-dejavu-core curl && rm -rf /var/lib/apt/lists/*
 COPY script/oblivion/vm-tui-test.py /usr/libexec/oblivion-vm-test
 RUN touch /usr/lib/oblivion/vm/tui-lab
 
@@ -484,9 +495,12 @@ COPY --from=pack /out/ /
 FROM rust-toolchain AS gateway-compiler
 WORKDIR /gateway
 ENV CARGO_TARGET_DIR=/tmp/target
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 COPY packages/oblivion-tor-state/ /oblivion-tor-state/
 COPY packages/oblivion-transport/ /oblivion-transport/
 COPY packages/oblivion-gateway/Cargo.toml packages/oblivion-gateway/Cargo.lock ./
+COPY packages/oblivion-gateway/build.rs ./
+COPY packages/core/src/models-dev/snapshot.txt /core/src/models-dev/snapshot.txt
 COPY packages/oblivion-gateway/.cargo/ .cargo/
 RUN cargo fetch --locked
 COPY packages/oblivion-gateway/src/ src/
@@ -503,6 +517,7 @@ RUN --network=none cargo test --locked --offline --lib --features lab-emulation 
     && cp /tmp/target/debug/oblivion-egress /gateway-bundle/oblivion-egress-lab \
     && cp /tmp/target/debug/oblivion-tools /gateway-bundle/oblivion-tools-lab \
     && cp /tmp/target/debug/oblivion-web /gateway-bundle/oblivion-web-lab \
+    && cp /tmp/target/debug/oblivion-rotation /gateway-bundle/oblivion-rotation-lab \
     && cp $(find /tmp/target/debug/deps -type f -name 'oblivion_gateway-*' -executable) /gateway-bundle/gateway-tests \
     && cp $(find /tmp/target/debug/deps -type f -name 'activation-*' -executable) /gateway-bundle/activation-tests \
     && cargo build --locked --offline --bins \
@@ -511,9 +526,10 @@ RUN --network=none cargo test --locked --offline --lib --features lab-emulation 
     && cp /tmp/target/debug/oblivion-egress /gateway-bundle/oblivion-egress \
     && cp /tmp/target/debug/oblivion-tools /gateway-bundle/oblivion-tools \
     && cp /tmp/target/debug/oblivion-web /gateway-bundle/oblivion-web \
+    && cp /tmp/target/debug/oblivion-rotation /gateway-bundle/oblivion-rotation \
     && cp /tmp/target/debug/oblivion-onion-gateway /gateway-bundle/oblivion-onion-gateway \
     && strip /gateway-bundle/oblivion-* /gateway-bundle/*-tests \
-    && find Cargo.toml Cargo.lock .cargo src tests examples guest/firewall.nft guest/onion chat-database.py chat-export.py session-backup.py test-chat-database.py test-chat-export.py test-session-backup.py test-host-firewall.py host-firewall.nft ../oblivion-tor-state/Cargo.toml ../oblivion-tor-state/src ../oblivion-transport/Cargo.toml ../oblivion-transport/src -type f -print0 | sort -z | xargs -0 sha256sum > /gateway-bundle/sources.sha256 \
+    && find Cargo.toml Cargo.lock build.rs .cargo src tests examples guest/firewall.nft guest/onion chat-database.py chat-export.py session-backup.py test-chat-database.py test-chat-export.py test-session-backup.py test-host-firewall.py host-firewall.nft ../core/src/models-dev/snapshot.txt ../oblivion-tor-state/Cargo.toml ../oblivion-tor-state/src ../oblivion-transport/Cargo.toml ../oblivion-transport/src -type f -print0 | sort -z | xargs -0 sha256sum > /gateway-bundle/sources.sha256 \
     && rustc --version > /gateway-bundle/compiler.txt \
     && cd /gateway-bundle && sha256sum * > SHA256SUMS
 
@@ -544,6 +560,7 @@ COPY --from=gateway-compiler /gateway-bundle/oblivion-gateway-control /usr/bin/o
 COPY --from=gateway-compiler /gateway-bundle/oblivion-egress /usr/bin/oblivion-egress
 COPY --from=gateway-compiler /gateway-bundle/oblivion-tools /usr/bin/oblivion-tools
 COPY --from=gateway-compiler /gateway-bundle/oblivion-web /usr/bin/oblivion-web
+COPY --from=gateway-compiler /gateway-bundle/oblivion-rotation /usr/bin/oblivion-rotation
 COPY packages/oblivion-tor-state/src/lib.rs /tmp/oblivion-tor-state.rs
 RUN expected="$(sed -n 's/^pub const VERSION: &str = "\([^"]*\)";$/\1/p' /tmp/oblivion-tor-state.rs)" \
     && actual="$(tor --version | sed -n '1s/^Tor version \([0-9.]*\)\.$/\1/p')" \
@@ -599,13 +616,14 @@ FROM gateway-system AS gateway-network-lab
 RUN apt-get update && apt-get install -y --no-install-recommends python3 curl \
     && rm -rf /var/lib/apt/lists/*
 COPY script/oblivion/vm-network-fixture.py /usr/libexec/oblivion-network-fixture
+COPY script/oblivion/vm-rotation-fixture.py /usr/libexec/oblivion-rotation-fixture.py
 COPY script/oblivion/vm-network-setup.sh /tmp/network-setup
 RUN sh /tmp/network-setup && rm /tmp/network-setup
 
 FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS gateway-network-pack
 RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools && rm -rf /var/lib/apt/lists/*
 COPY packages/oblivion-gateway/guest/ /sources/guest/
-COPY script/oblivion/vm-network-fixture.py script/oblivion/vm-network-setup.sh /sources/lab/
+COPY script/oblivion/vm-network-fixture.py script/oblivion/vm-rotation-fixture.py script/oblivion/vm-network-setup.sh /sources/lab/
 COPY --from=gateway-compiler /gateway-bundle/sources.sha256 /sources/broker.sha256
 RUN --mount=type=bind,from=gateway-system,source=/,target=/gateway,ro \
     --mount=type=bind,from=gateway-network-lab,source=/,target=/lab,ro \
@@ -693,7 +711,7 @@ FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20b
 RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools && rm -rf /var/lib/apt/lists/*
 COPY --from=stream-tls-fixture /fixture/ /fixture/
 COPY packages/oblivion-gateway/guest/ /sources/guest/
-COPY script/oblivion/vm-network-fixture.py script/oblivion/vm-network-setup.sh /sources/lab/
+COPY script/oblivion/vm-network-fixture.py script/oblivion/vm-rotation-fixture.py script/oblivion/vm-network-setup.sh /sources/lab/
 COPY --from=gateway-compiler /gateway-bundle/sources.sha256 /sources/broker.sha256
 RUN --mount=type=bind,from=transport-network-lab,source=/,target=/lab,ro \
     mkdir /out && cp /lab/boot/vmlinuz-* /out/kernel && cp /lab/boot/initrd.img-* /out/initrd \
@@ -702,7 +720,7 @@ RUN --mount=type=bind,from=transport-network-lab,source=/,target=/lab,ro \
     && cp /fixture/cert.pem /out/fixture-cert.pem \
     && cp /fixture/key.pem /out/fixture-key.pem \
     && cp /fixture/ca.pem /out/fixture-ca.pem \
-    && sha256sum /lab/usr/bin/oblivion-api /lab/usr/bin/oblivion-egress /lab/usr/bin/oblivion-tools /lab/usr/bin/oblivion-web /lab/usr/bin/oblivion-gateway-control > /out/binaries.sha256 \
+    && sha256sum /lab/usr/bin/oblivion-api /lab/usr/bin/oblivion-egress /lab/usr/bin/oblivion-tools /lab/usr/bin/oblivion-web /lab/usr/bin/oblivion-rotation /lab/usr/bin/oblivion-gateway-control > /out/binaries.sha256 \
     && cd /sources && find . -type f -print0 | sort -z | xargs -0 sha256sum > /out/sources.sha256 \
     && cp broker.sha256 /out/broker-sources.sha256 \
     && cd /out && sha256sum * > SHA256SUMS
@@ -746,10 +764,11 @@ COPY ${MANAGER_BINARY} /usr/bin/oblivion-manager
 COPY ${MANAGER_ASSETS} /usr/lib/oblivion/manager/
 COPY packages/oblivion-host/host/ /etc/systemd/system/
 COPY script/oblivion/live-setup.sh /tmp/live-setup
+COPY script/oblivion/session-identities.sh /tmp/session-identities
 COPY script/oblivion/live-controller.json /etc/oblivion/controller.json
 COPY script/oblivion/host-firewall.nft /etc/oblivion/host-firewall.nft
 COPY packages/oblivion-gateway/guest/resolv.conf /etc/resolv.conf
-RUN sh /tmp/live-setup && rm /tmp/live-setup
+RUN sh /tmp/live-setup && sh /tmp/session-identities && rm /tmp/live-setup /tmp/session-identities
 COPY script/oblivion/display/*.service script/oblivion/display/*.socket script/oblivion/display/manager.conf script/oblivion/display/foot.ini script/oblivion/display/start.sh script/oblivion/display/70-oblivion-clipboard.rules /usr/lib/oblivion/display/
 COPY script/oblivion/display/install.sh /tmp/display-setup
 RUN sh /tmp/display-setup && rm /tmp/display-setup \
@@ -864,3 +883,19 @@ RUN --mount=type=bind,from=persistence-host,source=/,target=/host,ro \
 
 FROM scratch AS persistence-artifacts
 COPY --from=persistence-pack /out/ /
+
+# Disposable integration test with simultaneous, separately encrypted VM pairs.
+FROM stream-gateway AS multisession-gateway
+RUN sed -i 's|provider.py$|provider.py --multisession|' /etc/systemd/system/oblivion-stream-provider.service
+
+FROM pack AS multisession-pack
+COPY packages/oblivion-host/host/oblivion-gateway-host.service /host/etc/systemd/system/
+COPY script/oblivion/vm-multisession-test.py /host/usr/libexec/oblivion-vm-test
+RUN --mount=type=bind,from=multisession-gateway,source=/,target=/gateway,ro \
+    mksquashfs /gateway /host/usr/lib/oblivion/vm/multisession-gateway.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
+    && rm /out/host.squashfs /out/SHA256SUMS \
+    && mksquashfs /host /out/host.squashfs -noappend -comp zstd -processors 2 -quiet \
+    && cd /out && sha256sum * > SHA256SUMS
+
+FROM scratch AS multisession-artifacts
+COPY --from=multisession-pack /out/ /

@@ -31,7 +31,7 @@ table inet oblivion_host {
         meta skuid 0 udp sport 68 udp dport 67 counter accept
         # Only the gateway hypervisor owns external TCP sockets. Its guest
         # enforces Tor/proxy policy; no host application receives this UID.
-        meta skuid 1101 meta l4proto tcp counter accept
+        meta skuid { 1101, 16017, 16033, 16049, 16065, 16081, 16097, 16113, 16129, 16145, 16161, 16177, 16193, 16209, 16225, 16241, 16257, 16273, 16289, 16305, 16321, 16337, 16353, 16369, 16385, 16401, 16417, 16433, 16449, 16465, 16481, 16497 } meta l4proto tcp counter accept
         counter drop
     }
 }

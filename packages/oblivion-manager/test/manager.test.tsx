@@ -20,7 +20,7 @@ test.each([[80, 24], [160, 50]])("a failed Tor checkpoint shows a locked welcome
     await app.mockInput.pressEnter()
     await app.renderOnce()
     expect(app.captureCharFrame()).toContain("Welcome back")
-    expect(app.captureCharFrame()).toContain("Oblivion is locked.")
+    expect(app.captureCharFrame()).toContain("The requested volumes are locked.")
     expect(app.captureCharFrame()).not.toContain("Operation not completed")
     expect(app.captureCharFrame()).not.toContain("Complete recovery and lock")
   } finally { await app.dispose() }

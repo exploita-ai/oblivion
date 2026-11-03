@@ -99,7 +99,10 @@ parser.add_argument("--tor-state", action="store_true", help="Exercise selective
 parser.add_argument("--stream", action="store_true", help="With laboratory gateway/session images, verify active streams through real storage revocation")
 parser.add_argument("--stream-socks", action="store_true", help="With --stream and stream-host, use an external synthetic SOCKS proxy in the offline host")
 parser.add_argument("--tor-online", action="store_true", help="With --tor-state or --onion-host, allow Tor bootstrap and capture the outer uplink")
+parser.add_argument("--multisession", action="store_true", help="Exercise simultaneous session/gateway pairs with the offline multisession image")
 args = parser.parse_args()
+if args.multisession and any((args.tor_online, args.stream, args.onion_host, args.services_bundle, args.gateway_bundle, args.refresh_import_test, args.refresh_tui_test, args.gateway_image, args.session_image)):
+    parser.error("--multisession requires the standalone offline multisession image")
 if args.onion_host and (not args.services_bundle or not args.gateway_image or not args.onion_file_image
         or args.session_image or args.tor_state or args.stream or args.refresh_import_test or args.refresh_tui_test):
     parser.error("--onion-host requires services/gateway/file images and a plain host fixture")
@@ -188,11 +191,11 @@ initrd = image / "initrd"
 fixture = None
 bundle_manifest = None
 bundle = args.services_bundle or args.gateway_bundle
-fixture_name = "vm-onion-host-test.py" if args.onion_host else "vm-import-test.py" if args.refresh_import_test else "vm-tor-state-test.py" if args.tor_state else "vm-session-network-test.py" if session_image else "vm-gateway-host-test.py" if gateway_image else "vm-gateway-test.py" if args.gateway_bundle else "vm-services-test.py" if args.services_bundle else "vm-tui-test.py"
+fixture_name = "vm-multisession-test.py" if args.multisession else "vm-onion-host-test.py" if args.onion_host else "vm-import-test.py" if args.refresh_import_test else "vm-tor-state-test.py" if args.tor_state else "vm-session-network-test.py" if session_image else "vm-gateway-host-test.py" if gateway_image else "vm-gateway-test.py" if args.gateway_bundle else "vm-services-test.py" if args.services_bundle else "vm-tui-test.py"
 if sum(bool(option) for option in (args.refresh_tui_test, args.refresh_import_test, args.services_bundle, args.gateway_bundle)) > 1:
     raise SystemExit("Choose one laboratory fixture override.")
-if args.refresh_tui_test or args.refresh_import_test or bundle:
-    if not (image / ("import-lab" if args.refresh_import_test else "tui-lab")).exists():
+if args.multisession or args.refresh_tui_test or args.refresh_import_test or bundle:
+    if not args.multisession and not (image / ("import-lab" if args.refresh_import_test else "tui-lab")).exists():
         raise SystemExit("The fixture override requires a tui-host laboratory image.")
     fixture = Path(__file__).with_name(fixture_name).read_bytes()
     if bundle:
@@ -220,6 +223,10 @@ if args.refresh_tui_test or args.refresh_import_test or bundle:
         (root / "scripts/init-bottom").mkdir(parents=True)
         (root / "scripts/oblivion-lab-test.py").write_bytes(fixture)
         bundle_hook = ""
+        if args.multisession:
+            for name in ["host-firewall.nft", "test-host-firewall.py"]:
+                (root / "scripts" / name).write_bytes(Path(__file__).with_name(name).read_bytes())
+                bundle_hook += f"cp /scripts/{name} /run/{name}\n"
         if bundle:
             (root / "scripts/oblivion-host").mkdir()
             # Copy only manifest-covered inputs; a previous export may have left
@@ -288,7 +295,7 @@ if args.refresh_tui_test or args.refresh_import_test or bundle:
 disk = None if args.gateway_bundle else output / "data.raw"
 if disk:
     with disk.open("xb") as stream:
-        stream.truncate((2 if args.backup_only else 1) * 1024 * 1024 * 1024)
+        stream.truncate((2 if args.backup_only or args.multisession else 1) * 1024 * 1024 * 1024)
 import_source = output / "import-source.raw" if (image / "import-lab").exists() else None
 if import_source:
     # Each fault-injection run owns its media. A mistaken test selection must
@@ -352,7 +359,7 @@ with ExitStack() as cleanup, (output / "serial.log").open("xb") as log:
         command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
         timeout=1200 if args.stream else 900)
 serial = (output / "serial.log").read_text(errors="replace")
-fixture_prefix = "OBLIVION_ONION_HOST_FIXTURE_SHA256 " if args.onion_host else "OBLIVION_IMPORT_FIXTURE_SHA256 " if args.refresh_import_test else "OBLIVION_TOR_STATE_FIXTURE_SHA256 " if args.tor_state else "OBLIVION_SESSION_NETWORK_FIXTURE_SHA256 " if session_image else "OBLIVION_GATEWAY_HOST_FIXTURE_SHA256 " if gateway_image else "OBLIVION_GATEWAY_FIXTURE_SHA256 " if args.gateway_bundle else "OBLIVION_SERVICES_FIXTURE_SHA256 " if args.services_bundle else "OBLIVION_TUI_FIXTURE_SHA256 "
+fixture_prefix = "OBLIVION_MULTISESSION_FIXTURE_SHA256 " if args.multisession else "OBLIVION_ONION_HOST_FIXTURE_SHA256 " if args.onion_host else "OBLIVION_IMPORT_FIXTURE_SHA256 " if args.refresh_import_test else "OBLIVION_TOR_STATE_FIXTURE_SHA256 " if args.tor_state else "OBLIVION_SESSION_NETWORK_FIXTURE_SHA256 " if session_image else "OBLIVION_GATEWAY_HOST_FIXTURE_SHA256 " if gateway_image else "OBLIVION_GATEWAY_FIXTURE_SHA256 " if args.gateway_bundle else "OBLIVION_SERVICES_FIXTURE_SHA256 " if args.services_bundle else "OBLIVION_TUI_FIXTURE_SHA256 "
 fixture_verified = fixture is None or (fixture_prefix + hashlib.sha256(fixture).hexdigest()) in serial.splitlines()
 bundle_prefix = "OBLIVION_GATEWAY_BUNDLE_SHA256 " if args.gateway_bundle else "OBLIVION_HOST_BUNDLE_SHA256 "
 bundle_verified = bundle_manifest is None or (bundle_prefix + hashlib.sha256(bundle_manifest.encode()).hexdigest()) in serial.splitlines()
@@ -363,6 +370,8 @@ markers = [b"OBLIVION_VM_A_CANARY_4d02", b"OBLIVION_VM_B_CANARY_b0ca", b"OBLIVIO
            b"OBLIVION_API_KEY_CANARY_5c91", b"OBLIVION_API_NEXT_CANARY_86ab", b"OBLIVION_API_RAM_CANARY_a13e",
            b"OBLIVION_PROXY_USER_CANARY_31d2", b"OBLIVION_PROXY_PASSWORD_CANARY_72a4",
            b"synthetic-general-password", b"synthetic-session-password-a", b"synthetic-session-password-b"]
+if args.multisession:
+    markers.extend([b"synthetic-multi-general-password", b"synthetic-multi-session-password"])
 if import_source:
     assert hashlib.sha256(import_source.read_bytes()).hexdigest() == import_digest, "Import source changed"
     markers.extend([b"OBLIVION_USB_SELECTED_CANARY_82f1", b"OBLIVION_USB_EDIT_CANARY_1b72", b"OBLIVION_USB_UNSELECTED_CANARY_29a1", b"OBLIVION_IMPORT_PARTIAL_CANARY_c26a"])
@@ -425,7 +434,8 @@ summary = {
     "inner_accelerator": None if args.gateway_bundle else "tcg", "production_kvm_tested": False,
     "seconds": round(time.monotonic() - started, 2), "qemu_exit": result.returncode,
     "checks": [line.strip() for line in serial.splitlines() if line.startswith("PASS:")],
-    "guest_pass": "OBLIVION_VM_LAB_PASS" in serial, "plaintext_markers_on_disk": sorted(found),
+    "guest_pass": ("OBLIVION_MULTISESSION_TESTS_PASSED" if args.multisession else "OBLIVION_VM_LAB_PASS") in serial, "plaintext_markers_on_disk": sorted(found),
+    "simultaneous_sessions": args.multisession,
     "disk_scan_canaries": [marker.decode() for marker in markers],
     "disk_sha256": digest.hexdigest() if disk else None, "image_manifest": (image / "SHA256SUMS").read_text(),
     "compiled_sources": (image / "sources.sha256").read_text(),

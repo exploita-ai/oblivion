@@ -1,25 +1,25 @@
 use oblivion_transport::provider::Provider;
 use serde_json::{Map, Value};
 
-pub const ABLITERATION_MODELS: [&str; 3] = [
-    "abliterated-model",
-    "abliterated-model-large",
-    "abliterated-model-large-v2",
-];
+include!(concat!(env!("OUT_DIR"), "/model-limits.rs"));
 
-pub const REFUSELESS_MODELS: [&str; 6] = [
-    "glm-5.3-abliterated",
-    "glm-5.3-flash-abliterated",
-    "deepseek-v4.1-flash-abliterated",
-    "deepseek-v4.1-flash-fast",
-    "minimax-m3.1-flash",
-    "deepseek-v4.1-flash-free",
-];
+#[derive(Debug, PartialEq, Eq)]
+pub enum Error {
+    Request,
+    TokenLimit,
+    ModelLimits,
+}
+
+impl From<()> for Error {
+    fn from(_: ()) -> Self {
+        Self::Request
+    }
+}
 
 // Closed request surface derived from OpenCode's openai-chat protocol. Serialize
 // the validated value again: duplicate JSON keys cannot acquire different meaning
 // in the provider's parser. Arbitrary provider settings are deliberately rejected.
-pub fn validate(provider: Provider, bytes: &[u8]) -> Result<Vec<u8>, ()> {
+pub fn validate(provider: Provider, bytes: &[u8]) -> Result<Vec<u8>, Error> {
     let mut value: Value = serde_json::from_slice(bytes).map_err(|_| ())?;
     let request = object(
         &value,
@@ -47,16 +47,11 @@ pub fn validate(provider: Provider, bytes: &[u8]) -> Result<Vec<u8>, ()> {
         ],
     )?;
     let model = string(required(request, "model")?)?;
-    match provider {
-        Provider::AbliterationAi => require(ABLITERATION_MODELS.contains(&model))?,
-        Provider::Refuseless => require(REFUSELESS_MODELS.contains(&model))?,
-        Provider::Openrouter => require(
-            (1..=256).contains(&model.len())
-                && model
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || b"-._:/~".contains(&byte)),
-        )?,
-    }
+    let limit = MODEL_LIMITS
+        .iter()
+        .find(|(id, name, _, _)| *id == provider.id() && *name == model)
+        .map(|(_, _, context, output)| (*context).min(*output))
+        .ok_or(Error::ModelLimits)?;
     require(request.get("stream") == Some(&Value::Bool(true)))?;
     let messages = required(request, "messages")?.as_array().ok_or(())?;
     require(!messages.is_empty() && messages.len() <= 4096)?;
@@ -103,7 +98,7 @@ pub fn validate(provider: Provider, bytes: &[u8]) -> Result<Vec<u8>, ()> {
     }
     for field in ["max_tokens", "max_completion_tokens"] {
         if let Some(value) = request.get(field) {
-            require(value.as_u64().is_some_and(|n| (1..=131072).contains(&n)))?;
+            token_limit(value, limit)?;
         }
     }
     for (field, minimum, maximum) in [
@@ -154,11 +149,7 @@ pub fn validate(provider: Provider, bytes: &[u8]) -> Result<Vec<u8>, ()> {
                 )?;
             }
             if let Some(tokens) = reasoning.get("max_tokens") {
-                require(
-                    tokens
-                        .as_u64()
-                        .is_some_and(|value| (1..=131072).contains(&value)),
-                )?;
+                token_limit(tokens, limit)?;
             }
         }
         if let Some(usage) = request.get("usage") {
@@ -176,7 +167,15 @@ pub fn validate(provider: Provider, bytes: &[u8]) -> Result<Vec<u8>, ()> {
             }),
         );
     }
-    serde_json::to_vec(&value).map_err(|_| ())
+    serde_json::to_vec(&value).map_err(|_| Error::Request)
+}
+
+fn token_limit(value: &Value, limit: u64) -> Result<(), Error> {
+    value
+        .as_u64()
+        .is_some_and(|tokens| (1..=limit).contains(&tokens))
+        .then_some(())
+        .ok_or(Error::TokenLimit)
 }
 
 fn validate_message(provider: Provider, value: &Value) -> Result<(), ()> {
@@ -397,32 +396,121 @@ mod tests {
     }
 
     #[test]
+    fn every_catalog_model_accepts_its_limit_and_rejects_one_token_more() {
+        for &(id, model, context, output) in MODEL_LIMITS {
+            let provider: Provider = serde_json::from_value(json!(id)).unwrap();
+            let limit = context.min(output);
+            for field in ["max_tokens", "max_completion_tokens"] {
+                let mut body = chat(model);
+                body[field] = json!(limit);
+                let accepted = validate(provider, &serde_json::to_vec(&body).unwrap())
+                    .unwrap_or_else(|error| panic!("{id}/{model} {field}: {error:?}"));
+                let accepted: Value = serde_json::from_slice(&accepted).unwrap();
+                assert_eq!(accepted[field], limit);
+                body[field] = json!(limit + 1);
+                assert_eq!(
+                    validate(provider, &serde_json::to_vec(&body).unwrap()),
+                    Err(Error::TokenLimit),
+                    "{id}/{model} {field}"
+                );
+            }
+            if provider == Provider::Openrouter {
+                let mut body = chat(model);
+                body["reasoning"] = json!({"max_tokens": limit});
+                let accepted = validate(provider, &serde_json::to_vec(&body).unwrap()).unwrap();
+                let accepted: Value = serde_json::from_slice(&accepted).unwrap();
+                assert_eq!(accepted["reasoning"]["max_tokens"], limit);
+                assert_eq!(accepted["provider"]["zdr"], true);
+                assert_eq!(accepted["provider"]["data_collection"], "deny");
+                assert_eq!(accepted["provider"]["allow_fallbacks"], false);
+                body["reasoning"]["max_tokens"] = json!(limit + 1);
+                assert_eq!(
+                    validate(provider, &serde_json::to_vec(&body).unwrap()),
+                    Err(Error::TokenLimit)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_output_and_reasoning_budgets_have_a_specific_error() {
+        for (provider, model) in [
+            (Provider::AbliterationAi, "abliterated-model-large-v2"),
+            (Provider::Refuseless, "glm-5.3-abliterated"),
+            (Provider::Openrouter, "openai/gpt-5"),
+        ] {
+            for field in ["max_tokens", "max_completion_tokens", "reasoning"] {
+                if field == "reasoning" && provider != Provider::Openrouter {
+                    continue;
+                }
+                for tokens in [
+                    json!(0),
+                    json!(-1),
+                    json!(u64::MAX),
+                    json!(1.5),
+                    json!("8192"),
+                    Value::Null,
+                    json!(true),
+                ] {
+                    let mut body = chat(model);
+                    body[field] = if field == "reasoning" {
+                        json!({"max_tokens": tokens})
+                    } else {
+                        tokens
+                    };
+                    assert_eq!(
+                        validate(provider, &serde_json::to_vec(&body).unwrap()),
+                        Err(Error::TokenLimit)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn missing_model_limits_are_reported_instead_of_inventing_a_ceiling() {
+        for provider in [
+            Provider::AbliterationAi,
+            Provider::Refuseless,
+            Provider::Openrouter,
+        ] {
+            assert_eq!(
+                validate(
+                    provider,
+                    &serde_json::to_vec(&chat("unknown-model")).unwrap()
+                ),
+                Err(Error::ModelLimits)
+            );
+        }
+    }
+
+    #[test]
     fn each_fixed_provider_accepts_only_its_own_catalog() {
         assert!(
             validate(
                 Provider::AbliterationAi,
-                &serde_json::to_vec(&chat(ABLITERATION_MODELS[0])).unwrap()
+                &serde_json::to_vec(&chat("abliterated-model")).unwrap()
             )
             .is_ok()
         );
         assert!(
             validate(
                 Provider::Refuseless,
-                &serde_json::to_vec(&chat(REFUSELESS_MODELS[0])).unwrap()
+                &serde_json::to_vec(&chat("glm-5.3-abliterated")).unwrap()
             )
             .is_ok()
         );
         assert!(
             validate(
                 Provider::AbliterationAi,
-                &serde_json::to_vec(&chat(REFUSELESS_MODELS[0])).unwrap()
+                &serde_json::to_vec(&chat("glm-5.3-abliterated")).unwrap()
             )
             .is_err()
         );
         assert!(
             validate(
                 Provider::Refuseless,
-                &serde_json::to_vec(&chat(ABLITERATION_MODELS[0])).unwrap()
+                &serde_json::to_vec(&chat("abliterated-model")).unwrap()
             )
             .is_err()
         );
@@ -498,7 +586,7 @@ mod tests {
         let bytes = serde_json::to_vec(&body).unwrap();
         assert!(validate(Provider::Openrouter, &bytes).is_ok());
 
-        body["model"] = json!(ABLITERATION_MODELS[0]);
+        body["model"] = json!("abliterated-model");
         assert!(
             validate(
                 Provider::AbliterationAi,
@@ -510,7 +598,7 @@ mod tests {
 
     #[test]
     fn non_openrouter_providers_cannot_smuggle_routing_fields() {
-        let mut body = chat(ABLITERATION_MODELS[0]);
+        let mut body = chat("abliterated-model");
         body["provider"] = json!({"zdr": true});
         assert!(
             validate(

@@ -27,6 +27,7 @@ enum Operation {
     OpenDocuments,
     OpenDocumentsEphemeral,
     StartChat,
+    StopChat,
     ChatReady,
     ChatRecover,
     CancelChat,
@@ -66,6 +67,9 @@ struct Request {
     operation: Operation,
     session: Option<String>,
     secret_len: u16,
+    expected_session: Option<String>,
+    #[serde(default)]
+    slot: oblivion_host::scope::Slot,
 }
 
 #[derive(Serialize)]
@@ -178,7 +182,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
         ) == request.session.is_some(),
         "invalid_session_argument",
     )?;
-    if let Some(id) = &request.session {
+    for id in request.session.iter().chain(request.expected_session.iter()) {
         require(
             id.len() == 32
                 && id
@@ -187,6 +191,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
             "invalid_session_id",
         )?;
     }
+    oblivion_host::scope::within(request.slot, || {
     let needs_secret = matches!(
         request.operation,
         Operation::InitGeneral
@@ -223,13 +228,16 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
         let _lock = lock_named("storage.lock")?;
         require(!crate::storage::recovery_required()?, "recovery_required")?;
         require(!crate::vm::stopped()?, "vm_not_running")?;
+        if let Some(id) = &request.expected_session {
+            require(crate::storage::session_info()?.is_some_and(|info| info.0 == *id), "session_changed")?;
+        }
         let path = if matches!(request.operation, Operation::Terminal) {
             "/run/oblivion-session/terminal.sock"
         } else {
             "/run/oblivion-session/console.sock"
         };
-        let console = UnixStream::connect(path).map_err(|_| Error("console_unavailable"))?;
-        crate::gateway::peer(&console, crate::vm::VM_UID)?;
+        let console = UnixStream::connect(oblivion_host::scope::path(path)).map_err(|_| Error("console_unavailable"))?;
+        crate::gateway::peer(&console, oblivion_host::scope::uid(crate::vm::VM_UID))?;
         return Ok(Response {
             ok: true,
             output: String::new(),
@@ -247,6 +255,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
         Operation::OpenDocuments => "enter-documents",
         Operation::OpenDocumentsEphemeral => "enter-documents-ephemeral",
         Operation::StartChat => "start-chat",
+        Operation::StopChat => "stop-chat",
         Operation::ChatReady => "chat-ready",
         Operation::ChatRecover => "chat-recover",
         Operation::CancelChat => "cancel-chat",
@@ -289,6 +298,8 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    command.args(["--slot", &request.slot.index().to_string()]);
+    if let Some(id) = request.expected_session { command.args(["--expected-session", &id]); }
     if let Some(id) = request.session {
         command.arg(id);
     }
@@ -318,6 +329,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
                     .to_owned(),
             )
         },
+    })
     })
 }
 

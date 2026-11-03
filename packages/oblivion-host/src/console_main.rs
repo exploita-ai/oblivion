@@ -5,7 +5,8 @@ use std::process::Command;
 use std::time::Duration;
 
 fn main() {
-    let result = run();
+    let slot = std::env::args().nth(2).map(|value| value.parse::<u8>().ok().and_then(|value| oblivion_host::scope::Slot::try_from(value).ok())).unwrap_or(Some(Default::default()));
+    let result = slot.ok_or_else(|| "invalid_session_slot".into()).and_then(|slot| oblivion_host::scope::within(slot, run));
     match result {
         Ok(terminal::Action::New) => std::process::exit(10),
         Ok(_) => {}
@@ -37,7 +38,8 @@ fn run() -> control::Result<terminal::Action> {
     }
     let (observed, observations) = std::sync::mpsc::sync_channel(1);
     let (stop, stopped) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    let slot = oblivion_host::scope::current();
+    std::thread::spawn(move || oblivion_host::scope::within(slot, || {
         loop {
             let header = (|| -> control::Result<terminal::SessionHeader> {
                 #[derive(serde::Deserialize)]
@@ -82,7 +84,7 @@ fn run() -> control::Result<terminal::Action> {
                 break;
             }
         }
-    });
+    }));
     let result = terminal::bridge_observed(
         &mut terminal,
         control::console()?,

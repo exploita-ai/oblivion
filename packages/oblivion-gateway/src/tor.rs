@@ -176,6 +176,40 @@ impl Tor {
         bootstrap_progress(&control("GETINFO status/bootstrap-phase\r\n")?)
     }
 
+    pub fn exits(&self) -> io::Result<std::collections::BTreeSet<String>> {
+        Ok(circuits(&information("circuit-status")?)?.into_iter()
+            .filter_map(|circuit| circuit.exit).collect())
+    }
+
+    pub fn prepare_rotation(&self, excluded: &std::collections::BTreeSet<String>) -> io::Result<()> {
+        self.disable()?;
+        let exits = excluded.iter().cloned().collect::<Vec<_>>().join(",");
+        if !control(&format!("SETCONF ExcludeExitNodes={exits}\r\n"))?.is_empty() {
+            return Err(io::Error::other("unexpected_tor_reply"));
+        }
+        Ok(())
+    }
+
+    pub fn drained(&self) -> io::Result<bool> {
+        Ok(information("circuit-status")?.is_empty() && information("stream-status")?.is_empty())
+    }
+
+    pub fn build_circuit(&self) -> io::Result<u32> {
+        let mut stream = connection()?;
+        stream.write_all(b"EXTENDCIRCUIT 0 purpose=general\r\n")?;
+        let line = read_line(&mut stream, Instant::now() + Duration::from_secs(5), &mut 4096)?;
+        line.strip_prefix("250 EXTENDED ").and_then(|value| value.parse::<u32>().ok())
+            .filter(|id| *id != 0).ok_or_else(|| io::Error::other("circuit_build_failed"))
+    }
+
+    pub fn circuit_ready(&self, id: u32, excluded: &std::collections::BTreeSet<String>) -> io::Result<bool> {
+        let status = circuits(&information("circuit-status")?)?;
+        if status.iter().any(|circuit| circuit.exit.as_ref().is_some_and(|exit| excluded.contains(exit))) {
+            return Err(io::Error::other("previous_exit_reused"));
+        }
+        Ok(status.iter().any(|circuit| circuit.id == id && circuit.built && circuit.exit.is_some()))
+    }
+
     pub fn snapshot(&self, stop: bool) -> io::Result<State> {
         if stop {
             service("stop")?;
@@ -186,6 +220,78 @@ impl Tor {
             .read_to_string(&mut text)?;
         State::select(&text).map_err(|_| io::Error::other("invalid_tor_state"))
     }
+}
+
+struct Circuit { id: u32, built: bool, exit: Option<String> }
+
+fn circuits(lines: &[String]) -> io::Result<Vec<Circuit>> {
+    lines.iter().map(|line| {
+        let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+        let id = fields.first().and_then(|value| value.parse::<u32>().ok())
+            .filter(|id| *id != 0).ok_or_else(|| io::Error::other("invalid_circuit_status"))?;
+        let built = fields.get(1) == Some(&"BUILT");
+        let hops = fields.get(2).map(|path| path.split(',').collect::<Vec<_>>()).unwrap_or_default();
+        // Conflux circuits also carry application traffic and must not retain
+        // an old exit when Tor links two paths for the same destination.
+        let exit = if fields.iter().any(|field| matches!(*field, "PURPOSE=GENERAL" | "PURPOSE=CONFLUX_LINKED" | "PURPOSE=CONFLUX_UNLINKED")) && hops.len() >= 3 {
+            let fingerprint = hops.last().unwrap().split(['~', '=']).next().unwrap();
+            if fingerprint.len() != 41 || !fingerprint.starts_with('$') || !fingerprint[1..].bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(io::Error::other("invalid_exit_identity"));
+            }
+            Some(fingerprint.to_ascii_uppercase())
+        } else { None };
+        Ok(Circuit { id, built, exit })
+    }).collect()
+}
+
+fn information(name: &str) -> io::Result<Vec<String>> {
+    let mut stream = connection()?;
+    stream.write_all(format!("GETINFO {name}\r\n").as_bytes())?;
+    read_information(&mut stream, name)
+}
+
+fn read_information(stream: &mut UnixStream, name: &str) -> io::Result<Vec<String>> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut remaining = 65536;
+    let header = read_line(stream, deadline, &mut remaining)?;
+    // GETINFO uses an inline value when exactly one circuit/stream remains.
+    // That is common immediately after DisableNetwork or EXTENDCIRCUIT, not
+    // an invalid response or an empty/drained state.
+    if let Some(value) = header.strip_prefix(&format!("250-{name}=")) {
+        if read_line(stream, deadline, &mut remaining)? != "250 OK" {
+            return Err(io::Error::other("invalid_tor_information"));
+        }
+        return Ok(if value.is_empty() { Vec::new() } else { vec![value.to_owned()] });
+    }
+    if header != format!("250+{name}=") { return Err(io::Error::other("invalid_tor_information")); }
+    let mut lines = Vec::new();
+    loop {
+        let line = read_line(stream, deadline, &mut remaining)?;
+        if line == "." { break; }
+        lines.push(line);
+    }
+    if read_line(stream, deadline, &mut remaining)? != "250 OK" {
+        return Err(io::Error::other("invalid_tor_information"));
+    }
+    Ok(lines)
+}
+
+fn read_line(stream: &mut UnixStream, deadline: Instant, remaining: &mut usize) -> io::Result<String> {
+    let mut line = Vec::new();
+    while *remaining > 0 {
+        *remaining -= 1;
+        stream.set_read_timeout(Some(deadline.checked_duration_since(Instant::now())
+            .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))?))?;
+        let mut byte = [0];
+        stream.read_exact(&mut byte)?;
+        line.push(byte[0]);
+        if byte[0] == b'\n' {
+            if !line.ends_with(b"\r\n") { break; }
+            line.truncate(line.len() - 2);
+            return String::from_utf8(line).map_err(|_| io::Error::other("invalid_tor_line"));
+        }
+    }
+    Err(io::Error::other("invalid_tor_line"))
 }
 
 fn ready() -> io::Result<()> {
@@ -354,7 +460,77 @@ fn bootstrap_progress(lines: &[String]) -> io::Result<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientAuth, bootstrap_progress};
+    use super::{ClientAuth, bootstrap_progress, circuits, read_information, read_line};
+
+    #[test]
+    fn information_accepts_inline_and_multiline_values_without_losing_a_single_circuit_or_stream() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        for name in ["circuit-status", "stream-status"] {
+            for (wire, expected) in [
+                (format!("250-{name}=\r\n250 OK\r\n"), vec![]),
+                (format!("250-{name}=one\r\n250 OK\r\n"), vec!["one"]),
+                (format!("250+{name}=\r\none\r\n.\r\n250 OK\r\n"), vec!["one"]),
+                (format!("250+{name}=\r\none\r\ntwo\r\n.\r\n250 OK\r\n"), vec!["one", "two"]),
+                (format!("250+{name}=\r\n.\r\n250 OK\r\n"), vec![]),
+            ] {
+                let (mut reader, mut writer) = UnixStream::pair().unwrap();
+                writer.write_all(wire.as_bytes()).unwrap();
+                drop(writer);
+                assert_eq!(read_information(&mut reader, name).unwrap(), expected);
+            }
+            for wire in [
+                "250-wrong-key=one\r\n250 OK\r\n".to_owned(),
+                format!("250-{name}=one\r\n551 failed\r\n"),
+                format!("250+{name}=\r\none\r\n.\r\n551 failed\r\n"),
+                format!("250-{name}=one\r\n"),
+            ] {
+                let (mut reader, mut writer) = UnixStream::pair().unwrap();
+                writer.write_all(wire.as_bytes()).unwrap();
+                drop(writer);
+                assert!(read_information(&mut reader, name).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn circuit_verification_requires_a_full_general_path_and_valid_exit() {
+        let path = format!("${}~guard,${}~middle,${}~exit", "A".repeat(40), "B".repeat(40), "c".repeat(40));
+        let parsed = circuits(&[
+            format!("42 BUILT {path} PURPOSE=GENERAL TIME_CREATED=now"),
+            format!("43 BUILT {path} PURPOSE=HS_CLIENT_REND"),
+            "44 LAUNCHED PURPOSE=GENERAL".to_owned(),
+            format!("45 EXTENDED ${}~guard PURPOSE=GENERAL", "A".repeat(40)),
+        ]).unwrap();
+        assert!(parsed[0].built);
+        assert_eq!(parsed[0].id, 42);
+        assert_eq!(parsed[0].exit, Some(format!("${}", "C".repeat(40))));
+        assert!(parsed[1..].iter().all(|circuit| circuit.exit.is_none()));
+        assert!(circuits(&["1 BUILT $a,$b,$bad PURPOSE=GENERAL".into()]).is_err());
+        assert!(circuits(&["invalid BUILT PURPOSE=GENERAL".into()]).is_err());
+    }
+
+    #[test]
+    fn conflux_paths_are_included_in_the_exits_to_replace() {
+        for purpose in ["CONFLUX_LINKED", "CONFLUX_UNLINKED"] {
+            let line = format!("12 BUILT $A~guard,$B~middle,${}~exit PURPOSE={purpose}", "D".repeat(40));
+            let parsed = circuits(&[line]).unwrap();
+            assert_eq!(parsed[0].exit.as_deref(), Some(format!("${}", "D".repeat(40)).as_str()));
+        }
+    }
+
+    #[test]
+    fn control_line_reader_bounds_input_and_rejects_invalid_framing() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+        for (bytes, limit, valid) in [(b"250 EXTENDED 42\r\n".as_slice(), 64, true), (b"bad\n", 64, false), (b"oversized\r\n", 4, false)] {
+            let (mut read, mut write) = UnixStream::pair().unwrap();
+            write.write_all(bytes).unwrap();
+            drop(write);
+            assert_eq!(read_line(&mut read, Instant::now() + Duration::from_secs(1), &mut {limit}).is_ok(), valid);
+        }
+    }
 
     #[test]
     fn client_auth_accepts_only_canonical_public_keys() {

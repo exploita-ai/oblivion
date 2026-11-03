@@ -4,7 +4,7 @@ import socket
 import struct
 
 
-def capture(path):
+def capture(path, source=None):
     data = path.read_bytes()
     assert data[:4] in [b"\xd4\xc3\xb2\xa1", b"\xa1\xb2\xc3\xd4"]
     order = "<" if data[:4] == b"\xd4\xc3\xb2\xa1" else ">"
@@ -16,6 +16,11 @@ def capture(path):
         assert length == original and offset + 16 + length <= len(data)
         packet = data[offset + 16:offset + 16 + length]
         offset += 16 + length
+        # A NIC capture includes retransmissions arriving from remote peers even
+        # when the guest firewall drops them. Filter at the packet IP boundary
+        # when asserting that a blocked gateway emitted no external IP traffic.
+        if source is not None and (packet[12:14] != b"\x08\x00" or socket.inet_ntoa(packet[26:30]) != source):
+            continue
         result["packets"] += 1
         protocol = packet[12:14]
         if protocol == b"\x86\xdd":
@@ -33,10 +38,10 @@ def capture(path):
         kind = "tcp" if ip[9] == 6 else "udp"
         result[kind] += 1
         transport = ip[(ip[0] & 15) * 4:]
-        source, destination = struct.unpack_from("!HH", transport)
-        result[kind + "_ports"].extend([source, destination])
+        source_port, destination_port = struct.unpack_from("!HH", transport)
+        result[kind + "_ports"].extend([source_port, destination_port])
         if kind == "tcp":
-            result["tcp_flows"].append((socket.inet_ntoa(ip[12:16]), source, socket.inet_ntoa(ip[16:20]), destination))
+            result["tcp_flows"].append((socket.inet_ntoa(ip[12:16]), source_port, socket.inet_ntoa(ip[16:20]), destination_port))
     for kind in ["tcp", "udp"]:
         result[kind + "_ports"] = sorted(set(result[kind + "_ports"]))
     result["tcp_flows"] = sorted(set(result["tcp_flows"]))

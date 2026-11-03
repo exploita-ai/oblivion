@@ -1,3 +1,4 @@
+use oblivion_host::scope;
 use crate::storage::{Error, Result, require};
 use oblivion_host::channel::{self, Channel};
 use oblivion_transport::policy::Tools;
@@ -34,8 +35,8 @@ pub enum Role {
 }
 
 impl Role {
-    fn name(self) -> &'static str {
-        match self {
+    fn name(self) -> String {
+        scope::current().name(match self {
             Self::Session => "oblivion-session",
             Self::Gateway => "oblivion-gateway-vm",
             Self::Import => "oblivion-import-vm",
@@ -43,11 +44,11 @@ impl Role {
             Self::OnionUplink => "oblivion-onion-uplink",
             Self::OnionGateway => oblivion_host::onion_vm::Kind::Gateway.name(),
             Self::OnionFile => oblivion_host::onion_vm::Kind::File.name(),
-        }
+        })
     }
 
     fn uid(self) -> u32 {
-        match self {
+        scope::uid(match self {
             Self::Session => VM_UID,
             Self::Gateway => GATEWAY_UID,
             Self::Import => IMPORT_UID,
@@ -55,7 +56,7 @@ impl Role {
             Self::OnionUplink => GATEWAY_UID,
             Self::OnionGateway => oblivion_host::onion_vm::GATEWAY_UID,
             Self::OnionFile => oblivion_host::onion_vm::FILE_UID,
-        }
+        })
     }
 
     pub fn runtime(self) -> String {
@@ -86,6 +87,7 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn reservation_mib(&self) -> u64 { u64::from(self.memory_mib) + 128 }
     pub fn validate(&self) -> Result<()> {
         require(
             (256..=32768).contains(&self.memory_mib),
@@ -157,9 +159,9 @@ impl Config {
         )?;
         self.launch(Role::Session, token.is_some(), false, false)?;
         if let Some(token) = token {
-            let stream = UnixStream::connect("/run/oblivion-session/token.sock")
+            let stream = UnixStream::connect(&scope::path("/run/oblivion-session/token.sock"))
                 .map_err(|_| Error("session_channel_unavailable"))?;
-            crate::gateway::peer(&stream, VM_UID)?;
+            crate::gateway::peer(&stream, scope::uid(VM_UID))?;
             crate::gateway::grant(token, tools)?;
             let mut channel = Channel::new(&stream, Duration::from_secs(60));
             qmp(Role::Session, "cont")?;
@@ -199,9 +201,9 @@ impl Config {
 
     pub fn start_documents(&self) -> Result<()> {
         self.launch(Role::Session, false, true, false)?;
-        let stream = UnixStream::connect("/run/oblivion-session/ready.sock")
+        let stream = UnixStream::connect(&scope::path("/run/oblivion-session/ready.sock"))
             .map_err(|_| Error("session_channel_unavailable"))?;
-        crate::gateway::peer(&stream, VM_UID)?;
+        crate::gateway::peer(&stream, scope::uid(VM_UID))?;
         let mut channel = Channel::new(&stream, Duration::from_secs(60));
         // Connect before boot so the guest's readiness marker cannot be lost.
         // QEMU running alone does not mean the vault or power-key handler is ready.
@@ -215,9 +217,9 @@ impl Config {
 
     pub fn resize_session(&self, target: u64) -> Result<()> {
         self.launch(Role::Session, false, false, true)?;
-        let stream = UnixStream::connect("/run/oblivion-session/ready.sock")
+        let stream = UnixStream::connect(&scope::path("/run/oblivion-session/ready.sock"))
             .map_err(|_| Error("session_channel_unavailable"))?;
-        crate::gateway::peer(&stream, VM_UID)?;
+        crate::gateway::peer(&stream, scope::uid(VM_UID))?;
         let mut channel = Channel::new(&stream, Duration::from_secs(1200));
         qmp(Role::Session, "cont")?;
         let mut result = [0u8; 16];
@@ -239,14 +241,14 @@ impl Config {
         }
         require(stopped_role(role)?, "vm_already_running")?;
         if matches!(role, Role::Session) {
-            let device = fs::metadata(DEVICE).map_err(|_| Error("session_device_missing"))?;
+            let device = fs::metadata(scope::path(DEVICE)).map_err(|_| Error("session_device_missing"))?;
             require(
                 device.file_type().is_block_device(),
                 "invalid_session_device",
             )?;
             unsafe {
                 require(
-                    libc::chown(c"/dev/mapper/oblivion-session".as_ptr(), VM_UID, VM_UID) == 0,
+                    libc::chown(std::ffi::CString::new(scope::path(DEVICE)).unwrap().as_ptr(), scope::uid(VM_UID), scope::uid(VM_UID)) == 0,
                     "device_owner_failed",
                 )?;
             }
@@ -350,13 +352,13 @@ impl Config {
                 prepare_onion_wire(
                     Role::OnionUplink,
                     "network.sock",
-                    oblivion_host::onion_vm::GATEWAY_UID,
+                    scope::uid(oblivion_host::onion_vm::GATEWAY_UID),
                 )?
             } else {
                 prepare_onion_wire(
                     Role::OnionGateway,
                     "inside.sock",
-                    oblivion_host::onion_vm::FILE_UID,
+                    scope::uid(oblivion_host::onion_vm::FILE_UID),
                 )?
             };
             args.push(format!(
@@ -569,8 +571,8 @@ impl Config {
         ];
         args.extend(
             [
-                format!("User={GATEWAY_UID}"),
-                format!("Group={GATEWAY_UID}"),
+                format!("User={}", scope::uid(GATEWAY_UID)),
+                format!("Group={}", scope::uid(GATEWAY_UID)),
                 format!("RootDirectory={}", self.root.display()),
                 format!("RuntimeDirectory={}", role.name()),
                 "RuntimeDirectoryMode=0700".into(),
@@ -627,7 +629,8 @@ impl Config {
 }
 
 fn start_command(role: Role, args: &[String]) -> Result<()> {
-    execute("/usr/bin/systemd-run", args)?;
+    let args: Vec<_> = args.iter().map(|value| scope::wire(value)).collect();
+    execute("/usr/bin/systemd-run", &args)?;
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if stopped_role(role)? {
@@ -672,11 +675,11 @@ pub fn state() -> Result<String> {
 /// PID lookup or any guest output. Only the host owner can access its parent.
 pub fn session_owner() -> Result<OwnedFd> {
     let socket = channel::connect(
-        std::path::Path::new("/run/oblivion-session/lifetime.sock"),
+        std::path::Path::new(&scope::path("/run/oblivion-session/lifetime.sock")),
         Duration::from_secs(2),
     )
     .map_err(|_| Error("session_watch_unavailable"))?;
-    crate::gateway::peer(&socket, VM_UID)?;
+    crate::gateway::peer(&socket, scope::uid(VM_UID))?;
     let file = std::fs::File::from(OwnedFd::from(socket));
     oblivion_transfer::relay::peer_process(&file).map_err(|_| Error("session_watch_unavailable"))
 }
@@ -793,14 +796,14 @@ fn session_port(id: &str, role: &str) -> Result<UnixStream> {
         "invalid_transfer_id",
     )?;
     let name = format!("copy-{id}");
-    let path = format!("/run/oblivion-session/{name}.sock");
+    let path = scope::path(&format!("/run/oblivion-session/{name}.sock"));
     qmp_arguments(
         Role::Session,
         "chardev-add",
         json!({"id":name,"backend":{"type":"socket","data":{"addr":{"type":"unix","data":{"path":path}},"server":true,"wait":false}}}),
     )?;
     let stream = UnixStream::connect(&path).map_err(|_| Error("transfer_port_unavailable"))?;
-    crate::gateway::peer(&stream, VM_UID)?;
+    crate::gateway::peer(&stream, scope::uid(VM_UID))?;
     qmp_arguments(
         Role::Session,
         "device_add",
@@ -849,7 +852,7 @@ pub fn remove_copy_port(id: &str) -> Result<()> {
             Err(error) => return Err(error),
         }
     }
-    let path = format!("/run/oblivion-session/{name}.sock");
+    let path = scope::path(&format!("/run/oblivion-session/{name}.sock"));
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

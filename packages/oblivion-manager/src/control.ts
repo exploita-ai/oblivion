@@ -15,6 +15,7 @@ export type Operation =
   | "open-documents"
   | "open-documents-ephemeral"
   | "start-chat"
+  | "stop-chat"
   | "chat-ready"
   | "chat-recover"
   | "cancel-chat"
@@ -46,6 +47,8 @@ export type Operation =
 
 export type Request = {
   operation: Operation
+  slot?: number
+  expectedSession?: string
   session?: string
   payload?: Uint8Array
   timeoutMs?: number
@@ -67,7 +70,7 @@ export function request(input: Request, path = "/run/oblivion-control.sock"): Pr
     : 1024
   if ((input.payload?.byteLength ?? 0) > limit) return Promise.reject(new ControlError("request_too_large"))
   const header = Buffer.from(
-    JSON.stringify({ operation: input.operation, session: input.session ?? null, secret_len: input.payload?.byteLength ?? 0 }),
+    JSON.stringify({ slot: input.slot ?? 0, expected_session: input.expectedSession ?? null, operation: input.operation, session: input.session ?? null, secret_len: input.payload?.byteLength ?? 0 }),
   )
   const frame = Buffer.alloc(4 + header.length + (input.payload?.byteLength ?? 0))
   frame.writeUInt32BE(header.length)

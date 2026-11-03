@@ -23,7 +23,7 @@ export function NetworkIndicator(props: { label: NetworkLabel; host: string; blo
     <For each={indicators()}>{(indicator) => <box flexDirection="row" gap={1}>
       <text fg={theme.text.muted}>{indicator.name}</text>
       <text fg={indicator.mark === "+" ? theme.feedback.success : indicator.mark === "?" || indicator.mark === "." ? theme.feedback.warning : theme.text.muted}>[{indicator.mark}]</text>
-      {indicator.name === "Network" && props.access && <text fg={theme.text.base}>{props.access === "open" ? "Open Web" : props.access === "strict" ? "Strict" : "Offline"}</text>}
+      {indicator.name === "Network" && props.access && <text fg={theme.text.base}>{props.access === "open" ? "Open Internet" : props.access === "strict" ? "Strict" : "Offline"}</text>}
     </box>}</For>
   </box>
 }

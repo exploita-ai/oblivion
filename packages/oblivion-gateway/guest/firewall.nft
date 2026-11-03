@@ -20,7 +20,7 @@ table inet oblivion {
         ct state invalid counter drop
         iifname "lo" accept
         ct state established,related accept
-        iifname "inside0" ip saddr 10.88.0.2 ip daddr 10.88.0.1 tcp dport { 8111, 8112, 8113 } ct state new counter accept
+        iifname "inside0" ip saddr 10.88.0.2 ip daddr 10.88.0.1 tcp dport { 8111, 8112, 8113, 8114 } ct state new counter accept
         counter drop
     }
     chain forward {

@@ -29,7 +29,10 @@ enum Request {
         token: Zeroizing<String>,
         #[serde(default)]
         tools: Option<Tools>,
+        #[serde(default)]
+        rotation_allowed: bool,
     },
+    RotationAllowed { allowed: bool },
     Revoke {},
     Policy {
         tools: Tools,
@@ -96,6 +99,11 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
     let mut firewall = None;
     let mut access = Access::Strict;
     loop {
+        if let Some(grant) = api.as_mut() {
+            if grant.poll_rotation(provider, key.as_deref().map(String::as_str), transport.as_ref(), tor.as_ref())? {
+                firewall = Some(crate::network::snapshot()?);
+            }
+        }
         let bytes = channel.read(api)?;
         let request: Request =
             serde_json::from_slice(&bytes).map_err(|_| io::Error::other("invalid_request"))?;
@@ -169,7 +177,7 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                 provider = Some(selected_provider);
                 key = Some(api_key);
             }
-            Request::Grant { token, tools } => {
+            Request::Grant { token, tools, rotation_allowed } => {
                 if api.is_some()
                     || token.len() != 64
                     || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -195,10 +203,21 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                     key,
                     &token,
                     transport,
-                    tools.as_ref(),
+                    tools,
                 )?);
+                api.as_mut().unwrap().rotation_allowed = rotation_allowed;
+            }
+            Request::RotationAllowed { allowed } => {
+                let grant = api.as_mut().ok_or_else(|| io::Error::other("grant_required"))?;
+                if grant.blocked { return Err(io::Error::other("rotation_recovery_required")); }
+                grant.rotation_allowed = allowed;
             }
             Request::Policy { tools } => {
+                // An explicit failed rotation stays latched; a mode change must
+                // not replace its firewall with a permissive transport policy.
+                if api.as_ref().is_some_and(|grant| grant.blocked) {
+                    return Err(io::Error::other("rotation_recovery_required"));
+                }
                 let mut previous = api
                     .take()
                     .ok_or_else(|| io::Error::other("grant_required"))?;
@@ -225,12 +244,18 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                         .ok_or_else(|| io::Error::other("not_configured"))?,
                     &previous.token,
                     transport,
-                    Some(&tools),
+                    Some(tools),
                 )?);
+                api.as_mut().unwrap().rotation_allowed = previous.rotation_allowed;
             }
             Request::Revoke {} | Request::Shutdown {} => {
                 if let Some(mut current) = api.take() {
                     current.stop()?;
+                    // Destroy a latched gateway instead of allowing a later
+                    // grant to mistake its blocked ruleset for a ready route.
+                    if current.blocked {
+                        return Err(io::Error::other("rotation_recovery_required"));
+                    }
                 }
             }
             Request::Status {} => {}
@@ -245,7 +270,7 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                     .as_ref()
                     .ok_or_else(|| io::Error::other("not_configured"))?;
                 let progress = tor.as_ref().and_then(|tor| tor.progress().ok());
-                let ready = access != Access::Offline
+                let ready = access != Access::Offline && !api.as_ref().is_some_and(|grant| grant.blocked)
                     && match transport {
                         Transport::Tor {} => progress == Some(100),
                         Transport::Socks5 { .. } => Process::start(
@@ -281,6 +306,25 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
 
 struct Grant {
     token: Zeroizing<String>,
+    plane: Option<Plane>,
+    rotation: Process,
+    policy: Option<Tools>,
+    blocked: bool,
+    pending: Option<PendingRotation>,
+    previous_exits: std::collections::BTreeSet<String>,
+    normal_firewall: Vec<u8>,
+    rotation_firewall: Vec<u8>,
+    last_rotation: Option<Instant>,
+    rotation_allowed: bool,
+}
+
+struct PendingRotation {
+    deadline: Instant,
+    circuit: Option<u32>,
+    draining: bool,
+}
+
+struct Plane {
     api: Process,
     egress: Process,
     tools: Option<Process>,
@@ -293,8 +337,145 @@ impl Grant {
         key: &str,
         token: &str,
         transport: &Transport,
-        tools: Option<&Tools>,
+        tools: Option<Tools>,
     ) -> io::Result<Self> {
+        let plane = Plane::start(provider, key, token, transport, tools.as_ref())?;
+        let rotation = Process::start(Role::Rotation, Zeroizing::new(serde_json::to_vec(
+            &serde_json::json!({"session_token": token}),
+        )?))?;
+        Ok(Self {
+            token: Zeroizing::new(token.to_owned()), plane: Some(plane), rotation,
+            policy: tools, blocked: false, pending: None, rotation_allowed: false,
+            previous_exits: Default::default(), normal_firewall: crate::network::snapshot()?, rotation_firewall: Vec::new(), last_rotation: None,
+        })
+    }
+
+    fn poll_rotation(&mut self, provider: Option<Provider>, key: Option<&str>, transport: Option<&Transport>, tor: Option<&crate::tor::Tor>) -> io::Result<bool> {
+        let control = self.rotation.control.as_mut().ok_or_else(|| io::Error::other("rotation_control_missing"))?;
+        let mut request = [0u8];
+        let received = unsafe { libc::recv(control.as_raw_fd(), request.as_mut_ptr().cast(), 1, libc::MSG_DONTWAIT) };
+        if received == 0 || (received < 0 && io::Error::last_os_error().kind() != io::ErrorKind::WouldBlock) {
+            return Err(io::Error::other("rotation_control_lost"));
+        }
+        if received == 1 {
+            if request != *b"R" || self.pending.is_some() { return Err(io::Error::other("invalid_rotation_request")); }
+            if !self.rotation_allowed {
+                control.write_all(b"T")?;
+                return Ok(false);
+            }
+            if !matches!(transport, Some(Transport::Tor {})) || tor.is_none() || self.policy.as_ref().is_some_and(|policy| policy.access == Access::Offline) {
+                control.write_all(b"U")?;
+                return Ok(false);
+            }
+            if self.last_rotation.is_some_and(|time| time.elapsed() < Duration::from_secs(30)) {
+                control.write_all(b"C")?;
+                return Ok(false);
+            }
+            self.last_rotation = Some(Instant::now());
+            // Set the latch before touching children or Tor. Any failure below
+            // leaves it installed; supervisor death also kills the whole cgroup.
+            crate::network::rotation_block()?;
+            self.blocked = true;
+            self.pending = Some(PendingRotation { deadline: Instant::now() + Duration::from_secs(90), circuit: None, draining: true });
+            let prepare = (|| {
+                if let Some(mut plane) = self.plane.take() { plane.stop()?; }
+                let tor = tor.unwrap();
+                let exits = tor.exits()?;
+                if !exits.is_empty() { self.previous_exits = exits; }
+                tor.prepare_rotation(&self.previous_exits)
+            })();
+            if prepare.is_err() { self.fail_rotation(tor, b'P')?; }
+            return Ok(true);
+        }
+        let Some(pending) = self.pending.as_mut() else { return Ok(false) };
+        if pending.draining {
+            // DisableNetwork closes asynchronously. Keep the full barrier while
+            // Tor retires old streams; do not mistake that transition for failure.
+            let result = (|| {
+                if Instant::now() >= pending.deadline { return Err(io::Error::other("rotation_timed_out")); }
+                let tor = tor.ok_or_else(|| io::Error::other("tor_required"))?;
+                if !tor.drained()? { return Ok(false); }
+                crate::network::rotation_tor_only()?;
+                self.rotation_firewall = crate::network::snapshot()?;
+                tor.enable()?;
+                Ok(true)
+            })();
+            return match result {
+                Ok(false) => Ok(false),
+                Ok(true) => { pending.draining = false; Ok(true) }
+                Err(_) => { self.fail_rotation(tor, b'D')?; Ok(true) }
+            };
+        }
+        let result = (|| {
+            if Instant::now() >= pending.deadline { return Err(io::Error::other("rotation_timed_out")); }
+            let tor = tor.ok_or_else(|| io::Error::other("tor_required"))?;
+            if !tor.bootstrapped()? { return Ok(false); }
+            if pending.circuit.is_none() {
+                pending.circuit = Some(tor.build_circuit()?);
+                return Ok(false);
+            }
+            if !tor.circuit_ready(pending.circuit.unwrap(), &self.previous_exits)? { return Ok(false); }
+            if !crate::network::isolated(&self.rotation_firewall)? { return Err(io::Error::other("isolation_lost")); }
+            self.plane = Some(Plane::start(
+                provider.ok_or_else(|| io::Error::other("not_configured"))?,
+                key.ok_or_else(|| io::Error::other("not_configured"))?, &self.token,
+                transport.ok_or_else(|| io::Error::other("not_configured"))?, self.policy.as_ref(),
+            )?);
+            if !crate::network::isolated(&self.rotation_firewall)? { return Err(io::Error::other("isolation_lost")); }
+            // The baseline is verified with the barrier still installed. Only
+            // its known table is removed in the final atomic release.
+            crate::network::rotation_release()?;
+            if !crate::network::isolated(&self.normal_firewall)? { return Err(io::Error::other("isolation_lost")); }
+            Ok(true)
+        })();
+        match result {
+            Ok(false) => Ok(false),
+            Ok(true) => {
+                self.pending = None;
+                self.blocked = false;
+                self.rotation.control.as_mut().unwrap().write_all(if self.previous_exits.is_empty() { b"N" } else { b"S" })?;
+                Ok(true)
+            }
+            Err(error) => {
+                let phase = match error.to_string().as_str() {
+                    "circuit_build_failed" => b'B',
+                    "previous_exit_reused" => b'X',
+                    "rotation_timed_out" => b'O',
+                    "isolation_lost" => b'I',
+                    "invalid_exit_identity" | "invalid_circuit_status" => b'E',
+                    "invalid_tor_information" | "invalid_tor_line" => b'H',
+                    "unexpected_tor_reply" => b'R',
+                    _ if error.kind() == io::ErrorKind::AddrInUse => b'L',
+                    _ => b'V',
+                };
+                self.fail_rotation(tor, phase)?; Ok(true)
+            }
+        }
+    }
+
+    fn fail_rotation(&mut self, tor: Option<&crate::tor::Tor>, phase: u8) -> io::Result<()> {
+        crate::network::rotation_block()?;
+        if let Some(mut plane) = self.plane.take() { plane.stop()?; }
+        if let Some(tor) = tor { let _ = tor.disable(); }
+        self.pending = None;
+        self.blocked = true;
+        self.rotation.control.as_mut().unwrap().write_all(&[phase])
+    }
+
+    fn stop(&mut self) -> io::Result<()> {
+        let plane = self.plane.as_mut().map(Plane::stop).transpose();
+        let rotation = self.rotation.stop();
+        plane?;
+        rotation
+    }
+
+    fn exited(&mut self) -> io::Result<bool> {
+        Ok(self.rotation.child.try_wait()?.is_some() || self.plane.as_mut().map(Plane::exited).transpose()?.unwrap_or(false))
+    }
+}
+
+impl Plane {
+    fn start(provider: Provider, key: &str, token: &str, transport: &Transport, tools: Option<&Tools>) -> io::Result<Self> {
         #[derive(Serialize)]
         struct EgressCredentials<'a> {
             provider: Provider,
@@ -352,7 +533,6 @@ impl Grant {
             })?),
         )?;
         Ok(Self {
-            token: Zeroizing::new(token.to_owned()),
             api,
             egress,
             tools,
@@ -363,14 +543,24 @@ impl Grant {
     fn stop(&mut self) -> io::Result<()> {
         // Try every closure even if one fails. Process::drop also prevents a
         // startup error from leaving the other service or its sockets alive.
-        let tools = self.tools.as_mut().map(Process::stop).transpose();
-        let web = self.web.stop();
-        let api = self.api.stop();
-        let egress = self.egress.stop();
+        self.egress.control.take();
+        self.api.control.take();
+        self.web.control.take();
+        if let Some(tools) = &mut self.tools { tools.control.take(); }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let egress = self.egress.stop_until(deadline);
+        let tools = self.tools.as_mut().map(|tools| tools.stop_until(deadline)).transpose();
+        let web = self.web.stop_until(deadline);
+        let api = self.api.stop_until(deadline);
         tools?;
         web?;
         api?;
         egress
+    }
+
+    fn exited(&mut self) -> io::Result<bool> {
+        Ok(self.tools.as_mut().map(|tools| tools.child.try_wait()).transpose()?.flatten().is_some()
+            || self.web.child.try_wait()?.is_some() || self.api.child.try_wait()?.is_some() || self.egress.child.try_wait()?.is_some())
     }
 }
 
@@ -380,6 +570,7 @@ enum Role {
     Tools,
     Web,
     Probe,
+    Rotation,
 }
 
 struct Process {
@@ -395,6 +586,7 @@ impl Process {
             Role::Tools => ("/usr/bin/oblivion-tools", 1301, [10, 88, 0, 1], 8112u16),
             Role::Web => ("/usr/bin/oblivion-web", 1302, [10, 88, 0, 1], 8113u16),
             Role::Probe => ("/usr/bin/oblivion-egress", 1201, [127, 0, 0, 1], 0u16),
+            Role::Rotation => ("/usr/bin/oblivion-rotation", 1303, [10, 88, 0, 1], 8114u16),
         };
         let (control, inherited) = UnixStream::pair()?;
         control.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -478,8 +670,11 @@ impl Process {
     }
 
     fn stop(&mut self) -> io::Result<()> {
+        self.stop_until(Instant::now() + Duration::from_secs(5))
+    }
+
+    fn stop_until(&mut self, deadline: Instant) -> io::Result<()> {
         self.control.take();
-        let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if self.child.try_wait()?.is_some() {
                 return Ok(());
@@ -560,18 +755,7 @@ impl Channel {
     ) -> io::Result<()> {
         loop {
             if let Some(api) = api {
-                let tools_exited = api
-                    .tools
-                    .as_mut()
-                    .map(|tools| tools.child.try_wait())
-                    .transpose()?
-                    .flatten()
-                    .is_some();
-                if tools_exited
-                    || api.web.child.try_wait()?.is_some()
-                    || api.api.child.try_wait()?.is_some()
-                    || api.egress.child.try_wait()?.is_some()
-                {
+                if api.exited()? {
                     return Err(io::Error::other("grant_process_exited"));
                 }
             }

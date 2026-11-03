@@ -15,6 +15,7 @@ from pathlib import Path
 
 ROOT = Path("/usr/lib/oblivion-stream-fixture")
 EXTERNAL = False
+MULTISESSION = False
 KEYS = {b"Bearer OBLIVION_API_KEY_CANARY_5c91": "initial", b"Bearer OBLIVION_API_NEXT_CANARY_86ab": "alternate",
     b"Bearer OBLIVION_API_RAM_CANARY_a13e": "temporary"}
 lock = threading.Lock()
@@ -50,7 +51,7 @@ def headers(reader):
 
 
 def web_response(connection, reader, line, secure):
-    assert EXTERNAL
+    assert EXTERNAL or MULTISESSION
     values = headers(reader)
     assert values[b"host"] == b"api.abliteration.ai"
     assert not any(name in values for name in [b"authorization", b"proxy-authorization"])
@@ -134,7 +135,9 @@ def serve(connection):
             assert 2 in methods
             connection.sendall(b"\x05\x02")
             assert exact(connection, 1) == b"\x01"
-            assert exact(connection, exact(connection, 1)[0]) == (b"OBLIVION_PROXY_USER_CANARY_31d2" if EXTERNAL else b"oblivion-api")
+            user = exact(connection, exact(connection, 1)[0])
+            expected = [b"OBLIVION_PROXY_USER_CANARY_31d2"] if EXTERNAL else [b"oblivion-api", b"oblivion-tools"] if MULTISESSION else [b"oblivion-api"]
+            assert user in expected
             token = exact(connection, exact(connection, 1)[0])
             if EXTERNAL:
                 assert token == b"OBLIVION_PROXY_PASSWORD_CANARY_72a4"
@@ -149,7 +152,7 @@ def serve(connection):
             assert prefix + exact(connection, 3) == b"\x05\x01\x00\x03"
             assert exact(connection, exact(connection, 1)[0]) == b"api.abliteration.ai"
             port = struct.unpack(">H", exact(connection, 2))[0]
-            assert port == 443 or (EXTERNAL and port == 80)
+            assert port == 443 or ((EXTERNAL or MULTISESSION) and port == 80)
             connection.sendall(b"\x05\x00\x00\x01\x7f\x00\x00\x01\x00\x00")
             if port == 80:
                 with connection.makefile("rb") as reader:
@@ -169,6 +172,14 @@ def serve(connection):
                     assert 0 < size <= 16 * 1024 * 1024
                     body = json.loads(reader.read(size))
                     assert body["model"] == "abliterated-model" and body["stream"] is True
+                    if MULTISESSION and body["messages"] == [{"role": "user", "content": "OBLIVION_KEY_PROBE"}]:
+                        chunk = {"id": "chatcmpl-key-probe", "object": "chat.completion.chunk", "created": 1,
+                            "model": body["model"], "choices": [{"index": 0, "delta": {"role": "assistant",
+                            "content": "OBLIVION_KEY_" + KEYS[values[b"authorization"]]}, "finish_reason": "stop"}]}
+                        payload = ("data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n").encode()
+                        tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: "
+                            + str(len(payload)).encode() + b"\r\n\r\n" + payload)
+                        return
                     if EXTERNAL and web_model(tls, body):
                         return
                     if "OBLIVION_STREAM_REQUEST" not in json.dumps(body["messages"]):
@@ -230,9 +241,10 @@ def status(line):
 
 
 def main():
-    global EXTERNAL
+    global EXTERNAL, MULTISESSION
     EXTERNAL = sys.argv[1:] == ["--external"]
-    assert EXTERNAL or sys.argv[1:] == []
+    MULTISESSION = sys.argv[1:] == ["--multisession"]
+    assert EXTERNAL or MULTISESSION or sys.argv[1:] == []
     assert os.getuid() == 0
     assert len(Path("/proc/swaps").read_text().splitlines()) == 1
     context.load_cert_chain(ROOT / "cert.pem", ROOT / "key.pem")

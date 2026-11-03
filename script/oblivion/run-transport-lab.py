@@ -213,7 +213,7 @@ def main():
                 assert chat.call("tools-request", token=next_token, scheme="https")["status"] == 403
                 assert chat.call("request", token=next_token)["status"] == 502
                 assert proxy.snapshot()["contacts"] == contacts + 3
-                check("Open Web allows HTTP/HTTPS without rules, while an explicit block overrides tool and provider access")
+                check("Open Internet allows HTTP/HTTPS without rules, while an explicit block overrides tool and provider access")
             if args.fault in ["revoke", "policy"]:
                 assert not control.call("shutdown")["active"]
             # EOF from a crashed connector precedes the supervisor's child-exit

@@ -322,6 +322,57 @@ async fn streams_native_tool_history_through_remote_dns_and_replaces_credentials
 }
 
 #[tokio::test]
+async fn large_models_forward_their_actual_output_limit() {
+    let mut fixture = Fixture::new(true, TOKEN).await;
+    for model in ["abliterated-model-large", "abliterated-model-large-v2"] {
+        for field in ["max_tokens", "max_completion_tokens"] {
+            let mut body = chat();
+            body["model"] = json!(model);
+            body[field] = json!(999_990);
+            let pending = tokio::spawn(fixture.request(body).send());
+            let observed = fixture.next().await;
+            assert_eq!(observed.body["model"], model);
+            assert_eq!(observed.body[field], 999_990);
+            drop(reply(
+                observed,
+                200,
+                vec![("content-type", "text/event-stream")],
+            ));
+            let response = timeout(Duration::from_secs(10), pending)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.text().await.unwrap(), "");
+        }
+    }
+    assert_eq!(fixture.attempts.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn invalid_token_limit_is_explained_without_contacting_socks() {
+    let fixture = Fixture::new(true, TOKEN).await;
+    let mut body = chat();
+    body["max_completion_tokens"] = json!(262_135);
+    let response = fixture.request(body).send().await.unwrap();
+    assert_eq!(response.status(), 400);
+    let response = response.text().await.unwrap();
+    assert!(!response.contains(KEY) && !response.contains(TOKEN));
+    assert!(!response.contains("synthetic prompt"));
+    let response: Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["error"]["code"], "token_limit_denied");
+    assert_eq!(response["error"]["type"], "oblivion_gateway");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("selected model")
+    );
+    assert_eq!(fixture.attempts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn rejects_provider_features_and_remote_media_before_contacting_socks() {
     let fixture = Fixture::new(true, TOKEN).await;
     let denied = [

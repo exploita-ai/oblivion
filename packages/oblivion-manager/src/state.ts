@@ -19,6 +19,9 @@ export const preferences = z.object({
 })
 
 export const status = z.object({
+  slot: z.number().int().min(0).max(31).optional(),
+  session_slot_limit: z.number().int().min(1).max(32).optional(),
+  open_sessions: z.array(z.object({ slot: z.number().int().min(0).max(31), id: identifier.nullable(), mode: z.enum(["documents", "chat", "starting"]).nullable(), recovery_required: z.boolean() })).optional(),
   debug_available: z.boolean().default(false),
   general_present: z.boolean(),
   general_incomplete: z.boolean(),

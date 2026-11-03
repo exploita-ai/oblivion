@@ -1,3 +1,4 @@
+import { sessionSocket } from "./session-tabs"
 import { useKeyboard } from "@opentui/solid"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
 import { z } from "zod"
@@ -26,7 +27,12 @@ const errors: Record<string, string> = {
   source_not_available: "The selected device is no longer available. Reattach it and refresh the list.",
 }
 
-export function SessionRestore(props: { request: (request: Request) => Promise<string>; back: () => void }) {
+export function SessionRestore(props: {
+  slot?: number
+  request: (request: Request) => Promise<string>; back: () => void }) {
+  const request = props.request
+  const targetSlot = props.slot ?? 0
+
   const [devices, setDevices] = createSignal<z.infer<typeof devicesSchema>["sources"]>([])
   const [device, setDevice] = createSignal<z.infer<typeof devicesSchema>["sources"][number]>()
   const [page, setPage] = createSignal<Page>({ path: "", entries: [], next: null, skipped: 0 })
@@ -52,7 +58,7 @@ export function SessionRestore(props: { request: (request: Request) => Promise<s
 
   async function command(value: object, timeoutMs?: number) {
     const payload = new TextEncoder().encode(JSON.stringify(value))
-    try { return await props.request({ operation: "transfers", payload, timeoutMs }) }
+    try { return await request({ operation: "transfers", payload, timeoutMs }) }
     finally { payload.fill(0) }
   }
   async function release() {
@@ -111,7 +117,7 @@ export function SessionRestore(props: { request: (request: Request) => Promise<s
     preparing = pending
     const result = await pending.finally(() => { if (preparing === pending) preparing = undefined })
     if (disposed) { await discard(); return }
-    transfer = await connectTransfer(result.id, undefined, { entries: 1, bytes: result.bytes, budgetMs: 3_600_000 })
+    transfer = await connectTransfer(result.id, sessionSocket("/run/oblivion-transfer-host/control.sock", targetSlot), { entries: 1, bytes: result.bytes, budgetMs: 3_600_000 })
     if (disposed) { await discard(); return }
     await browse()
   }

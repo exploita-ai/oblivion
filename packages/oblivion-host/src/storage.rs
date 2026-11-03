@@ -1,3 +1,4 @@
+use oblivion_host::scope;
 use oblivion_host::{egress, keys, network, persistence, settings, transfers};
 use oblivion_transport::policy::{Access, Policy, Session, Tools};
 use oblivion_transport::provider::Provider;
@@ -48,6 +49,9 @@ struct Config {
 
 #[derive(Serialize)]
 struct Status {
+    slot: scope::Slot,
+    open_sessions: Vec<OpenSession>,
+    session_slot_limit: u8,
     general_present: bool,
     general_incomplete: bool,
     general_open: bool,
@@ -85,7 +89,27 @@ struct Status {
 
 pub fn main() -> Result<()> {
     secure_process()?;
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let slot = if let Some(position) = args.iter().position(|value| value == "--slot") {
+        let value = args.get(position + 1).ok_or(Error("invalid_session_slot"))?
+            .parse::<u8>().map_err(|_| Error("invalid_session_slot"))?;
+        args.drain(position..position + 2);
+        oblivion_host::scope::Slot::try_from(value).map_err(Error)?
+    } else { Default::default() };
+    let expected = if let Some(position) = args.iter().position(|value| value == "--expected-session") {
+        let id = args.get(position + 1).ok_or(Error("invalid_session_id"))?.clone();
+        validate_id(&id)?;
+        args.drain(position..position + 2);
+        Some(id)
+    } else { None };
+    oblivion_host::scope::within(slot, || execute(args, expected.as_deref()))
+}
+
+fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
+    runtime()?;
+    if scope::current().index() != 0 {
+        fs::create_dir_all(scope::current().runtime()).map_err(|_| Error("runtime_directory_failed"))?;
+    }
     require(args.len() >= 3 && args[0] == "--config", "usage")?;
     let config = Config::read(Path::new(&args[1]))?;
     if args.len() == 3 && args[2] == "serve" {
@@ -171,6 +195,11 @@ pub fn main() -> Result<()> {
     } else {
         lock()?
     };
+    // A delayed view callback cannot operate on a new session which reused
+    // its old slot. Verify under the same lock as the operation itself.
+    if let Some(id) = expected {
+        require(session_info()?.is_some_and(|info| info.0 == id), "session_changed")?;
+    }
     // A broken transfer record must not prevent teardown from revoking the
     // current grant. Admission guards apply to new work, not close/recovery.
     if !matches!(
@@ -206,6 +235,7 @@ pub fn main() -> Result<()> {
             | "enter-ephemeral"
             | "enter-documents"
             | "enter-documents-ephemeral"
+            | "stop-chat"
             | "start-chat"
             | "chat-ready"
             | "discard-general-pending"
@@ -534,6 +564,15 @@ pub fn main() -> Result<()> {
             }
             Ok(())
         }
+        "stop-chat" => {
+            require(!crate::onion_host::prepared()? && !crate::transfer_host::prepared()?, "transfer_active")?;
+            let (id, mode) = session_info()?.ok_or(Error("session_not_open"))?;
+            require(mode == "chat", "chat_not_running")?;
+            write_session_info(&id, "starting")?;
+            recover_chat(&config)?;
+            crate::gateway::shutdown()?;
+            Ok(())
+        }
         "chat-ready" => {
             require(
                 mapping_open("oblivion-session")? && !crate::vm::stopped()?,
@@ -674,7 +713,7 @@ pub fn main() -> Result<()> {
                 return config.change_access(mode, save);
             }
             require(
-                !mapping_open("oblivion-session")? && crate::vm::stopped()?,
+                open_sessions()?.is_empty() && crate::vm::stopped()?,
                 "session_must_be_closed",
             )?;
             match command {
@@ -708,7 +747,7 @@ pub fn main() -> Result<()> {
                 "general_not_writable",
             )?;
             require(
-                !mapping_open("oblivion-session")? && crate::vm::stopped()?,
+                open_sessions()?.is_empty() && crate::vm::stopped()?,
                 "session_must_be_closed",
             )?;
             crate::host_network::save()
@@ -740,7 +779,7 @@ pub fn main() -> Result<()> {
                 })
             };
             require(
-                !mapping_open("oblivion-session")? && crate::vm::stopped()?,
+                open_sessions()?.is_empty() && crate::vm::stopped()?,
                 "session_must_be_closed",
             )?;
             if let Some(command) = command {
@@ -924,15 +963,21 @@ pub fn main() -> Result<()> {
             let vm = config.vm.as_ref().ok_or(Error("vm_not_configured"))?;
             vm.validate()?;
             require(crate::vm::stopped()?, "vm_already_running")?;
-            if config.gateway.is_some() {
-                config.start_gateway(true)?;
-                crate::gateway::ready()?;
-            }
             let id = if op == "enter-ephemeral" {
                 random_id()?
             } else {
                 args[3].clone()
             };
+            if op == "enter-ephemeral" {
+                config.open_ephemeral()?;
+            } else {
+                config.open(&id, &password(false)?)?;
+            }
+            write_session_info(&id, "chat")?;
+            if config.gateway.is_some() {
+                config.start_gateway(true)?;
+                crate::gateway::ready()?;
+            }
             let tools = if config.gateway.is_some() {
                 Some(session_policy(
                     &id,
@@ -942,12 +987,6 @@ pub fn main() -> Result<()> {
             } else {
                 None
             };
-            if op == "enter-ephemeral" {
-                config.open_ephemeral()?;
-            } else {
-                config.open(&id, &password(false)?)?;
-            }
-            write_session_info(&id, "chat")?;
             let web_access = crate::host_settings::status(true)?.current.web_access;
             // Failed startup keeps the vault interlocked until explicit leave/lock.
             let result = (|| {
@@ -973,84 +1012,28 @@ pub fn main() -> Result<()> {
             }
             result
         }
-        "close" | "leave" | "force-leave" => {
-            // Transfer cleanup can fail while a session is still running.
-            // Revoke its network before attempting any fallible teardown.
-            let gateway = if config.gateway.is_some() {
-                crate::gateway::revoke()
-            } else {
-                Ok(())
-            };
-            let onion = if config.onion.is_some() || crate::onion_host::prepared()? {
-                crate::onion_host::shutdown()
-            } else {
-                Ok(true)
-            };
-            onion?;
-            gateway?;
-            if config.import.is_some()
-                || config.export.is_some()
-                || crate::transfer_host::prepared()?
-            {
-                match crate::transfer_host::stop() {
-                    Err(_) if op == "force-leave" => {
-                        // An unresponsive destination cannot acknowledge port
-                        // removal. Only the explicit forced-close action may
-                        // destroy it, then require cleanup again before LUKS.
-                        crate::vm::stop(true)?;
-                        crate::transfer_host::stop()?;
-                    }
-                    result => result?,
-                }
-            }
-            if config.vm.is_some() && op != "close" {
-                crate::vm::stop(op == "force-leave")?;
-            }
-            close_session()?;
-            clear_key_selection()?;
-            clear_key_file("session-info")
-        }
+        "close" | "leave" | "force-leave" => require(config.close_slot(op == "force-leave")?, "locked_without_tor_state"),
         "lock" | "recover" => {
-            // Attempt every independent shutdown before checking the results.
-            // A failed checkpoint is not a running gateway; a failed stop is.
-            // Never close mappings while a worker's stop is unconfirmed.
-            let gateway = config
-                .gateway
-                .as_ref()
-                .map_or(Ok(true), |_| crate::gateway::shutdown());
-            let onion = if config.onion.is_some() || crate::onion_host::prepared()? {
-                crate::onion_host::shutdown()
-            } else {
-                Ok(true)
-            };
-            let transfers = (|| {
-                if config.import.is_some()
-                    || config.export.is_some()
-                    || crate::transfer_host::prepared()?
-                {
-                    crate::transfer_host::stop()?;
+            let mut failure = None;
+            let mut checkpoint = true;
+            for value in 0..scope::LIMIT {
+                let result = scope::within(scope::Slot::try_from(value).map_err(Error)?, || config.close_slot(true));
+                match result {
+                    Err(error) => failure = Some(error),
+                    Ok(saved) => checkpoint &= saved,
                 }
-                Ok(())
-            })();
-            let session = config
-                .vm
-                .as_ref()
-                .map_or(Ok(()), |_| crate::vm::stop(false));
-            let checkpoint = gateway?;
-            let onion_checkpoint = onion?;
-            transfers?;
-            session?;
+            }
+            if let Some(error) = failure { return Err(error); }
             close_general()?;
-            clear_key_file("session-info")?;
-            clear_key_selection()?;
             clear_key_file("api-keys.json")?;
             clear_key_file("api-key-default")?;
-            clear_transport_selection()?;
-            clear_network_selection()?;
-            if recovery_required()? {
-                fs::remove_file(RECOVERY).map_err(|_| Error("recovery_clear_failed"))?;
-            }
-            require(checkpoint && onion_checkpoint, "locked_without_tor_state")
+            scope::within(Default::default(), || -> Result<()> {
+                clear_key_selection()?;
+                clear_transport_selection()?;
+                clear_network_selection()
+            })?;
+            if recovery_required()? { fs::remove_file(RECOVERY).map_err(|_| Error("recovery_clear_failed"))?; }
+            require(checkpoint, "locked_without_tor_state")
         }
         "status" => {
             let mode = mount_mode()?;
@@ -1060,6 +1043,9 @@ pub fn main() -> Result<()> {
                 Some(read_keyring()?.status(key_selection()?))
             };
             let status = Status {
+                slot: scope::current(),
+                open_sessions: open_sessions()?,
+                session_slot_limit: scope::LIMIT,
                 connections: crate::host_network::snapshot().ok(),
                 system: crate::system_info::status(),
                 debug_available: crate::debug::available(),
@@ -1142,6 +1128,7 @@ pub fn main() -> Result<()> {
                 transfers_configured: config.import.is_some() || config.export.is_some(),
                 gateway_network: config.gateway_network,
                 recovery_required: recovery_required()?
+                    || runtime_record("session-recovery-required").exists()
                     || session_info()?.is_some_and(|(_, mode)| mode == "starting"),
                 gateway_state: if config.gateway.is_some() {
                     Some(crate::gateway::state()?)
@@ -1264,11 +1251,7 @@ impl Config {
             if restore {
                 return clear_network_selection();
             }
-            let path = Path::new(if save { PROFILE } else { RUN }).join(if save {
-                "network-policy.json"
-            } else {
-                "network-policy-selection.json"
-            });
+            let path = if save { network_profile()?.join("network-policy.json") } else { runtime_record("network-policy-selection.json") };
             write_network_policy(&path, &policy, save)?;
             if save {
                 clear_network_selection()?;
@@ -1310,7 +1293,7 @@ impl Config {
         }
         if temporary {
             write_transport_profile(
-                &Path::new(RUN).join("transport-selection.json"),
+                &runtime_record("transport-selection.json"),
                 &profile,
                 false,
             )?;
@@ -1318,7 +1301,7 @@ impl Config {
             clear_transport_selection()?;
             if save {
                 write_transport_profile(
-                    &Path::new(PROFILE).join("transport.json"),
+                    &network_profile()?.join("transport.json"),
                     &profile,
                     true,
                 )?;
@@ -1331,6 +1314,13 @@ impl Config {
         let mode = mount_mode()?;
         require(mode != MountMode::Closed, "general_not_open")?;
         let mut keyring = read_keyring()?;
+        if let keys::Command::Replace { id, .. } | keys::Command::Remove { id } = &command {
+            for entry in open_sessions()? {
+                if !matches!(entry.mode.as_deref(), Some("chat" | "starting")) { continue; }
+                let selected = scope::within(entry.slot, || key_selection())?;
+                require(keyring.status(selected).selected.as_ref() != Some(id), "api_key_in_use")?;
+            }
+        }
         let revoke = keyring.requires_revocation(&command, key_selection()?);
         let temporary = match &command {
             keys::Command::Temporary { .. } => true,
@@ -1436,6 +1426,10 @@ impl Config {
     }
 
     fn start_gateway(&self, wait: bool) -> Result<()> {
+        if session_info()?.is_some() {
+            let selected = read_keyring()?.status(key_selection()?).selected;
+            write_key_selection(selected.as_deref())?;
+        }
         require(
             crate::host_settings::status(true)?.current.web_access != "offline",
             "network_offline",
@@ -1742,6 +1736,7 @@ impl Config {
     }
 
     fn open_ephemeral(&self) -> Result<()> {
+        self.admit_session()?;
         require(
             mount_mode()? == MountMode::ReadOnly && mapping_open("oblivion-general")?,
             "ephemeral_boot_required",
@@ -1754,15 +1749,17 @@ impl Config {
         File::open("/dev/urandom")
             .and_then(|mut random| random.read_exact(&mut secret))
             .map_err(|_| Error("random_failed"))?;
-        create_image(Path::new(EPHEMERAL), self.session_mib)?;
-        self.format(Path::new(EPHEMERAL), &secret)?;
-        crypt_open(Path::new(EPHEMERAL), "oblivion-session", &secret, false)?;
+        create_image(Path::new(&scope::path(EPHEMERAL)), self.session_mib)?;
+        self.format(Path::new(&scope::path(EPHEMERAL)), &secret)?;
+        crypt_open(Path::new(&scope::path(EPHEMERAL)), "oblivion-session", &secret, false)?;
         drop(secret);
         format_session()
     }
 
     fn open(&self, id: &str, secret: &[u8]) -> Result<()> {
         validate_id(id)?;
+        require(!open_sessions()?.iter().any(|entry| entry.id.as_deref() == Some(id)), "session_already_open")?;
+        self.admit_session()?;
         require(
             mount_mode()? == MountMode::ReadWrite && mapping_open("oblivion-general")?,
             "general_not_writable",
@@ -1914,7 +1911,7 @@ fn key_selection() -> Result<Option<Option<String>>> {
 }
 
 fn key_reference(name: &str) -> Result<Option<Option<String>>> {
-    let path = Path::new(RUN).join(name);
+    let path = runtime_record(name);
     match fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(Error("selection_unavailable")),
@@ -1938,7 +1935,7 @@ fn clear_key_selection() -> Result<()> {
 
 fn clear_key_file(name: &str) -> Result<()> {
     for name in [name.to_owned(), format!("{name}.pending")] {
-        let path = Path::new(RUN).join(name);
+        let path = runtime_record(&name);
         match fs::symlink_metadata(&path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return Err(Error("selection_unavailable")),
@@ -1955,8 +1952,8 @@ fn write_key_selection(id: Option<&str>) -> Result<()> {
 }
 
 fn write_key_file(name: &str, bytes: &[u8]) -> Result<()> {
-    let path = Path::new(RUN).join(name);
-    let pending = Path::new(RUN).join(format!("{name}.pending"));
+    let path = runtime_record(name);
+    let pending = runtime_record(&format!("{name}.pending"));
     for existing in [&path, &pending] {
         match fs::symlink_metadata(existing) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -1983,26 +1980,26 @@ fn write_key_file(name: &str, bytes: &[u8]) -> Result<()> {
 
 fn transport_profiles() -> Result<(egress::Profile, Option<egress::Profile>)> {
     let saved = if profile_directory()? {
-        read_transport_profile(&Path::new(PROFILE).join("transport.json"))?.unwrap_or_default()
+        read_transport_profile(&network_profile()?.join("transport.json"))?.unwrap_or_default()
     } else {
         egress::Profile::default()
     };
     // A corrupt saved profile is never hidden by a volatile override.
     Ok((
         saved,
-        read_transport_profile(&Path::new(RUN).join("transport-selection.json"))?,
+        read_transport_profile(&runtime_record("transport-selection.json"))?,
     ))
 }
 
 fn policy_profiles() -> Result<(Option<Policy>, Option<Policy>)> {
     let saved = if profile_directory()? {
-        read_network_policy(&Path::new(PROFILE).join("network-policy.json"))?
+        read_network_policy(&network_profile()?.join("network-policy.json"))?
     } else {
         None
     };
     Ok((
         saved,
-        read_network_policy(&Path::new(RUN).join("network-policy-selection.json"))?,
+        read_network_policy(&runtime_record("network-policy-selection.json"))?,
     ))
 }
 
@@ -2028,7 +2025,7 @@ fn clear_network_selection() -> Result<()> {
         "network-policy-selection.json",
         "network-policy-selection.json.pending",
     ] {
-        let path = Path::new(RUN).join(name);
+        let path = runtime_record(&name);
         match fs::symlink_metadata(&path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return Err(Error("selection_unavailable")),
@@ -2097,7 +2094,7 @@ fn clear_transport_selection() -> Result<()> {
         "transport-selection.json",
         "transport-selection.json.pending",
     ] {
-        let path = Path::new(RUN).join(name);
+        let path = runtime_record(&name);
         match fs::symlink_metadata(&path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return Err(Error("selection_unavailable")),
@@ -2146,7 +2143,7 @@ fn write_transport_profile(path: &Path, profile: &egress::Profile, durable: bool
 pub(crate) fn tor_state(
     purpose: oblivion_host::tor_profile::Purpose,
 ) -> Result<Option<oblivion_tor_state::State>> {
-    oblivion_host::tor_profile::load(Path::new(PROFILE), purpose).map_err(Error)
+    oblivion_host::tor_profile::load(&network_profile()?, purpose).map_err(Error)
 }
 
 pub(crate) fn tor_state_writable() -> Result<bool> {
@@ -2163,7 +2160,7 @@ pub(crate) fn save_tor_state(
     state: &oblivion_tor_state::State,
 ) -> Result<()> {
     require(tor_state_writable()?, "general_not_writable")?;
-    oblivion_host::tor_profile::save(Path::new(PROFILE), purpose, state).map_err(Error)
+    oblivion_host::tor_profile::save(&network_profile()?, purpose, state).map_err(Error)
 }
 
 fn save_api_keys(archive: &keys::Archive) -> Result<()> {
@@ -2222,18 +2219,19 @@ fn close_session() -> Result<()> {
         crypt_close("oblivion-session")?;
     }
     require(!mapping_open("oblivion-session")?, "session_still_open")?;
-    if Path::new(EPHEMERAL)
+    if Path::new(&scope::path(EPHEMERAL))
         .try_exists()
         .map_err(|_| Error("ephemeral_check_failed"))?
     {
-        trusted_file(Path::new(EPHEMERAL))?;
-        fs::remove_file(EPHEMERAL).map_err(|_| Error("ephemeral_cleanup_failed"))?;
+        trusted_file(Path::new(&scope::path(EPHEMERAL)))?;
+        fs::remove_file(scope::path(EPHEMERAL)).map_err(|_| Error("ephemeral_cleanup_failed"))?;
     }
     Ok(())
 }
 
 pub(crate) fn closed_session_file(id: &str) -> Result<File> {
     validate_id(id)?;
+    require(!open_sessions()?.iter().any(|entry| entry.id.as_deref() == Some(id)), "session_already_open")?;
     closed_archive()?;
     trusted_file(&Path::new(MOUNT).join(format!("sessions/{id}.luks")))
 }
@@ -2405,7 +2403,7 @@ fn format_session() -> Result<()> {
             "0",
             "-E",
             "lazy_itable_init=0,lazy_journal_init=0",
-            SESSION,
+            &scope::path(SESSION),
         ],
         None,
     )
@@ -2426,6 +2424,8 @@ fn close_general() -> Result<()> {
 }
 
 fn crypt_open(path: &Path, name: &str, secret: &[u8], readonly: bool) -> Result<()> {
+    let scoped = if name == "oblivion-session" { scope::current().mapping(name) } else { name.to_owned() };
+    let name = scoped.as_str();
     let mut args = vec![
         "open",
         "--type",
@@ -2443,6 +2443,8 @@ fn crypt_open(path: &Path, name: &str, secret: &[u8], readonly: bool) -> Result<
 }
 
 fn crypt_close(name: &str) -> Result<()> {
+    let scoped = if name == "oblivion-session" { scope::current().mapping(name) } else { name.to_owned() };
+    let name = scoped.as_str();
     run("/usr/sbin/cryptsetup", &["close", name], None)
 }
 
@@ -2524,7 +2526,7 @@ pub(crate) fn lock_named(name: &str) -> Result<File> {
         .truncate(false)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(format!("{RUN}/{name}"))
+        .open(if matches!(name, "storage.lock" | "daemon.lock") { Path::new(RUN).join(name) } else { runtime_record(name) })
         .map_err(|_| Error("lock_failed"))?;
     unsafe {
         require(
@@ -2661,6 +2663,8 @@ fn sync_directory(path: &Path) -> Result<()> {
 }
 
 fn mapping_open(name: &str) -> Result<bool> {
+    let scoped = if name == "oblivion-session" { scope::current().mapping(name) } else { name.to_owned() };
+    let name = scoped.as_str();
     // Device symlinks are managed asynchronously by userspace. Only the kernel's
     // device-mapper table can tell us that the mapping is really gone.
     for entry in fs::read_dir("/sys/block").map_err(|_| Error("mapping_check_failed"))? {
@@ -2750,9 +2754,8 @@ fn session_titles(mode: &MountMode) -> Result<std::collections::BTreeMap<String,
                 )
             })
             .collect(),
-        MountMode::ReadOnly => session_info()?
-            .into_iter()
-            .map(|(id, _)| (id, Path::new(RUN).join("session-title")))
+        MountMode::ReadOnly => open_sessions()?.into_iter()
+            .filter_map(|entry| entry.id.map(|id| (id, Path::new(&entry.slot.runtime()).join("session-title"))))
             .collect(),
     };
     for (id, path) in paths {
@@ -2852,7 +2855,7 @@ fn recover_chat(config: &Config) -> Result<()> {
         .truncate(false)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(RECOVERY)
+        .open(&scope::path("/run/oblivion/session-recovery-required"))
         .map_err(|_| Error("recovery_marker_failed"))?;
     if crate::gateway::revoke().is_err() {
         crate::gateway::shutdown()?;
@@ -2864,14 +2867,14 @@ fn recover_chat(config: &Config) -> Result<()> {
         .ok_or(Error("vm_not_configured"))?
         .start_documents()?;
     write_session_info(&id, "documents")?;
-    fs::remove_file(RECOVERY).map_err(|_| Error("recovery_clear_failed"))
+    fs::remove_file(&scope::path("/run/oblivion/session-recovery-required")).map_err(|_| Error("recovery_clear_failed"))
 }
 
 pub(crate) fn session_info() -> Result<Option<(String, String)>> {
     if !mapping_open("oblivion-session")? {
         return Ok(None);
     }
-    let path = Path::new(RUN).join("session-info");
+    let path = runtime_record("session-info");
     if !path.exists() {
         return Ok(None);
     }
@@ -2885,10 +2888,33 @@ pub(crate) fn session_info() -> Result<Option<(String, String)>> {
     Ok(Some(value))
 }
 fn write_session_info(id: &str, mode: &str) -> Result<()> {
+    let fresh = session_info()?.is_none();
     write_key_file(
         "session-info",
         &serde_json::to_vec(&(id, mode)).map_err(|_| Error("encode_failed"))?,
-    )
+    )?;
+    if fresh {
+        let profile = network_profile()?;
+        // Snapshot the host defaults once. Later host changes must not alter an
+        // existing session; ephemeral defaults may themselves be RAM-only.
+        if !profile.join("transport.json").exists() {
+            let transport = read_transport_profile(&Path::new(RUN).join("transport-selection.json"))?
+                .or(read_transport_profile(&Path::new(PROFILE).join("transport.json"))?).unwrap_or_default();
+            write_transport_profile(&profile.join("transport.json"), &transport, mount_mode()? == MountMode::ReadWrite)?;
+        }
+        if !profile.join("network-policy.json").exists() {
+            let policy = read_network_policy(&Path::new(RUN).join("network-policy-selection.json"))?
+                .or(read_network_policy(&Path::new(PROFILE).join("network-policy.json"))?).unwrap_or_default();
+            write_network_policy(&profile.join("network-policy.json"), &policy, mount_mode()? == MountMode::ReadWrite)?;
+        }
+        if !profile.join("access.json").exists() {
+            crate::host_settings::write_access(&profile.join("access.json"), &crate::host_settings::host_status(true)?.current.web_access)?;
+        }
+        // Pin the opening's credential independently of later default changes.
+        let selected = read_keyring()?.status(key_selection()?).selected;
+        write_key_selection(selected.as_deref())?;
+    }
+    Ok(())
 }
 fn credentials_editable() -> Result<bool> {
     Ok(
@@ -3046,4 +3072,109 @@ fn network_observation(mode: Option<&str>) -> network::Observation {
     }
     .into();
     result
+}
+
+#[derive(Serialize)]
+struct OpenSession {
+    slot: scope::Slot,
+    id: Option<String>,
+    mode: Option<String>,
+    recovery_required: bool,
+}
+
+fn open_sessions() -> Result<Vec<OpenSession>> {
+    let mut result = Vec::new();
+    for index in 0..scope::LIMIT {
+        let slot = scope::Slot::try_from(index).map_err(Error)?;
+        scope::within(slot, || -> Result<()> {
+            if !mapping_open("oblivion-session")? { return Ok(()); }
+            let info = session_info()?;
+            result.push(OpenSession {
+                slot,
+                recovery_required: info.is_none() || Path::new(&scope::path("/run/oblivion/session-recovery-required")).exists(),
+                id: info.as_ref().map(|entry| entry.0.clone()),
+                mode: info.map(|entry| entry.1),
+            });
+            Ok(())
+        })?;
+    }
+    Ok(result)
+}
+
+pub(crate) fn runtime_record(name: &str) -> PathBuf {
+    // The key inventory and global default belong to the host. A per-opening
+    // selection and every session/gateway record belong to the explicit slot.
+    let base = if matches!(name.trim_end_matches(".pending"), "api-keys.json" | "api-key-default") {
+        RUN.to_owned()
+    } else { scope::current().runtime() };
+    Path::new(&base).join(name)
+}
+
+pub(crate) fn network_profile() -> Result<PathBuf> {
+    let Some((id, _)) = session_info()? else { return Ok(PathBuf::from(PROFILE)); };
+    // Gateway owners see the general mount read-only, even for a persistent
+    // session. Its private profile subtree remains writable in that namespace.
+    let path = if Path::new(&scope::path(EPHEMERAL)).exists() {
+        Path::new(&scope::current().runtime()).join("network-profile").join(id)
+    } else {
+        Path::new(PROFILE).join("sessions").join(id)
+    };
+    fs::create_dir_all(&path).map_err(|_| Error("profile_unavailable"))?;
+    let metadata = fs::symlink_metadata(&path).map_err(|_| Error("profile_unavailable"))?;
+    require(metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o077 == 0, "unsafe_profile")?;
+    Ok(path)
+}
+
+impl Config {
+    fn admit_session(&self) -> Result<()> {
+        let opened = open_sessions()?;
+        require(!opened.iter().any(|entry| entry.recovery_required), "recovery_required")?;
+        let reservation = self.vm.as_ref().map_or(0, crate::vm::Config::reservation_mib)
+            + self.gateway.as_ref().map_or(0, crate::vm::Config::reservation_mib);
+        let memory = fs::read_to_string("/proc/meminfo").map_err(|_| Error("memory_unavailable"))?;
+        let kib = |name: &str| -> Result<u64> {
+            memory.lines().find_map(|line| line.strip_prefix(name))
+                .and_then(|value| value.split_whitespace().next()).and_then(|value| value.parse().ok())
+                .ok_or(Error("memory_unavailable"))
+        };
+        require(kib("MemAvailable:")? >= (reservation + 256) * 1024
+            && kib("MemTotal:")? >= ((opened.len() as u64 + 1) * reservation + 512) * 1024,
+            "insufficient_session_memory")
+    }
+
+    fn close_slot(&self, force: bool) -> Result<bool> {
+        if !mapping_open("oblivion-session")?
+            && !Path::new(&crate::vm::Role::Gateway.runtime()).exists()
+            && !Path::new(&crate::vm::Role::Session.runtime()).exists()
+            && !Path::new(&scope::path(EPHEMERAL)).exists()
+            && !runtime_record("session-recovery-required").exists()
+            && !runtime_record("session-info").exists()
+            && !crate::transfer_host::prepared()? && !crate::onion_host::prepared()? {
+            return Ok(true);
+        }
+        // Each independent stop is attempted even when another fails. Nothing
+        // unmaps the volume until all its owners are confirmed stopped.
+        let gateway = self.gateway.as_ref().map_or(Ok(true), |_| crate::gateway::shutdown());
+        let onion = if self.onion.is_some() || crate::onion_host::prepared()? { crate::onion_host::shutdown() } else { Ok(true) };
+        let transfers = crate::transfer_host::stop();
+        let session = self.vm.as_ref().map_or(Ok(()), |_| crate::vm::stop(force));
+        let result = (|| {
+            let saved_gateway = gateway?;
+            let saved_onion = onion?;
+            if transfers.is_err() && force { crate::transfer_host::stop()?; } else { transfers?; }
+            session?;
+            close_session()?;
+            let ephemeral_profiles = Path::new(&scope::current().runtime()).join("network-profile");
+            if ephemeral_profiles.exists() { fs::remove_dir_all(ephemeral_profiles).map_err(|_| Error("profile_cleanup_failed"))?; }
+            clear_key_selection()?;
+            clear_key_file("session-info")?;
+            clear_key_file("access.json")?;
+            clear_key_file("session-recovery-required")?;
+            clear_transport_selection()?;
+            clear_network_selection()?;
+            Ok(saved_gateway && saved_onion)
+        })();
+        if result.is_err() { write_key_file("session-recovery-required", b"1")?; }
+        result
+    }
 }

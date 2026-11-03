@@ -5,6 +5,39 @@ trap '[ "$?" = 0 ] || printf "OBLIVION_GUEST_PROBE_FAILED\n"' EXIT
 printf 'OBLIVION_GUEST_READY\n'
 while IFS= read -r command; do
     case "$command" in
+        ready) printf 'OBLIVION_GUEST_READY\n' ;;
+        model-initial|model-alternate)
+            python3 - "$command" <<'PY'
+import http.client, json, sys
+from pathlib import Path
+token = Path('/run/oblivion-api/token').read_text()
+client = http.client.HTTPConnection('10.88.0.1', 8111, timeout=20)
+client.request('POST', '/v1/chat/completions', json.dumps({'model': 'abliterated-model', 'stream': True,
+    'messages': [{'role': 'user', 'content': 'OBLIVION_KEY_PROBE'}]}),
+    {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+response = client.getresponse()
+assert response.status == 200
+assert ('OBLIVION_KEY_' + sys.argv[1].removeprefix('model-')).encode() in response.read()
+client.close()
+print('OBLIVION_MODEL_KEY_VERIFIED')
+PY
+            ;;
+        network-ok|network-blocked)
+            python3 - "$command" <<'PY'
+import sys, urllib.request
+from pathlib import Path
+token = Path('/run/oblivion-api/token').read_text()
+client = urllib.request.build_opener(urllib.request.ProxyHandler({'http': 'http://oblivion-tools:' + token + '@10.88.0.1:8112'}))
+try:
+    with client.open('http://api.abliteration.ai/shell', timeout=10) as response:
+        assert response.read() == b'OBLIVION_WEB_SHELL\n'
+except OSError:
+    assert sys.argv[1] == 'network-blocked'
+else:
+    assert sys.argv[1] == 'network-ok'
+print('OBLIVION_NETWORK_VERIFIED')
+PY
+            ;;
         probe)
             [ "$(id -u)" = 1000 ]
             [ ! -e /run/oblivion/general ]

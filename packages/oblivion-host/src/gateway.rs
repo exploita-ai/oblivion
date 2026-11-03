@@ -14,8 +14,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
-const UNIT: &str = "oblivion-gateway-host.service";
-const SOCKET: &str = "/run/oblivion/gateway-control.sock";
+fn unit() -> String { oblivion_host::scope::owner("oblivion-gateway-host") }
+fn socket() -> String { oblivion_host::scope::path("/run/oblivion/gateway-control.sock") }
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "operation", rename_all = "kebab-case", deny_unknown_fields)]
@@ -24,7 +24,9 @@ enum Request<'a> {
         token: &'a str,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tools: Option<Tools>,
+        rotation_allowed: bool,
     },
+    RotationAllowed { allowed: bool },
     Revoke {},
     Policy {
         tools: Tools,
@@ -69,7 +71,7 @@ struct Observed {
 }
 
 pub fn observation() -> Result<Observation> {
-    let stream = UnixStream::connect(SOCKET).map_err(|_| Error("gateway_unavailable"))?;
+    let stream = UnixStream::connect(&socket()).map_err(|_| Error("gateway_unavailable"))?;
     peer(&stream, 0)?;
     let mut channel = Channel::new(&stream, Duration::from_secs(4));
     send(&mut channel, b"{\"operation\":\"observe\"}")?;
@@ -85,7 +87,7 @@ fn observe(stream: &UnixStream) -> Result<Observed> {
 }
 
 pub fn state() -> Result<String> {
-    vm::unit_state(UNIT)
+    vm::unit_state(&unit())
 }
 
 pub fn start(wait: bool) -> Result<()> {
@@ -94,9 +96,9 @@ pub fn start(wait: bool) -> Result<()> {
         "gateway_already_running",
     )?;
     let arguments = if wait {
-        vec!["start".to_owned(), UNIT.to_owned()]
+        vec!["start".to_owned(), unit()]
     } else {
-        vec!["start".to_owned(), "--no-block".to_owned(), UNIT.to_owned()]
+        vec!["start".to_owned(), "--no-block".to_owned(), unit()]
     };
     vm::execute("/usr/bin/systemctl", &arguments).map_err(|_| Error("gateway_start_failed"))?;
     require(!wait || state()? == "active", "gateway_start_failed")
@@ -122,13 +124,13 @@ pub(crate) fn destroy() -> Result<()> {
     // Always inspect both units: the host process may have died before its
     // ExecStopPost, or a previous cleanup may have been interrupted.
     if !matches!(state()?.as_str(), "inactive" | "failed") {
-        vm::execute("/usr/bin/systemctl", &["stop".to_owned(), UNIT.to_owned()])?;
+        vm::execute("/usr/bin/systemctl", &["stop".to_owned(), unit()])?;
     }
     vm::stop_role(Role::Gateway, true)?;
     if state()? == "failed" {
         vm::execute(
             "/usr/bin/systemctl",
-            &["reset-failed".to_owned(), UNIT.to_owned()],
+            &["reset-failed".to_owned(), unit()],
         )?;
     }
     require(state()? == "inactive", "gateway_still_running")
@@ -148,13 +150,13 @@ pub fn prepare() -> Result<Zeroizing<String>> {
     );
     // Only the point-to-point Ethernet socket is accessible to the session VM.
     // Its parent remains private to UID 1101; systemd binds this one socket.
-    let path = c"/run/oblivion-gateway-vm/inside.sock";
+    let path = std::ffi::CString::new(oblivion_host::scope::path("/run/oblivion-gateway-vm/inside.sock")).unwrap();
     require(
-        unsafe { libc::chown(path.as_ptr(), vm::GATEWAY_UID, vm::VM_UID) } == 0,
+        unsafe { libc::chown(path.as_ptr(), oblivion_host::scope::uid(vm::GATEWAY_UID), oblivion_host::scope::uid(vm::VM_UID)) } == 0,
         "gateway_network_unavailable",
     )?;
     fs::set_permissions(
-        Path::new("/run/oblivion-gateway-vm/inside.sock"),
+        Path::new(&oblivion_host::scope::path("/run/oblivion-gateway-vm/inside.sock")),
         fs::Permissions::from_mode(0o660),
     )
     .map_err(|_| Error("gateway_network_unavailable"))?;
@@ -162,7 +164,20 @@ pub fn prepare() -> Result<Zeroizing<String>> {
 }
 
 pub fn grant(token: &str, tools: Option<Tools>) -> Result<()> {
-    request(&Request::Grant { token, tools }, true)
+    require(!crate::onion_host::prepared()?, "transfer_active")?;
+    request(&Request::Grant { token, tools, rotation_allowed: true }, true)
+}
+
+// OnionShare has its own Tor gateway. Serialize its lifecycle with rotation
+// before starting any external transfer; an unacknowledged interlock fails shut.
+pub fn rotation_allowed(allowed: bool) -> Result<()> {
+    if crate::storage::session_info()?.is_some_and(|(_, mode)| mode == "chat") && state()? == "active" {
+        if let Err(error) = request(&Request::RotationAllowed { allowed }, true) {
+            destroy()?;
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 pub fn revoke() -> Result<()> {
@@ -189,7 +204,7 @@ pub fn ready() -> Result<()> {
 }
 
 fn request(request: &Request<'_>, active: bool) -> Result<()> {
-    let stream = UnixStream::connect(SOCKET).map_err(|_| Error("gateway_unavailable"))?;
+    let stream = UnixStream::connect(&socket()).map_err(|_| Error("gateway_unavailable"))?;
     peer(&stream, 0)?;
     let mut channel = Channel::new(
         &stream,
@@ -228,7 +243,7 @@ fn connected(key: crate::storage::ApiKey, transport: Transport, network: bool) -
     let tor = matches!(transport, Transport::Tor {});
     let stream = UnixStream::connect(format!("{}/control.sock", Role::Gateway.runtime()))
         .map_err(|_| Error("gateway_channel_unavailable"))?;
-    peer(&stream, vm::GATEWAY_UID)?;
+    peer(&stream, oblivion_host::scope::uid(vm::GATEWAY_UID))?;
     let mut channel = Channel::new(&stream, Duration::from_secs(60));
     vm::resume_gateway()?;
     let ready: Ready = serde_json::from_slice(&receive(&mut channel)?)
@@ -286,11 +301,11 @@ fn connected(key: crate::storage::ApiKey, transport: Transport, network: bool) -
     let mut observed = observe(&stream)?;
     let mut observed_at = Instant::now();
     network_ready = network_ready && observed.isolated && (!network || observed.ready);
-    if let Ok(meta) = fs::symlink_metadata(SOCKET) {
+    if let Ok(meta) = fs::symlink_metadata(&socket()) {
         require(meta.file_type().is_socket(), "invalid_gateway_socket")?;
-        fs::remove_file(SOCKET).map_err(|_| Error("gateway_socket_failed"))?;
+        fs::remove_file(&socket()).map_err(|_| Error("gateway_socket_failed"))?;
     }
-    let listener = UnixListener::bind(SOCKET).map_err(|_| Error("gateway_socket_failed"))?;
+    let listener = UnixListener::bind(&socket()).map_err(|_| Error("gateway_socket_failed"))?;
     listener
         .set_nonblocking(true)
         .map_err(|_| Error("gateway_socket_failed"))?;
@@ -363,7 +378,7 @@ fn connected(key: crate::storage::ApiKey, transport: Transport, network: bool) -
                         true
                     }
                     Request::Revoke {} => false,
-                    Request::Policy { .. } => {
+                    Request::Policy { .. } | Request::RotationAllowed { .. } => {
                         require(active, "gateway_grant_required")?;
                         true
                     }
@@ -419,9 +434,9 @@ fn connected(key: crate::storage::ApiKey, transport: Transport, network: bool) -
 fn watch_session() -> Result<OwnedFd> {
     // Connect only while the guest is paused, then release the console before
     // the manager attaches. No guest output or extra virtual device is needed.
-    let console = UnixStream::connect("/run/oblivion-session/console.sock")
+    let console = UnixStream::connect(&oblivion_host::scope::path("/run/oblivion-session/console.sock"))
         .map_err(|_| Error("session_watch_unavailable"))?;
-    peer(&console, vm::VM_UID)?;
+    peer(&console, oblivion_host::scope::uid(vm::VM_UID))?;
     let mut fd = -1;
     let mut size = size_of::<libc::c_int>() as libc::socklen_t;
     // SO_PEERPIDFD is Linux 6.5+; 77 is its x86_64/aarch64 ABI value, not yet

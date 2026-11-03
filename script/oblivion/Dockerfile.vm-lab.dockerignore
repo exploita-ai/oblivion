@@ -1,6 +1,13 @@
 **
 !packages/
 packages/*
+!packages/core/
+packages/core/*
+!packages/core/src/
+packages/core/src/*
+!packages/core/src/models-dev/
+packages/core/src/models-dev/*
+!packages/core/src/models-dev/snapshot.txt
 !packages/oblivion-tor-state/
 packages/oblivion-tor-state/*
 !packages/oblivion-tor-state/Cargo.toml
@@ -30,6 +37,7 @@ packages/oblivion-host/*
 packages/oblivion-gateway/*
 !packages/oblivion-gateway/Cargo.toml
 !packages/oblivion-gateway/Cargo.lock
+!packages/oblivion-gateway/build.rs
 !packages/oblivion-gateway/.cargo/
 !packages/oblivion-gateway/.cargo/**
 !packages/oblivion-gateway/src/
@@ -45,6 +53,7 @@ script/*
 !script/oblivion/
 script/oblivion/*
 !script/oblivion/journald-forwarding.conf
+!script/oblivion/session-identities.sh
 !script/oblivion/run-vm-lab.py
 !script/oblivion/run-tui-boot-lab.py
 !script/oblivion/run-onion-lab.py

@@ -36,7 +36,7 @@ for (const ephemeral of [false, true]) {
       await app.renderOnce(); await app.mockInput.pressKey("2"); await app.mockInput.pressEnter(); await app.renderOnce()
       expect(app.captureCharFrame()).toContain("HOST / Settings / Network & Wi-Fi")
       expect(app.captureCharFrame()).toContain("Ethernet · eth0")
-      expect(app.captureCharFrame()).toContain("Network [+] Open Web   Tor [ ]   SOCKS5 [ ]")
+      expect(app.captureCharFrame()).toContain("Network [+] Open Internet   Tor [ ]   SOCKS5 [ ]")
       await app.mockInput.pressEscape(); await app.mockInput.pressArrow("down"); await app.mockInput.pressEnter(); await app.renderOnce()
       expect(app.captureCharFrame()).toContain("HOST / Settings / Privacy route")
       expect(app.captureCharFrame()).toContain("SOCKS5 proxy")
@@ -124,13 +124,13 @@ test("large Wi-Fi lists scroll without hiding tabs or footer", async () => {
       expect(frame).toContain("Wi-Fi 099")
       expect(frame).not.toContain("Wi-Fi 000")
       expect(frame).toContain("HOST / Settings / Network & Wi-Fi")
-      expect(frame).toContain("Network [+] Open Web   Tor [ ]   SOCKS5 [ ]")
+      expect(frame).toContain("Network [+] Open Internet   Tor [ ]   SOCKS5 [ ]")
       expect(frame.split("\n")).toHaveLength(height + 1)
     }
   } finally { await app.dispose() }
 })
 
-test.each([[80, 24], [160, 50]])("F9 applies one global mode and returns to the running workspace at %ix%i", async (width, height) => {
+test.each([[80, 24], [160, 50]])("F9 applies a session mode and returns to the running workspace at %ix%i", async (width, height) => {
   const runtime = preview(() => {})
   await runtime.request({ operation: "open-documents", session: "a".repeat(32) })
   await runtime.request({ operation: "start-chat" })
@@ -145,8 +145,11 @@ test.each([[80, 24], [160, 50]])("F9 applies one global mode and returns to the 
     await app.renderOnce(); await app.mockInput.pressKey("F6"); await app.renderOnce(); await app.renderOnce()
     expect(app.captureCharFrame()).toContain("Running workspace")
     await app.mockInput.pressKey("F9"); await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("Global network access")
+    expect(app.captureCharFrame()).toContain("Session network")
+    await app.mockInput.pressEnter(); await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Session network access")
     await app.mockInput.pressArrow("down"); await app.mockInput.pressEnter(); await app.mockInput.pressEnter(); await app.renderOnce(); await app.renderOnce()
+    await app.mockInput.pressKey("F6"); await app.renderOnce(); await app.renderOnce()
     expect(app.captureCharFrame()).toContain("Running workspace")
     expect(app.captureCharFrame()).toContain("Network [+] Strict")
     expect(operations).toContain("settings")

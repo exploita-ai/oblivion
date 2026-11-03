@@ -1,3 +1,4 @@
+import { sessionSocket } from "./session-tabs"
 import { useKeyboard } from "@opentui/solid"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
 import { z } from "zod"
@@ -12,7 +13,12 @@ import { theme } from "./theme"
 
 const started = z.object({ id: z.string().regex(/^[a-f0-9]{32}$/), bytes: z.number().int().min(32 * 1024 ** 2).max(1024 ** 4) })
 
-export function SessionBackup(props: { id: string; title: string; request: (request: Request) => Promise<string>; back: () => void }) {
+export function SessionBackup(props: {
+  slot?: number
+  id: string; title: string; request: (request: Request) => Promise<string>; back: () => void }) {
+  const request = props.request
+  const targetSlot = props.slot ?? 0
+
   const [devices, setDevices] = createSignal<z.infer<typeof devicesSchema>["sources"]>([])
   const [onion, setOnion] = createSignal(false)
   const [target, setTarget] = createSignal<z.infer<typeof devicesSchema>["sources"][number]>()
@@ -30,7 +36,7 @@ export function SessionBackup(props: { id: string; title: string; request: (requ
 
   async function command(value: object, timeoutMs?: number) {
     const payload = new TextEncoder().encode(JSON.stringify(value))
-    try { return await props.request({ operation: "transfers", payload, timeoutMs }) }
+    try { return await request({ operation: "transfers", payload, timeoutMs }) }
     finally { payload.fill(0) }
   }
   async function stop() {
@@ -75,7 +81,7 @@ export function SessionBackup(props: { id: string; title: string; request: (requ
     preparing = pending
     const result = await pending.finally(() => { if (preparing === pending) preparing = undefined })
     if (disposed) { await stop(); return }
-    transfer = await connectTransfer(result.id, undefined, { entries: 1, bytes: result.bytes, budgetMs: 3_600_000 })
+    transfer = await connectTransfer(result.id, sessionSocket("/run/oblivion-transfer-host/control.sock", targetSlot), { entries: 1, bytes: result.bytes, budgetMs: 3_600_000 })
     if (disposed) { await stop(); return }
     const manifest = await transfer.offer(["session.oblivion"])
     if (manifest.entries.length !== 1 || manifest.entries[0].kind !== "file" || manifest.entries[0].path !== "session.oblivion" || manifest.bytes !== result.bytes) throw new ControlError("invalid_manifest")
@@ -120,5 +126,5 @@ export function SessionBackup(props: { id: string; title: string; request: (requ
     </Show></Show>
     <Show when={error()}><text fg={theme.feedback.error}>{error()}</text></Show>
     <Show when={busy()}><BusyModal text={busy()} cancellable={!!transfer} /></Show>
-  </box>}><OnionShare paths={[]} backup={{ id: props.id, title: props.title }} request={props.request} back={() => setOnion(false)} /></Show>
+  </box>}><OnionShare paths={[]} backup={{ id: props.id, title: props.title }} request={request} back={() => setOnion(false)} /></Show>
 }

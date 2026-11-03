@@ -62,23 +62,55 @@ function providerName(id: string) {
 
 export function App(props: { runtime: Runtime; preview?: boolean; initial?: Status; documentsOnly?: boolean }) {
   const [state, setState] = createSignal(props.initial)
+  const [slot, setSlot] = createSignal(props.initial?.slot ?? 0)
+  const scopedRequest = createMemo(() => {
+    const target = slot()
+    const id = state()?.active_session ?? undefined
+    return (input: Request) => props.runtime.request({ ...input, slot: target, expectedSession: id })
+  })
+  const sessionActivity = new Map<number, { id: string | null; monotonic: number; wall: number }>()
+  const openSessions = () => state()?.open_sessions ?? (state()?.session_open ? [{ slot: slot(), id: state()?.active_session ?? null, mode: state()?.session_mode ?? null, recovery_required: !!state()?.recovery_required }] : [])
+  const tabs = () => (state()?.open_sessions ?? []).filter((entry) => entry.slot !== 0).map((entry) => ({ slot: entry.slot, title: entry.id ? sessionTitle(entry.id) : "Recovery", mode: entry.mode, recovery: entry.recovery_required }))
+
+  async function selectSlot(target: number) {
+    if (editing()) return
+    await perform("Switching session", async () => {
+      detachWorkspace(); props.runtime.clearClipboard?.()
+      setDocuments(false); setSessionNetwork(false); setSession(undefined); setPage(0); setSettingsSection(undefined); setKeyID(undefined)
+      const previous = slot()
+      setSlot(target)
+      try { await refresh() }
+      catch (error) { setSlot(previous); await refresh(); throw error }
+      if (state()?.session_open) { activity(); await workspace() }
+    })
+  }
+
+  async function openingSlot() {
+    if (!state()?.session_slot_limit) return
+    const occupied = new Set(openSessions().map((entry) => entry.slot))
+    const target = Array.from({ length: state()!.session_slot_limit! - 1 }, (_, index) => index + 1).find((index) => !occupied.has(index))
+    if (target === undefined) throw new ControlError("session_limit_reached")
+    detachWorkspace(); setDocuments(false); setSlot(target)
+    await refresh()
+  }
   const [page, setPage] = createSignal(0)
   const [sessionSection, setSessionSection] = createSignal(0)
+  const [sessionNetwork, setSessionNetwork] = createSignal(false)
   const [accessSection, setAccessSection] = createSignal(0)
   const [settingsSection, setSettingsSection] = createSignal<number>()
   const settingsCategory = () => settingsSection() === undefined ? undefined : settingsSections[settingsSection()!]
   const networkTab = () => settingsCategory() === "Privacy route" ? 1 : settingsCategory() === "Network rules" ? 2 : 0
-  const networkVisible = () => !!state()?.general_mounted && !state()?.session_open && ["Network & Wi-Fi", "Privacy route", "Network rules"].includes(settingsCategory() ?? "")
+  const networkVisible = () => !!state()?.general_mounted && (!state()?.session_open || sessionNetwork()) && ["Network & Wi-Fi", "Privacy route", "Network rules"].includes(settingsCategory() ?? "")
   const [keyID, setKeyID] = createSignal<string>()
   const [diagnostics, setDiagnostics] = createSignal<ReturnType<typeof debugStatus.parse>>()
   const debugVisible = () => !!state()?.debug_available && !state()?.session_open && page() === sections.length
-  const category = () => debugVisible() ? "Debug" : page() === 1 ? settingsCategory() ?? "Settings" : sections[page()]
+  const category = () => sessionNetwork() && settingsSection() === undefined ? "Session network" : debugVisible() ? "Debug" : page() === 1 ? settingsCategory() ?? "Settings" : sections[page()]
   async function debug(action = "status") {
     setDiagnostics(debugStatus.parse(JSON.parse(await command("debug", { action }))))
   }
   const sessionTitle = (id: string) => state()?.session_titles[id] ?? `Session ${id.slice(0, 8)}`
   const [session, setSession] = createSignal<string | undefined>(props.initial?.active_session ?? undefined)
-  const [documents, setDocuments] = createSignal(!!props.documentsOnly || !!props.initial?.session_open)
+  const [documents, setDocuments] = createSignal(!props.initial?.recovery_required && (!!props.documentsOnly || !!props.initial?.session_open))
   const [documentsLocked, setDocumentsLocked] = createSignal(false)
   const [backup, setBackup] = createSignal<{ id: string; title: string }>()
   const [restoring, setRestoring] = createSignal(false)
@@ -86,6 +118,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   const [connection, setConnection] = createSignal<ChatConnection>()
   let startup: ReturnType<typeof Promise.withResolvers<void>> | undefined
   onCleanup(() => startup?.reject(new ControlError("chat_start_cancelled")))
+  let workspaceGeneration = 0
   let drawWorkspace: ((frame: ChatFrame) => void) | undefined
   const [networkWait, setNetworkWait] = createSignal<AbortController>()
   onCleanup(() => networkWait()?.abort())
@@ -96,14 +129,19 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   const [now, setNow] = createSignal(performance.now())
   const breadcrumb = () => restoring() ? "HOST / Sessions / Restore session" : backup() ? "HOST / Sessions / Encrypted backup" : !state()?.general_mounted
     ? `ACCESS / ${debugVisible() ? "Debug" : wizard() ? "Keyboard and time zone" : form()?.title ?? (state()?.general_present ? "Welcome back" : "First-time setup")}`
+    : sessionNetwork() ? `SESSION / ${state()?.active_session ? sessionTitle(state()!.active_session!) : ""} / Network${settingsCategory() ? ` / ${settingsCategory()}` : ""}`
     : page() === 0 && session() && state()?.session_open ? `SESSION / ${state()?.session_titles[session()!] ?? session()!.slice(0, 8)} / ${form()?.title ?? "Documents"}`
     : `HOST / ${page() === 1 && settingsCategory() ? `Settings / ${settingsCategory()}` : category()}${keyID() ? " / " + (state()?.api_keys?.entries.find((entry) => entry.id === keyID())?.name ?? "Key") : page() === 0 && session() ? ` / ${state()?.session_titles[session()!] ?? session()!.slice(0, 8)}` : ""}`
   const editing = () => !!form() || !!wizard() || !!busy() || intro() || documentsLocked() || !!backup() || restoring()
   const blocked = () => editing() || documents()
-  const navigate = (index: number) => { setWorkspaceVisible(false); setDocuments(false); setPage(index); setSettingsSection(undefined); setSession(undefined); setKeyID(undefined); setSelection(0); setFocus("content"); setNotice(""); if (debugVisible()) void perform("Refresh debug status", () => debug()) }
+  const navigate = (index: number) => { setSessionNetwork(false); setWorkspaceVisible(false); setDocuments(false); setPage(index); setSettingsSection(undefined); setSession(undefined); setKeyID(undefined); setSelection(0); setFocus("content"); setNotice(""); if (debugVisible()) void perform("Refresh debug status", () => debug()) }
   const back = () => {
     setNotice("")
     if (!state()?.general_mounted) { setPage(0); setSelection(0); setFocus("content"); return }
+    if (sessionNetwork()) {
+      if (settingsSection() !== undefined) { setSettingsSection(undefined); setSelection(0); return }
+      setSessionNetwork(false); void perform("Returning to Workspace", workspace); return
+    }
     if (state()?.session_open) {
       setSession(state()?.active_session ?? "ephemeral"); setPage(0); setKeyID(undefined); setFocus("navigation"); return
     }
@@ -125,10 +163,11 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   const activity = () => {
     lastActivity = { monotonic: performance.now(), wall: Date.now() }
     retryIdleLockAt = 0
+    if (state()?.session_open) sessionActivity.set(slot(), { ...lastActivity, id: state()?.active_session ?? null })
   }
   const welcome = () => !!state()?.general_present && !state()?.general_mounted && !state()?.general_incomplete && !state()?.recovery_required && !form() && !wizard() && !debugVisible()
-  const unavailable = () => !state()?.general_mounted ? "Unlock Oblivion first." : state()?.session_open && state()?.session_mode !== "documents" ? "Close the active chat first." : undefined
-  const networkUnavailable = () => state()?.recovery_required ? "Complete recovery first." : state()?.session_open && state()?.session_mode !== "documents" ? "Close the active chat first." : undefined
+  const unavailable = () => !state()?.general_mounted ? "Unlock Oblivion first." : state()?.session_open && state()?.session_mode !== "documents" ? "Stop Workspace before changing the route or credentials." : undefined
+  const networkUnavailable = () => state()?.recovery_required ? "Complete recovery first." : state()?.session_open && state()?.session_mode !== "documents" ? "Stop Workspace before changing the route or credentials." : undefined
   const persistent = () => !!state()?.general_mounted && !state()?.general_readonly
 
   function openSetting(index: number) {
@@ -144,15 +183,24 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
 
   async function refresh() {
     const previous = state()?.active_session
-    setState(status.parse(JSON.parse(await props.runtime.request({ operation: "status" }))))
+    const target = slot()
+    const updated = status.parse(JSON.parse(await props.runtime.request({ operation: "status", slot: target })))
+    if (target !== slot()) return
+    setState(updated)
+    for (const entry of openSessions()) {
+      if (!sessionActivity.has(entry.slot) || sessionActivity.get(entry.slot)?.id !== entry.id) sessionActivity.set(entry.slot, { id: entry.id, monotonic: performance.now(), wall: Date.now() })
+    }
+    for (const key of sessionActivity.keys()) if (!openSessions().some((entry) => entry.slot === key)) sessionActivity.delete(key)
     if (previous && previous !== state()?.active_session) props.runtime.clearClipboard?.()
     if (!state()?.session_open || state()?.recovery_required || previous && previous !== state()?.active_session) detachWorkspace()
+    if (state()?.recovery_required) setDocuments(false)
     setObserved(performance.now())
-    if (!previous && state()?.active_session) { setSession(state()?.active_session ?? undefined); setDocuments(true) }
+    if (!previous && state()?.active_session && !state()?.recovery_required) { setSession(state()?.active_session ?? undefined); setDocuments(true) }
     if (previous && !state()?.active_session) { setDocuments(false); setSession(undefined) }
   }
 
   function detachWorkspace() {
+    workspaceGeneration++
     connection()?.close()
     setConnection(undefined); setWorkspaceVisible(false)
   }
@@ -175,9 +223,14 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
       setNotice(label === "Create encrypted storage" && state()?.general_incomplete
         ? "Encrypted storage preparation was interrupted. Discard the incomplete attempt, then retry."
         : explain(error))
+      if (slot() !== 0 && !state()?.session_open) {
+        setSlot(0); navigate(0)
+        await refresh().catch(() => undefined)
+        setNotice(explain(error))
+      }
     } finally {
       setBusy("")
-      if (state()?.session_open && !workspaceVisible() && !form() && !wizard()) setDocuments(true)
+      if (state()?.session_open && !state()?.recovery_required && !workspaceVisible() && !form() && !wizard() && !sessionNetwork()) setDocuments(true)
     }
   }
 
@@ -185,7 +238,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
     if (operation === "close" || operation === "lock") props.runtime.clearClipboard?.()
     const payload = value === undefined ? undefined : new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value))
     try {
-      return await props.runtime.request({ operation, payload, session, timeoutMs: operation === "settings" ? 15_000 : undefined })
+      return await props.runtime.request({ slot: slot(), expectedSession: operation === "lock" ? undefined : state()?.active_session ?? undefined, operation, payload, session, timeoutMs: operation === "settings" ? 15_000 : undefined })
     } finally {
       payload?.fill(0)
     }
@@ -197,6 +250,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
     try {
       await command("close")
       detachWorkspace()
+      await refresh()
       await command("session-storage", { action: "grow", id, mib, password })
       await command("open-documents", password, id)
     } finally {
@@ -274,7 +328,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   function create() {
     if (state()?.general_readonly) {
       setForm({ title: "New ephemeral session", description: "All chats share this session’s documents. Everything stays in RAM.", fields: [titleField()], submit: "Create and start chat", run: async (values) => {
-        await command("open-documents-ephemeral"); await refresh();
+        await openingSlot(); await command("open-documents-ephemeral"); await refresh();
         const id = state()!.active_session!;
         await command("rename-session", { id, title: values.title.trim() }); setSession(id); setSelection(0); await refresh(); await launchChat()
       } })
@@ -285,6 +339,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
       fields: [titleField(), sizeField((state()?.session_bytes ?? 536870912) / 1048576, state()?.available_bytes ?? 0), { id: "password", label: "Session password", secret: true, description: "Use at least 16 characters.", validate: (value) => Buffer.byteLength(value) < 16 ? "Use a longer password (at least 16 bytes)." : undefined }, { id: "confirm", label: "Repeat session password", secret: true, validate: (value, values) => value !== values.password ? "The passwords do not match. Try again." : undefined }, ...chatKeyFields()], submit: "Create and start chat",
       run: async (values) => {
         validatePassword(values)
+        await openingSlot()
         const id = (await command("session-storage", { action: "create", mib: Number(values.mib), password: values.password })).trim()
         await command("rename-session", { id, title: values.title.trim() })
         await command("open-documents", values.password, id)
@@ -301,7 +356,9 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
       const pending = wait ? Promise.withResolvers<void>() : undefined
       startup = pending
       const timeout = pending ? setTimeout(() => pending.reject(new ControlError("chat_start_timeout")), 60_000) : undefined
+      const generation = workspaceGeneration
       if (!connection()) setConnection(connect((event) => {
+        if (generation !== workspaceGeneration) return
         if (event.type === "frame") { drawWorkspace?.(event); return }
         if (event.type === "startup") {
           if (event.status === "started") { startup?.resolve(); return }
@@ -318,9 +375,10 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
           if (event.action === "new") create()
         })
       }, () => {
+        if (generation !== workspaceGeneration) return
         if (startup) { startup.reject(new ControlError("chat_client_failed")); return }
         detachWorkspace(); setDocuments(true); setFeedback("error"); setNotice("The workspace display disconnected. Open Workspace to reconnect, or close and lock the session.")
-      }))
+      }, slot()))
       setDocuments(false); setForm(undefined); setWorkspaceVisible(true); setFocus("content")
       try { await pending?.promise } finally {
         clearTimeout(timeout)
@@ -335,7 +393,9 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   }
 
   function open(id: string) {
-    setForm({ title: "Open protected session", description: `${sessionTitle(id)} · All chats and shared documents are restored from this session's encrypted volume.`, fields: [{ id: "password", label: "Session password", secret: true }, ...chatKeyFields()], submit: "Unlock session", run: async (values) => { await command("open-documents", values.password, id); setSession(id); await refresh(); await launchChat(values.key) } })
+    const existing = openSessions().find((entry) => entry.id === id)
+    if (existing) { void selectSlot(existing.slot); return }
+    setForm({ title: "Open protected session", description: `${sessionTitle(id)} · All chats and shared documents are restored from this session's encrypted volume.`, fields: [{ id: "password", label: "Session password", secret: true }, ...chatKeyFields()], submit: "Unlock session", run: async (values) => { await openingSlot(); await command("open-documents", values.password, id); setSession(id); await refresh(); await launchChat(values.key) } })
   }
 
   function prepare() {
@@ -387,14 +447,30 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
     } })
   }
 
+  function openNetwork() {
+    if (!state()?.session_open) { networkAccess(); return }
+    setSessionNetwork(true); setWorkspaceVisible(false); setDocuments(false)
+    setPage(1); setSettingsSection(undefined); setSelection(0); setFocus("content"); setNotice("")
+  }
+
+  function stopWorkspace() {
+    confirm("Stop Workspace", "Stops the chats, terminals and jobs in this session so its route or API key can change. Saved work stays encrypted; other sessions keep running.", async () => {
+      await command("stop-chat"); detachWorkspace()
+    })
+  }
+
+  function sessionKey() {
+    setForm({ title: "Session API key", description: "Use this key for this opening only. The global default and other sessions are unchanged.", fields: [{ id: "key", label: "API key", value: state()?.api_keys?.selected ?? undefined, choices: (state()?.api_keys?.entries ?? []).map((key) => ({ value: key.id, label: `${key.name} · ${providerName(key.provider)}` })) }], submit: "Use key", run: async (values) => { await command("api-keys", { action: "select", id: values.key }) } })
+  }
+
   function networkAccess() {
     const resume = workspaceVisible()
     setResumeWorkspace(resume); setWorkspaceVisible(false); setDocuments(false)
-    setForm({ title: "Global network access", description: "Applies to all chats and terminals. Changes interrupt active requests. Offline also stops OnionShare; local programs keep running.", fields: [{ id: "mode", label: "Access", value: state()?.settings?.current.web_access ?? "open", choices: [
-      { value: "open", label: "Open Web — public HTTP/HTTPS through Tor or SOCKS5" },
+    setForm({ title: state()?.session_open ? "Session network access" : "Default network access", description: (state()?.session_open ? "Applies to every chat and terminal in this session. Other sessions are unchanged." : "Default for new sessions. Already open sessions are unchanged.") + " Changes interrupt active requests. Offline also stops OnionShare; local programs keep running.", fields: [{ id: "mode", label: "Access", value: state()?.settings?.current.web_access ?? "open", choices: [
+      { value: "open", label: "Open Internet — all public TCP ports through Tor or SOCKS5" },
       { value: "strict", label: "Strict — configured provider and approved destinations" },
       { value: "offline", label: "Offline — block all external traffic" },
-    ] }], submit: "Apply globally", run: async (values) => {
+    ] }], submit: state()?.session_open ? "Apply to this session" : "Set default", run: async (values) => {
       await command("settings", { action: "access", mode: values.mode, save: persistent() })
       if (resume && connection()) { setWorkspaceVisible(true); setFocus("content") }
       setResumeWorkspace(false)
@@ -402,7 +478,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   }
 
   function addRule() {
-    setForm({ title: "Add a web access rule", description: "Global rules for public destinations. Changes interrupt active requests. Provider traffic keeps its fixed route and respects matching block rules.", fields: [{ id: "destination", label: "Domain or public IP", description: "For example example.org or *.example.org" }, { id: "port", label: "Port", value: "443" }, { id: "action", label: "Action", choices: [{ value: "deny", label: "Block" }, { value: "allow", label: "Allow" }] }], submit: "Add rule", run: async (values) => { await command("network-policy", { action: "put", rule: { destination: values.destination, port: Number(values.port), action: values.action }, save: persistent() }) } })
+    setForm({ title: "Add a web access rule", description: "Rules for this session’s public destinations. Changes interrupt active requests. Provider traffic keeps its fixed route and respects matching block rules.", fields: [{ id: "destination", label: "Domain or public IP", description: "For example example.org or *.example.org" }, { id: "port", label: "Port", value: "443" }, { id: "action", label: "Action", choices: [{ value: "deny", label: "Block" }, { value: "allow", label: "Allow" }] }], submit: "Add rule", run: async (values) => { await command("network-policy", { action: "put", rule: { destination: values.destination, port: Number(values.port), action: values.action }, save: persistent() }) } })
   }
 
   async function changeConnection(value: object) {
@@ -469,6 +545,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   }
 
   function sessionView(index: number) {
+    setSessionNetwork(false)
     setNotice("")
     setSessionSection(index); setFocus("content"); setPage(0); setSession(state()?.active_session ?? "ephemeral"); setKeyID(undefined)
     setWorkspaceVisible(false); setDocuments(index === 1)
@@ -482,25 +559,31 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
     setResumeWorkspace(workspaceVisible())
     setWorkspaceVisible(false); setDocuments(false)
     confirm("Close and lock session", "Stop all chats, terminals and jobs, then lock the session's encrypted volume.", async () => {
-      await command("close"); detachWorkspace(); navigate(0)
+      await command("close"); detachWorkspace(); setSlot(0); navigate(0)
     })
   }
 
   function lockOblivion() {
-    confirm("Lock Oblivion", "Lock your encrypted settings and return to Welcome back.", async () => { await command("lock"); navigate(0) })
+    confirm("Lock Oblivion", "Stop and lock all open sessions, protect your settings and return to Welcome back.", async () => { await command("lock"); setSlot(0); navigate(0) })
   }
 
   async function enforceIdleLock() {
     const current = state()
     const monotonic = performance.now()
     const wall = Date.now()
-    const action = idleLockAction({
+    const expired = openSessions().find((entry) => {
+      const activity = sessionActivity.get(entry.slot)
+      const minutes = current?.settings?.current.session_idle_minutes ?? 15
+      return activity && minutes > 0 && Math.max(monotonic - activity.monotonic, wall - activity.wall) >= minutes * 60_000
+    })
+    const hostAction = idleLockAction({
       elapsedMs: Math.max(0, monotonic - lastActivity.monotonic, wall - lastActivity.wall),
       generalMounted: !!current?.general_mounted,
-      sessionOpen: !!current?.session_open,
+      sessionOpen: false,
       sessionMinutes: current?.settings?.current.session_idle_minutes ?? 15,
       hostMinutes: current?.settings?.current.host_idle_minutes ?? 30,
     })
+    const action = hostAction === "host" ? "host" : expired ? "session" : undefined
     if (!action || idleLocking || wall < retryIdleLockAt || busy() || documentsLocked()) return
     idleLocking = true
     setBusy(action === "host" ? "Locking Oblivion after inactivity" : "Locking inactive session")
@@ -509,9 +592,11 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
     setForm(undefined)
     setWizard(undefined)
     try {
-      await command(action === "host" ? "lock" : "close")
-      detachWorkspace()
-      navigate(0)
+      const target = action === "host" ? 0 : expired!.slot
+      await props.runtime.request({ operation: action === "host" ? "lock" : "close", slot: target, expectedSession: action === "session" ? expired!.id ?? undefined : undefined })
+      if (action === "host" || target === slot()) {
+        detachWorkspace(); props.runtime.clearClipboard?.(); setSlot(0); navigate(0)
+      }
       await refresh()
       setFeedback("success")
       setNotice(action === "host"
@@ -519,8 +604,12 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
         : `Session locked after ${idleLabel(current?.settings?.current.session_idle_minutes ?? 15)} of inactivity.`)
     } catch (error) {
       await refresh().catch(() => undefined)
-      const completed = action === "host" ? !state()?.general_mounted : !state()?.session_open
+      const completed = action === "host" ? !state()?.general_mounted : !openSessions().some((entry) => entry.slot === expired?.slot)
       if (completed) {
+        if (action === "host" || expired?.slot === slot()) {
+          detachWorkspace(); props.runtime.clearClipboard?.(); setSlot(0); navigate(0)
+          await refresh().catch(() => undefined)
+        }
         setFeedback("success")
         setNotice(action === "host" ? "Oblivion auto-locked." : "Session auto-locked.")
       } else {
@@ -539,7 +628,8 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
       { title: diagnostics()?.ssh_active ? "Disable access" : "Enable access", key: "E", disabled: !diagnostics(), run: () => void perform(diagnostics()?.ssh_active ? "Disable debug access" : "Enable debug access", () => debug(diagnostics()?.ssh_active ? "disable-ssh" : "enable-ssh")) },
       { title: "Refresh", key: "R", run: () => void perform("Refresh debug status", () => debug()) },
     ]
-    if (!state()?.general_mounted || state()?.session_open || state()?.recovery_required) return []
+    if (!state()?.general_mounted || state()?.recovery_required) return []
+    if (sessionNetwork() && settingsSection() === undefined && state()?.session_mode === "chat") return [{ title: "Stop Workspace", key: "S", run: stopWorkspace }]
     if (networkVisible()) {
       if (networkTab() === 2) return [{ title: "Add rule", key: "N", disabled: !!state()?.recovery_required, run: addRule }]
       if (networkTab() === 1) return []
@@ -547,6 +637,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
         if (state()?.connections?.wifi_enabled && state()?.connections?.devices.some((device) => device.kind === "wifi")) await command("connections", { action: "scan" })
       }) }]
     }
+    if (state()?.session_open) return []
     if (page() === 0 && !session()) return [
       { title: "New session", key: "N", run: create },
       { title: "Rename", key: "R", disabled: !state()?.sessions[selection()], run: () => {
@@ -597,7 +688,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
       { name: `${current.egress?.selected.mode === "socks5" ? "[x]" : "[ ]"} SOCKS5 proxy`, description: "Use your own proxy instead of Tor. Configure address and optional authentication.", disabled: networkUnavailable(), action: "Configure proxy", run: () => transport(true) },
     ]
     if (networkTab() === 2) return [
-      ...(current.network_policy?.policy.rules ?? []).map((rule) => ({ name: `${rule.action.toUpperCase()} ${rule.destination}:${rule.port}`, description: rule.session ? `Session ${rule.session.slice(0, 8)}` : "All sessions", disabled: state()?.recovery_required ? "Complete recovery first." : undefined, action: "Remove rule", run: () => confirm("Remove web rule", `${rule.action} ${rule.destination}:${rule.port}`, async () => {
+      ...(current.network_policy?.policy.rules ?? []).map((rule) => ({ name: `${rule.action.toUpperCase()} ${rule.destination}:${rule.port}`, description: rule.session ? `Session ${rule.session.slice(0, 8)}` : "All tools in this session", disabled: state()?.recovery_required ? "Complete recovery first." : undefined, action: "Remove rule", run: () => confirm("Remove web rule", `${rule.action} ${rule.destination}:${rule.port}`, async () => {
         await command("network-policy", { action: "remove", rule, save: persistent() })
         setSelection(0)
       }) })),
@@ -622,7 +713,17 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   const items = createMemo<MenuItem[]>(() => {
     const current = state()
     if (!current) return []
+    if (current.recovery_required && slot() !== 0 && current.session_open) return [
+      { name: "Close and recover session", description: "Stop this session’s owners and lock its volume. Other sessions keep running.", run: () => void perform("Recover session", async () => { await command("close"); setSlot(0); navigate(0) }) },
+      { name: "Force stop session", description: "Use if normal recovery fails. Unfinished writes in this session may be lost.", run: () => confirm("Force stop session", "Force this session to stop and lock its volume. Other sessions remain open.", async () => { await command("force-close"); setSlot(0); navigate(0) }) },
+    ]
     if (networkVisible()) return networkItems()
+    if (sessionNetwork() && settingsSection() === undefined) return [
+      { name: "Access mode", badge: (current.settings?.current.web_access ?? "open").toUpperCase(), description: "Open Internet, Strict or Offline for every chat and terminal in this session.", run: networkAccess },
+      { name: "Privacy route", badge: current.egress?.selected.mode === "socks5" ? "SOCKS5" : "Tor", description: "A dedicated gateway and credentials for this session. Stop Workspace before changing the route.", run: () => openSetting(1) },
+      { name: "Rules", badge: `${current.network_policy?.policy.rules.length ?? 0}`, description: "Destinations allowed or blocked for this session only.", run: () => openSetting(3) },
+      { name: "API key", badge: current.api_keys?.entries.find((entry) => entry.id === current.api_keys?.selected)?.name ?? "None", description: "Credential selected for this opening. Stop Workspace before changing it.", disabled: networkUnavailable(), run: sessionKey },
+    ]
     if (current.recovery_required) return [{ name: "Complete recovery and lock", description: "Cleanup is required before another session can open.", run: () => void perform("Recover and lock", async () => { await command("lock"); setSession(undefined) }) }, { name: "Force stop and lock", description: "Use only if graceful recovery fails. Unsaved work may be lost.", run: () => confirm("Force stop and lock", "Force the failed session VM to stop, then lock its encrypted volume and persistent settings. Unfinished writes may be lost.", async () => { await command("force-close"); await command("lock"); setSession(undefined) }) }]
     if (!current.general_mounted && current.general_present && !current.general_incomplete) return [
       { name: "Unlock Oblivion", badge: "PERSISTENT", description: "Unlock your saved settings and sessions. Each session has its own password. Changes are saved inside encrypted storage.", run: () => unlock() },
@@ -651,14 +752,14 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
       return [
         { name: "Network & Wi-Fi", badge: current.connections?.internet === "local" ? "Connected" : current.connections?.internet === "offline" ? "Offline" : "Unknown", description: "Manage Ethernet, Wi-Fi and the host Internet connection.", action: "Open", run: () => openSetting(0) },
         { name: "Privacy route", badge: current.egress?.selected.mode === "socks5" ? "SOCKS5" : "Tor", description: "Choose the protected route used by providers and permitted session traffic.", action: "Open", run: () => openSetting(1) },
-        { name: "Network access", badge: preferences.web_access === "offline" ? "Offline" : preferences.web_access === "strict" ? "Strict" : "Open Web", description: "One gateway policy for every chat, terminal and network tool.", action: "Open", run: () => openSetting(2) },
+        { name: "Network access", badge: preferences.web_access === "offline" ? "Offline" : preferences.web_access === "strict" ? "Strict" : "Open Internet", description: "Default for new sessions. Existing sessions keep their own policy.", action: "Open", run: () => openSetting(2) },
         { name: "Network rules", badge: `${rules} ${rules === 1 ? "rule" : "rules"}`, description: "Allow or block destinations used by shell commands and generic network tools.", action: "Open", run: () => openSetting(3) },
         { name: "API keys", badge: `${keys} ${keys === 1 ? "key" : "keys"}`, description: "Manage encrypted provider credentials and the global default.", action: "Open", run: () => openSetting(4) },
         { name: "Keyboard & time zone", badge: `${preferences.keyboard} · ${preferences.timezone}`, description: "Change the keyboard layout, variant and local time zone.", action: "Open", run: () => openSetting(5) },
         { name: "Auto-lock", badge: `${idleLabel(preferences.session_idle_minutes ?? 15)} / ${idleLabel(preferences.host_idle_minutes ?? 30)}`, description: "Set independent inactivity limits for the active session and Oblivion.", action: "Open", run: () => openSetting(6) },
       ]
     }
-    if (category() === "Network access") return [{ name: "Change global access", badge: (current.settings?.current.web_access ?? "open").toUpperCase(), description: "Open Web, Strict or Offline. Shared by all session tools and chats.", action: "Configure", run: networkAccess }]
+    if (category() === "Network access") return [{ name: "Change default access", badge: (current.settings?.current.web_access ?? "open").toUpperCase(), description: "Open Internet, Strict or Offline. Shared by all session tools and chats.", action: "Configure", run: networkAccess }]
 
     if (category() === "API keys" && keyID()) {
       const entry = current.api_keys?.entries.find((entry) => entry.id === keyID())
@@ -677,7 +778,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
       ...(current.api_keys?.entries ?? []).map((entry) => ({ name: entry.name, description: `${providerName(entry.provider)} · ${entry.id === current.api_keys?.selected ? "Selected · " : ""}${entry.id === current.api_keys?.default ? "Default · " : ""}${entry.temporary ? "RAM only" : "Saved encrypted"}`, badge: `${providerName(entry.provider)}${entry.id === current.api_keys?.default ? " · Default" : ""}`, disabled: unavailable(), run: () => { setKeyID(entry.id); setSelection(0) } })),
     ]
     if (category() === "Keyboard & time zone") return [
-      { name: "Edit preferences", description: "Choose a layout, variant and time zone from the installed Debian catalog.", disabled: current.session_open ? "Close the active session first; its keyboard and time zone are applied at VM startup." : undefined, run: () => void perform("Load settings", setup) },
+      { name: "Edit preferences", description: "Choose a layout, variant and time zone from the installed Debian catalog.", disabled: openSessions().length ? "Close all sessions first; keyboard and time zone are applied at VM startup." : undefined, run: () => void perform("Load settings", setup) },
       { name: "Test keyboard", description: "Type a harmless sample before using a password.", run: keyboardTest },
     ]
     if (category() === "Auto-lock") {
@@ -703,8 +804,14 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   useKeyboard((key) => {
     activity()
     if (key.defaultPrevented) return
+    if (!editing() && state()?.general_mounted && key.ctrl && ["pageup", "pagedown"].includes(key.name)) {
+      key.preventDefault(); key.stopPropagation()
+      const slots = [0, ...openSessions().map((entry) => entry.slot).filter((value) => value !== 0)]
+      const offset = key.name === "pageup" ? -1 : 1
+      void selectSlot(slots[(slots.indexOf(slot()) + offset + slots.length) % slots.length]); return
+    }
     if (networkWait() && key.name === "escape") { key.preventDefault(); networkWait()!.abort(); setBusy("Cancelling connection · waiting for safe cleanup"); return }
-    if (!editing() && state()?.general_mounted && key.name === "f9") { key.preventDefault(); key.stopPropagation(); networkAccess(); return }
+    if (!editing() && state()?.general_mounted && key.name === "f9") { key.preventDefault(); key.stopPropagation(); openNetwork(); return }
     if (!editing() && state()?.session_open) {
       if ((["f6", "f7"].includes(key.name) || key.name === "f8" && state()?.session_mode === "documents")) { key.preventDefault(); key.stopPropagation(); sessionView(key.name === "f6" ? 0 : key.name === "f7" ? 1 : 2); return }
       if (key.ctrl && key.name === "q" || key.raw === "\x1d" || key.ctrl && key.name === "]") {
@@ -770,7 +877,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
   const networkLabel = () => networkFresh() ? state()?.network_status?.label ?? "STATUS UNKNOWN" : "STATUS UNKNOWN"
 
   return <Show when={!intro()} fallback={<BootLogo elapsed={elapsed()} />}>
-    <Shell mounted={!!state()?.general_mounted} welcome={welcome()} activeSession={state()?.active_session}
+    <Shell tabs={tabs()} slot={slot()} selectSlot={(target) => void selectSlot(target)} mounted={!!state()?.general_mounted} welcome={welcome()} activeSession={state()?.active_session}
       breadcrumb={workspaceVisible() ? `SESSION / ${state()?.active_session?.slice(0, 8)} / Workspace` : documents() ? `SESSION / ${state()?.active_session?.slice(0, 8)} / Documents` : breadcrumb()}
       workspace={workspaceVisible()} documents={documents()} onSection={(index) => state()?.general_mounted ? navigate(index) : accessSettings(index)}
       accessSetting={wizard() ? 0 : undefined} debugAvailable={state()?.debug_available} debugActive={debugVisible()}
@@ -779,7 +886,7 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
       host={now() - observed() <= 10000 ? state()?.network_status?.host_link ?? "STATUS UNKNOWN" : "STATUS UNKNOWN"}
       network={networkLabel()} blocked={!!state()?.network_status?.direct_blocked && networkFresh()}
       connection={now() - observed() <= 10000 ? state()?.connections?.internet ?? "unknown" : "unknown"} transport={state()?.egress?.selected.mode ?? "tor"}
-      access={state()?.settings?.current.web_access ?? "open"} onNetwork={networkAccess}
+      access={state()?.settings?.current.web_access ?? "open"} onNetwork={openNetwork}
       busy={busy()} cancellable={!!networkWait()} onClose={state()?.session_open ? closeSession : lockOblivion} notice={notice()} feedback={feedback()}
       onActivity={activity}>
         <Show when={backup() || restoring()} fallback={<>
@@ -787,10 +894,10 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
         <Show when={documents()} fallback={<Show when={wizard()} fallback={<Show when={form()} fallback={
           <Show when={debugVisible()} fallback={<Show when={category() === "System" && state()?.general_mounted && !state()?.session_open} fallback={
           <Menu details={!(category() === "API keys" && !keyID())} toolbar={pageActions()} actionsFocused={focus() === "actions"} focusActions={() => setFocus("actions")} empty={category() === "API keys" ? "No API keys. Add your first key above." : category() === "Network rules" ? "No access rules. Add a rule above." : "No sessions. Create a session above."} title={!state()?.general_mounted ? state()?.general_present ? "Welcome back" : "Welcome to Oblivion" : page() === 0 ? session() ? `Session ${state()?.session_titles[session()!] ?? session()!.slice(0, 8)}` : "Your protected sessions" : keyID() ? state()?.api_keys?.entries.find((entry) => entry.id === keyID())?.name ?? "API key" : category() === "API keys" ? "Saved API keys" : category()}
-            description={!state()?.general_mounted ? state()?.general_present ? "Persistent: keep chats, documents and settings in encrypted storage.\nEphemeral: work in RAM; new data is lost when closed and persistent storage stays unchanged.\nBoth modes use your configured Tor or SOCKS5 route for online AI." : "Create the encrypted space that protects your sessions, documents, API keys and preferences." : page() === 0 ? session() ? `${state()?.general_readonly ? "Ephemeral · RAM only" : "Persistent · Separate encrypted volume"} · ${state()?.session_mode === "chat" ? "Chat running" : state()?.session_open ? "Documents open · Offline" : "Locked"}` : "Enter to unlock a session · N to create a new workspace" : category() === "Settings" ? "Connectivity, privacy, credentials, regional preferences and automatic locking." : networkVisible() ? networkDescription() : category() === "Network access" ? "One global policy for web tools, package managers and remote inference." : category() === "API keys" ? "Select a key to manage it. Secrets stay hidden." : category() === "Keyboard & time zone" ? `${state()?.settings?.current.keyboard ?? "us"} · ${state()?.settings?.current.timezone ?? "UTC"} · Interface: English` : category() === "Auto-lock" ? "Protect unattended sessions, documents, API keys and settings." : `${capacity(state()?.available_bytes ?? 0)} free · ${state()?.general_readonly ? "Read-only storage" : "Encrypted storage"}`}
+            description={!state()?.general_mounted ? state()?.general_present ? "Persistent: keep chats, documents and settings in encrypted storage.\nEphemeral: work in RAM; new data is lost when closed and persistent storage stays unchanged.\nBoth modes use your configured Tor or SOCKS5 route for online AI." : "Create the encrypted space that protects your sessions, documents, API keys and preferences." : page() === 0 ? session() ? `${state()?.general_readonly ? "Ephemeral · RAM only" : "Persistent · Separate encrypted volume"} · ${state()?.session_mode === "chat" ? "Chat running" : state()?.session_open ? "Documents open · Offline" : "Locked"}` : "Enter to unlock a session · N to create a new workspace" : category() === "Settings" ? "Connectivity, privacy, credentials, regional preferences and automatic locking." : sessionNetwork() ? "Controls only this session. Other sessions keep their own route, access policy and credentials." : networkVisible() ? networkDescription() : category() === "Network access" ? "Default policy for new sessions. Each open session has its own network controls." : category() === "API keys" ? "Select a key to manage it. Secrets stay hidden." : category() === "Keyboard & time zone" ? `${state()?.settings?.current.keyboard ?? "us"} · ${state()?.settings?.current.timezone ?? "UTC"} · Interface: English` : category() === "Auto-lock" ? "Protect unattended sessions, documents, API keys and settings." : `${capacity(state()?.available_bytes ?? 0)} free · ${state()?.general_readonly ? "Read-only storage" : "Encrypted storage"}`}
             items={items()} selected={selection()} disabled={blocked()} actions={!welcome()} back={state()?.general_mounted ? back : undefined} focused={focus() === "content" && !blocked()} focus={() => setFocus("content")} change={setSelection} choose={choose} />
           }><SystemPage status={state()!} focused={!editing() && focus() === "content"} /></Show>}><DebugPage status={diagnostics()} actions={pageActions()} focused={!editing() && focus() !== "navigation"} activate={() => setFocus("actions")} /></Show>
-        }>{(current) => <FormView form={current()} cancel={() => { setForm(undefined); if (state()?.session_open) { if (resumeWorkspace() && connection()) void workspace(); else setDocuments(true); setResumeWorkspace(false) }; if (page() === 0 && session() && !state()?.session_open) { setSession(undefined); setSelection(0) } }} submit={(values) => {
+        }>{(current) => <FormView form={current()} cancel={() => { setForm(undefined); if (state()?.session_open) { if (resumeWorkspace() && connection()) void workspace(); else if (!sessionNetwork()) setDocuments(true); setResumeWorkspace(false) }; if (page() === 0 && session() && !state()?.session_open) { setSession(undefined); setSelection(0) } }} submit={(values) => {
           // perform unmounts the form. Capture its action before the Show accessor expires.
           const submitted = current()
           void perform(submitted.title, () => submitted.run(values))
@@ -802,16 +909,16 @@ export function App(props: { runtime: Runtime; preview?: boolean; initial?: Stat
             await refresh(); setWizard(undefined)
           }} />}
         </Show>}>
-          <Show when={state()?.active_session} fallback={<text>Loading session...</text>}>{(id) => <Documents request={props.runtime.request} session={id()} chat={state()?.session_mode === "chat"}
+          <Show when={state()?.active_session} fallback={<text>Loading session...</text>}>{(id) => <Documents slot={slot()} request={scopedRequest()} session={id()} chat={state()?.session_mode === "chat"}
             capacity={state()?.session_sizes[id()] ?? state()?.session_bytes ?? 0} available={state()?.available_bytes ?? 0}
             grow={state()?.general_readonly ? undefined : growOpenSession}
             focused={focus() === "content"} activate={() => setFocus("content")} focusSidebar={undefined} onNavigationLock={setDocumentsLocked}
             back={() => { if (props.documentsOnly) { props.runtime.exit(); return }; sessionView(0) }} />}</Show>
         </Show>
         }>{(current) => <ChatViewport connection={current()} attach={(receive) => { drawWorkspace = receive }} activate={() => setFocus("content")} focused={focus() === "content" && !busy()} activity={activity} />}</Show>
-        </>}><Show when={restoring()} fallback={<Show when={backup()}>{(selected) => <SessionBackup id={selected().id} title={selected().title} request={props.runtime.request} back={() => {
+        </>}><Show when={restoring()} fallback={<Show when={backup()}>{(selected) => <SessionBackup slot={slot()} id={selected().id} title={selected().title} request={scopedRequest()} back={() => {
           setBackup(undefined); void perform("Refreshing sessions", async () => {})
-        }} />}</Show>}><SessionRestore request={props.runtime.request} back={() => {
+        }} />}</Show>}><SessionRestore slot={slot()} request={scopedRequest()} back={() => {
           setRestoring(false); void perform("Refreshing sessions", async () => {})
         }} /></Show></Show>
     </Shell>
@@ -825,7 +932,7 @@ function validatePassword(values: Record<string, string>) {
 
 function explain(error: unknown) {
   const messages: Record<string, string> = {
-    network_offline: "Global access is Offline. Use Network (F9) to enable Strict or Open Web; local files and terminals remain available.",
+    network_offline: "This session is Offline. Use Network (F9) to enable Strict or Open Internet; local files and terminals remain available.",
     terminal_disconnected: "The terminal did not become ready. Your session stays open; retry Terminal or close and lock the session.",
     debug_operation_failed: "Debug access could not be changed. Check that the host has a local network connection, then refresh.",
     debug_image_required: "Debug tools are available only in the debug image.",
@@ -853,12 +960,16 @@ function explain(error: unknown) {
     gateway_connect_timeout: "The protected connection is taking too long. Check Network, then retry Start chat. Documents remain offline.",
     gateway_unavailable: "The gateway is unavailable. Retry Start chat; documents remain available.",
     gateway_start_failed: "The protected gateway could not start. No chat request was sent and Documents remain offline. Retry Start chat; if it repeats, update Oblivion or check System.",
-    locked_without_tor_state: "Oblivion is locked. Tor state could not be saved; the next connection may take longer. Your chats and documents remain encrypted.",
-    session_already_open: "Close the active session before opening another one.",
-    session_must_be_closed: "Close the active session before changing this setting.",
+    locked_without_tor_state: "The requested volumes are locked. Tor state could not be saved; the next connection may take longer. Chats and documents remain encrypted.",
+    api_key_in_use: "This key is in use by an open chat. Stop its Workspace before replacing or removing it.",
+    session_already_open: "This session is already open. Select its tab.",
+    session_must_be_closed: "Close the sessions using this setting first. For route or credential changes, stop that session’s Workspace.",
     general_not_writable: "Persistent storage is read-only. Unlock Oblivion in persistent mode to save changes.",
     controller_unavailable: "The storage controller is unavailable. No operation was confirmed.",
     controller_timeout: "The controller has not confirmed completion. Refresh status before retrying.",
+    session_limit_reached: "No session slot is available. Close a session before opening another.",
+    session_changed: "The session changed before the operation completed. Refresh its tab before retrying.",
+    insufficient_session_memory: "Not enough available RAM for another session and its gateway. Close a session or increase VM memory.",
     insufficient_space: "There is not enough free space for this session volume.",
     insufficient_growth_space: "Growing keeps the original intact. Free space must cover the entire replacement volume plus 64 MiB.",
     pending_session_growth: "A previous growth copy is still present. Use Storage cleanup in Sessions before retrying.",

@@ -15,9 +15,9 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const UNIT: &str = "oblivion-transfer-host.service";
-const JOB: &str = "/run/oblivion/transfer.json";
-const PENDING_JOB: &str = "/run/oblivion/transfer.pending";
+fn unit() -> String { oblivion_host::scope::owner("oblivion-transfer-host") }
+fn job_path() -> String { oblivion_host::scope::path("/run/oblivion/transfer.json") }
+fn pending_job() -> String { oblivion_host::scope::path("/run/oblivion/transfer.pending") }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -50,7 +50,7 @@ pub fn status(configured: bool, export_configured: bool, general: &Path) -> Resu
     Ok(Status {
         configured,
         export_configured,
-        active: !matches!(vm::unit_state(UNIT)?.as_str(), "inactive" | "failed"),
+        active: !matches!(vm::unit_state(&unit())?.as_str(), "inactive" | "failed"),
         sources: if configured || export_configured {
             sources(general)?
         } else {
@@ -129,6 +129,11 @@ fn sources(general: &Path) -> Result<Vec<Source>> {
         ) else {
             continue;
         };
+        // A device leased to another session must not be mounted twice. This
+        // also covers read/write aliases while an export is still being set up.
+        if fs::read_dir(path.join("holders")).map_or(true, |mut entries| entries.next().is_some()) {
+            continue;
+        }
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
@@ -209,17 +214,17 @@ fn prepare_device(source: &str, general: &Path, export: bool) -> Result<()> {
             ) == source.id,
         "source_changed",
     )?;
-    let name = if export {
+    let name = oblivion_host::scope::current().mapping(if export {
         "oblivion-export"
     } else {
         "oblivion-import"
-    };
+    });
     let uid = if export {
-        vm::EXPORT_UID
+        oblivion_host::scope::uid(vm::EXPORT_UID)
     } else {
-        vm::IMPORT_UID
+        oblivion_host::scope::uid(vm::IMPORT_UID)
     };
-    let mut args = vec!["create".into(), name.into()];
+    let mut args = vec!["create".into(), name];
     if !export {
         args.push("--readonly".into());
     }
@@ -228,15 +233,11 @@ fn prepare_device(source: &str, general: &Path, export: bool) -> Result<()> {
         format!("0 {} linear {} 0", source.bytes / 512, source.id),
     ]);
     vm::execute("/usr/sbin/dmsetup", &args)?;
-    let path = if export {
-        vm::EXPORT_DEVICE
-    } else {
-        vm::IMPORT_DEVICE
-    };
+    let path = oblivion_host::scope::path(if export { vm::EXPORT_DEVICE } else { vm::IMPORT_DEVICE });
     require(
         unsafe {
             libc::chown(
-                CString::new(path)
+                CString::new(path.as_str())
                     .map_err(|_| Error("invalid_device"))?
                     .as_ptr(),
                 uid,
@@ -294,16 +295,16 @@ pub fn start_recovery() -> Result<Started> {
 
 pub fn idle() -> Result<()> {
     require(
-        matches!(vm::unit_state(UNIT)?.as_str(), "inactive" | "failed")
+        matches!(vm::unit_state(&unit())?.as_str(), "inactive" | "failed")
             && vm::stopped_role(Role::Import)?
             && vm::stopped_role(Role::Export)?,
         "transfer_already_running",
     )?;
     require(
-        !Path::new(JOB).exists()
-            && !Path::new(PENDING_JOB).exists()
-            && !Path::new(vm::IMPORT_DEVICE).exists()
-            && !Path::new(vm::EXPORT_DEVICE).exists(),
+        !Path::new(&job_path()).exists()
+            && !Path::new(&pending_job()).exists()
+            && !Path::new(&oblivion_host::scope::path(vm::IMPORT_DEVICE)).exists()
+            && !Path::new(&oblivion_host::scope::path(vm::EXPORT_DEVICE)).exists(),
         "transfer_cleanup_required",
     )?;
     Ok(())
@@ -333,21 +334,21 @@ fn start_job(
         .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(PENDING_JOB)
+        .open(&pending_job())
         .map_err(|_| Error("transfer_state_failed"))?;
     job.write_all(&encoded)
         .and_then(|()| job.sync_all())
         .map_err(|_| Error("transfer_state_failed"))?;
     // The storage operation lock serializes starts. Publish only a complete
     // record so interruption cannot leave an undecodable live job.
-    require(!Path::new(JOB).exists(), "transfer_already_running")?;
-    fs::rename(PENDING_JOB, JOB).map_err(|_| Error("transfer_state_failed"))?;
-    vm::execute("/usr/bin/systemctl", &["start".into(), UNIT.into()])?;
+    require(!Path::new(&job_path()).exists(), "transfer_already_running")?;
+    fs::rename(&pending_job(), &job_path()).map_err(|_| Error("transfer_state_failed"))?;
+    vm::execute("/usr/bin/systemctl", &["start".into(), unit()])?;
     Ok(Started { id, bytes })
 }
 
 pub fn prepared() -> Result<bool> {
-    for path in [JOB, PENDING_JOB, vm::IMPORT_DEVICE, vm::EXPORT_DEVICE] {
+    for path in [&job_path(), &pending_job(), vm::IMPORT_DEVICE, vm::EXPORT_DEVICE] {
         if Path::new(path)
             .try_exists()
             .map_err(|_| Error("transfer_state_failed"))?
@@ -359,24 +360,24 @@ pub fn prepared() -> Result<bool> {
 }
 
 pub fn stop() -> Result<()> {
-    if !matches!(vm::unit_state(UNIT)?.as_str(), "inactive" | "failed") {
-        vm::execute("/usr/bin/systemctl", &["stop".into(), UNIT.into()])?;
+    if !matches!(vm::unit_state(&unit())?.as_str(), "inactive" | "failed") {
+        vm::execute("/usr/bin/systemctl", &["stop".into(), unit()])?;
     }
     require(
-        matches!(vm::unit_state(UNIT)?.as_str(), "inactive" | "failed"),
+        matches!(vm::unit_state(&unit())?.as_str(), "inactive" | "failed"),
         "transfer_still_running",
     )?;
     cleanup()
 }
 
 fn job() -> Result<Option<Job>> {
-    if !Path::new(JOB)
+    if !Path::new(&job_path())
         .try_exists()
         .map_err(|_| Error("transfer_state_failed"))?
     {
         return Ok(None);
     }
-    let file = crate::storage::trusted_file(Path::new(JOB))?;
+    let file = crate::storage::trusted_file(Path::new(&job_path()))?;
     require(
         file.metadata()
             .map_err(|_| Error("transfer_state_failed"))?
@@ -431,7 +432,8 @@ pub fn cleanup() -> Result<()> {
             crate::storage::cleanup_restore(&job.id)?;
         }
     }
-    for name in ["oblivion-import", "oblivion-export"] {
+    for base in ["oblivion-import", "oblivion-export"] {
+        let name = oblivion_host::scope::current().mapping(base);
         if Path::new(&format!("/dev/mapper/{name}"))
             .try_exists()
             .map_err(|_| Error("device_check_failed"))?
@@ -443,14 +445,14 @@ pub fn cleanup() -> Result<()> {
         }
     }
     if job()?.is_some() {
-        fs::remove_file(JOB).map_err(|_| Error("transfer_cleanup_failed"))?;
+        fs::remove_file(&job_path()).map_err(|_| Error("transfer_cleanup_failed"))?;
     }
-    if Path::new(PENDING_JOB)
+    if Path::new(&pending_job())
         .try_exists()
         .map_err(|_| Error("transfer_state_failed"))?
     {
-        crate::storage::trusted_file(Path::new(PENDING_JOB))?;
-        fs::remove_file(PENDING_JOB).map_err(|_| Error("transfer_cleanup_failed"))?;
+        crate::storage::trusted_file(Path::new(&pending_job()))?;
+        fs::remove_file(&pending_job()).map_err(|_| Error("transfer_cleanup_failed"))?;
     }
     Ok(())
 }
@@ -463,7 +465,7 @@ pub fn serve(import: Option<&vm::Config>, export: Option<&vm::Config>, uid: u32)
         config.start_role(Role::Import)?;
         let source = UnixStream::connect(format!("{}/copy.sock", Role::Import.runtime()))
             .map_err(|_| Error("transfer_port_unavailable"))?;
-        crate::gateway::peer(&source, vm::IMPORT_UID)?;
+        crate::gateway::peer(&source, oblivion_host::scope::uid(vm::IMPORT_UID))?;
         vm::resume_transfer(Role::Import)?;
         let mut ready = [0; 6];
         Channel::new(&source, Duration::from_secs(90))
@@ -496,7 +498,7 @@ pub fn serve(import: Option<&vm::Config>, export: Option<&vm::Config>, uid: u32)
         config.start_role(Role::Export)?;
         let destination = UnixStream::connect(format!("{}/copy.sock", Role::Export.runtime()))
             .map_err(|_| Error("transfer_port_unavailable"))?;
-        crate::gateway::peer(&destination, vm::EXPORT_UID)?;
+        crate::gateway::peer(&destination, oblivion_host::scope::uid(vm::EXPORT_UID))?;
         vm::resume_transfer(Role::Export)?;
         let mut ready = [0; 6];
         Channel::new(&destination, Duration::from_secs(90))
@@ -544,9 +546,9 @@ pub fn serve(import: Option<&vm::Config>, export: Option<&vm::Config>, uid: u32)
         crate::gateway::peer(
             &source,
             if job.export {
-                vm::EXPORT_UID
+                oblivion_host::scope::uid(vm::EXPORT_UID)
             } else {
-                vm::IMPORT_UID
+                oblivion_host::scope::uid(vm::IMPORT_UID)
             },
         )?;
         vm::resume_transfer(role)?;
@@ -587,13 +589,13 @@ fn relay_job(
     process: Option<&mut CopyProcess>,
 ) -> Result<()> {
     let listener =
-        UnixListener::bind(transfers::SOCKET).map_err(|_| Error("transfer_socket_failed"))?;
-    fs::set_permissions(transfers::SOCKET, fs::Permissions::from_mode(0o600))
+        UnixListener::bind(&oblivion_host::scope::path(transfers::SOCKET)).map_err(|_| Error("transfer_socket_failed"))?;
+    fs::set_permissions(&oblivion_host::scope::path(transfers::SOCKET), fs::Permissions::from_mode(0o600))
         .map_err(|_| Error("transfer_socket_failed"))?;
     require(
         unsafe {
             libc::chown(
-                c"/run/oblivion-transfer-host/control.sock".as_ptr(),
+                std::ffi::CString::new(oblivion_host::scope::path("/run/oblivion-transfer-host/control.sock")).unwrap().as_ptr(),
                 uid,
                 !0,
             )

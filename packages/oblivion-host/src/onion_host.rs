@@ -22,10 +22,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
-const JOB: &str = "/run/oblivion/onion.json";
-const PENDING: &str = "/run/oblivion/onion.pending";
-const SOCKET: &str = "/run/oblivion-onion-host/control.sock";
-const COPY_SOCKET: &str = "/run/oblivion-onion-host/copy.sock";
+fn job_path() -> String { oblivion_host::scope::path("/run/oblivion/onion.json") }
+fn pending() -> String { oblivion_host::scope::path("/run/oblivion/onion.pending") }
+fn socket() -> String { oblivion_host::scope::path("/run/oblivion-onion-host/control.sock") }
+fn copy_socket() -> String { oblivion_host::scope::path("/run/oblivion-onion-host/copy.sock") }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -184,9 +184,9 @@ struct Guests {
 
 pub fn prepared() -> Result<bool> {
     for path in [
-        JOB.into(),
-        PENDING.into(),
-        "/run/oblivion-onion-host".into(),
+        job_path(),
+        pending(),
+        oblivion_host::scope::path("/run/oblivion-onion-host"),
         Role::OnionUplink.runtime(),
         Role::OnionGateway.runtime(),
         Role::OnionFile.runtime(),
@@ -201,7 +201,7 @@ pub fn prepared() -> Result<bool> {
 }
 
 pub fn archiving() -> Result<bool> {
-    match fs::symlink_metadata(JOB) {
+    match fs::symlink_metadata(&job_path()) {
         Ok(_) => Ok(read_job()?.backup),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(_) => Err(Error("onion_state_failed")),
@@ -213,6 +213,7 @@ pub fn start(session: String, ttl_seconds: u16, backup: bool) -> Result<Status> 
         !prepared()? && !crate::transfer_host::prepared()?,
         "transfer_active",
     )?;
+    crate::gateway::rotation_allowed(false)?;
     let job = Job {
         id: crate::storage::random_id()?,
         session,
@@ -225,14 +226,14 @@ pub fn start(session: String, ttl_seconds: u16, backup: bool) -> Result<Status> 
         .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(PENDING)
+        .open(&pending())
         .map_err(|_| Error("onion_state_failed"))?;
     file.write_all(&bytes)
         .map_err(|_| Error("onion_state_failed"))?;
-    fs::rename(PENDING, JOB).map_err(|_| Error("onion_state_failed"))?;
+    fs::rename(&pending(), &job_path()).map_err(|_| Error("onion_state_failed"))?;
     let started = vm::execute(
         "/usr/bin/systemctl",
-        &["start".into(), oblivion_host::onion_vm::OWNER.into()],
+        &["start".into(), oblivion_host::scope::owner("oblivion-onion-host")],
     );
     if started.is_err() {
         let _checkpoint = shutdown()?;
@@ -245,7 +246,7 @@ pub fn status(configured: bool) -> Result<Status> {
     if !prepared()? {
         return Ok(Status::closed(configured));
     }
-    let socket = oblivion_host::channel::connect(Path::new(SOCKET), Duration::from_secs(3))
+    let socket = oblivion_host::channel::connect(Path::new(&socket()), Duration::from_secs(3))
         .map_err(|_| Error("onion_unavailable"))?;
     crate::gateway::peer(&socket, 0)?;
     exchange(
@@ -302,7 +303,7 @@ pub fn share(client_auth: ClientAuth) -> Result<Status> {
 }
 
 fn command<T: for<'de> Deserialize<'de>>(request: &OwnerRequest) -> Result<T> {
-    let socket = oblivion_host::channel::connect(Path::new(SOCKET), Duration::from_secs(3))
+    let socket = oblivion_host::channel::connect(Path::new(&socket()), Duration::from_secs(3))
         .map_err(|_| Error("onion_unavailable"))?;
     crate::gateway::peer(&socket, 0)?;
     exchange(
@@ -317,10 +318,11 @@ fn command<T: for<'de> Deserialize<'de>>(request: &OwnerRequest) -> Result<T> {
 /// be stopped before a caller may close any mapping or report a lock.
 pub fn shutdown() -> Result<bool> {
     if !prepared()? {
+        crate::gateway::rotation_allowed(true)?;
         return Ok(true);
     }
     let checkpoint = (|| {
-        let socket = oblivion_host::channel::connect(Path::new(SOCKET), Duration::from_secs(2))
+        let socket = oblivion_host::channel::connect(Path::new(&socket()), Duration::from_secs(2))
             .map_err(|_| Error("onion_unavailable"))?;
         crate::gateway::peer(&socket, 0)?;
         let reply: Stopped = exchange(
@@ -336,7 +338,7 @@ pub fn shutdown() -> Result<bool> {
     })();
     let stopped = vm::execute(
         "/usr/bin/systemctl",
-        &["stop".into(), oblivion_host::onion_vm::OWNER.into()],
+        &["stop".into(), oblivion_host::scope::owner("oblivion-onion-host")],
     );
     let cleaned = cleanup();
     stopped?;
@@ -346,7 +348,8 @@ pub fn shutdown() -> Result<bool> {
 
 pub fn cleanup() -> Result<()> {
     stop_guests()?;
-    cleanup_records()
+    cleanup_records()?;
+    crate::gateway::rotation_allowed(true)
 }
 
 fn stop_guests() -> Result<()> {
@@ -361,7 +364,7 @@ fn stop_guests() -> Result<()> {
 }
 
 fn cleanup_records() -> Result<()> {
-    if Path::new(JOB)
+    if Path::new(&job_path())
         .try_exists()
         .map_err(|_| Error("onion_state_failed"))?
     {
@@ -370,12 +373,12 @@ fn cleanup_records() -> Result<()> {
             vm::remove_copy_port(&job.id)?;
         }
     }
-    match fs::remove_file(COPY_SOCKET) {
+    match fs::remove_file(&copy_socket()) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(Error("onion_cleanup_failed")),
     }
-    for path in [JOB, PENDING] {
+    for path in [&job_path(), &pending()] {
         match fs::symlink_metadata(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return Err(Error("onion_state_failed")),
@@ -389,7 +392,7 @@ fn cleanup_records() -> Result<()> {
 
 fn read_job() -> Result<Job> {
     let job: Job =
-        serde_json::from_reader(crate::storage::trusted_file(Path::new(JOB))?.take(1025))
+        serde_json::from_reader(crate::storage::trusted_file(Path::new(&job_path()))?.take(1025))
             .map_err(|_| Error("invalid_onion_job"))?;
     crate::storage::validate_id(&job.id)?;
     crate::storage::validate_id(&job.session)?;
@@ -524,8 +527,8 @@ impl Guests {
             enabled.ok && enabled.initialized && !enabled.active,
             "onion_initialization_failed",
         )?;
-        let listener = UnixListener::bind(SOCKET).map_err(|_| Error("onion_socket_failed"))?;
-        fs::set_permissions(SOCKET, fs::Permissions::from_mode(0o600))
+        let listener = UnixListener::bind(&socket()).map_err(|_| Error("onion_socket_failed"))?;
+        fs::set_permissions(&socket(), fs::Permissions::from_mode(0o600))
             .map_err(|_| Error("onion_socket_failed"))?;
         listener
             .set_nonblocking(true)
@@ -1197,9 +1200,10 @@ impl Copy {
             .min(Instant::now() + Duration::from_secs(oblivion_host::transfers::BUDGET_SECONDS));
         let ready = Arc::new(AtomicBool::new(false));
         let observed = ready.clone();
+        let slot = oblivion_host::scope::current();
         let thread = std::thread::Builder::new()
             .name("onion-import".into())
-            .spawn(move || {
+            .spawn(move || oblivion_host::scope::within(slot, || {
                 let port = File::from(OwnedFd::from(vm::copy_port(&id, exporting)?));
                 let owners = vec![source.owner, session];
                 let (source, destination) = if exporting {
@@ -1215,11 +1219,11 @@ impl Copy {
                 )
                 .map_err(|_| Error("transfer_guest_not_ready"))?;
                 let listener =
-                    UnixListener::bind(COPY_SOCKET).map_err(|_| Error("onion_socket_failed"))?;
-                fs::set_permissions(COPY_SOCKET, fs::Permissions::from_mode(0o600))
+                    UnixListener::bind(&copy_socket()).map_err(|_| Error("onion_socket_failed"))?;
+                fs::set_permissions(&copy_socket(), fs::Permissions::from_mode(0o600))
                     .map_err(|_| Error("onion_socket_failed"))?;
                 require(
-                    unsafe { libc::chown(c"/run/oblivion-onion-host/copy.sock".as_ptr(), uid, !0) }
+                    unsafe { libc::chown(std::ffi::CString::new(oblivion_host::scope::path("/run/oblivion-onion-host/copy.sock")).unwrap().as_ptr(), uid, !0) }
                         == 0,
                     "onion_socket_failed",
                 )?;
@@ -1276,7 +1280,7 @@ impl Copy {
                     )
                     .map_err(|_| Error("onion_import_failed"));
                 }
-            })
+            }))
             .map_err(|_| Error("onion_import_failed"))?;
         Ok(Self {
             thread,
@@ -1294,9 +1298,9 @@ impl Peer {
         )
         .map_err(|_| Error("onion_guest_not_ready"))?;
         let uid = match role {
-            Role::OnionUplink => vm::GATEWAY_UID,
-            Role::OnionGateway => oblivion_host::onion_vm::GATEWAY_UID,
-            Role::OnionFile => oblivion_host::onion_vm::FILE_UID,
+            Role::OnionUplink => oblivion_host::scope::uid(vm::GATEWAY_UID),
+            Role::OnionGateway => oblivion_host::scope::uid(oblivion_host::onion_vm::GATEWAY_UID),
+            Role::OnionFile => oblivion_host::scope::uid(oblivion_host::onion_vm::FILE_UID),
             _ => return Err(Error("invalid_onion_role")),
         };
         crate::gateway::peer(&socket, uid)?;

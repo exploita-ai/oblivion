@@ -7,6 +7,8 @@ chroot /host /usr/bin/dpkg-query -W -f='${Package}\t${Version}\n' > /out/host-pa
 chroot /guest /usr/bin/dpkg-query -W -f='${Package}\t${Version}\n' > /out/guest-packages.tsv
 cp /out/kernel /host/usr/lib/oblivion/vm/kernel
 cp /out/initrd /host/usr/lib/oblivion/vm/initrd
+# Session initramfs also mounts the encrypted writable system layer.
+cp /guest/boot/initrd.img-* /host/usr/lib/oblivion/vm/session-initrd
 if [ -f /host/usr/lib/oblivion/vm/manager-lab ]; then
     (cd /host && sha256sum usr/bin/oblivion-manager) > /out/manager.sha256
 fi
@@ -38,6 +40,12 @@ for binary in /host/usr/bin/qemu-system-* /host/usr/lib/*/qemu/*.so; do
 done
 for directory in dev proc sys run/oblivion-session run/oblivion-gateway-vm run/oblivion-import-vm run/oblivion-export-vm run/oblivion-onion-uplink run/oblivion-onion-gateway-vm run/oblivion-onion-file-vm tmp; do mkdir -p "/host/usr/lib/oblivion/vm/qemu-root/$directory"; done
 # Mount targets must exist before packing the immutable hypervisor root.
+# Each runtime is mounted into its own immutable hypervisor root namespace.
+for slot in $(seq 1 31); do
+    for role in session gateway-vm import-vm export-vm onion-uplink onion-gateway-vm onion-file-vm; do
+        mkdir -p "/host/usr/lib/oblivion/vm/qemu-root/run/oblivion-$role-s$slot"
+    done
+done
 touch /host/usr/lib/oblivion/vm/qemu-root/kernel /host/usr/lib/oblivion/vm/qemu-root/initrd /host/usr/lib/oblivion/vm/qemu-root/root.squashfs
 rm -rf /guest/boot /guest/var/cache/apt /guest/var/lib/apt/lists /host/var/cache/apt /host/var/lib/apt/lists
 mkdir -p /guest/boot

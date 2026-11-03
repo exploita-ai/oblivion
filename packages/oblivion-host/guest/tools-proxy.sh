@@ -10,7 +10,7 @@ ALL_PROXY=$HTTP_PROXY
 http_proxy=$HTTP_PROXY
 https_proxy=$HTTP_PROXY
 all_proxy=$HTTP_PROXY
-NO_PROXY='127.0.0.1,localhost,::1,10.88.0.1:8111'
+NO_PROXY='127.0.0.1,localhost,::1,10.88.0.1:8111,10.88.0.1:8114'
 no_proxy=$NO_PROXY
 export HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy
 unset oblivion_tools_token

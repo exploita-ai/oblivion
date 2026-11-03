@@ -26,7 +26,11 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
             return Err("dump_protection_failed".into());
         }
     }
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let slot = if let Some(index) = args.iter().position(|value| value == "--slot") {
+        let slot = oblivion_host::scope::Slot::try_from(args.get(index + 1).ok_or("invalid_session_slot")?.parse::<u8>()?)?;
+        args.drain(index..index + 2); slot
+    } else { Default::default() };
     let operation = args.first().ok_or("missing_operation")?;
     if args.len()
         != if matches!(
@@ -87,7 +91,7 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
         return Err("secret_too_large".into());
     }
     let header = serde_json::to_vec(&json!({
-        "operation": operation, "session": args.get(1), "secret_len": secret.len(),
+        "operation": operation, "session": args.get(1), "secret_len": secret.len(), "slot": slot,
     }))?;
     let mut stream = UnixStream::connect("/run/oblivion-control.sock")?;
     stream.set_read_timeout(Some(Duration::from_secs(

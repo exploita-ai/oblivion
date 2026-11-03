@@ -10,6 +10,12 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Status {
+    #[serde(default, rename = "slot")]
+    _slot: u8,
+    #[serde(default, rename = "session_slot_limit")]
+    _slot_limit: u8,
+    #[serde(default, rename = "open_sessions")]
+    _open_sessions: serde_json::Value,
     general_present: bool,
     general_incomplete: bool,
     general_open: bool,

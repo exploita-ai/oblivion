@@ -335,6 +335,46 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  multisession-vm:
+    name: Concurrent encrypted sessions and private gateways x86
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Prepare the disposable host
+        run: |
+          test -c /dev/kvm
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 libarchive-tools
+          sudo usermod -a -G kvm "$(id -un)"
+      - name: Build synthetic sessions and real controller/gateway services
+        run: >-
+          docker buildx build --platform linux/amd64 --progress plain
+          -f script/oblivion/Dockerfile.vm-lab --target multisession-artifacts
+          --build-arg GUEST=multisession-guest
+          --output type=local,dest=artifacts/ci/multisession/image .
+      - name: Exercise simultaneous volumes, credentials, traffic and independent shutdown
+        # No external NIC or public provider. Inner guests use laboratory TCG.
+        run: >-
+          sg kvm -c 'python3 -B script/oblivion/run-vm-lab.py
+          --architecture x86_64 --accelerator kvm --multisession
+          --image artifacts/ci/multisession/image
+          --output artifacts/ci/multisession/results'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: oblivion-multisession-x86-${{ github.sha }}
+          path: |
+            artifacts/ci/multisession/results/*.json
+            artifacts/ci/multisession/results/*.log
+            artifacts/ci/multisession/image/SHA256SUMS
+            artifacts/ci/multisession/image/sources.sha256
+          retention-days: 7
+          if-no-files-found: error
+
   manager-import:
     name: Manager USB import/export lifecycle x86
     runs-on: ubuntu-24.04

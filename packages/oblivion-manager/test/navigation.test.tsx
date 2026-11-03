@@ -256,7 +256,7 @@ test.each([[80, 24], [160, 50]])("settings groups every host preference behind o
     for (const label of ["Network & Wi-Fi", "Privacy route", "Network access", "Network rules", "API keys", "Keyboard & time zone", "Auto-lock"]) {
       expect(app.captureCharFrame()).toContain(label)
     }
-    for (const [index, section, action] of [[0, "Network & Wi-Fi", "Ethernet"], [1, "Privacy route", "SOCKS5 proxy"], [2, "Network access", "Change global access"], [3, "Network rules", "Add rule"], [4, "API keys", "Add API key"], [5, "Keyboard & time zone", "Edit preferences"], [6, "Auto-lock", "Session auto-lock"]] as const) {
+    for (const [index, section, action] of [[0, "Network & Wi-Fi", "Ethernet"], [1, "Privacy route", "SOCKS5 proxy"], [2, "Network access", "Change default access"], [3, "Network rules", "Add rule"], [4, "API keys", "Add API key"], [5, "Keyboard & time zone", "Edit preferences"], [6, "Auto-lock", "Session auto-lock"]] as const) {
       if (index > 0) await app.mockInput.pressEscape()
       for (let row = 0; row < index; row++) await app.mockInput.pressArrow("down")
       await app.mockInput.pressEnter()

@@ -1,7 +1,9 @@
 use super::*;
+use crate::tools::ToolsProxy;
 use oblivion_transport::{Authentication, Metadata, provider::Provider};
 use serde_json::{Value, json};
 use std::net::{Ipv4Addr, SocketAddrV4};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::oneshot;
 
 const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -147,10 +149,10 @@ async fn external(listener: TcpListener, authenticated: bool) -> TcpStream {
     let mut request = vec![5, 1, 0, 3, HOST.len() as u8];
     request.extend_from_slice(HOST);
     request.extend_from_slice(&443u16.to_be_bytes());
-    external_request(listener, authenticated, &request).await
+    external_request(&listener, authenticated, &request).await
 }
 
-async fn external_request(listener: TcpListener, authenticated: bool, request: &[u8]) -> TcpStream {
+async fn external_request(listener: &TcpListener, authenticated: bool, request: &[u8]) -> TcpStream {
     let (mut proxy, _) = listener.accept().await.unwrap();
     let mut greeting = [0; 3];
     proxy.read_exact(&mut greeting).await.unwrap();
@@ -466,7 +468,10 @@ async fn tools_policy_and_reserved_addresses_fail_before_contacting_the_proxy() 
             vec![5, 1, 0, 2], // Unsupported address type
         ] {
             let (egress, mut client, upstream, server) =
-                configured_fixture(false, Some(tools(json!([])))).await;
+                configured_fixture(false, Some(Tools {
+                    access: Access::Open,
+                    ..tools(json!([]))
+                })).await;
             assert_eq!(authenticate_as(&mut client, TOOLS_USER, TOKEN.as_bytes()).await, [1, 0]);
             client.write_all(&request).await.unwrap();
             let mut reply = [0; 10];
@@ -497,7 +502,7 @@ async fn allowed_tools_relay_canonical_destinations_with_external_credentials_an
                 ])))).await;
                 assert_eq!(authenticate_as(&mut client, TOOLS_USER, TOKEN.as_bytes()).await, [1, 0]);
                 let proxy = tokio::spawn(async move {
-                    let mut proxy = external_request(upstream, authenticated, outgoing).await;
+                    let mut proxy = external_request(&upstream, authenticated, outgoing).await;
                     let mut bytes = [0; 7];
                     proxy.read_exact(&mut bytes).await.unwrap();
                     assert_eq!(&bytes, b"opaque!");
@@ -564,7 +569,7 @@ async fn open_web_role_allows_only_public_domain_https() {
         );
         let expected = b"\x05\x01\x00\x03\x0bexample.com\x01\xbb";
         let proxy = tokio::spawn(async move {
-            let mut proxy = external_request(upstream, false, expected).await;
+            let mut proxy = external_request(&upstream, false, expected).await;
             assert_eq!(proxy.read(&mut [0]).await.unwrap(), 0);
         });
         request(&mut client, b"EXAMPLE.COM.", 443).await;
@@ -657,11 +662,25 @@ async fn global_access_rejects_before_dns_or_upstream_connections() {
                 443,
             ),
             (
-                Access::Open,
+                Access::Strict,
                 json!([]),
                 TOOLS_USER,
                 b"example.com".as_slice(),
                 22,
+            ),
+            (
+                Access::Open,
+                json!([{"destination":"example.com","port":22,"action":"deny"}]),
+                TOOLS_USER,
+                b"example.com".as_slice(),
+                22,
+            ),
+            (
+                Access::Open,
+                json!([{"destination":"example.com","port":49152,"action":"ask"}]),
+                TOOLS_USER,
+                b"example.com".as_slice(),
+                49152,
             ),
             (
                 Access::Open,
@@ -747,11 +766,17 @@ async fn global_access_rejects_before_dns_or_upstream_connections() {
 }
 
 #[tokio::test]
-async fn global_open_allows_http_https_and_strict_keeps_the_provider_route() {
+async fn global_open_allows_public_tcp_and_strict_keeps_the_provider_route() {
     timeout(Duration::from_secs(5), async {
         for (access, user, host, port) in [
+            (Access::Open, TOOLS_USER, b"example.com".as_slice(), 1u16),
+            (Access::Open, TOOLS_USER, b"example.com".as_slice(), 21),
+            (Access::Open, TOOLS_USER, b"example.com".as_slice(), 22),
             (Access::Open, TOOLS_USER, b"example.com".as_slice(), 80u16),
             (Access::Open, TOOLS_USER, b"example.com".as_slice(), 443),
+            (Access::Open, TOOLS_USER, b"example.com".as_slice(), 990),
+            (Access::Open, TOOLS_USER, b"example.com".as_slice(), 49152),
+            (Access::Open, TOOLS_USER, b"example.com".as_slice(), 65535),
             (Access::Strict, USER, HOST, 443),
         ] {
             let (egress, mut client, upstream, server) = configured_fixture(
@@ -770,7 +795,7 @@ async fn global_open_allows_http_https_and_strict_keeps_the_provider_route() {
             expected.extend_from_slice(host);
             expected.extend_from_slice(&port.to_be_bytes());
             let proxy = tokio::spawn(async move {
-                let mut connection = external_request(upstream, false, &expected).await;
+                let mut connection = external_request(&upstream, false, &expected).await;
                 assert_eq!(connection.read(&mut [0]).await.unwrap(), 0);
             });
             request(&mut client, host, port).await;
@@ -784,4 +809,81 @@ async fn global_open_allows_http_https_and_strict_keeps_the_provider_route() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn curl_passive_ftp_tunnels_control_and_data_through_open_egress() {
+    timeout(Duration::from_secs(10), async {
+        let (egress, client, upstream, server) = configured_fixture(
+            false,
+            Some(Tools { access: Access::Open, ..tools(json!([])) }),
+        ).await;
+        let proxy = Arc::new(ToolsProxy::new(crate::tools::Credentials {
+            session_token: Zeroizing::new(TOKEN.into()),
+            socks: client.peer_addr().unwrap(),
+        }).unwrap());
+        drop(client);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy_server = tokio::spawn(proxy.clone().serve(listener));
+        let peer = tokio::spawn(async move {
+            // Only loopback sockets exist. The synthetic SOCKS peer checks both
+            // destination hostnames and ports, then speaks passive FTP itself.
+            let mut control = BufReader::new(external_request(
+                &upstream, false, b"\x05\x01\x00\x03\x0bexample.com\x00\x15",
+            ).await);
+            let (retrieve, requested) = oneshot::channel();
+            let mut retrieve = Some(retrieve);
+            control.get_mut().write_all(b"220 Fixture ready\r\n").await.unwrap();
+            let control = async {
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    assert_ne!(control.read_line(&mut line).await.unwrap(), 0);
+                    let reply: &[u8] = match line.trim_end() {
+                        "USER anonymous" => b"331 Password required\r\n",
+                        command if command.starts_with("PASS ") => b"230 Logged in\r\n",
+                        "PWD" => b"257 \"/\"\r\n",
+                        "EPSV" => b"229 Entering Extended Passive Mode (|||50000|)\r\n",
+                        "TYPE I" => b"200 Binary\r\n",
+                        "SIZE fixture.txt" => b"213 15\r\n",
+                        "RETR fixture.txt" => {
+                            retrieve.take().unwrap().send(()).unwrap();
+                            b"150 Sending data\r\n226 Transfer complete\r\n"
+                        },
+                        "QUIT" => {
+                            control.get_mut().write_all(b"221 Goodbye\r\n").await.unwrap();
+                            break;
+                        },
+                        command => panic!("Unexpected synthetic FTP command: {command}"),
+                    };
+                    control.get_mut().write_all(reply).await.unwrap();
+                }
+            };
+            let data = async {
+                let mut data = external_request(
+                    &upstream, false, b"\x05\x01\x00\x03\x0bexample.com\xc3\x50",
+                ).await;
+                requested.await.unwrap();
+                data.write_all(b"oblivion-files\n").await.unwrap();
+                data.shutdown().await.unwrap();
+            };
+            tokio::join!(control, data);
+        });
+        let result = tokio::process::Command::new("curl")
+            .env_clear()
+            .args(["-q", "--silent", "--show-error", "--max-time", "5",
+                "--proxy", &format!("http://oblivion-tools:{TOKEN}@{address}"),
+                "--noproxy", "", "--proxytunnel", "--ftp-pasv", "--ftp-skip-pasv-ip",
+                "ftp://example.com/fixture.txt"])
+            .kill_on_drop(true)
+            .output().await.unwrap();
+        proxy.revoke();
+        proxy_server.await.unwrap().unwrap();
+        egress.revoke();
+        server.await.unwrap().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        assert_eq!(result.stdout, b"oblivion-files\n");
+        peer.await.unwrap();
+    }).await.unwrap();
 }

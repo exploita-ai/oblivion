@@ -88,11 +88,15 @@ try:
     server(None, '10.222.0.2', ['tcp:22'])
     assert connects(1000), 'positive control must reach the fixture before filtering'
     run('nft', '-f', str(policy))
-    assert connects(1101), 'gateway UID must reach its external TCP transport'
-    for uid in (0, 1000, 1100, 1101, 1102, 1103, 1104, 1105, 1106):
+    gateways = {1101, *(16000 + slot * 16 + 1 for slot in range(1, 32))}
+    rule = next(line for line in policy.read_text().splitlines() if 'meta skuid { 1101' in line)
+    assert {int(value.strip()) for value in rule.split('{')[1].split('}')[0].split(',')} == gateways
+    for uid in (1101, 16017, 16033, 16497):
+        assert connects(uid), f'gateway UID {uid} must reach its external TCP transport'
+    for uid in (0, 1000, 1100, 1101, 1102, 1103, 1104, 1105, 1106, 16016, 16017, 16018, 16032, 16033, 16496, 16497):
         # Keep every UID/port probe, but pay interpreter/setpriv startup once
         # per identity rather than 60 times inside the software-emulated VM.
-        checks = ([(port, False, 0) for port in (53, 853, 8081)] if uid != 1101 else [])
+        checks = ([(port, False, 0) for port in (53, 853, 8081)] if uid not in gateways else [])
         checks += [(port, True, 0) for port in (53, 123, 443, 9999)]
         for (port, udp, _), allowed in zip(checks, probes(uid, checks)):
             assert not allowed, f"{'UDP' if udp else 'TCP'} port {port} escaped: UID {uid}"

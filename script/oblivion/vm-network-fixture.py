@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Typed diagnostics in a lab-only image. No user documents or real API keys."""
 import base64
+import importlib.util
 import hashlib
 import json
 import os
@@ -12,6 +13,12 @@ import sys
 import time
 import tty
 from pathlib import Path
+
+spec = importlib.util.spec_from_file_location('rotation_fixture', '/usr/libexec/oblivion-rotation-fixture.py')
+rotation_fixture = None
+if Path(spec.origin).exists():
+    rotation_fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rotation_fixture)
 
 ROLE = sys.argv[1]
 API = ("10.88.0.1", 8111)
@@ -132,7 +139,7 @@ def gateway(operation, configuration):
     if operation == "supervisor-info":
         pid = int(run("systemctl", "show", "oblivion-gateway-control.service", "--property=MainPID", "--value"))
         children = Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
-        expected = {"oblivion-api": 1300, "oblivion-egress": 1201, "oblivion-web": 1302}
+        expected = {"oblivion-api": 1300, "oblivion-egress": 1201, "oblivion-web": 1302, "oblivion-rotati": 1303}
         if configuration.get("tools", False):
             expected["oblivion-tools"] = 1301
         assert len(children) == len(expected)
@@ -149,7 +156,8 @@ def gateway(operation, configuration):
             assert f"Uid:\t{uid}\t{uid}\t{uid}\t{uid}" in status
             assert all(f"{field}:\t0000000000000000" in status for field in ["CapInh", "CapPrm", "CapEff", "CapAmb"])
             assert "NoNewPrivs:\t1" in status and (child / "environ").read_bytes() == b""
-            assert (child / "cmdline").read_bytes() == f"/usr/bin/{name}\0".encode()
+            program = "oblivion-rotation" if name == "oblivion-rotati" else name
+            assert (child / "cmdline").read_bytes() == f"/usr/bin/{program}\0".encode()
             assert next(line.split()[4:6] for line in (child / "limits").read_text().splitlines() if line.startswith("Max core file size")) == ["0", "0"]
             processes[name] = int(value)
         assert set(processes) == set(expected)
@@ -162,7 +170,7 @@ def gateway(operation, configuration):
         if operation != "supervisor-crash":
             name = {"broker-crash": "oblivion-api", "egress-crash": "oblivion-egress", "tools-crash": "oblivion-tools", "web-crash": "oblivion-web"}[operation]
             children = Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
-            assert len(children) in [3, 4]
+            assert len(children) in [4, 5]
             pid = next(int(value) for value in children if Path(f"/proc/{value}/comm").read_text().strip() == name)
         os.kill(pid, signal.SIGKILL)
         return {"signalled": True}
@@ -175,7 +183,7 @@ def gateway(operation, configuration):
                 break
             assert time.monotonic() < deadline, (state, tor_state)
             time.sleep(0.01)
-        assert not any(path.read_text().strip() in ["oblivion-api", "oblivion-egress", "oblivion-tools", "oblivion-web"] for path in Path("/proc").glob("[0-9]*/comm"))
+        assert not any(path.read_text().strip() in ["oblivion-api", "oblivion-egress", "oblivion-tools", "oblivion-web", "oblivion-rotati"] for path in Path("/proc").glob("[0-9]*/comm"))
         selectors = gateway("transport-state", {})["selectors"]
         assert all(not values for values in selectors.values())
         return {"supervisor": state, "tor": tor_state, "broker_absent": True, "egress_absent": True,
@@ -292,7 +300,9 @@ for line in sys.stdin:
         if command["operation"] == "poweroff":
             reply({"id": command["id"], "ok": True})
             break
-        if ROLE == "gateway":
+        if command["operation"].startswith("rotation-"):
+            result = rotation_fixture.call(ROLE, command["operation"], command)
+        elif ROLE == "gateway":
             result = gateway(command["operation"], command)
         elif command["operation"] == "request":
             result = request(command["token"])

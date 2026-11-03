@@ -194,8 +194,17 @@ impl Broker {
         let Ok(Ok(body)) = body else {
             return error(StatusCode::PAYLOAD_TOO_LARGE, "body_limit");
         };
-        let Ok(body) = request::validate(self.provider, &body.to_bytes()) else {
-            return error(StatusCode::BAD_REQUEST, "request_denied");
+        let body = match request::validate(self.provider, &body.to_bytes()) {
+            Ok(body) => body,
+            Err(request::Error::Request) => {
+                return error(StatusCode::BAD_REQUEST, "request_denied");
+            }
+            Err(request::Error::TokenLimit) => {
+                return error(StatusCode::BAD_REQUEST, "token_limit_denied");
+            }
+            Err(request::Error::ModelLimits) => {
+                return error(StatusCode::BAD_REQUEST, "model_limits_unavailable");
+            }
         };
         let upstream = tokio::select! {
             biased;
@@ -271,6 +280,12 @@ struct StreamState {
 
 fn error(status: StatusCode, code: &'static str) -> Response<Body> {
     let message = match code {
+        "token_limit_denied" => {
+            "The output or reasoning token budget must be a positive integer within the selected model's limit."
+        }
+        "model_limits_unavailable" => {
+            "This model has no verified limits in Oblivion's bundled catalog. Choose a listed model or update Oblivion."
+        }
         "provider_credentials_rejected" => {
             "The provider rejected the API key. Close the session and replace the key in API keys."
         }

@@ -280,7 +280,7 @@ fn copy(terminal: &mut Terminal, started: &Started, path: String, export: bool) 
 }
 
 fn connect() -> Result<UnixStream> {
-    let stream = UnixStream::connect(transfers::SOCKET)?;
+    let stream = UnixStream::connect(oblivion_host::scope::path(transfers::SOCKET))?;
     #[cfg(target_os = "linux")]
     {
         let mut peer: libc::ucred = unsafe { std::mem::zeroed() };

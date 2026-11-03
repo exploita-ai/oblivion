@@ -1,3 +1,4 @@
+import { sessionSocket } from "./session-tabs"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import { createEffect, createSignal, onCleanup, onMount, Show, Switch, Match } from "solid-js"
 import { ControlError, type Request } from "./control"
@@ -18,6 +19,7 @@ import { FilePicker } from "./vendor/termcn/file-picker"
 import { connectTransfer, devicesSchema, pageSchema, startedSchema, type Offer, type Page, type Recovery, type Transfer } from "./transfer"
 
 export function Documents(props: {
+  slot?: number
   request: (value: Request) => Promise<string>
   connect?: (id: string) => Promise<Transfer>
   session: string
@@ -31,6 +33,9 @@ export function Documents(props: {
   back: () => void
   onNavigationLock?: (locked: boolean) => void
 }) {
+  const request = props.request
+  const targetSlot = props.slot ?? 0
+
   const dimensions = useTerminalDimensions()
   const wide = () => dimensions().width >= 140
   const spacious = () => wide() && dimensions().height >= 32
@@ -67,12 +72,12 @@ export function Documents(props: {
   createEffect(() => props.onNavigationLock?.(!!exportView() || !!busy() || !!form() || !!devices() || !!recovery() || !!offer() || mode() === "import" || !!job))
 
   async function command(value: object) {
-    return props.request({ operation: "transfers", payload: new TextEncoder().encode(JSON.stringify(value)) })
+    return request({ operation: "transfers", payload: new TextEncoder().encode(JSON.stringify(value)) })
   }
   async function cleanup() {
     transfer?.close(); transfer = undefined
     if (!job) return
-    cancelling ??= (onion ? onionStatus(props.request, { action: "cancel" }) : command({ operation: "cancel" })).then(() => { job = undefined; onion = false }).finally(() => { cancelling = undefined })
+    cancelling ??= (onion ? onionStatus(request, { action: "cancel" }) : command({ operation: "cancel" })).then(() => { job = undefined; onion = false }).finally(() => { cancelling = undefined })
     await cancelling
   }
   async function run(label: string, task: () => Promise<void>) {
@@ -94,7 +99,7 @@ export function Documents(props: {
   async function browse(path = "", after?: string, direction: "reset" | "next" | "previous" = "reset") {
     const result = mode() === "import" && transfer
       ? await transfer.browse(path, after)
-      : pageSchema.parse(JSON.parse(await props.request({ operation: "browse", payload: new TextEncoder().encode(JSON.stringify({ path, after: after ?? null, limit: 100 })) })))
+      : pageSchema.parse(JSON.parse(await request({ operation: "browse", payload: new TextEncoder().encode(JSON.stringify({ path, after: after ?? null, limit: 100 })) })))
     if (disposed) return
     setPage(result)
     setCursors((values) => direction === "next" ? [...values, after] : direction === "previous" ? values.slice(0, -1) : [undefined])
@@ -107,14 +112,14 @@ export function Documents(props: {
     const started = startedSchema.parse(JSON.parse(await command(exporting ? { operation: "export", target } : { operation: "import", source: target })))
     job = started.id
     if (!exporting) sourceID = target
-    transfer = await (props.connect ?? connectTransfer)(started.id)
+    transfer = await (props.connect ?? ((id: string) => connectTransfer(id, sessionSocket("/run/oblivion-transfer-host/control.sock", targetSlot))))(started.id)
     if (exporting) { await makeOffer(true); return }
     setMode("import"); setSelected([]); setDevices(undefined); await browse(); setFocus("files")
   }
   async function receiveImport(id: string) {
     await run("Read received files", async () => {
       job = id; onion = true; setExportView(undefined); setDevice("OnionShare · sealed intake")
-      transfer = await (props.connect ? props.connect(id) : connectTransfer(id, onionCopySocket, { entries: 1024, bytes: 268435456, budgetMs: 300_000 }))
+      transfer = await (props.connect ? props.connect(id) : connectTransfer(id, sessionSocket(onionCopySocket, targetSlot), { entries: 1024, bytes: 268435456, budgetMs: 300_000 }))
       setMode("import"); setSelected([]); await browse(); setFocus("files")
     })
   }
@@ -126,7 +131,7 @@ export function Documents(props: {
     if (!exporting) await readUsage()
   }
   async function readUsage() {
-    const response = storageUsage.parse(JSON.parse(await props.request({ operation: "session-storage", payload: new TextEncoder().encode('{"action":"usage"}') })))
+    const response = storageUsage.parse(JSON.parse(await request({ operation: "session-storage", payload: new TextEncoder().encode('{"action":"usage"}') })))
     setUsage(response.usage)
     return response.usage
   }
@@ -186,7 +191,7 @@ export function Documents(props: {
   async function recover(request: { operation: "list"; after: string | null } | { operation: "discard"; id: string }) {
     await cleanup()
     job = startedSchema.parse(JSON.parse(await command({ operation: "recover" }))).id
-    transfer = await (props.connect ?? connectTransfer)(job)
+    transfer = await (props.connect ?? ((id: string) => connectTransfer(id, sessionSocket("/run/oblivion-transfer-host/control.sock", targetSlot))))(job)
     const result = await transfer.recover(request)
     await cleanup()
     if (result.result === "inventory") { setRecovery(result); return }
@@ -230,10 +235,10 @@ export function Documents(props: {
   onCleanup(() => { disposed = true; props.onNavigationLock?.(false); transfer?.close(); if (job) void cleanup().catch(() => undefined) })
 
   return <Show when={!exportView()} fallback={<Switch>
-    <Match when={exportView() === "chat"}><ChatExport request={props.request} back={() => setExportView(undefined)} saved={createdExport} /></Match>
-    <Match when={exportView() === "diagnostics"}><Diagnostics request={props.request} back={() => setExportView(undefined)} saved={createdExport} /></Match>
-    <Match when={exportView() === "onion"}><OnionReceive request={props.request} back={() => setExportView(undefined)} import={receiveImport} /></Match>
-    <Match when={exportView() === "share"}><OnionShare request={props.request} connect={props.connect} paths={selected()} back={() => setExportView(undefined)} /></Match>
+    <Match when={exportView() === "chat"}><ChatExport request={request} back={() => setExportView(undefined)} saved={createdExport} /></Match>
+    <Match when={exportView() === "diagnostics"}><Diagnostics request={request} back={() => setExportView(undefined)} saved={createdExport} /></Match>
+    <Match when={exportView() === "onion"}><OnionReceive request={request} back={() => setExportView(undefined)} import={receiveImport} /></Match>
+    <Match when={exportView() === "share"}><OnionShare slot={targetSlot} request={request} connect={props.connect} paths={selected()} back={() => setExportView(undefined)} /></Match>
   </Switch>}><box flexGrow={1} minHeight={0} flexDirection="column">
     <Show when={!form() && !devices() && !recovery()}><PageHeader title={offer() ? "Review transfer" : "Documents"}
       description={`${props.chat ? "Chat remains active while you browse." : "Offline documents · no network device"}${usage() ? ` · ${capacity(usage()!.used)} used / ${capacity(usage()!.available)} free` : ""}`} /></Show>
