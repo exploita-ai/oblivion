@@ -956,9 +956,17 @@ with socket.socket(socket.AF_UNIX) as client:
     # An explicit service stop must complete without ordering deadlocks or orphan VMs.
     systemctl("stop", CONTROLLER)
     assert property(CONTROLLER, "Result") == "success"
-    locked()
     assert property(MANAGER, "ActiveState") in ["inactive", "failed"]
     assert not Path(f"/proc/{manager_pid}").exists()
+    # The manager queues recovery without blocking its own stop. That job is
+    # ordered after the controller, so stop's return can precede its completion.
+    deadline = time.monotonic() + 30
+    while RECOVER in systemctl("list-jobs", "--no-legend", "--plain").split():
+        assert time.monotonic() < deadline, "queued shutdown recovery deadline"
+        time.sleep(0.1)
+    assert property(RECOVER, "ActiveState") == "inactive"
+    assert property(RECOVER, "Result") == "success"
+    locked()
     check("controller stop drains dependent services and leaves no active VM or open volume")
     assert all(secret not in output for secret in [GENERAL, PASSWORD, API_KEY, NEXT_API_KEY, RAM_API_KEY, PROXY_USER, PROXY_PASSWORD])
     check("synthetic passwords, API keys and proxy credentials never appear on the managed console")
