@@ -955,6 +955,7 @@ with socket.socket(socket.AF_UNIX) as client:
     reopen()
     # An explicit service stop must complete without ordering deadlocks or orphan VMs.
     systemctl("stop", CONTROLLER)
+    assert property(CONTROLLER, "Result") == "success"
     locked()
     assert property(MANAGER, "ActiveState") in ["inactive", "failed"]
     assert not Path(f"/proc/{manager_pid}").exists()

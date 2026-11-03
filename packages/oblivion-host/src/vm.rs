@@ -327,9 +327,9 @@ impl Config {
         );
         if matches!(role, Role::Session) {
             args.extend([
-                // Controller recovery asks this persistent guest to power off
-                // before systemd falls back to stopping the VM itself.
-                "--property=Before=oblivion-controller.service".to_owned(),
+                // Controller ExecStopPost waits for this VM to stop. An
+                // ordering dependency would defer that stop until the
+                // controller finished, deadlocking verified recovery.
                 format!("--property=BindPaths={DEVICE}:/dev/oblivion-session"),
                 format!("--property=DeviceAllow={DEVICE} rw"),
             ]);

@@ -471,7 +471,10 @@ if STREAM:
     stream_closed(alternate_stream)
     assert status()["session_open"]
     check("session QEMU death revokes its active upstream stream through the pidfd observer before explicit volume closure")
-assert command("enter", a, secret=PASSWORD, success=False) == "session_already_open"
+# RAM admission may reject this occupied legacy slot before its mapping check.
+rejected = command("enter", a, secret=PASSWORD, success=False)
+assert rejected in ["session_already_open", "insufficient_session_memory"], rejected
+assert status()["active_session"] == b and status()["session_open"]
 command("close")
 assert not status()["session_open"]
 check("B rejects A's token; SIGKILL of its QEMU automatically revokes the broker and closes the matching pidfd while the volume remains interlocked until explicit close")
