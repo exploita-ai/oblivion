@@ -253,6 +253,7 @@ check("saving an API key keeps the gateway stopped until a chat starts")
 a = command("create", secret=PASSWORD)
 b = command("create", secret=b"synthetic-session-password-b")
 if SOCKS:
+    command("settings", secret=b'{"action":"access","mode":"strict","save":true}')
     policy_command = json.dumps({"action": "put", "rule": {
         "destination": "denied.example.com", "port": 443, "action": "deny", "session": a}, "save": True}).encode()
     command("network-policy", secret=policy_command)
@@ -377,8 +378,9 @@ check("A receives a RAM token privately; real broker authenticates it, rejects b
 if SOCKS:
     client.sendall(b"tools-denied\n")
     receive(client, b"OBLIVION_TOOLS_POLICY_ENFORCED")
-    assert command("network-policy", secret=policy_command, success=False) == "session_must_be_closed"
-    check("the host grant activates the actual tools listener; invalid tokens, denied/unknown targets and private addresses fail closed, and policy changes are blocked while open")
+    command("network-policy", secret=policy_command)
+    assert status()["session_open"] and int(property("oblivion-session.service", "MainPID")) == chat
+    check("Strict enforces tokens and scoped rules; live policy application preserves the session VM")
 client.sendall(b"adapter\n")
 receive(client, b"OBLIVION_ADAPTER_AUTHENTICATED")
 check("compiled OpenCode uses the production launcher and local token; the broker accepts its payload and returns the disabled-provider error")
@@ -535,8 +537,10 @@ if SOCKS:
     command("unlock", secret=GENERAL)
     stopped()
     saved_transport = Path("/run/oblivion/general/profile/transport.json").read_bytes()
-    tor_state = Path("/run/oblivion/general/profile/tor-state")
-    assert tor_state.read_bytes() == b"unused-tor-state-fixture"
+    command("enter-documents", a, secret=PASSWORD)
+    documents = int(property("oblivion-session.service", "MainPID"))
+    tor_state = Path(f"/run/oblivion/general/profile/sessions/{a}/tor-state")
+    assert Path("/run/oblivion/general/profile/tor-state").read_bytes() == b"unused-tor-state-fixture"
     # Replace the deliberately invalid seed with the selective guard fixture
     # already used by the Tor-state lab. A stored guard is not a bootstrap.
     guard_id = "rsa_id=0123456789ABCDEF0123456789ABCDEF01234567"
@@ -545,16 +549,18 @@ if SOCKS:
     stopped()
     assert status()["egress"]["selected"] == {"mode": "tor"} and status()["egress"]["temporary"]
     assert Path("/run/oblivion/general/profile/transport.json").read_bytes() == saved_transport
-    assert command("enter", a, secret=PASSWORD, success=False) == "gateway_not_ready"
+    assert command("start-chat", success=False) == "gateway_not_ready"
     tor_gateway, _ = ready()
-    assert not status()["session_open"] and property("oblivion-session.service", "ActiveState") in ["inactive", "failed"]
-    assert not Path("/dev/mapper/oblivion-session").exists() and not Path("/run/oblivion-session/console.sock").exists()
+    assert status()["session_open"] and status()["session_mode"] == "documents"
+    assert int(property("oblivion-session.service", "MainPID")) == documents
+    assert Path("/dev/mapper/oblivion-session").exists()
+    assert b"-netdev" not in Path(f"/proc/{documents}/cmdline").read_bytes()
     assert stream_status()["active"] == [] and stream_status()["closed"] == [1, 2]
     assert tor_state.stat().st_uid == 0 and tor_state.stat().st_mode & 0o777 == 0o600
     assert "TorVersion Tor 0.4.9.15\n" in tor_state.read_text()
     assert guard_id in tor_state.read_text()
     assert all(line.startswith(("Guard ", "TorVersion ", "LastWritten ")) for line in tor_state.read_text().splitlines())
-    check("SOCKS-to-Tor imports its saved guard and replaces the gateway; absent bootstrap still rejects opening before any session mapping or VM, with no SOCKS fallback")
+    check("SOCKS-to-Tor imports the session guard; absent bootstrap preserves the same offline Documents VM without a network device or SOCKS fallback")
 
     command("egress", secret=b'{"action":"saved"}')
     stopped()
@@ -565,7 +571,7 @@ if SOCKS:
     assert guard_id.encode() in saved_tor_state
     check("restoring the saved SOCKS profile closes the Tor gateway and completes its selective state checkpoint before the next chat")
 
-    command("enter", a, secret=PASSWORD)
+    command("start-chat")
     restored_gateway, _ = ready()
     assert restored_gateway != tor_gateway
     assert gateway_status() == {"ok": True, "configured": True, "active": True}
@@ -648,7 +654,7 @@ if SOCKS:
     assert Path("/run/oblivion/general/profile/provider.keys.json").read_bytes() == saved_keys
     check("an empty saved key archive and a new RAM-only key leave the ephemeral gateway stopped until chat without writing the read-only profile")
     assert status()["general_readonly"] and status()["sessions"] == []
-    assert tor_state.read_bytes() == saved_tor_state
+    assert Path("/run/oblivion/general/profile/tor-state").read_bytes() == b"unused-tor-state-fixture"
     assert command("enter", a, secret=PASSWORD, success=False) == "general_not_writable"
     command("enter-ephemeral")
     ready()

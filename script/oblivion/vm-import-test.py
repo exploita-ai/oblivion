@@ -249,7 +249,7 @@ def session_terminal(mode="start", probe=None):
             raise AssertionError("session terminal did not reach " + text)
 
         send_frame({"type": "resize", "cols": 100, "rows": 30})
-        wait_frame("TERMINAL")
+        wait_frame("WORKSPACE")
         marker = "BACKUP_CHAT_PROBE_DONE" if probe else {"start": "TERMINAL_JOB_STARTED", "attached": "TERMINAL_JOB_CONTINUES", "reopened": "TERMINAL_REOPEN_VERIFIED", "backup": "BACKUP_METADATA_VERIFIED"}[mode]
         private = "printf '" + "".join(f"\\{byte:03o}" for byte in b"OBLIVION_VM_A_CANARY_4d02") + "'"
         command = "" if probe else (private + ' > /vault/workspace/terminal-controller.txt && ' if mode == "start" else
@@ -699,10 +699,12 @@ def execute_test():
     send(b"\x1b", "Operazione non completata")
     assert status()["session_open"]
     send(b"f", "Premi F di nuovo")
-    send(b"f", "Sessioni protette")
+    send(b"f", "Archivio generale bloccato")
     cleaned()
-    assert not status()["session_open"]
-    check("an unresponsive recipient stays interlocked until explicit forced closure reaps both VMs")
+    assert not status()["session_open"] and not status()["general_open"]
+    check("an unresponsive recipient stays interlocked until explicit forced closure reaps both VMs and locks the archive")
+    send(b"\r", "Password del volume generale")
+    send(GENERAL + b"\r", "Sessioni protette")
     send(b"\r", "Password della sessione")
     send(PASSWORD + b"\r", "OBLIVION_GUEST_READY")
     offer()

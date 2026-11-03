@@ -146,7 +146,7 @@ def reopen():
     send(GENERAL + b"\r", "Sessioni protette")
     assert not status()["session_open"]
     send(b"\r", "Password della sessione")
-    send(PASSWORD + b"\r", "Conversations and documents")
+    send(PASSWORD + b"\r", "A privacy-first live OS")
     wait_screen("/exit lock session")
 
 
@@ -281,8 +281,8 @@ with Path("/run/oblivion/storage.lock").open("rb") as operation_lock:
         time.sleep(0.01)
     assert recovering.poll() is None, "recovery abandoned a busy controller"
     fcntl.flock(operation_lock, fcntl.LOCK_UN)
-    output, error = recovering.communicate(timeout=30)
-    assert recovering.returncode == 0, (output, error)
+    recovered_output, error = recovering.communicate(timeout=30)
+    assert recovering.returncode == 0, (recovered_output, error)
 locked()
 check("recovery waits for a transient operation and closes without a second request")
 # Older immutable lab images predate the dedicated manager account. Supply the
@@ -631,14 +631,14 @@ with socket.socket(socket.AF_UNIX) as client:
     send(b"\r", "Nuova sessione - password")
 
     send(PASSWORD + b"\r", "Ripeti la password")
-    send(PASSWORD + b"\r", "Conversations and documents")
+    send(PASSWORD + b"\r", "A privacy-first live OS")
     wait_screen("/exit lock session")
     session_id = status()["sessions"][0]
     assert command("set-api-key", secret=NEXT_API_KEY, success=False) == "session_must_be_closed"
     assert command("clear-api-key", success=False) == "session_must_be_closed"
     assert stored_key() == NEXT_API_KEY
     assert command("api-keys", secret=key_command("select", id=first_key), success=False) == "session_must_be_closed"
-    assert command("api-keys", secret=key_command("remove", id=second_key), success=False) == "session_must_be_closed"
+    assert command("api-keys", secret=key_command("remove", id=second_key), success=False) == "api_key_in_use"
     for body in [TOR_SAVE, TOR_SELECT, SAVED_TRANSPORT]:
         assert command("egress", secret=body, success=False) == "session_must_be_closed"
     assert transport_file.read_bytes() == saved_transport
@@ -801,7 +801,7 @@ with socket.socket(socket.AF_UNIX) as client:
     send(RAM_API_KEY + b"\r", "Nuova sessione effimera")
     send(b"n", "Scegli la chiave per questa apertura")
     send(b"j", "> Volatile [RAM]")
-    send(b"\r", "Conversations and documents")
+    send(b"\r", "A privacy-first live OS")
     wait_screen("/exit lock session")
     assert status()["session_open"] and status()["general_readonly"]
     assert command("enter-ephemeral", success=False) == "vm_already_running"
@@ -825,7 +825,7 @@ with socket.socket(socket.AF_UNIX) as client:
     assert file_digest("/data/general.luks") == encrypted_before
     send(b"n", "Scegli la chiave per questa apertura")
     send(b"j", "> Volatile [RAM]")
-    send(b"\r", "Conversations and documents")
+    send(b"\r", "A privacy-first live OS")
     wait_screen("/exit lock session")
     assert subprocess.check_output(["cryptsetup", "luksUUID", str(ephemeral)]).strip() != first_ephemeral
     send(b"\x1b[200~OBLIVION_TUI_B_REQUEST\x1b[201~", "OBLIVION_TUI_B_REQUEST")
@@ -900,7 +900,7 @@ with socket.socket(socket.AF_UNIX) as client:
     assert not status()["incomplete_sessions"] and status()["available_bytes"] >= status()["session_bytes"]
     send(b"i", "Sessioni protette")
     send(b"\r", "Password della sessione")
-    send(PASSWORD + b"\r", "Conversations and documents")
+    send(PASSWORD + b"\r", "A privacy-first live OS")
     wait_screen("/exit lock session")
     check("disk exhaustion is explicit, preserves existing archives and permits reopening after pending cleanup")
     terminal.reset()

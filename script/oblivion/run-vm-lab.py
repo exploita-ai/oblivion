@@ -233,8 +233,10 @@ if args.multisession or args.refresh_tui_test or args.refresh_import_test or bun
             # stale units in the output directory after a source file was removed.
             for name in [line.split()[1] for line in bundle_manifest.splitlines()] + ["SHA256SUMS"]:
                 shutil.copy2(bundle / name, root / "scripts/oblivion-host" / name)
+            # Gateway test binaries grew beyond the old 64 MiB RAM mount.
+            bundle_size = sum(path.stat().st_size for path in (root / "scripts/oblivion-host").iterdir()) + 16 * 1024 * 1024
             bundle_hook = ('mkdir /run/oblivion-lab-bundle\n'
-                'mount -t tmpfs -o mode=0755,nodev,nosuid,size=64m tmpfs /run/oblivion-lab-bundle\n'
+                f'mount -t tmpfs -o mode=0755,nodev,nosuid,size={bundle_size} tmpfs /run/oblivion-lab-bundle\n'
                 'cp -a /scripts/oblivion-host/. /run/oblivion-lab-bundle/\n'
                 'mount -o remount,ro /run/oblivion-lab-bundle\n')
             if args.services_bundle:

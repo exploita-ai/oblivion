@@ -503,11 +503,12 @@ command("api-keys", secret=json.dumps({"action": "add", "name": "Synthetic model
 command("egress", secret=json.dumps({"action": "save", "transport": {"mode": "socks5", "endpoint": "192.0.2.10:1080",
         "authentication": {"username": "synthetic", "password": PROXY}}}).encode())
 profile = Path("/run/oblivion/general/profile")
-preserved = {name: (profile / name).read_bytes() for name in ["provider.keys.json", "transport.json"]}
+preserved = {path: path.read_bytes() for path in [
+    profile / "provider.keys.json", profile / "sessions" / session / "transport.json"]}
 _, pids = prepared()
 ipc("close"); stopped(pids)
 assert not Path("/dev/mapper/oblivion-session").exists()
-assert all((profile / name).read_bytes() == data for name, data in preserved.items())
+assert all(path.read_bytes() == data for path, data in preserved.items())
 assert not Path("/run/oblivion-gateway-vm").exists()
 check("session close reaps transfer guests before LUKS closure without changing model proxy/key profiles")
 

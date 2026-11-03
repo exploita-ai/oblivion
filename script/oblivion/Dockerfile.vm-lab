@@ -145,7 +145,11 @@ RUN sh /usr/lib/oblivion/guest/install.sh
 FROM guest AS manager-import-guest
 RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
 COPY script/oblivion/vm-import-seed.py /usr/lib/oblivion/lab/import-seed.py
+# This fixture uses hvc0 for its synthetic command loop, so lifecycle probes
+# need the real shell on hvc1 even during a simulated chat. Production chat
+# uses one tmux workspace on hvc0 and enables hvc1 only in Documents mode.
 RUN mkdir -p /etc/systemd/system/oblivion-vault.service.d \
+    && sed -i '/ConditionKernelCommandLine=oblivion.documents=1/d' /etc/systemd/system/oblivion-terminal.service \
     && printf '[Service]\nExecStartPost=/usr/bin/python3 /usr/lib/oblivion/lab/import-seed.py\n' > /etc/systemd/system/oblivion-vault.service.d/lab.conf
 
 # A synthetic command loop with the production vault and private network setup.

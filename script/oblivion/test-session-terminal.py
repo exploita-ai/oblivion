@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import shutil
 import subprocess
@@ -52,6 +53,21 @@ class SessionTerminalTest(unittest.TestCase):
                         os.read(master, 65536)
                 self.fail(f"Real shell did not write {name}")
 
+            def wait_shell(window, panes, zoom=0):
+                # A native split is asynchronous. Wait for its actual shell
+                # prompt before typing; startup may otherwise discard input.
+                deadline = time.monotonic() + 5
+                expected = f"{window}:{panes}:{zoom}"
+                while time.monotonic() < deadline:
+                    state = subprocess.run([tmux, "-S", socket, "display-message", "-p",
+                        "#{window_index}:#{window_panes}:#{window_zoomed_flag}"], text=True, capture_output=True)
+                    output = subprocess.run([tmux, "-S", socket, "capture-pane", "-p"], text=True, capture_output=True)
+                    if state.returncode == 0 and output.returncode == 0 and state.stdout.strip() == expected and re.search(r"(?:^|\n)bash-\d+(?:\.\d+)+[#$]$", output.stdout.rstrip()):
+                        return
+                    if select.select([master], [], [], 0.01)[0]:
+                        os.read(master, 65536)
+                self.fail(f"Shell not ready: expected {expected}, got {state.stdout!r}: {output.stdout!r}")
+
             def wait_output(marker):
                 captured = bytearray()
                 deadline = time.monotonic() + 5
@@ -62,21 +78,29 @@ class SessionTerminalTest(unittest.TestCase):
 
             child, master = attach()
             try:
+                wait_shell(0, 1)
                 os.write(master, b"printf alpha > first.txt\n")
                 wait_file("first.txt", "alpha")
+                wait_shell(0, 1)
                 # Native split shortcuts create independent PTYs in this same
                 # tmux session. No manager-specific panel commands intervene.
                 os.write(master, b"\x02%")
+                wait_shell(0, 2)
                 os.write(master, b"printf split > split.txt\n")
                 wait_file("split.txt", "split")
+                wait_shell(0, 2)
                 os.write(master, b'\x02"')
+                wait_shell(0, 3)
                 os.write(master, b"printf stacked > stacked.txt\n")
                 wait_file("stacked.txt", "stacked")
+                wait_shell(0, 3)
                 panes = subprocess.check_output([tmux, "-S", socket, "list-panes", "-F", "#{pane_pid}"], text=True).splitlines()
                 self.assertEqual(len(set(panes)), 3)
                 os.write(master, b"\x02z")
+                wait_shell(0, 3, 1)
                 os.write(master, b"printf zoomed > zoom.txt\n")
                 wait_file("zoom.txt", "zoomed")
+                wait_shell(0, 3, 1)
                 self.assertEqual(subprocess.check_output([tmux, "-S", socket, "display-message", "-p", "#{window_zoomed_flag}"], text=True).strip(), "1")
                 # Private lifecycle hints survive tmux without enabling escape
                 # passthrough; the viewer forwards only the fixed vocabulary.
@@ -84,15 +108,20 @@ class SessionTerminalTest(unittest.TestCase):
                     events.write(b"started\n")
                 wait_output(b"\x1b]777;oblivion;started\x07")
                 os.write(master, b"\x02c")
+                wait_shell(1, 1)
                 os.write(master, b"printf beta > second.txt\n")
                 wait_file("second.txt", "beta")
+                wait_shell(1, 1)
                 windows = subprocess.check_output([tmux, "-S", socket, "list-windows", "-F", "#{window_index}"], text=True)
                 self.assertEqual(windows.splitlines(), ["0", "1"])
                 os.write(master, b"\x02p")
+                wait_shell(0, 3, 1)
                 os.write(master, b"printf previous > previous.txt\n")
                 wait_file("previous.txt", "previous")
+                wait_shell(0, 3, 1)
                 self.assertEqual(subprocess.check_output([tmux, "-S", socket, "display-message", "-p", "#{window_index}"], text=True).strip(), "0")
                 os.write(master, b"\x02n")
+                wait_shell(1, 1)
                 os.write(master, b"\x1b[8;30;120t")
                 os.write(master, b"stty size > size.txt\n")
                 wait_file("size.txt", "29 120\n")
@@ -103,6 +132,7 @@ class SessionTerminalTest(unittest.TestCase):
                 wait_output(marker)
                 child.terminate(); child.wait(timeout=5); os.close(master)
                 child, master = attach()
+                wait_shell(1, 1)
                 os.write(master, b"printf resumed > resumed.txt\n")
                 wait_file("resumed.txt", "resumed")
                 windows = subprocess.check_output([tmux, "-S", socket, "list-windows", "-F", "#{window_index}"], text=True)
