@@ -21,7 +21,7 @@
 <p align="center">
   <a href="#download-oblivion">Download</a> ·
   <a href="#quick-start">Quick start</a> ·
-  <a href="#included-in-beta-2">Features</a> ·
+  <a href="#included-in-beta-3">Features</a> ·
   <a href="#why-oblivion">Why Oblivion</a> ·
   <a href="#privacy-model">Privacy</a> ·
   <a href="#where-oblivion-runs">Platforms</a> ·
@@ -46,32 +46,32 @@ coding agent operate on files you explicitly place inside an isolated workspace.
 ## Download Oblivion
 
 The current public build is
-[`v0.1.0-beta.2`](https://github.com/exploita-ai/oblivion/releases/tag/v0.1.0-beta.2).
-It packages the session terminal, file transfers, conversation exports,
-encrypted backups, OnionShare and text clipboard features described below.
-The original `v0.1.0-beta.1` remains available as an older build.
+[`v0.1.0-beta.3`](https://github.com/exploita-ai/oblivion/releases/tag/v0.1.0-beta.3).
+It adds concurrent protected sessions, tmux Workspace, persistent guest sudo,
+Open Internet and controlled Tor rotation to the file-transfer, encrypted-backup
+and OnionShare features. Earlier betas remain available in the release history.
 Images are experimental pre-releases; full operational-candidate qualification
 is still in progress.
 
 | Image               | Choose it for                                    | Download                                                                                                                                                                                                                                 |
 | ------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `amd64` / `x86_64`  | 64-bit Intel or AMD PCs and x86 virtual machines | [ISO](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.2/oblivion-v0.1.0-beta.2-amd64.iso) · [SHA-256](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.2/oblivion-v0.1.0-beta.2-amd64.sha256) |
-| `arm64` / `aarch64` | Apple Silicon M3+ with UTM and other ARM64 hosts | [ISO](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.2/oblivion-v0.1.0-beta.2-arm64.iso) · [SHA-256](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.2/oblivion-v0.1.0-beta.2-arm64.sha256) |
+| `amd64` / `x86_64`  | 64-bit Intel or AMD PCs and x86 virtual machines | [ISO](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.3/oblivion-v0.1.0-beta.3-amd64.iso) · [SHA-256](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.3/oblivion-v0.1.0-beta.3-amd64.sha256) |
+| `arm64` / `aarch64` | Apple Silicon M3+ with UTM and other ARM64 hosts | [ISO](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.3/oblivion-v0.1.0-beta.3-arm64.iso) · [SHA-256](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.3/oblivion-v0.1.0-beta.3-arm64.sha256) |
 
 Download the matching checksum next to the ISO, then verify it before booting:
 
 ```sh
 # Linux
-sha256sum --check oblivion-v0.1.0-beta.2-amd64.sha256
+sha256sum --check oblivion-v0.1.0-beta.3-amd64.sha256
 
 # macOS
-shasum -a 256 --check oblivion-v0.1.0-beta.2-arm64.sha256
+shasum -a 256 --check oblivion-v0.1.0-beta.3-arm64.sha256
 ```
 
 Windows users can run `certutil -hashfile <image.iso> SHA256` and compare the
 result with the downloaded checksum file. These hashes detect a damaged or
 incomplete download; signed release provenance is not available yet.
-[SHA256SUMS](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.2/SHA256SUMS)
+[SHA256SUMS](https://github.com/exploita-ai/oblivion/releases/download/v0.1.0-beta.3/SHA256SUMS)
 contains the checksums for both architectures.
 
 ## Quick start
@@ -91,6 +91,11 @@ Use the [VM guide](docs/DEVELOPMENT.md#run-from-a-virtual-machine) for UTM,
 QEMU/KVM and VirtualBox. Running inside a VM is convenient for evaluation, but
 the outer OS and hypervisor can observe input, display, memory and virtual disk.
 
+Existing users: export encrypted session backups before updating. Writing the
+new ISO over a persistent boot disk erases that disk; an automatic in-place
+updater is not included. Keep the original until you have restored and verified
+your sessions on the new installation.
+
 ### Working in a session
 
 Create or unlock Oblivion, configure your connection and provider key, then
@@ -99,15 +104,15 @@ its chats and terminals share that session's documents.
 
 | Control                  | Action                                                                   |
 | ------------------------ | ------------------------------------------------------------------------ |
-| `F6`                     | Workspace: chats and shells in tmux                                                                     |
+| `F6`                     | Workspace: chats and shells in tmux                                      |
 | `F7`                     | Documents, imports, exports and sharing                                  |
-| `F9`                     | Network controls for the selected protected session (development)        |
-| `F8`                     | Start chat (offline workspace only)                                           |
+| `F9`                     | Network controls for the selected protected session                      |
+| `F8`                     | Start chat (offline workspace only)                                      |
 | `Ctrl+Q`                 | Confirm session closure and locking; lock Oblivion from the host manager |
 | `/new` · `/resume`       | Create or resume a chat inside the current protected session             |
 | `/exit` · `/quit` · `/q` | Request closure of the protected session                                 |
 
-In development builds, Chat and Terminal are unified in **Workspace**. It opens
+Chat and Terminal are unified in **Workspace**. It opens
 with the latest chat; split panes and manage windows with native tmux shortcuts:
 `Ctrl+B` then `%` for side-by-side panes, `"` for stacked panes, `O` to change
 pane, `Z` to zoom, and `?` for help. New panes start a shell; run `chat` to open
@@ -116,20 +121,20 @@ server. Closing a pane does not delete its conversations. Pane layouts and
 shell processes last until the protected session closes; chat history and
 workspace files remain encrypted in persistent sessions.
 
-Development builds also offer **Build No Tools** alongside the default Build
+Oblivion also offers **Build No Tools** alongside the default Build
 agent. Press `Shift+Tab` or choose `/agents` → `Build No Tools` to answer using
 the conversation and supplied context without tools: no shell, file operations,
 web requests or subagents. Permissive chat settings cannot re-enable its tools.
 Switch back to Build to use tools again. The selected model provider still
 receives the conversation; this is not an offline mode.
 
-Development session images also include CLI binary-analysis tools: `strings`,
+Session images also include CLI binary-analysis tools: `strings`,
 `binwalk`, `xxd`, `hexdump`, `nm`, `objdump`, `readelf`, `patchelf`, `gdb`,
 `ltrace` and `strace`, plus Pwntools, Ropper, angr and Python's `imghdr`
 compatibility module. No analysis GUI is installed. Run `oblivion-tools` for
-the inventory available in your image; this set is not in the published beta 2.
+the inventory available in your image.
 
-The current source supports **multiple open protected sessions**, each with its
+Oblivion supports **multiple open protected sessions**, each with its
 own encrypted volume, VM, gateway, network rules and pinned API key. Use the
 session tabs or `Ctrl+PageUp` / `Ctrl+PageDown` to switch; background work keeps
 running. Available RAM determines how many sessions can open (up to 31 new
@@ -140,14 +145,14 @@ Strict and Offline apply to every chat, shell and tool inside that session.
 The footer shows its mode next to `Network [ ]`. Host Settings supplies defaults
 for new sessions; existing sessions retain their own policy. There is no per-chat
 `/web` control. Guest sudo installations persist inside the session's encrypted
-volume. These additions are not in the published beta 2 ISO.
+volume.
 
 Documents and workspace shells work offline without a provider key. Switching views
 keeps the active VM and its work running. Starting chat from an offline VM
 restarts the guest on the same unlocked volume; locking stops its processes.
 Use the explicit import/export flow to move files across the session boundary.
 
-Current development builds add encrypted **Auto-lock** preferences. By default,
+Oblivion includes encrypted **Auto-lock** preferences. By default,
 15 minutes without keyboard, paste or mouse input in a session locks that session,
 including background tabs; 30 minutes without input anywhere locks Oblivion.
 Agent output and background jobs do not count
@@ -158,23 +163,27 @@ The host manager keeps its primary navigation deliberately small: `Sessions`,
 network rules, API keys, keyboard/time zone, and auto-lock preferences live in
 one structured Settings hierarchy instead of competing for sidebar space.
 
-## Included in beta 2
+## Included in beta 3
 
-These features are packaged in `v0.1.0-beta.2`. Inclusion in this experimental
+These features are packaged in `v0.1.0-beta.3`. Inclusion in this experimental
 release does not establish complete hardware, hypervisor or security qualification.
 
-| Feature                          | What you can do                                                                                                                                                                 |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Protected sessions**           | Name a session, keep multiple chats and shared documents in its own encrypted volume, close it and reopen its history.                                                          |
-| **Session terminal**             | Run guest-only shells, manage terminal windows and inspect processes. Includes curl, Git/ripgrep, jq, SQLite, Python/venv, Node/npm, archive and document tools.                |
-| **Documents**                    | Browse `workspace` and `imports`; approve file/folder imports and exports through isolated media VMs, with manifests, hashes, progress and recovery.                            |
-| **Conversation exports**         | Save settled messages as Markdown or OpenCode JSON inside the encrypted workspace, then export the selected transcript.                                                         |
-| **Encrypted session backups**    | Back up a closed session and restore an independent copy with its chats and documents. The original session password is required; host settings and provider keys are excluded. |
-| **OnionShare**                   | Receive and review ordinary files; share approved documents or a closed encrypted backup through dedicated Tor transfer VMs.                                                    |
-| **Provider keys and networking** | Keep multiple encrypted keys, select a global default or an override for one opening, and route session traffic through Tor or an explicit SOCKS5 proxy.                        |
-| **Privacy WebFetch**             | Read public HTTPS pages through the selected protected route with a coherent browser profile, under the same session access policy as other tools.                         |
-| **Host/guest text clipboard**    | Explicit text copy/paste in UTM; the amd64 image also packages the selected VirtualBox clipboard client. No shared folders or clipboard file transfers.                         |
-| **Diagnostics**                  | Export an allowlisted report for troubleshooting, with a review step before sending it outside the session.                                                                     |
+| Feature                            | What you can do                                                                                                                                                                 |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Protected sessions**             | Name a session, keep multiple chats and shared documents in its own encrypted volume, close it and reopen its history.                                                          |
+| **Workspace**                      | Split chats and guest shells with native tmux controls. Use persistent sudo to install tools inside the session; CLI analysis and debugging tools are included.                 |
+| **Concurrent sessions**            | Switch between independently encrypted sessions with separate VMs, gateways, network policies and opening credentials.                                                          |
+| **Build No Tools**                 | Answer from the conversation and supplied context with every agent tool disabled.                                                                                               |
+| **Tor rotation**                   | The native `tor_rotate` tool pauses the selected session’s traffic, rebuilds circuits and reopens only after verification; failure stays blocked.                               |
+| **Session capacity and auto-lock** | Choose or increase encrypted session storage and configure inactivity locking.                                                                                                  |
+| **Documents**                      | Browse `workspace` and `imports`; approve file/folder imports and exports through isolated media VMs, with manifests, hashes, progress and recovery.                            |
+| **Conversation exports**           | Save settled messages as Markdown or OpenCode JSON inside the encrypted workspace, then export the selected transcript.                                                         |
+| **Encrypted session backups**      | Back up a closed session and restore an independent copy with its chats and documents. The original session password is required; host settings and provider keys are excluded. |
+| **OnionShare**                     | Receive and review ordinary files; share approved documents or a closed encrypted backup through dedicated Tor transfer VMs.                                                    |
+| **Provider keys and networking**   | Keep multiple encrypted keys, select a global default or an override for one opening, and route session traffic through Tor or an explicit SOCKS5 proxy.                        |
+| **Privacy WebFetch**               | Read public HTTPS pages through the selected protected route with a coherent browser profile, under the same session access policy as other tools.                              |
+| **Host/guest text clipboard**      | Explicit text copy/paste in UTM; the amd64 image also packages the selected VirtualBox clipboard client. No shared folders or clipboard file transfers.                         |
+| **Diagnostics**                    | Export an allowlisted report for troubleshooting, with a review step before sending it outside the session.                                                                     |
 
 Direct large-backup receipt over Tor is not implemented; restore uses removable
 or prepared virtual media. UTM text copy/paste has been tested in both directions.
@@ -193,13 +202,13 @@ working copies across the host filesystem. Oblivion changes that boundary. On a
 direct bare-metal boot, the installed OS is not running; the live system is
 disposable; and every protected session owns an encrypted workspace.
 
-| Boundary             | What Oblivion does                                                         |
-| -------------------- | -------------------------------------------------------------------------- |
-| **At rest**          | Separate LUKS2 volume and password for every persistent session            |
-| **While running**    | Read-only Debian base with runtime and temporary paths in RAM              |
-| **Between sessions** | Separate volumes, VMs and gateways; development builds allow concurrent sessions without sharing their filesystems |
-| **On the network**   | Dedicated gateway VM with Tor or explicit SOCKS5 and no direct fallback    |
-| **For documents**    | Offline access without a network device, API key or agent process          |
+| Boundary             | What Oblivion does                                                                            |
+| -------------------- | --------------------------------------------------------------------------------------------- |
+| **At rest**          | Separate LUKS2 volume and password for every persistent session                               |
+| **While running**    | Read-only live base; encrypted session writes and RAM-only temporary files                    |
+| **Between sessions** | Separate volumes, VMs and gateways; concurrent sessions run without sharing their filesystems |
+| **On the network**   | Dedicated gateway VM with Tor or explicit SOCKS5 and no direct fallback                       |
+| **For documents**    | Offline access without a network device, API key or agent process                             |
 
 The current cloud mode sends the context you approve to the configured
 provider. This beta focuses on remote APIs and is not air-gapped; local
@@ -213,7 +222,7 @@ Oblivion live OS (bare metal or supported VM)
     ├── tmpfs runtime (discarded on shutdown)
     ├── general LUKS2 vault — settings and API keys
     ├── Oblivion manager
-    └── protected sessions (concurrent in development builds)
+    └── protected sessions (concurrent)
         ├── independent LUKS2 volume
         ├── dedicated gateway VM — Tor or explicit SOCKS5
         ├── isolated transfer VMs — started for approved operations
@@ -239,11 +248,12 @@ mount the session filesystem. See the maintained
 - Runtime paths and temporary files live on tmpfs in the live system.
 - The gateway mediates session egress through Tor or a configured SOCKS5 proxy;
   direct access is deny-by-default.
-- One host-controlled access policy applies to every chat and tool: **Open Internet**
+- One host-controlled access policy per session applies to all its chats and tools: **Open Internet**
   (default for new profiles), **Strict**, or **Offline**. Open Internet permits public
   TCP on all ports through Tor/SOCKS5; explicit block and approval rules still apply. Strict requires
   allow rules beyond the provider. Offline blocks provider and tool traffic.
-  Change it in **Settings → Network access**, or press **F9** in Workspace.
+  Use **Settings → Network access** for new-session defaults, or **F9** in
+  Workspace to change the selected session.
   The footer shows the mode beside `Network [ ]`; the chat has no `/web` switch.
   Tools must use the proxy: FTP needs passive mode and HTTP CONNECT tunneling
   (`curl --proxytunnel`); SSH/SFTP need a proxy-capable client or ProxyCommand.
@@ -314,20 +324,21 @@ fallback in the production profile.
 
 ### Practical requirements
 
-The beta 2 ISOs are about 1.58 GB for amd64 and 1.54 GB for arm64, including
-the expanded tools and transfer components. The general vault defaults to 2 GiB, a new session
+The beta 3 ISOs are about 1.72 GB for amd64 and 1.67 GB for ARM64, including
+the expanded tools and transfer components. The general vault defaults to 2 GiB;
+a new session
 reserves 512 MiB inside it, and the session plus model gateway allocate about
 1.8 GiB of guest memory. OnionShare starts additional VMs; its full resource
 profile is still being qualified.
 
-In the development build, session capacity is selectable while **512 MiB remains
+Session capacity is selectable while **512 MiB remains
 the default**. `Sessions / Increase storage` enlarges a closed session without
 changing its password or contents. Growth keeps the original until the enlarged
 encrypted copy is verified, so the general vault needs enough free space for
 the complete new volume plus 64 MiB. Documents can offer this step before a
 large local-media import.
 
-| Resource                  | Starting configuration for beta 2 | Notes                                                    |
+| Resource                  | Starting configuration for beta 3 | Notes                                                    |
 | ------------------------- | --------------------------------- | -------------------------------------------------------- |
 | Writable boot disk        | 16 GB or more                     | Leave room for vaults, sessions, documents and backups.  |
 | System or outer-VM memory | 8 GiB                             | Full-profile peak memory is still being measured.        |
@@ -336,19 +347,19 @@ large local-media import.
 
 These are starting recommendations, not certified minimums. The earlier
 chat-only profile was exercised with 4 GiB; that does not qualify the expanded
-beta 2 profile at the same memory limit.
+beta 3 profile at the same memory limit.
 
 Direct boot currently targets Intel/AMD PCs. The persistence implementation
 uses free space after the read-only live image. In a VM, expose the prepared
 raw disk as writable storage and disable shared folders and host-disk
-passthrough. Beta 2 includes optional host/guest text clipboard
+passthrough. Beta 3 includes optional host/guest text clipboard
 support; see the [UTM and VirtualBox setup guide](docs/DEVELOPMENT.md#text-copypaste-in-a-vm).
 Copied text is deliberately shared with the outer OS. A Debian-supported
 Ethernet or Wi-Fi adapter is required for remote inference.
 
 ## Next: qualify the operational beta
 
-The operational features above are packaged for evaluation in beta 2. The
+The operational features above are packaged for evaluation in beta 3. The
 remaining work is to qualify them together on the actual candidate: complete
 public Tor backup transfers, physical-media failures, supported VM profiles, upgrades,
 rollback and independent user testing. Component tests and successful ISO
@@ -374,17 +385,17 @@ See the [beta scope](docs/STATUS.md#remote-api-beta-scope) and
 
 ## Project status
 
-`v0.1.0-beta.2` is the current experimental pre-release, built from
-[`b959035`](https://github.com/exploita-ai/oblivion/tree/b95903520a2562f7de7c884d5d5efeea6a67b37a).
-The matching commit passed all 42 checks on both
-[`main`](https://github.com/exploita-ai/oblivion/actions/runs/40758638222) and
-[`dev`](https://github.com/exploita-ai/oblivion/actions/runs/40758638690).
-The [release workflow](https://github.com/exploita-ai/oblivion/actions/runs/40764719849)
+`v0.1.0-beta.3` is the current experimental pre-release, built from
+[`ab0eae8`](https://github.com/exploita-ai/oblivion/tree/ab0eae8a0db190d4b7f2f2010e05c64ff005c2a9).
+The matching source commit passed the complete
+[`main` checks](https://github.com/exploita-ai/oblivion/actions/runs/41703137690).
+`main` and `dev` contain the same release source and documentation.
+The [release workflow](https://github.com/exploita-ai/oblivion/actions/runs/41703208056)
 built and verified both `amd64` and `arm64` images before publication.
 
 Earlier baselines passed encrypted persistence and a real provider response on
 physical amd64 hardware, and nested ARM sessions were validated in UTM on M4 Pro.
-Full beta 2 operational-candidate testing on those profiles remains open;
+Full beta 3 operational-candidate testing on those profiles remains open;
 component and VM-laboratory results are not a substitute for that acceptance.
 
 Hardening is still in progress: reproducible signed provenance, a minimal Debian

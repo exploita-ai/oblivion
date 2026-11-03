@@ -4,15 +4,49 @@ Oblivion is early beta. The architecture works end to end and public
 pre-release images are available, but the project is not yet ready for
 sensitive or irreplaceable data.
 
-`v0.1.0-beta.2` packages the operational features below for experimental use.
-Its source commit `b959035` passed all 42 GitHub checks on both `main` and `dev`;
-the release workflow rebuilt and verified both image architectures before
-publication. This does not close the supported-candidate, public large-backup,
-hardware, upgrade or independent-review gates documented here.
+`v0.1.0-beta.3` packages the operational features below for experimental use.
+Its source commit [`ab0eae8`](https://github.com/exploita-ai/oblivion/tree/ab0eae8a0db190d4b7f2f2010e05c64ff005c2a9)
+passed the complete GitHub checks on
+[main](https://github.com/exploita-ai/oblivion/actions/runs/41703137690).
+`main` and `dev` contain the same release source and documentation.
+The [release workflow](https://github.com/exploita-ai/oblivion/actions/runs/41703208056)
+rebuilt both public ISO architectures and verified their hashes before publication.
+
+Release qualification corrected Privacy Web's internal proxy routing, a
+systemd ordering deadlock during controller shutdown, and the legacy manager's
+storage-status decoder. It also updated lifecycle labs to use the session initramfs with its encrypted
+writable system layer. Compiled-chat boot checks now recognize the current home-screen
+motto. The existing import/export lab covers interrupted writers and filesystem
+errors, including the original failure and recovery cases. Shutdown checks wait
+for the manager’s queued recovery job. The OnionShare component CI budget now
+allows all six emulated guests to finish after compilation; individual operation
+deadlines are unchanged.
+
+The local ARM64 release-qualification labs passed 99 gateway checks, 42 host
+service lifecycle checks and 34 complete session-network checks. The latter
+used the compiled agent with a synthetic TLS provider and authenticated SOCKS
+fixture: the outside capture contained only TCP traffic to that proxy, and the
+post-closure disk scan found none of the synthetic plaintext markers. This
+lab uses HVF outside and TCG for nested guests; it does not establish production
+KVM performance or replace the separately documented public-Tor tests.
+
+One x86 multi-session CI attempt returned `vm_shutdown_timeout` immediately
+following reuse of an offline session slot. The controller kept recovery required
+and did not report the still-open volume as locked. The full job passed on an
+unchanged-source retry, completing the 43-job CI suite. A supplemental ARM64
+stress run completed 16 consecutive reuse/close cycles while the other session
+retained its processes and network access; that extended diagnostic then reached
+its 900-second harness budget and is not counted as a completed suite. The
+intermittent shutdown trigger has not been identified and is not claimed fixed.
+
+The dated results below describe their specific test environments. Publication
+does not close the supported-candidate, public large-backup, hardware, upgrade or
+independent-review gates documented here. An automatic in-place updater is not
+included; preserve existing disks and export encrypted backups before updating.
 
 ## Implemented
 
-- **Controlled Tor rotation in development.** The native `tor_rotate` agent
+- **Controlled Tor rotation.** The native `tor_rotate` agent
   tool acts on one protected session and its shared gateway. A firewall barrier
   precedes established-connection rules; API, tools, WebFetch and connector
   processes stop before Tor rebuilds circuits. Previous exit relay identities,
@@ -38,7 +72,7 @@ hardware, upgrade or independent-review gates documented here.
   zero errors. Disconnecting only A's uplink forced the real 90-second rotation
   deadline; reconnecting it left A blocked. Repeated probes left its outgoing
   IP packet count unchanged at 1,579. Both disposable encrypted sessions were
-  removed, leaving GB and holding unchanged in the controller's inventory.
+  removed, leaving existing user sessions unchanged in the controller's inventory.
   This qualification exposed and corrected a GETINFO parser defect: Tor's
   nonempty single-line circuit/stream responses were rejected, causing
   intermittent early rotation failures. The reader now handles empty, inline
@@ -47,10 +81,9 @@ hardware, upgrade or independent-review gates documented here.
   image passed the eight separate rotation/barrier VM checks; 60 gateway Rust
   tests passed (two adapter tests ignored), the three native-tool tests passed,
   and the repository check passed all 20 package tasks. Reports and outside
-  captures are local ignored artifacts under `artifacts/oblivion-tor-rotate/`.
-  This feature is not yet part of a published ISO release.
+  captures are local ignored validation artifacts. This feature is included in beta 3.
 
-- **Open Internet in development.** Open Web now admits public TCP destinations
+- **Open Internet.** Open Web now admits public TCP destinations
   on every port through Tor or the configured SOCKS5 upstream. Explicit deny
   and approval rules still override Open; Strict and Offline are unchanged.
   Each protected session retains its own policy. UDP, direct forwarding and
@@ -76,9 +109,9 @@ hardware, upgrade or independent-review gates documented here.
   also failed and increased the host output-drop counter by three packets.
   These are bounded live probes, not a proof against every bypass or a SOCKS5
   qualification. GNU FTP returned 425 on its data channel, so successful FTP
-  remains dependent on the server and available Tor exits. It is not a published ISO.
+  remains dependent on the server and available Tor exits. The feature is included in beta 3.
 
-- **Build No Tools in development.** A selectable primary agent answers from
+- **Build No Tools.** A selectable primary agent answers from
   conversation/context without exposing or executing tools, including shell,
   file operations, web, MCP, Code Mode and subagents. Agent/session allow rules
   cannot override this restriction; switching back restores ordinary Build
@@ -94,9 +127,9 @@ hardware, upgrade or independent-review gates documented here.
   embedded runtime hashes match the build. UTM boots to Welcome back with the
   existing encrypted partition preserved byte-for-byte and the previous disk
   retained for rollback. An unlocked chat on this image remains to be checked.
-  This is a local test image, not a published release.
+  That result refers to the local diagnostic image; the feature is now included in beta 3.
 
-- **Concurrent protected sessions in development.** The manager has a top tab
+- **Concurrent protected sessions.** The manager has a top tab
   bar and Ctrl+PageUp/PageDown navigation. Each opening owns a separate session
   VM, gateway VM, hypervisor identities, sockets, volume and network policy.
   F9 changes only that session; host Settings supplies defaults for future
@@ -105,7 +138,7 @@ hardware, upgrade or independent-review gates documented here.
   running; Lock Oblivion attempts cleanup across every slot. RAM admission
   rejects an opening that cannot fit. Session network settings and Tor state
   stay in controller-owned directories in the encrypted general vault.
-  These changes are not in the published beta 2 image. The disposable
+  These changes are included in beta 3. The disposable
   multi-session lab and its CI job exercise real Linux services with synthetic
   guests/providers and no public uplink; supported KVM and UTM candidate
   qualification remain separate release gates.
@@ -120,9 +153,9 @@ hardware, upgrade or independent-review gates documented here.
   public Tor/provider, real OpenCode conversation or production KVM acceptance
   test. The 150 manager tests include 80×24/160×50 navigation, overflow tabs,
   delayed console frames and local recovery. Host Rust tests and the repository
-  check pass; the new x86 CI job still needs to run after publication.
+  check pass; the x86 CI lifecycle job also passes on the beta 3 source commit.
 
-- **Session-wide network access and persistent administration in development.**
+- **Session-wide network access and persistent administration.**
   New profiles default to Open Internet; Strict and Offline apply to the entire
   gateway, including API requests and command-line tools. Explicit deny rules
   still take precedence. The manager footer shows the selected policy beside
@@ -150,7 +183,7 @@ hardware, upgrade or independent-review gates documented here.
   virtual disk. Public Tor/provider and an unlocked session on this candidate
   remain to be checked; boot acceptance does not establish those results.
 
-- **CLI analysis tools in development.** Session images now include binutils,
+- **CLI analysis tools.** Session images now include binutils,
   Binwalk, xxd, hexdump, patchelf, GDB, ltrace and strace. A hash-locked Python
   bundle supplies Pwntools 4.15.0, Ropper 1.13.13 and angr 10.0.5; Debian supplies
   imghdr compatibility on Python 3.13. No GUI extras are installed. The agent's
@@ -164,10 +197,10 @@ hardware, upgrade or independent-review gates documented here.
   remains for native CI: the emulator returned inconsistent syscall registers.
   The native CI suite keeps the tracing test enabled. Repository checks pass.
   The Python bundle alone occupies about 563 MiB uncompressed on ARM64; this
-  is not a measurement of the final ISO increase. These changes are in the build
-  sources and the 2026-11-02 local ARM64 candidate, not a published release.
+  is not a measurement of the final ISO increase. These changes are included in
+  beta 3; the native amd64 CI suite passes on the release source commit.
 
-- **Unified Workspace in development.** Chat and Terminal now share a guest
+- **Unified Workspace.** Chat and Terminal now share a guest
   tmux workspace, with native split/window/focus/zoom shortcuts and a `chat`
   launcher for independent TUI clients. One authenticated loopback OpenCode
   server owns execution and the canonical encrypted database. Documents stays
@@ -183,16 +216,16 @@ hardware, upgrade or independent-review gates documented here.
   tester confirmed the native Ctrl+B, % split using the physical keyboard;
   automated modifier delivery through UTM was unsuitable for that check.
   The updated manager and guest filesystem are included in the 2026-11-02
-  local ARM64 candidate installed in UTM. This is not a published release ISO.
+  local ARM64 candidate installed in UTM. Workspace is now included in beta 3.
 
-- **Configurable session capacity in development.** New sessions still default
+- **Configurable session capacity.** New sessions still default
   to 512 MiB. The manager can reserve a different size and grow a closed session
   through an encrypted replacement verified in a networkless maintenance VM.
   Documents shows guest-reported used/free space and checks capacity before
   import; a local-media import can offer growth and recheck the selection before
   resuming. Current local-media limits are 16 GiB / 16,384 entries / one hour,
   with bounded file descriptors and streamed progress. OnionShare retains its
-  separate 256 MiB / 1,024-entry limits. These changes are not in beta 2;
+  separate 256 MiB / 1,024-entry limits. The capacity changes are included in beta 3;
   historical qualification notes below describe the earlier limits.
   The ARM64 laboratory passed real LUKS growth from 128 to 512 MiB, password/
   space/shrink rejection, orderly maintenance cleanup, and reopening the same
@@ -311,19 +344,19 @@ model downloads, GPU work and DGX Spark remain deferred.
 The implemented/validated lists above are unchanged by this plan. There is no
 new runtime capability, format migration or removal of an existing VM boundary.
 
-| In scope | Delivery boundary |
-| --- | --- |
-| Agent and manager | Retain coding tools and OpenCode chat components; fix concrete usability/reliability defects. |
-| Operational workspace | Deliver the interactive terminal and process controls in the milestones below. |
-| Protected work | General LUKS2 vault and separate session volumes, titles, multiple chats, Documents, one active session, locking and recovery. |
-| Remote providers | Abliteration first; qualify other integrated providers separately. No new catalog or arbitrary endpoints. |
-| Keys and network | Encrypted keys, global default/per-opening override, Tor default, optional SOCKS5, revoked grants and no direct fallback. |
-| Physical live image | Primary amd64 boot, guided encrypted persistence, minimal Debian and release hardening. |
-| Virtualized image | Same Debian environment on qualified CPU/OS/hypervisor combinations, nested KVM, persistent virtual disk and tested import/setup profile. Start with the available UTM Mac; qualify Linux/QEMU and Windows/VirtualBox independently. |
-| arm64 | Preserve builds/regressions; no generic ARM or all-Mac compatibility claim. |
-| Ephemeral mode | Volatile Debian session state and unchanged archives; outer-host memory/swap/snapshot retention remains outside Debian's control. |
-| Transfers and portability | USB and virtual-media import, OnionShare receive/share, conversation exports, encrypted session backup/restore and redacted diagnostics. |
-| Upgrades | Preserved histories/files and verified recovery/upgrade paths without shell repair. |
+| In scope                  | Delivery boundary                                                                                                                                                                                                                    |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Agent and manager         | Retain coding tools and OpenCode chat components; fix concrete usability/reliability defects.                                                                                                                                        |
+| Operational workspace     | Deliver the interactive terminal and process controls in the milestones below.                                                                                                                                                       |
+| Protected work            | General LUKS2 vault and separate session volumes, titles, multiple chats, Documents, one active session, locking and recovery.                                                                                                       |
+| Remote providers          | Abliteration first; qualify other integrated providers separately. No new catalog or arbitrary endpoints.                                                                                                                            |
+| Keys and network          | Encrypted keys, global default/per-opening override, Tor default, optional SOCKS5, revoked grants and no direct fallback.                                                                                                            |
+| Physical live image       | Primary amd64 boot, guided encrypted persistence, minimal Debian and release hardening.                                                                                                                                              |
+| Virtualized image         | Same Debian environment on qualified CPU/OS/hypervisor combinations, nested KVM, persistent virtual disk and tested import/setup profile. Start with the available UTM Mac; qualify Linux/QEMU and Windows/VirtualBox independently. |
+| arm64                     | Preserve builds/regressions; no generic ARM or all-Mac compatibility claim.                                                                                                                                                          |
+| Ephemeral mode            | Volatile Debian session state and unchanged archives; outer-host memory/swap/snapshot retention remains outside Debian's control.                                                                                                    |
+| Transfers and portability | USB and virtual-media import, OnionShare receive/share, conversation exports, encrypted session backup/restore and redacted diagnostics.                                                                                             |
+| Upgrades                  | Preserved histories/files and verified recovery/upgrade paths without shell repair.                                                                                                                                                  |
 
 Do not replace the gateway/transfer VMs with native host services or introduce
 new platform abstractions solely for deferred native ports. Keep the current
@@ -359,23 +392,23 @@ full-image leak, upgrade or network-failure qualification. Detailed local
 evidence remains in ignored artifacts; publish reproducible evidence with the
 candidate that is actually released.
 
-| Capability | Current implementation to reuse | Remaining product work |
-| --- | --- | --- |
-| Terminal and jobs | OpenCode shell/jobs and PTY services; the manager's embedded terminal and bounded console transport. | A user-facing guest terminal and process view, independent of chat and provider readiness. |
-| Files in/out | Documents picker, isolated transfer endpoints, manifests, hashes, cancellation and recovery. | Qualify USB and virtual import media; add the new source/destination choices without shared folders. |
-| Exports and backups | Stable chat DB, per-session LUKS2 containers and controller teardown. | Markdown/JSON export, closed-session encrypted backup/restore and allowlisted diagnostics. |
-| OnionShare | Existing Tor gateway and verified copy engine. | Package and confine the upstream CLI, implement private receive/share lifecycles and explicit intake approval. |
+| Capability          | Current implementation to reuse                                                                      | Remaining product work                                                                                         |
+| ------------------- | ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Terminal and jobs   | OpenCode shell/jobs and PTY services; the manager's embedded terminal and bounded console transport. | A user-facing guest terminal and process view, independent of chat and provider readiness.                     |
+| Files in/out        | Documents picker, isolated transfer endpoints, manifests, hashes, cancellation and recovery.         | Qualify USB and virtual import media; add the new source/destination choices without shared folders.           |
+| Exports and backups | Stable chat DB, per-session LUKS2 containers and controller teardown.                                | Markdown/JSON export, closed-session encrypted backup/restore and allowlisted diagnostics.                     |
+| OnionShare          | Existing Tor gateway and verified copy engine.                                                       | Package and confine the upstream CLI, implement private receive/share lifecycles and explicit intake approval. |
 
 ### Ordered milestones
 
-| Milestone | Deliverable | Dependency and exit evidence |
-| --- | --- | --- |
-| **M0 — protect the baseline** | Preserve the passing chat/storage behavior; surface unsupported nested virtualization, insufficient RAM/storage, DHCP, gateway and provider failures distinctly. Finish remaining high-priority audit corrections. | Existing source/lab results plus profile-specific fault tests. No lost history, false lock success, stale protection indicator or direct fallback. This gate stays active for every later milestone. |
-| **M1 — Terminal and Processes** | A full-window interactive shell in the session VM; create/select/stop terminals, inspect build/test/server jobs, bounded output and exit status. It works offline without a provider key. Switching to Chat or Documents keeps processes running; locking stops and verifies all session processes. | Reuse PTY/jobs and the embedded renderer. Exercise input, resize, scroll, interrupts, process-tree shutdown, crash/reopen and offline-to-chat transitions. No host shell, root console, provider key or general-vault access. |
-| **M2 — file intake and delivery** | `Documents / Import` accepts selected USB files/folders and explicitly attached virtual import media. `Export` writes selected readable files after a clear destination/confirmation step. Provide source, destination, totals, progress, cancellation and recovery. | Reuse the copy engine. Test actual USB and UTM media, large directories, unsupported files, path escapes, disconnects, full disks and interrupted copies. Verify receipt/flush before success. Never expose an entire outer-host folder or mount the session filesystem there. |
-| **M3 — exports and session portability** | Three distinct actions: `Export chat` as Markdown/JSON, `Back up encrypted session` with `Restore session`, and `Export diagnostics`. Backups preserve all chats, IDs, workspace/imports and required session metadata; provider keys remain in the general vault. | Complete M2 and the backup format/lifecycle contract below. Restore on a disposable copy and on another qualified instance; preserve originals and reject unsupported versions without destructive migration. Test corruption/truncation, wrong passwords, cancellation and low space. |
-| **M4 — OnionShare files** | `Receive over Tor` and `Share over Tor` in the existing transfer UI, using upstream OnionShare CLI. Temporary private addresses/access keys, size/time limits, progress and cancellation; inspect and approve received files before publishing them to the session. | Complete M2/M3. Qualify the dedicated transfer/Tor path under the existing gateway boundary, secret/log retention, owner death, timeout and revoke-on-lock. Test real sender/recipient round trips, including an encrypted session backup. |
-| **M5 — qualify and release** | Minimal audited Debian packages/services for the delivered features, release/debug separation, signed manifests/checksums, verified update/rollback and tested live/VM profiles. | Every included milestone passes affected package checks, root `bun run check`, Linux integration and actual supported-profile acceptance. At least five non-author testers finish the workflow without developer repairs. Publish measured image/RAM costs and exact support boundaries. |
+| Milestone                                | Deliverable                                                                                                                                                                                                                                                                                         | Dependency and exit evidence                                                                                                                                                                                                                                                             |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **M0 — protect the baseline**            | Preserve the passing chat/storage behavior; surface unsupported nested virtualization, insufficient RAM/storage, DHCP, gateway and provider failures distinctly. Finish remaining high-priority audit corrections.                                                                                  | Existing source/lab results plus profile-specific fault tests. No lost history, false lock success, stale protection indicator or direct fallback. This gate stays active for every later milestone.                                                                                     |
+| **M1 — Terminal and Processes**          | A full-window interactive shell in the session VM; create/select/stop terminals, inspect build/test/server jobs, bounded output and exit status. It works offline without a provider key. Switching to Chat or Documents keeps processes running; locking stops and verifies all session processes. | Reuse PTY/jobs and the embedded renderer. Exercise input, resize, scroll, interrupts, process-tree shutdown, crash/reopen and offline-to-chat transitions. No host shell, root console, provider key or general-vault access.                                                            |
+| **M2 — file intake and delivery**        | `Documents / Import` accepts selected USB files/folders and explicitly attached virtual import media. `Export` writes selected readable files after a clear destination/confirmation step. Provide source, destination, totals, progress, cancellation and recovery.                                | Reuse the copy engine. Test actual USB and UTM media, large directories, unsupported files, path escapes, disconnects, full disks and interrupted copies. Verify receipt/flush before success. Never expose an entire outer-host folder or mount the session filesystem there.           |
+| **M3 — exports and session portability** | Three distinct actions: `Export chat` as Markdown/JSON, `Back up encrypted session` with `Restore session`, and `Export diagnostics`. Backups preserve all chats, IDs, workspace/imports and required session metadata; provider keys remain in the general vault.                                  | Complete M2 and the backup format/lifecycle contract below. Restore on a disposable copy and on another qualified instance; preserve originals and reject unsupported versions without destructive migration. Test corruption/truncation, wrong passwords, cancellation and low space.   |
+| **M4 — OnionShare files**                | `Receive over Tor` and `Share over Tor` in the existing transfer UI, using upstream OnionShare CLI. Temporary private addresses/access keys, size/time limits, progress and cancellation; inspect and approve received files before publishing them to the session.                                 | Complete M2/M3. Qualify the dedicated transfer/Tor path under the existing gateway boundary, secret/log retention, owner death, timeout and revoke-on-lock. Test real sender/recipient round trips, including an encrypted session backup.                                               |
+| **M5 — qualify and release**             | Minimal audited Debian packages/services for the delivered features, release/debug separation, signed manifests/checksums, verified update/rollback and tested live/VM profiles.                                                                                                                    | Every included milestone passes affected package checks, root `bun run check`, Linux integration and actual supported-profile acceptance. At least five non-author testers finish the workflow without developer repairs. Publish measured image/RAM costs and exact support boundaries. |
 
 The next operational candidate contains M0–M4: terminal/processes, useful file
 intake/export, chat exports, encrypted session backup/restore, redacted
@@ -643,13 +676,13 @@ the reviewed paths; this is not an independent security certification.
 
 ### Existing protections
 
-| Data or boundary | Evidence in the current implementation |
-| --- | --- |
-| Chat history | Stable `/vault/state/opencode/oblivion.db`, independent of client build channel. Legacy copy uses SQLite backup, including committed WAL frames; staging stays on the encrypted filesystem and originals are preserved. See [chat-database.py](../packages/oblivion-host/guest/chat-database.py), lines 25–27 and 86–156. |
+| Data or boundary               | Evidence in the current implementation                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Chat history                   | Stable `/vault/state/opencode/oblivion.db`, independent of client build channel. Legacy copy uses SQLite backup, including committed WAL frames; staging stays on the encrypted filesystem and originals are preserved. See [chat-database.py](../packages/oblivion-host/guest/chat-database.py), lines 25–27 and 86–156.                                                                                                                             |
 | Agent files and temporary data | HOME/config/state/workspace are inside the session volume; cache and temporary data use `/tmp`. In current development the session root uses its encrypted system overlay; `/tmp`, `/var/tmp` and `/var/log` use tmpfs, journald persistence/forwarding is disabled, swap/sleep units are masked. See [conversation service](../packages/oblivion-host/guest/oblivion-conversation.service) and [guest setup](../script/oblivion/vm-common-setup.sh). |
-| Runtime and logging | Controller rejects active swap, requires tmpfs runtime storage and disables core dumps. The Oblivion application profile disables its logger/tracer. See [storage.rs](../packages/oblivion-host/src/storage.rs), lines 1780–1855, and [observability.ts](../packages/util/src/observability.ts), lines 27–30. These checks do not control the outer hypervisor. |
-| Real API keys | Stored under the encrypted general profile, using a mode-0600 pending file, file sync, atomic rename and directory sync. The session receives a revocable capability, not the provider key. See [storage.rs](../packages/oblivion-host/src/storage.rs), lines 1635–1681, and [network.sh](../packages/oblivion-host/guest/network.sh), lines 6–19. |
-| Network | Session has no default route or DNS; the gateway applies transport/tool rules. Broker tests cover TLS rejection, unavailable proxy without direct fallback and stream revocation. See [network.sh](../packages/oblivion-host/guest/network.sh), [gateway firewall](../packages/oblivion-gateway/guest/firewall.nft) and [broker.rs](../packages/oblivion-gateway/src/broker.rs). |
+| Runtime and logging            | Controller rejects active swap, requires tmpfs runtime storage and disables core dumps. The Oblivion application profile disables its logger/tracer. See [storage.rs](../packages/oblivion-host/src/storage.rs), lines 1780–1855, and [observability.ts](../packages/util/src/observability.ts), lines 27–30. These checks do not control the outer hypervisor.                                                                                       |
+| Real API keys                  | Stored under the encrypted general profile, using a mode-0600 pending file, file sync, atomic rename and directory sync. The session receives a revocable capability, not the provider key. See [storage.rs](../packages/oblivion-host/src/storage.rs), lines 1635–1681, and [network.sh](../packages/oblivion-host/guest/network.sh), lines 6–19.                                                                                                    |
+| Network                        | Session has no default route or DNS; the gateway applies transport/tool rules. Broker tests cover TLS rejection, unavailable proxy without direct fallback and stream revocation. See [network.sh](../packages/oblivion-host/guest/network.sh), [gateway firewall](../packages/oblivion-gateway/guest/firewall.nft) and [broker.rs](../packages/oblivion-gateway/src/broker.rs).                                                                      |
 
 These protections cover their configured paths. They do not prove that every
 dependency, Debian service, outer-host swap file or saved VM state is clean.
@@ -757,15 +790,15 @@ gateway. Repeat packet capture on the final image, including startup/failure.
 
 ### Checks performed and limits
 
-| Check | Result in this audit |
-| --- | --- |
-| Host Rust tests: `cargo test --locked --offline` in `packages/oblivion-host` | 46 passed on macOS. Linux-only storage/controller/VM paths were not executed. |
-| Gateway Rust tests: same command in `packages/oblivion-gateway` | 35 passed, 2 ignored adapter tests requiring `OBLIVION_ADAPTER_BIN`. Local TLS/SOCKS fixtures, not a real Tor circuit/provider. |
-| Private activation: `cargo test --locked --offline --features lab-emulation --test activation` in gateway | 10 passed on macOS. Lab mode does not establish production Linux isolation. |
-| Manager: `bun test` in `packages/oblivion-manager` | 80 passed; fixtures do not validate a booted VM. |
-| Core: `bun run script/test.ts test/database-migration.test.ts` in `packages/core` | 19 passed with the isolated test runner. Generic migration tests, not proof all historical archives survive. |
-| Python: selected `test-chat-database.py` WAL/invalid-source cases and `test-console.py` in `script/oblivion` | 2 database + 3 console tests passed. The other database cases require the compiled Linux client and were not run. |
-| Gitleaks 8.30.0, current tree, offline/redacted | No findings. Full Git history, personal volumes and runtime artifacts were not scanned. |
+| Check                                                                                                        | Result in this audit                                                                                                            |
+| ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| Host Rust tests: `cargo test --locked --offline` in `packages/oblivion-host`                                 | 46 passed on macOS. Linux-only storage/controller/VM paths were not executed.                                                   |
+| Gateway Rust tests: same command in `packages/oblivion-gateway`                                              | 35 passed, 2 ignored adapter tests requiring `OBLIVION_ADAPTER_BIN`. Local TLS/SOCKS fixtures, not a real Tor circuit/provider. |
+| Private activation: `cargo test --locked --offline --features lab-emulation --test activation` in gateway    | 10 passed on macOS. Lab mode does not establish production Linux isolation.                                                     |
+| Manager: `bun test` in `packages/oblivion-manager`                                                           | 80 passed; fixtures do not validate a booted VM.                                                                                |
+| Core: `bun run script/test.ts test/database-migration.test.ts` in `packages/core`                            | 19 passed with the isolated test runner. Generic migration tests, not proof all historical archives survive.                    |
+| Python: selected `test-chat-database.py` WAL/invalid-source cases and `test-console.py` in `script/oblivion` | 2 database + 3 console tests passed. The other database cases require the compiled Linux client and were not run.               |
+| Gitleaks 8.30.0, current tree, offline/redacted                                                              | No findings. Full Git history, personal volumes and runtime artifacts were not scanned.                                         |
 
 Total: 195 passing targeted tests on macOS, plus the secret scan. Installed
 Bun was 1.3.5 rather than the repository's pinned 1.4.4; repeat with the pinned
@@ -787,17 +820,17 @@ repository-wide lint/typecheck was not rerun for this documentation update.
 The audit above records the original findings. Implementation proceeds in
 separate commits; a code fix does not close its remaining runtime release gate.
 
-| Finding | Implemented and checked | Still required |
-| --- | --- | --- |
-| A1: application readiness | Chat startup now remains `starting` until the attached OpenCode client confirms a DB-backed read after connection/plugin initialization. Guest migration runs after viewer attachment and reports fixed failure codes; failed startup revokes the capability and returns the same unlocked volume to Documents, retaining the recovery latch if cleanup fails. Console/parser and manager regressions cover success, storage failure and client exit. | Compiled TUI/controller lifecycle and modern starting/recover/cancel transitions pass in Linux. Still qualify the user-facing full/corrupt-disk dialog and failed offline recovery on supported KVM hardware. |
-| A2: committed chat durability | SQLite connections now use WAL/FULL. With pinned Bun 1.4.4, 27 database/migration/workerd tests pass, including on-disk commit/reopen and sync-policy coverage; core typecheck passes. | The compiled API now passes outer-VM SIGKILL/reboot on two LUKS layers (details below). Physical power-loss behavior and target-hardware latency remain release qualification. |
-| A4: legacy resets | Pending destructive migrations now preflight their populated tables before executing the migration sequence. Unknown populated V2 projections and old pending inputs are refused, not reset. The tested completed July V2 lineage still preserves messages, pending work and events; fresh/current databases remain supported. Database/migration/workerd suites: 36 passing tests. | Five compiled-client migration fixtures pass. Confirm the recovery dialog on supported KVM targets. Unsupported pre-launch archives must be opened with their original client for export/recovery; no automatic data-erasing upgrade. |
-| A5: disk retention | Rebuilt ARM64 ISO inventory and runtime inspection verify RAM-backed writable system paths, no swap and disabled journal storage/forwarding. Synthetic lifecycle and crash disk scans find no plaintext markers; ephemeral use leaves the encrypted general image byte-identical. | The outer OS/hypervisor remains trusted. Guest controls cannot prevent host swap, snapshots, dumps or screen capture; qualify and document each supported host profile. No universal zero-retention claim. |
-| A7: provider errors | The broker now returns fixed classifications and actionable messages for 401, 403, 429 and 5xx without forwarding provider bodies/headers. Ten local TLS/SOCKS broker tests pass, covering nine upstream status cases, credential stripping, disconnects and revocation. | Both compiled adapter tests and the Linux credential lifecycle pass. Provider acceptance remains separate; no real key was used. |
-| A6: bootstrap lifecycle | Tor exposes only a validated 0–100 progress value. Modern startup schedules the gateway without blocking on systemd bootstrap, shows progress, counts controller work in the 120-second deadline and routes cancellation through controller cleanup. An in-flight operation settles before ordered cancellation/revocation; cleanup may exceed the connection deadline and is shown explicitly. Existing synchronous legacy entry remains available. Parser and manager tests cover malformed progress, elapsed controller time and cancellation after a controller accepts startup. | Live Tor bootstrap/guard persistence, packet capture, stalled-owner cleanup and controller cancellation pass in Linux. Qualify the deadline/progress UI on supported KVM hardware and degraded real links. |
-| A6: key metadata | The controller now distinguishes effective credential changes from labels and unrelated keys. Renaming, replacing with the same secret, removing an unused key and changing a default hidden by an opening override preserve the gateway; effective replacement/removal/selection revokes it. Nine Linux key tests pass. | Real gateway PID checks now pass for rename, unused-key add/remove, replacement and removal. Target-hardware UI acceptance remains. |
-| A3: global shutdown | Gateway shutdown distinguishes verified termination from checkpoint persistence. Lock/recover attempts gateway, transfer and session shutdown before checking results; a failed stop retains the recovery latch and prevents mapping closure. After successful closure, a lost Tor checkpoint produces a specific locked-state notice. Linux host builds and 55 Rust tests pass; 25 manager tests and typecheck pass, including the notice at 80×24/160×50. | The stopped-owner injection now passes with real LUKS and the gateway VM. Supported KVM hardware acceptance remains. |
-| A8: host egress | The live host installs an atomic nftables default-deny policy before NetworkManager or the controller starts. Only the gateway hypervisor UID may open external TCP; IPv6, host/session/transfer TCP and external DNS are blocked. IPv4 DHCP and explicit diagnostic SSH subnets are the narrow exceptions; release images have no SSH service. Stopping the policy service does not flush its rules. | The rebuilt ARM64 ISO passes static inventory, runtime policy and boot-order checks. Qualify amd64 and actual Wi-Fi/Ethernet hardware. |
+| Finding                       | Implemented and checked                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Still required                                                                                                                                                                                                                        |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A1: application readiness     | Chat startup now remains `starting` until the attached OpenCode client confirms a DB-backed read after connection/plugin initialization. Guest migration runs after viewer attachment and reports fixed failure codes; failed startup revokes the capability and returns the same unlocked volume to Documents, retaining the recovery latch if cleanup fails. Console/parser and manager regressions cover success, storage failure and client exit.                                                                                                                                | Compiled TUI/controller lifecycle and modern starting/recover/cancel transitions pass in Linux. Still qualify the user-facing full/corrupt-disk dialog and failed offline recovery on supported KVM hardware.                         |
+| A2: committed chat durability | SQLite connections now use WAL/FULL. With pinned Bun 1.4.4, 27 database/migration/workerd tests pass, including on-disk commit/reopen and sync-policy coverage; core typecheck passes.                                                                                                                                                                                                                                                                                                                                                                                               | The compiled API now passes outer-VM SIGKILL/reboot on two LUKS layers (details below). Physical power-loss behavior and target-hardware latency remain release qualification.                                                        |
+| A4: legacy resets             | Pending destructive migrations now preflight their populated tables before executing the migration sequence. Unknown populated V2 projections and old pending inputs are refused, not reset. The tested completed July V2 lineage still preserves messages, pending work and events; fresh/current databases remain supported. Database/migration/workerd suites: 36 passing tests.                                                                                                                                                                                                  | Five compiled-client migration fixtures pass. Confirm the recovery dialog on supported KVM targets. Unsupported pre-launch archives must be opened with their original client for export/recovery; no automatic data-erasing upgrade. |
+| A5: disk retention            | Rebuilt ARM64 ISO inventory and runtime inspection verify RAM-backed writable system paths, no swap and disabled journal storage/forwarding. Synthetic lifecycle and crash disk scans find no plaintext markers; ephemeral use leaves the encrypted general image byte-identical.                                                                                                                                                                                                                                                                                                    | The outer OS/hypervisor remains trusted. Guest controls cannot prevent host swap, snapshots, dumps or screen capture; qualify and document each supported host profile. No universal zero-retention claim.                            |
+| A7: provider errors           | The broker now returns fixed classifications and actionable messages for 401, 403, 429 and 5xx without forwarding provider bodies/headers. Ten local TLS/SOCKS broker tests pass, covering nine upstream status cases, credential stripping, disconnects and revocation.                                                                                                                                                                                                                                                                                                             | Both compiled adapter tests and the Linux credential lifecycle pass. Provider acceptance remains separate; no real key was used.                                                                                                      |
+| A6: bootstrap lifecycle       | Tor exposes only a validated 0–100 progress value. Modern startup schedules the gateway without blocking on systemd bootstrap, shows progress, counts controller work in the 120-second deadline and routes cancellation through controller cleanup. An in-flight operation settles before ordered cancellation/revocation; cleanup may exceed the connection deadline and is shown explicitly. Existing synchronous legacy entry remains available. Parser and manager tests cover malformed progress, elapsed controller time and cancellation after a controller accepts startup. | Live Tor bootstrap/guard persistence, packet capture, stalled-owner cleanup and controller cancellation pass in Linux. Qualify the deadline/progress UI on supported KVM hardware and degraded real links.                            |
+| A6: key metadata              | The controller now distinguishes effective credential changes from labels and unrelated keys. Renaming, replacing with the same secret, removing an unused key and changing a default hidden by an opening override preserve the gateway; effective replacement/removal/selection revokes it. Nine Linux key tests pass.                                                                                                                                                                                                                                                             | Real gateway PID checks now pass for rename, unused-key add/remove, replacement and removal. Target-hardware UI acceptance remains.                                                                                                   |
+| A3: global shutdown           | Gateway shutdown distinguishes verified termination from checkpoint persistence. Lock/recover attempts gateway, transfer and session shutdown before checking results; a failed stop retains the recovery latch and prevents mapping closure. After successful closure, a lost Tor checkpoint produces a specific locked-state notice. Linux host builds and 55 Rust tests pass; 25 manager tests and typecheck pass, including the notice at 80×24/160×50.                                                                                                                          | The stopped-owner injection now passes with real LUKS and the gateway VM. Supported KVM hardware acceptance remains.                                                                                                                  |
+| A8: host egress               | The live host installs an atomic nftables default-deny policy before NetworkManager or the controller starts. Only the gateway hypervisor UID may open external TCP; IPv6, host/session/transfer TCP and external DNS are blocked. IPv4 DHCP and explicit diagnostic SSH subnets are the narrow exceptions; release images have no SSH service. Stopping the policy service does not flush its rules.                                                                                                                                                                                | The rebuilt ARM64 ISO passes static inventory, runtime policy and boot-order checks. Qualify amd64 and actual Wi-Fi/Ethernet hardware.                                                                                                |
 
 The rebuilt ARM64 ISO boots with the host policy active **before** NetworkManager
 and the controller. Both services require the policy unit. Real namespace
