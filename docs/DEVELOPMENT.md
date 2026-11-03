@@ -91,6 +91,12 @@ policy without applying keyboard settings or restarting the session. The chat
 has no mode setting. Legacy profiles without `web_access` remain Strict; new
 profiles default Open. Existing user choices are preserved. Changing a policy
 or rules revokes all in-flight grant streams. Offline also stops OnionShare.
+Open Internet admits every public TCP port through the existing HTTP CONNECT
+proxy. Serialized profiles keep the `open` value; no storage migration is needed.
+The gateway tests require curl and exercise a passive FTP transfer through the
+real tools proxy and policy connector, with a loopback-only SOCKS/FTP fixture.
+Both control and data tunnels must retain remote hostname resolution. The test
+does not qualify public Tor exit policies or an actual external FTP service.
 
 For real supervisor/firewall/SOCKS revocation with a loopback TLS fixture:
 
@@ -146,7 +152,7 @@ Both terminal and agent disable shell/REPL/pager/SQLite histories and automatic
 npm audit/update checks; npm disk logs are disabled. Python/npm caches use RAM;
 project dependencies and the npm user prefix stay inside the session volume.
 Python dependencies belong in a project virtualenv. HTTP(S) tools use the
-opening-scoped proxy and global Open Web / Strict / Offline policy; Node enables native environment-proxy
+opening-scoped proxy and session-wide Open Internet / Strict / Offline policy; Node enables native environment-proxy
 support. Other networking libraries still need their own proxy support.
 Pwntools automatic update checks are disabled through `/etc/pwn.conf`, and its
 cache uses the RAM-backed XDG cache. Ropper's default `~/.ropper` cache is inside
@@ -786,3 +792,68 @@ must have a concrete runtime or build-time owner.
 Do not commit secrets, user data, encrypted volumes, traffic captures, generated
 images or local VM state. See [CONTRIBUTING.md](../CONTRIBUTING.md) for repository
 rules.
+
+## Tor rotation laboratory
+
+`tor_rotate` is a native agent tool (not a slash command). Ask the Build agent
+explicitly to use it; Build No Tools cannot call it. Only the current protected
+session is affected. Rotation interrupts its ongoing network operations.
+
+Run the focused client tests from `packages/core`:
+
+```sh
+bun run script/test.ts test/tool-tor-rotate.test.ts test/tool-registry.test.ts
+```
+
+Build and test the actual Linux gateway on a Mac with QEMU installed:
+
+```sh
+docker buildx build --platform linux/arm64 \
+  -f script/oblivion/Dockerfile.vm-lab --target gateway-network-artifacts \
+  --output type=local,dest=artifacts/tor-rotation/network .
+python3 -B script/oblivion/run-rotation-lab.py \
+  --image artifacts/tor-rotation/network \
+  --output artifacts/tor-rotation/run-01
+```
+
+This is an **explicit online test**: disposable VMs contact Tor and
+`https://example.com/`. It uses synthetic capabilities, makes no provider API
+requests and never mounts user session volumes. It checks pre-existing sockets,
+new TCP/DNS attempts during rotation, exit identities, authenticated HTTPS after
+rotation, a deliberately unresponsive Tor controller, recovery without automatic
+reopening and supervisor death. QEMU captures packets outside both VMs; the
+failure test compares outgoing IP packet counts while repeated probes run.
+Remote relays may still send retransmissions to the virtual NIC; the ingress
+firewall drops them during the full block. Tor relay traffic is expected during
+successful reconstruction; the assertion is
+that session application traffic is blocked, not that Tor can rebuild offline.
+The output directory must be new. Linux runners may select `--accelerator tcg`.
+
+For the real multi-session controller path, copy
+`script/oblivion/test-utm-rotation-isolation.py` and
+`script/oblivion/rotation-traffic-probe.py` into a debug live host running the
+updated host, gateway and session images. With the general volume unlocked and
+enough RAM for two additional session/gateway pairs, run as root:
+
+```sh
+python3 -B /tmp/test-utm-rotation-isolation.py \
+  --output /tmp/oblivion-rotation-isolation-01 --rotations 3
+```
+
+This is also an explicit online test against `https://example.com/`. It creates
+two disposable encrypted sessions using generated passwords kept only in RAM;
+it does not open existing volumes or call the model provider. Each session sends
+fresh HTTPS requests and requests over a persistent TLS connection. The test
+rotates A (three times in the command above, observing the real cooldown), then
+disconnects only A's external QEMU link to force rotation
+failure. B must retain its processes and original TLS connection without a
+request error. Restoring A's link must leave its traffic blocked, verified with
+an external-interface packet capture. The test closes and removes its own
+volumes and saves results and captures in the supplied directory. Existing
+sessions remain open; their process identities are checked for changes. Only
+use this script in a debug host, not as a production manager command.
+The report records runtime/script hashes, baseline and per-phase request
+counts, retained-connection continuity, failure phases and cleanup results.
+Baseline failures remain visible; any additional error on B during the
+measurement window fails acceptance. Synthetic test output and encrypted Tor
+uplink captures stay local; no provider requests or user chat content are needed.

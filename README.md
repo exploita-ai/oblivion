@@ -101,6 +101,7 @@ its chats and terminals share that session's documents.
 | ------------------------ | ------------------------------------------------------------------------ |
 | `F6`                     | Workspace: chats and shells in tmux                                                                     |
 | `F7`                     | Documents, imports, exports and sharing                                  |
+| `F9`                     | Network controls for the selected protected session (development)        |
 | `F8`                     | Start chat (offline workspace only)                                           |
 | `Ctrl+Q`                 | Confirm session closure and locking; lock Oblivion from the host manager |
 | `/new` · `/resume`       | Create or resume a chat inside the current protected session             |
@@ -115,17 +116,31 @@ server. Closing a pane does not delete its conversations. Pane layouts and
 shell processes last until the protected session closes; chat history and
 workspace files remain encrypted in persistent sessions.
 
+Development builds also offer **Build No Tools** alongside the default Build
+agent. Press `Shift+Tab` or choose `/agents` → `Build No Tools` to answer using
+the conversation and supplied context without tools: no shell, file operations,
+web requests or subagents. Permissive chat settings cannot re-enable its tools.
+Switch back to Build to use tools again. The selected model provider still
+receives the conversation; this is not an offline mode.
+
 Development session images also include CLI binary-analysis tools: `strings`,
 `binwalk`, `xxd`, `hexdump`, `nm`, `objdump`, `readelf`, `patchelf`, `gdb`,
 `ltrace` and `strace`, plus Pwntools, Ropper, angr and Python's `imghdr`
 compatibility module. No analysis GUI is installed. Run `oblivion-tools` for
 the inventory available in your image; this set is not in the published beta 2.
 
-The current source also adds a **global gateway mode** (Open Web by default,
-Strict or Offline) and **persistent sudo installations** inside each encrypted
-session. The mode appears next to `Network [ ]` and is managed in Settings or
-with F9 in Workspace. It applies to all chats and tools; there is no per-chat
-`/web` control. These additions are not in the published beta 2 ISO.
+The current source supports **multiple open protected sessions**, each with its
+own encrypted volume, VM, gateway, network rules and pinned API key. Use the
+session tabs or `Ctrl+PageUp` / `Ctrl+PageDown` to switch; background work keeps
+running. Available RAM determines how many sessions can open (up to 31 new
+slots). Closing one session leaves the others running; Lock Oblivion closes all.
+
+**F9** opens the current session's network controls. Open Internet (the default),
+Strict and Offline apply to every chat, shell and tool inside that session.
+The footer shows its mode next to `Network [ ]`. Host Settings supplies defaults
+for new sessions; existing sessions retain their own policy. There is no per-chat
+`/web` control. Guest sudo installations persist inside the session's encrypted
+volume. These additions are not in the published beta 2 ISO.
 
 Documents and workspace shells work offline without a provider key. Switching views
 keeps the active VM and its work running. Starting chat from an offline VM
@@ -133,8 +148,9 @@ restarts the guest on the same unlocked volume; locking stops its processes.
 Use the explicit import/export flow to move files across the session boundary.
 
 Current development builds add encrypted **Auto-lock** preferences. By default,
-15 minutes without keyboard, paste or mouse input locks the active session, and
-30 minutes locks Oblivion itself. Agent output and background jobs do not count
+15 minutes without keyboard, paste or mouse input in a session locks that session,
+including background tabs; 30 minutes without input anywhere locks Oblivion.
+Agent output and background jobs do not count
 as human activity. Both intervals can be changed or disabled independently.
 
 The host manager keeps its primary navigation deliberately small: `Sessions`,
@@ -156,7 +172,7 @@ release does not establish complete hardware, hypervisor or security qualificati
 | **Encrypted session backups**    | Back up a closed session and restore an independent copy with its chats and documents. The original session password is required; host settings and provider keys are excluded. |
 | **OnionShare**                   | Receive and review ordinary files; share approved documents or a closed encrypted backup through dedicated Tor transfer VMs.                                                    |
 | **Provider keys and networking** | Keep multiple encrypted keys, select a global default or an override for one opening, and route session traffic through Tor or an explicit SOCKS5 proxy.                        |
-| **Privacy WebFetch**             | Read public HTTPS pages through the selected protected route with a coherent browser profile. Strict mode asks per domain; Open mode removes only those WebFetch prompts.   |
+| **Privacy WebFetch**             | Read public HTTPS pages through the selected protected route with a coherent browser profile, under the same session access policy as other tools.                         |
 | **Host/guest text clipboard**    | Explicit text copy/paste in UTM; the amd64 image also packages the selected VirtualBox clipboard client. No shared folders or clipboard file transfers.                         |
 | **Diagnostics**                  | Export an allowlisted report for troubleshooting, with a review step before sending it outside the session.                                                                     |
 
@@ -181,7 +197,7 @@ disposable; and every protected session owns an encrypted workspace.
 | -------------------- | -------------------------------------------------------------------------- |
 | **At rest**          | Separate LUKS2 volume and password for every persistent session            |
 | **While running**    | Read-only Debian base with runtime and temporary paths in RAM              |
-| **Between sessions** | One open volume and one session VM at a time; no shared session filesystem |
+| **Between sessions** | Separate volumes, VMs and gateways; development builds allow concurrent sessions without sharing their filesystems |
 | **On the network**   | Dedicated gateway VM with Tor or explicit SOCKS5 and no direct fallback    |
 | **For documents**    | Offline access without a network device, API key or agent process          |
 
@@ -197,10 +213,10 @@ Oblivion live OS (bare metal or supported VM)
     ├── tmpfs runtime (discarded on shutdown)
     ├── general LUKS2 vault — settings and API keys
     ├── Oblivion manager
-    ├── isolated gateway VM — Tor or explicit SOCKS5
-    ├── isolated media and OnionShare transfer VMs — started for approved operations
-    └── one active protected session
+    └── protected sessions (concurrent in development builds)
         ├── independent LUKS2 volume
+        ├── dedicated gateway VM — Tor or explicit SOCKS5
+        ├── isolated transfer VMs — started for approved operations
         └── session VM
             ├── OpenCode-derived agent
             ├── shared documents for that session
@@ -223,12 +239,17 @@ mount the session filesystem. See the maintained
 - Runtime paths and temporary files live on tmpfs in the live system.
 - The gateway mediates session egress through Tor or a configured SOCKS5 proxy;
   direct access is deny-by-default.
-- One host-controlled access policy applies to every chat and tool: **Open Web**
-  (default for new profiles), **Strict**, or **Offline**. Open Web permits public
-  HTTP/HTTPS through Tor/SOCKS5; explicit block rules still apply. Strict requires
+- One host-controlled access policy applies to every chat and tool: **Open Internet**
+  (default for new profiles), **Strict**, or **Offline**. Open Internet permits public
+  TCP on all ports through Tor/SOCKS5; explicit block and approval rules still apply. Strict requires
   allow rules beyond the provider. Offline blocks provider and tool traffic.
   Change it in **Settings → Network access**, or press **F9** in Workspace.
   The footer shows the mode beside `Network [ ]`; the chat has no `/web` switch.
+  Tools must use the proxy: FTP needs passive mode and HTTP CONNECT tunneling
+  (`curl --proxytunnel`); SSH/SFTP need a proxy-capable client or ProxyCommand.
+  UDP and direct connections remain blocked. Tor exit policies and the selected
+  SOCKS5 server can still reject destinations or ports. FTP itself is unencrypted;
+  use SFTP or FTPS when transferring credentials or private files.
 - Session users can use `sudo` to install packages. Installed programs and system
   changes stay in that session’s encrypted volume, alongside its documents, and
   consume its available space. Ephemeral sessions discard them on closure.

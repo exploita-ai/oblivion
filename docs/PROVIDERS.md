@@ -50,6 +50,26 @@ image is released. Review the linked source before submitting sensitive data.
   ZDR does not automatically cover optional server-side tools or plugins;
   Oblivion does not enable those provider features.
 
+## Model limits
+
+The chat client and gateway use the same bundled model catalog. Output budgets
+follow the selected model's published output limit, with the client reserving
+room for the prompt in its context window. A large context window does not
+necessarily allow an equally large answer. There is no universal 131k or 256k
+output ceiling.
+
+The gateway rejects unknown models or budgets above their catalog limits with
+a specific error. OpenRouter availability still depends on an eligible ZDR
+endpoint and the account's access; a catalog entry does not guarantee either.
+
+The catalog is `packages/core/src/models-dev/snapshot.txt`. Gateway builds
+extract the supported providers' limits from that file. Update and rebuild
+both client and gateway together when limits change. Oblivion does not contact
+a model catalog service automatically at runtime. Abliteration and Refuseless
+entries are checked against their [model documentation](https://docs.abliteration.ai/models)
+and [published configuration](https://refuseless.com/); preserve these entries
+when refreshing the upstream catalog if they are absent there.
+
 ## Credential and routing boundary
 
 The provider is selected for a chat opening. The production gateway allowlists

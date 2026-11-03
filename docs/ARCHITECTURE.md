@@ -20,8 +20,8 @@ physical machine
     ├── tmpfs runtime
     ├── encrypted general vault
     ├── Oblivion manager
-    ├── egress gateway VM
-    └── one active session
+    └── independently opened sessions
+        ├── dedicated egress gateway VM
         ├── independent encrypted volume
         └── isolated session VM
 ```
@@ -37,14 +37,28 @@ provider credentials. Each persistent session uses a separate LUKS2 volume and
 password. A session contains its chats, workspace, imported files and the
 agent's session-local state.
 
-Only one session volume and one session VM may be open at a time. Locking a
-session stops its VM, revokes runtime credentials, closes its encrypted volume
-and clears the per-opening API-key override.
+Multiple session volumes may be open concurrently. Each controller slot owns
+its VM, gateway VM, hypervisor UIDs, device mappings, Unix sockets, transfer
+workers and credential grant. Admission reserves memory for the session/gateway
+pair; insufficient RAM rejects an opening instead of stopping an existing one.
+Slots 1–31 serve the tabbed manager; slot 0 retains legacy controller names.
+
+Locking one session stops its owners, revokes its grant, closes its volume and
+clears its per-opening API-key override. Lock Oblivion attempts every slot's
+cleanup before closing the general archive. A failed shutdown retains that
+slot's recovery state and keeps its mapping available for recovery.
+
+Session network preferences and Tor guard state live in a private directory
+under the general encrypted profile, keyed by session ID. The guest cannot
+modify them, even with sudo. Defaults are copied once when the session first
+opens. API keys remain in the general credential store; a per-opening selection
+is pinned, so changing the default cannot change another session's credentials.
+Replacing or removing a key currently used by a chat is refused.
 
 The manager also enforces two encrypted inactivity preferences. Session
 auto-lock performs the normal session close at its threshold; host auto-lock
-performs the normal full lock at its later threshold. Both timers share the
-last verified human keyboard, paste or mouse interaction. Model output and
+performs the normal full lock at its later threshold. Each session has its own activity time; the host tracks activity across all
+views. Only verified human keyboard, paste or mouse interaction refreshes them. Model output and
 background guest activity never extend an unlocked period.
 
 At the host level, the manager exposes only three primary contexts: Sessions,
@@ -100,14 +114,22 @@ caller-supplied headers, cookies or bodies and follows the selected Tor or
 SOCKS5 route with remote name resolution. A browser profile is selected once
 per session opening so its HTTP, TLS and user-agent characteristics remain
 coherent within a gateway grant. Policy changes revoke and recreate grants,
-including that profile. The host owns one access policy for all chats, WebFetch,
-shells and package managers: Open Web permits public ports 80/443 unless an
+including that profile. The controller owns one access policy per protected session, shared by its
+chats, WebFetch, shells and package managers: Open Internet permits all public TCP ports unless an
 explicit rule overrides it; Strict requires allow rules while retaining the
 fixed provider route; Offline denies external traffic, including the provider.
 Matching deny rules also block the provider. Missing legacy policy fields retain
-Strict; newly created profiles default to Open Web. The chat has no local mode
+Strict; newly created profiles default to Open Internet. The chat has no local mode
 switch or `/web` command. The host footer shows the policy next to `Network`;
-Settings / Network access and host F9 change it for the entire session.
+F9 changes it for the selected session. Settings / Network access sets defaults
+for future sessions. Switching Tor/SOCKS5 or API key requires stopping that
+session’s Workspace; its encrypted volume stays unlocked in Documents mode.
+The guest-facing tools proxy still exposes HTTP and CONNECT, not an unrestricted
+SOCKS listener. Non-HTTP clients must tunnel through CONNECT; passive FTP uses
+separate tunnels for its control and data ports. UDP/BIND, private or reserved
+literal destinations and direct forwarding remain rejected. Name resolution
+stays at the selected upstream proxy; its DNS view and exit policy still apply.
+Privacy WebFetch retains its own HTTPS-only request contract.
 
 Changes stop existing API, HTTP and CONNECT streams before recreating the grant
 with the same local session capability. They do not restart the session VM.
@@ -116,6 +138,38 @@ applies an outside-interface drop before established-connection rules, stops
 OnionShare workers and refuses new OnionShare/start-chat operations. It leaves
 local processes running. This is an application egress policy, not an air gap:
 the host can still maintain its Wi-Fi/Ethernet connection and DHCP.
+
+### Controlled Tor rotation
+
+The native agent tool `tor_rotate` changes Tor circuits for the current protected
+session, including all its chats and terminals. It is absent from non-Oblivion
+builds and follows agent tool permissions. It has no parameters and cannot
+select an arbitrary relay, destination, proxy or controller command.
+
+An unprivileged service on the private gateway link authenticates the opening
+capability and forwards one fixed operation to the root controller over an
+inherited Unix socket. It never receives the provider key or Tor control cookie.
+The controller installs a firewall barrier before stopping the API, tools,
+Privacy Web and connector processes. This blocks established connections as
+well as new requests. It disables Tor, verifies old streams/circuits are gone,
+excludes previously observed exit identities (including Conflux paths), then
+rebuilds and verifies a circuit and the firewall before reopening application
+traffic. Guard selection remains Tor's responsibility.
+
+OnionShare has a separate Tor gateway. Before starting it the host disables
+rotation and requires an acknowledgement; transfer shutdown re-enables it only
+after its network actors have stopped. A rotation already in progress prevents
+that acknowledgement. Legacy hosts without this interlock cannot enable rotation.
+
+During reconstruction only the local rotation response and Tor infrastructure
+traffic are permitted. A failed rotation leaves all external traffic blocked;
+Packets already sent cannot be recalled; remote retransmissions can still arrive
+at the NIC and are dropped during the full block. Tor recovering on its own
+cannot remove this barrier. Policy changes cannot
+clear it. Closing a latched grant destroys the gateway; reopening starts a fresh
+one. Requests are serialized and have a 30-second cooldown. Existing transfers
+and other model streams are interrupted, never automatically replayed. A changed
+relay identity does not guarantee a different public IP or acceptance by a site.
 
 ### Session administration and installed software
 
@@ -263,9 +317,10 @@ physical PC                         supported desktop host + hypervisor
                               |
                               +-- manager and controller
                               +-- encrypted general LUKS2 vault
-                              +-- gateway VM: broker + Tor/SOCKS5
-                              +-- one session VM + selected session volume
-                              +-- transfer VMs when required
+                              +-- session slots (independent lifecycles)
+                                   +-- gateway VM: broker + Tor/SOCKS5
+                                   +-- session VM + its encrypted volume
+                                   +-- transfer VMs when required
 ```
 
 The gateway and transfer VMs are peers of the session VM, not additional nested
@@ -425,7 +480,7 @@ Encrypted session backups are controller-owned exports of a closed LUKS2
 container with compatible encrypted session metadata. They are separate from
 document export and have independent streaming/size limits. Restore preserves
 the source, refuses unsupported formats and validates the copy in an offline
-guest, keeping one open session at a time. Provider keys stay in the general
+guest, using the selected session’s isolated slot. Provider keys stay in the general
 vault. Markdown/JSON conversation exports are deliberate readable disclosures;
 diagnostic exports contain only approved metadata, never a VM-memory dump.
 
@@ -551,7 +606,8 @@ Tor/proxy failure, interrupted startup, controller/guest crash, full storage
 and interrupted transfers. Include outer-VM termination on virtualized targets.
 Failed cleanup must report recovery, not a locked volume that remains open.
 
-Verify one-session enforcement, wrong passwords, stale/cross-session tokens,
+Verify simultaneous-session isolation, duplicate-volume rejection, resource
+admission, independent shutdown, wrong passwords, stale/cross-session tokens,
 blocked direct egress, key rotation/removal and no content/secret leakage in
 observed writes or logs. Compare persistent archives before/after ephemeral
 use. Test upgrades/rollback on copies. Run affected package suites, root

@@ -12,11 +12,121 @@ hardware, upgrade or independent-review gates documented here.
 
 ## Implemented
 
-- **Global network access and persistent session administration in development.**
-  New profiles default to Open Web; Strict and Offline apply to the entire
+- **Controlled Tor rotation in development.** The native `tor_rotate` agent
+  tool acts on one protected session and its shared gateway. A firewall barrier
+  precedes established-connection rules; API, tools, WebFetch and connector
+  processes stop before Tor rebuilds circuits. Previous exit relay identities,
+  including Conflux exits, are excluded. Traffic reopens only after circuit and
+  isolation verification. Failure stays blocked, including after Tor recovers;
+  a policy change cannot clear the latch. Rotation is refused while an
+  OnionShare transfer owns its separate network path. On 2026-11-03, eight checks
+  passed in two disposable ARM64 Debian VMs on the Mac with real Tor and outside
+  packet capture: transfer interlock, old sockets, new TCP/DNS probes, successful
+  rotation, a deliberately stalled controller and supervisor death. During the
+  failed rotation's repeated probes the outgoing IP packet count did not increase;
+  inbound relay retransmissions are dropped by the firewall. Twelve existing
+  gateway regression checks also passed with the same image. These laboratory
+  tests use synthetic credentials and make no model/provider request.
+  A separate UTM test with the real Build agent and abliteration.ai completed
+  exactly one native `tor_rotate` call, then received `ROTATION_OK` from the model
+  over the reopened transport. Its disposable protected session was removed;
+  existing sessions were preserved. The UTM update is temporary in RAM.
+  Additional two-session UTM acceptance passed nine checks in 326.53 seconds:
+  three successive rotations of A completed while B retained its original TLS
+  connection and VM/gateway processes. In the measurement window B completed
+  175 requests on that connection and 103 requests on fresh connections, with
+  zero errors. Disconnecting only A's uplink forced the real 90-second rotation
+  deadline; reconnecting it left A blocked. Repeated probes left its outgoing
+  IP packet count unchanged at 1,579. Both disposable encrypted sessions were
+  removed, leaving GB and holding unchanged in the controller's inventory.
+  This qualification exposed and corrected a GETINFO parser defect: Tor's
+  nonempty single-line circuit/stream responses were rejected, causing
+  intermittent early rotation failures. The reader now handles empty, inline
+  and multiline results with the same size/deadline bounds. Failure diagnostics
+  expose only fixed phase names, never raw Tor replies or secrets. The corrected
+  image passed the eight separate rotation/barrier VM checks; 60 gateway Rust
+  tests passed (two adapter tests ignored), the three native-tool tests passed,
+  and the repository check passed all 20 package tasks. Reports and outside
+  captures are local ignored artifacts under `artifacts/oblivion-tor-rotate/`.
+  This feature is not yet part of a published ISO release.
+
+- **Open Internet in development.** Open Web now admits public TCP destinations
+  on every port through Tor or the configured SOCKS5 upstream. Explicit deny
+  and approval rules still override Open; Strict and Offline are unchanged.
+  Each protected session retains its own policy. UDP, direct forwarding and
+  private/reserved literal destinations stay blocked. Non-HTTP tools must use
+  HTTP CONNECT; passive FTP is supported, subject to upstream exit policies.
+  Linux ARM64 gateway validation passed 51 tests, with two optional tests
+  ignored, including a real curl transfer through both passive FTP tunnels
+  using loopback-only services. The 16 host policy/settings tests, 150 manager
+  tests and repository check pass. Stored profiles retain `open` without
+  migration. The ARM64 diagnostic ISO built on 2026-11-02 includes this
+  extension. Its embedded runtime hashes, manager and gateway policy sources
+  were verified before installation in UTM. The VM boots to Welcome back;
+  the existing encrypted partition was preserved byte-for-byte by SHA-256
+  and the previous disk retained for rollback. On 2026-11-03, an unlocked UTM
+  session passed public HTTPS through curl (`IsTor: true`, normal certificate
+  verification) and two passive FTP directory transfers from FreeBSD through
+  CONNECT. Direct HTTPS and external DNS over UDP/TCP failed, including a TCP
+  probe run with guest sudo; a private-address CONNECT request was rejected.
+  Header-only host-interface observation during repeated probes found only
+  the gateway VM's existing Tor uplink TCP peers, with no external DNS or direct
+  test-destination packets. A separate capture included one permitted local DHCP
+  packet; diagnostic SSH was excluded. Probes under the session hypervisor UID
+  also failed and increased the host output-drop counter by three packets.
+  These are bounded live probes, not a proof against every bypass or a SOCKS5
+  qualification. GNU FTP returned 425 on its data channel, so successful FTP
+  remains dependent on the server and available Tor exits. It is not a published ISO.
+
+- **Build No Tools in development.** A selectable primary agent answers from
+  conversation/context without exposing or executing tools, including shell,
+  file operations, web, MCP, Code Mode and subagents. Agent/session allow rules
+  cannot override this restriction; switching back restores ordinary Build
+  behavior. Select it with Shift+Tab or `/agents`. Provider requests still use
+  the configured connection. The 429 focused Core tests and repository check
+  pass, including an unsolicited model tool call and switching back to Build.
+  The Oblivion command filter now exposes the agent selector and both cycle
+  shortcuts. Profile-specific TUI tests exercise Shift+Tab, `/agents` and
+  the Build No Tools prompt label at 44, 80 and 100 columns; the normal command
+  selection test also passes.
+  The ARM64 diagnostic image built on 2026-11-02 includes this agent and the
+  concurrent-session changes below. Its compiled client lists Build No Tools;
+  embedded runtime hashes match the build. UTM boots to Welcome back with the
+  existing encrypted partition preserved byte-for-byte and the previous disk
+  retained for rollback. An unlocked chat on this image remains to be checked.
+  This is a local test image, not a published release.
+
+- **Concurrent protected sessions in development.** The manager has a top tab
+  bar and Ctrl+PageUp/PageDown navigation. Each opening owns a separate session
+  VM, gateway VM, hypervisor identities, sockets, volume and network policy.
+  F9 changes only that session; host Settings supplies defaults for future
+  sessions. A credential is pinned per opening; keys used by live chats cannot
+  be removed or replaced. Closing/recovering one session leaves the others
+  running; Lock Oblivion attempts cleanup across every slot. RAM admission
+  rejects an opening that cannot fit. Session network settings and Tor state
+  stay in controller-owned directories in the encrypted general vault.
+  These changes are not in the published beta 2 image. The disposable
+  multi-session lab and its CI job exercise real Linux services with synthetic
+  guests/providers and no public uplink; supported KVM and UTM candidate
+  qualification remain separate release gates.
+  ARM64 Linux testing on 2026-11-02 passed 13 checks, opening three encrypted
+  volumes and session VMs concurrently, then two independent gateway VMs. Checks cover
+  private sockets/identities, pinned API credentials on actual synthetic TLS
+  requests, memory admission, independent workspace restart, live network
+  policy, gateway-owner failure, slot reuse, file/policy persistence and global
+  locking. Concurrent ephemeral sessions leave the encrypted archive unchanged
+  by SHA-256; synthetic plaintext canaries are absent from the outer data disk.
+  The outer VM uses HVF and the inner guests use laboratory TCG. This is not a
+  public Tor/provider, real OpenCode conversation or production KVM acceptance
+  test. The 150 manager tests include 80×24/160×50 navigation, overflow tabs,
+  delayed console frames and local recovery. Host Rust tests and the repository
+  check pass; the new x86 CI job still needs to run after publication.
+
+- **Session-wide network access and persistent administration in development.**
+  New profiles default to Open Internet; Strict and Offline apply to the entire
   gateway, including API requests and command-line tools. Explicit deny rules
   still take precedence. The manager footer shows the selected policy beside
-  Network; F9 opens the global control from Workspace. The chat's separate
+  Network; F9 opens the selected session’s control from Workspace. The chat's separate
   Web label, `/web` command and Alt+W binding have been removed. Existing
   connections are interrupted when access or rules change; the session VM and
   local processes stay running. Offline also disables Tor networking, blocks
@@ -127,7 +237,7 @@ hardware, upgrade or independent-review gates documented here.
 - offline Documents mode without a network device or provider credential
 - Tor and configurable SOCKS5 gateway modes with no intended direct fallback
 - Privacy WebFetch with coherent browser emulation; current development uses the
-  same host-controlled Open Web / Strict / Offline policy as all other tools
+  same host-controlled Open Internet / Strict / Offline policy as all other tools
 - multiple provider keys, a global default and a per-opening override
 - multiple chats sharing the documents of one encrypted session
 - encrypted session and host inactivity locks, driven only by human input
@@ -455,9 +565,10 @@ shipped.
 
 ### Implementation contracts
 
-- **One workspace and one open session.** Chat, Documents and Terminal use
-  the selected session's encrypted filesystem. Views share its process
-  lifetime; they do not unlock other volumes. Keep Chat full-window with the
+- **One workspace per protected session.** Workspace and Documents use
+  the selected session’s encrypted filesystem. Open-session tabs switch views
+  without stopping other VMs. Each session has a separate gateway, policy and
+  credential grant. Lock Oblivion closes all open slots. Keep Chat full-window with the
   network footer and explicit view shortcuts; put infrequent actions in a
   command menu. Loading/recovery uses the existing central modal. Check 80×24,
   160×50, resizing, keyboard-only navigation and focus for every new view.
