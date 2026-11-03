@@ -12,7 +12,7 @@ CONFIG = "/run/oblivion-multisession-test.json"
 BIN = "/usr/bin/oblivion-storage-lab"
 GENERAL = b"synthetic-multi-general-password"
 PASSWORD = b"synthetic-multi-session-password"
-KEY_A = "OBLIVION_API_KEY_CANARY_5c91"
+KEY_A = "OBLIVION_API_KEY_CANARY_5c91"  # gitleaks:allow synthetic canary, accepted only by the offline test provider
 KEY_B = "OBLIVION_API_NEXT_CANARY_86ab"
 ROOT = Path("/usr/lib/oblivion/vm")
 
