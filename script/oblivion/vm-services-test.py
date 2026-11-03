@@ -891,18 +891,16 @@ with socket.socket(socket.AF_UNIX) as client:
     send(PASSWORD + b"\r", "Ripeti la password")
     send(PASSWORD + b"\r", "Spazio insufficiente")
     assert status()["sessions"] == [session_id] and not status()["session_open"]
-    assert len(status()["incomplete_sessions"]) == 1 and file_digest(archive) == before
+    assert not status()["incomplete_sessions"] and file_digest(archive) == before
     assert Path("/run/oblivion/general/profile/canary").read_bytes() == b"OBLIVION_VM_A_CANARY_4d02"
     filler.unlink()
-    send(b"i", "Creazioni interrotte - mai aperte")
-    send(b"d", "Premi D di nuovo")
-    send(b"d", "Nessuna creazione interrotta")
+    send(b"i", "Nessuna creazione interrotta")
     assert not status()["incomplete_sessions"] and status()["available_bytes"] >= status()["session_bytes"]
     send(b"i", "Sessioni protette")
     send(b"\r", "Password della sessione")
     send(PASSWORD + b"\r", "A privacy-first live OS")
     wait_screen("/exit lock session")
-    check("disk exhaustion is explicit, preserves existing archives and permits reopening after pending cleanup")
+    check("disk exhaustion is rejected before creating a pending volume, preserves existing archives and permits reopening after freeing space")
     terminal.reset()
     os.kill(manager_pid, signal.SIGKILL)
     manager_pid = wait_restart(MANAGER, manager_pid)
@@ -920,6 +918,9 @@ with socket.socket(socket.AF_UNIX) as client:
     check("SIGKILL of controller stops its dependent manager and recovers before both restart")
     reopen()
     vm_pid = int(property("oblivion-session.service", "MainPID"))
+    # Global recovery now terminates frozen QEMU processes. Hold the real
+    # mapped block device open to exercise an actual LUKS close failure.
+    held_volume = Path("/dev/mapper/oblivion-session").open("rb", buffering=0)
     os.kill(vm_pid, signal.SIGSTOP)
     terminal.reset()
     os.kill(manager_pid, signal.SIGKILL)
@@ -927,6 +928,7 @@ with socket.socket(socket.AF_UNIX) as client:
     wait_screen("RECUPERO NECESSARIO")
     current = status()
     assert current["recovery_required"] and current["session_open"] and current["general_open"], current
+    assert not Path(f"/proc/{vm_pid}").exists()
     for operation, arguments, secret in [("create", [], PASSWORD), ("enter", [session_id], PASSWORD),
             ("unlock", [], GENERAL), ("unlock-ephemeral", [], GENERAL),
             ("set-api-key", [], NEXT_API_KEY), ("clear-api-key", [], b""), ("egress", [], TOR_SELECT),
@@ -935,7 +937,7 @@ with socket.socket(socket.AF_UNIX) as client:
     rejected = subprocess.run(["/usr/bin/oblivion-control", "create"], input=PASSWORD,
         capture_output=True, user=1000, group=1000, extra_groups=[], timeout=30)
     assert rejected.returncode != 0 and rejected.stderr == b"control_request_failed\n"
-    check("unresponsive VM leaves recovery latched and rejects every new opening")
+    check("recovery terminates frozen QEMU but a busy LUKS mapping stays interlocked and rejects every new opening")
     # Restart once more while recovery is failing: the error must survive UI restarts.
     terminal.reset()
     os.kill(manager_pid, signal.SIGKILL)
@@ -944,11 +946,12 @@ with socket.socket(socket.AF_UNIX) as client:
     assert status()["recovery_required"]
     send(b"f", "Premi F di nuovo")
     send(b"x", "RECUPERO NECESSARIO")
-    assert status()["session_open"] and int(property("oblivion-session.service", "MainPID")) == vm_pid
+    assert status()["session_open"] and not held_volume.closed
+    held_volume.close()
     send(b"f", "Premi F di nuovo")
     send(b"f", "Archivio generale bloccato")
     locked()
-    check("recovery survives restart; cancelled force-stop preserves VM; explicit confirmation closes both volumes")
+    check("recovery survives restart; cancelling preserves the busy-volume interlock; after its owner exits explicit confirmation closes both volumes")
     reopen()
     # An explicit service stop must complete without ordering deadlocks or orphan VMs.
     systemctl("stop", CONTROLLER)

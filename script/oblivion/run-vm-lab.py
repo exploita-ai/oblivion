@@ -320,7 +320,7 @@ with ExitStack() as cleanup, (output / "serial.log").open("xb") as log:
     command = [
         "qemu-system-" + args.architecture, "-machine", "virt" if args.architecture == "aarch64" else "q35", "-accel", args.accelerator,
         "-cpu", "max" if args.accelerator == "tcg" else "host",
-        "-m", "2048" if args.gateway_bundle else "4096", "-smp", "4", "-nodefaults", "-no-reboot", "-display", "none",
+        "-m", "2048" if args.gateway_bundle else "6144" if session_image else "4096", "-smp", "4", "-nodefaults", "-no-reboot", "-display", "none",
         "-monitor", "none", "-serial", "stdio", "-nic", "none",
         "-kernel", str(image / "kernel"), "-initrd", str(initrd),
         "-append", "console=" + ("ttyAMA0" if args.architecture == "aarch64" else "ttyS0") + " root=/dev/vda rootfstype=squashfs ro panic=-1 systemd.getty_auto=no systemd.show_status=false" + (" oblivion.lab-terminal=1" if args.terminal_only else "") + (" oblivion.lab-backup=1" if args.backup_only else ""),
@@ -356,10 +356,11 @@ with ExitStack() as cleanup, (output / "serial.log").open("xb") as log:
         "-object", f"filter-dump,id=uplink-capture,netdev=uplink,file={output / 'uplink.pcap'}",
     ] if args.tor_online else [])
     result = online_vm(command, log, output, recipient, recipient_port, 3900 if args.onion_backup else 900) if args.tor_online else subprocess.run(
-        # The expanded 31-check stream lifecycle took 870 seconds on CI x86;
-        # keep room for real VM startups without changing any per-operation check.
+        # Full stream and import/export lifecycles boot many nested VMs. The
+        # ARM import run reached its final exFAT roundtrip at 900 seconds;
+        # keep per-operation deadlines unchanged within a 20-minute lab budget.
         command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-        timeout=1200 if args.stream else 900)
+        timeout=1200 if args.stream or args.refresh_import_test else 900)
 serial = (output / "serial.log").read_text(errors="replace")
 fixture_prefix = "OBLIVION_MULTISESSION_FIXTURE_SHA256 " if args.multisession else "OBLIVION_ONION_HOST_FIXTURE_SHA256 " if args.onion_host else "OBLIVION_IMPORT_FIXTURE_SHA256 " if args.refresh_import_test else "OBLIVION_TOR_STATE_FIXTURE_SHA256 " if args.tor_state else "OBLIVION_SESSION_NETWORK_FIXTURE_SHA256 " if session_image else "OBLIVION_GATEWAY_HOST_FIXTURE_SHA256 " if gateway_image else "OBLIVION_GATEWAY_FIXTURE_SHA256 " if args.gateway_bundle else "OBLIVION_SERVICES_FIXTURE_SHA256 " if args.services_bundle else "OBLIVION_TUI_FIXTURE_SHA256 "
 fixture_verified = fixture is None or (fixture_prefix + hashlib.sha256(fixture).hexdigest()) in serial.splitlines()

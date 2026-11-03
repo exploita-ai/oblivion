@@ -654,12 +654,18 @@ RUN test "$(grep -cF '.https_only(true)' src/broker.rs)" = 1 \
     && sed -i '/\.https_only(true)/a\            .add_root_certificate(reqwest::Certificate::from_pem(include_bytes!("/fixture/ca.pem")).expect("laboratory certificate"))' src/broker.rs \
     && mkdir /stream-bundle \
     && (diff -u /tmp/production-broker.rs src/broker.rs > /stream-bundle/trust.diff; test "$?" = 1) \
-    && cargo build --locked --offline --bin oblivion-api \
+    && test "$(grep -cF '.emulation(Emulation::weighted_random())' src/web.rs)" = 1 \
+    && cp src/web.rs /tmp/production-web.rs \
+    && sed -i '/.emulation(Emulation::weighted_random())/a\            .tls_cert_store(wreq::tls::trust::CertStore::from_pem_stack(include_bytes!("/fixture/ca.pem")).expect("laboratory certificate"))' src/web.rs \
+    && (diff -u /tmp/production-web.rs src/web.rs >> /stream-bundle/trust.diff; test "$?" = 1) \
+    && cargo build --locked --offline --bin oblivion-api --bin oblivion-web \
     && cp /tmp/target/debug/oblivion-api /stream-bundle/oblivion-api \
-    && strip /stream-bundle/oblivion-api
+    && cp /tmp/target/debug/oblivion-web /stream-bundle/oblivion-web \
+    && strip /stream-bundle/oblivion-api /stream-bundle/oblivion-web
 
 FROM gateway-network-lab AS stream-gateway-base
 COPY --from=stream-compiler /stream-bundle/oblivion-api /usr/bin/oblivion-api
+COPY --from=stream-compiler /stream-bundle/oblivion-web /usr/bin/oblivion-web
 COPY --from=stream-compiler /stream-bundle/trust.diff /usr/lib/oblivion-stream-fixture/trust.diff
 COPY --from=stream-tls-fixture /fixture/cert.pem /usr/lib/oblivion-stream-fixture/cert.pem
 COPY --from=stream-tls-fixture /fixture/key.pem /usr/lib/oblivion-stream-fixture/key.pem

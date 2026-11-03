@@ -393,9 +393,9 @@ if SOCKS:
         print("OBLIVION_WEBTOOLS_FIXTURE " + json.dumps(stream_status()), flush=True)
         raise
     observed = stream_status()
-    assert observed["web"] == {"http": 1, "https": 1, "redirect": 1, "shell": 1, "completed": 1}
+    assert observed["web"] == {"http": 0, "https": 1, "redirect": 1, "shell": 1, "completed": 1}
     assert observed["probes"] > 0
-    check("compiled OpenCode webfetch and a shell client use the local proxy for HTTP and verified HTTPS; redirected, unknown and wrong-port targets fail without external contact or a direct fallback")
+    check("compiled PrivacyWeb fetches verified HTTPS while the shell uses its HTTP proxy; plaintext fetches, redirected, unknown and wrong-port targets fail without external contact or a direct fallback")
 
 if STREAM:
     assert stream_status()["active"] == []
@@ -411,21 +411,6 @@ if STREAM:
         check("active streaming blocks a transport change without interrupting or replacing its gateway")
 closing_gateway = ready()[0] if STREAM else None
 
-# Keep the old guest alive while requesting close: the VM interlock rejects
-# closing its disk, but revocation must already have removed its API listener.
-assert command("close", success=False) == "operation_failed"
-if STREAM:
-    stream_closed(1)
-    assert status()["session_open"] and Path(f"/proc/{chat}").exists()
-    client.sendall(b"stream-ended\n")
-    receive(client, b"OBLIVION_STREAM_FAILED")
-    check("controller revocation closes the provider TLS stream and the adapter reports failure while QEMU and its LUKS mapping are still open")
-client.sendall(b"revoked\n")
-receive(client, b"OBLIVION_SESSION_REVOKED")
-command("force-leave")
-client.close()
-assert not status()["session_open"] and not Path(f"/proc/{chat}").exists()
-check("revocation precedes vault closure and removes broker access even while the old guest remains running")
 if SOCKS:
     qmp("gateway", "object-del", {"id": "webtools-capture"})
     packets = Path("/run/oblivion-gateway-vm/webtools-outside.pcap").read_bytes()
@@ -436,6 +421,20 @@ if SOCKS:
     print("OBLIVION_WEBTOOLS_PCAP " + base64.b64encode(packets).decode(), flush=True)
     Path("/run/oblivion-gateway-vm/webtools-outside.pcap").unlink()
     check("the laboratory captures A's compiled-client traffic outside the gateway, without a cleartext provider key or local capability")
+
+# Pause guest CPUs while keeping QMP responsive: graceful powerdown cannot
+# finish, but gateway revocation must precede the still-open volume.
+qmp("session", "stop")
+assert command("close", success=False) == "vm_shutdown_timeout"
+if STREAM:
+    stream_closed(1)
+assert status()["session_open"] and Path(f"/proc/{chat}").exists()
+stopped()
+check("closure destroys the gateway and provider stream even while a paused session VM keeps its LUKS volume interlocked")
+command("force-leave")
+client.close()
+assert not status()["session_open"] and not Path(f"/proc/{chat}").exists()
+check("revocation precedes vault closure and removes broker access even while the old guest remains running")
 
 if STREAM:
     command("api-keys", secret=json.dumps({"action": "select", "id": alternate_key}).encode())
@@ -591,6 +590,7 @@ if SOCKS:
     assert not transfer_state.exists()
     transfer_state.write_text("{")
     transfer_state.chmod(0o600)
+    qmp("session", "stop")
     assert command("leave", success=False) == "invalid_transfer_state"
     stream_closed(3)
     assert status()["session_open"] and status()["general_open"]
@@ -607,8 +607,6 @@ if SOCKS:
 command("unlock", secret=GENERAL)
 stopped()
 command("enter", a, secret=PASSWORD)
-ready()
-command("force-leave")
 ready()
 # A privileged client that drips a frame must not hold the gateway owner
 # indefinitely. The production five-second admission budget expires and the
@@ -629,8 +627,9 @@ with socket.socket(socket.AF_UNIX) as control:
         raise AssertionError("gateway frame deadline renewed by partial input")
     assert sent > 1
 stopped()
-assert status()["general_open"] and not status()["session_open"]
-check("fragmented private requests expire despite continued progress; the owner destroys its gateway VM and leaves storage state explicit")
+assert status()["general_open"] and status()["session_open"]
+check("fragmented private requests expire despite continued progress; the owner destroys its gateway VM while the session volume remains interlocked")
+command("force-leave")
 command("lock")
 assert not status()["general_open"]
 
@@ -645,6 +644,8 @@ if SOCKS:
     command("unlock-ephemeral", secret=GENERAL)
     stopped()
     assert command("enter-ephemeral", success=False) == "gateway_unavailable"
+    assert Path("/run/oblivion/ephemeral.luks").exists() and status()["session_open"]
+    command("force-leave")
     assert not Path("/run/oblivion/ephemeral.luks").exists()
     saved_keys = Path("/run/oblivion/general/profile/provider.keys.json").read_bytes()
     temporary_command = json.dumps({"action": "temporary", "name": "Solo RAM", "key": RAM_KEY.decode()}).encode()

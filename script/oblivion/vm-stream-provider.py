@@ -57,7 +57,7 @@ def web_response(connection, reader, line, secure):
     assert not any(name in values for name in [b"authorization", b"proxy-authorization"])
     assert int(values.get(b"content-length", b"0")) == 0
     if line == b"GET /redirect HTTP/1.1\r\n":
-        assert not secure
+        assert secure
         with lock:
             web["redirect"] += 1
         connection.sendall(b"HTTP/1.1 302 Found\r\nLocation: https://denied.example.com/tools\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
@@ -81,13 +81,11 @@ def web_model(connection, body):
         delta, finish = {"role": "assistant", "content": "Synthetic web tools title"}, "stop"
     elif results:
         assert set(results) == {"web_http", "web_https", "web_redirect", "web_unknown", "web_port", "web_shell"}
-        assert "OBLIVION_WEB_HTTP" in results["web_http"]
+        assert "Privacy Web requires an HTTPS URL" in results["web_http"]
         assert "OBLIVION_WEB_HTTPS" in results["web_https"]
         assert "OBLIVION_SHELL_PROXY_OK" in results["web_shell"]
-        for name, url in [("web_redirect", "http://api.abliteration.ai/redirect"),
-                ("web_unknown", "https://unknown.example.com/tools"),
-                ("web_port", "https://api.abliteration.ai:4443/tools")]:
-            assert f"Transport error (GET {url})" in results[name], name
+        for name in ["web_redirect", "web_unknown", "web_port"]:
+            assert "StatusCode: non 2xx status code" in results[name], name
         with lock:
             web["completed"] += 1
         delta, finish = {"role": "assistant", "content": "OBLIVION_WEB_TOOLS_VERIFIED"}, "stop"
@@ -108,7 +106,7 @@ with socket.socket() as direct:
 print('OBLIVION_SHELL_PROXY_OK')''')
         calls = [("web_http", "webfetch", {"url": "http://api.abliteration.ai/tools", "format": "text"}),
             ("web_https", "webfetch", {"url": "https://api.abliteration.ai/tools", "format": "text"}),
-            ("web_redirect", "webfetch", {"url": "http://api.abliteration.ai/redirect", "format": "text"}),
+            ("web_redirect", "webfetch", {"url": "https://api.abliteration.ai/redirect", "format": "text"}),
             ("web_unknown", "webfetch", {"url": "https://unknown.example.com/tools", "format": "text"}),
             ("web_port", "webfetch", {"url": "https://api.abliteration.ai:4443/tools", "format": "text"}),
             ("web_shell", "shell", {"command": command})]

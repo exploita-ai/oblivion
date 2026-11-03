@@ -141,6 +141,24 @@ def production(drop_identity, binary="oblivion-api", proxy=None):
                     assert response.startswith(expected)
                     assert KEY.encode() not in response
             check("production API rejects a wrong token and fails closed with SOCKS unavailable")
+        elif binary == "oblivion-web":
+            for token, url, expected in [
+                ("invalid", "https://example.com/", b"HTTP/1.1 401"),
+                (TOKEN, "https://127.0.0.1/", b"HTTP/1.1 400"),
+                (TOKEN, "http://example.com/", b"HTTP/1.1 400"),
+                (TOKEN, "https://example.com/", b"HTTP/1.1 502"),
+            ]:
+                body = json.dumps({"url": url})
+                with socket.create_connection(address, timeout=10) as client:
+                    client.sendall(("POST /fetch HTTP/1.1\r\nHost: web\r\n"
+                        f"Authorization: Bearer {token}\r\nContent-Type: application/json\r\n"
+                        f"Content-Length: {len(body)}\r\n\r\n{body}").encode())
+                    response = b""
+                    while chunk := client.recv(65536):
+                        response += chunk
+                    assert response.startswith(expected), response
+                    assert TOKEN.encode() not in response
+            check("production PrivacyWeb authenticates HTTP fetches, rejects unsafe destinations and fails closed without its SOCKS connector")
         elif binary == "oblivion-tools":
             for token, expected in [("invalid", b"HTTP/1.1 407"), (TOKEN, b"HTTP/1.1 502")]:
                 auth = base64.b64encode(("oblivion-tools:" + token).encode()).decode()

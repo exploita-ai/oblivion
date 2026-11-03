@@ -79,17 +79,17 @@ class StreamFixture(unittest.TestCase):
                 response.begin()
                 self.assertEqual(response.status, 200)
                 self.assertEqual(response.read(), result)
-        with connection(80) as client:
+        with connection(443) as client:
             client.sendall(b"GET /redirect HTTP/1.1\r\nHost: api.abliteration.ai\r\n\r\n")
             response = http.client.HTTPResponse(client)
             response.begin()
             self.assertEqual(response.status, 302)
             self.assertEqual(response.getheader("Location"), "https://denied.example.com/tools")
             self.assertEqual(response.read(), b"")
-        results = {"web_http": "OBLIVION_WEB_HTTP", "web_https": "OBLIVION_WEB_HTTPS", "web_shell": "OBLIVION_SHELL_PROXY_OK",
-            "web_redirect": "Transport error (GET http://api.abliteration.ai/redirect)",
-            "web_unknown": "Transport error (GET https://unknown.example.com/tools)",
-            "web_port": "Transport error (GET https://api.abliteration.ai:4443/tools)"}
+        results = {"web_http": "Privacy Web requires an HTTPS URL", "web_https": "OBLIVION_WEB_HTTPS", "web_shell": "OBLIVION_SHELL_PROXY_OK",
+            "web_redirect": "StatusCode: non 2xx status code (403)",
+            "web_unknown": "StatusCode: non 2xx status code (403)",
+            "web_port": "StatusCode: non 2xx status code (403)"}
         with connection(443) as client:
             payload = model(client, [initial, *[{"role": "tool", "tool_call_id": name, "content": value} for name, value in results.items()]]).read()
         self.assertIn(b"OBLIVION_WEB_TOOLS_VERIFIED", payload)

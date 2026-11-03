@@ -76,7 +76,7 @@ for command in sys.stdin:
         assert tools_request(token, 'api.abliteration.ai:80') == 403
         print('OBLIVION_OTHER_POLICY_DENIED', flush=True)
     elif command == 'webtools':
-        result = subprocess.run(['/usr/lib/oblivion/guest/conversation.sh', 'run', '--auto', '--format', 'json',
+        result = subprocess.run(['/usr/lib/oblivion/guest/chat.sh', 'run', '--auto', '--format', 'json',
             'OBLIVION_WEB_TOOLS_REQUEST'], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180,
             env={**os.environ, 'NODE_EXTRA_CA_CERTS': '/usr/lib/oblivion-stream-fixture/cert.pem',
                 'HTTP_PROXY': 'http://127.0.0.1:1', 'https_proxy': 'http://127.0.0.1:1',
@@ -93,16 +93,16 @@ for command in sys.stdin:
         fetches = {event['part']['state']['input']['url']: event['part']['state'] for event in events
             if event.get('part', {}).get('tool') == 'webfetch'}
         assert set(fetches) == {'http://api.abliteration.ai/tools', 'https://api.abliteration.ai/tools',
-            'http://api.abliteration.ai/redirect', 'https://unknown.example.com/tools',
+            'https://api.abliteration.ai/redirect', 'https://unknown.example.com/tools',
             'https://api.abliteration.ai:4443/tools'}
-        for url in ['http://api.abliteration.ai/redirect', 'https://unknown.example.com/tools',
+        for url in ['http://api.abliteration.ai/tools', 'https://api.abliteration.ai/redirect', 'https://unknown.example.com/tools',
                 'https://api.abliteration.ai:4443/tools']:
             assert fetches[url]['status'] == 'error', url
-            assert fetches[url]['error'] == f'Transport error (GET {url})', url
-        for scheme in ['http', 'https']:
-            state = fetches[f'{scheme}://api.abliteration.ai/tools']
-            assert state['status'] == 'completed'
-            assert state['output'] == f'OBLIVION_WEB_{scheme.upper()}\n'
+            expected = 'Privacy Web requires an HTTPS URL' if url.startswith('http:') else 'StatusCode: non 2xx status code'
+            assert expected in fetches[url]['error'], url
+        state = fetches['https://api.abliteration.ai/tools']
+        assert state['status'] == 'completed'
+        assert state['output'] == 'OBLIVION_WEB_HTTPS\n'
         print('OBLIVION_COMPILED_WEBTOOLS_VERIFIED', flush=True)
     elif command.startswith('old '):
         assert request(command[4:], {})[0] == 401
@@ -120,7 +120,7 @@ for command in sys.stdin:
         print('OBLIVION_SESSION_REVOKED', flush=True)
     elif command == 'stream':
         assert stream_child is None
-        stream_child = subprocess.Popen(['/usr/lib/oblivion/guest/conversation.sh', 'run', '--format', 'json',
+        stream_child = subprocess.Popen(['/usr/lib/oblivion/guest/chat.sh', 'run', '--format', 'json',
             'OBLIVION_STREAM_REQUEST'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stream_output = b''
         deadline = time.monotonic() + 180
@@ -146,7 +146,7 @@ for command in sys.stdin:
         stream_child = None
         print('OBLIVION_STREAM_FAILED', flush=True)
     elif command == 'adapter':
-        result = subprocess.run(['/usr/lib/oblivion/guest/conversation.sh', 'run', '--format', 'json',
+        result = subprocess.run(['/usr/lib/oblivion/guest/chat.sh', 'run', '--format', 'json',
             'Synthetic adapter connectivity check'], stdin=subprocess.DEVNULL, capture_output=True,
             text=True, timeout=150)
         output = result.stdout + result.stderr
