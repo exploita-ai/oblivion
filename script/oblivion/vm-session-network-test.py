@@ -513,12 +513,12 @@ fourth = probe(client)
 assert fourth not in [first, second, third]
 _, owner = ready()
 os.kill(owner, signal.SIGSTOP)
-command("force-leave")
+assert command("force-leave", success=False) == "locked_without_tor_state"
 client.close()
 stopped()
 assert not status()["session_open"]
 command("lock")
-check("a frozen host owner cannot acknowledge revoke; closure instead destroys the gateway before releasing the session volume")
+check("a frozen host owner cannot confirm its checkpoint; closure reports that warning and destroys the gateway before releasing the session volume")
 
 command("unlock", secret=GENERAL)
 command("enter", a, secret=PASSWORD)
