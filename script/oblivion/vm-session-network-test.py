@@ -253,7 +253,9 @@ check("saving an API key keeps the gateway stopped until a chat starts")
 a = command("create", secret=PASSWORD)
 b = command("create", secret=b"synthetic-session-password-b")
 if SOCKS:
-    command("settings", secret=b'{"action":"access","mode":"strict","save":true}')
+    # The console-only lab has no keyboard catalog. Keep its host default in
+    # RAM; session rules and each session's inherited access mode persist.
+    command("settings", secret=b'{"action":"access","mode":"strict","save":false}')
     policy_command = json.dumps({"action": "put", "rule": {
         "destination": "denied.example.com", "port": 443, "action": "deny", "session": a}, "save": True}).encode()
     command("network-policy", secret=policy_command)
