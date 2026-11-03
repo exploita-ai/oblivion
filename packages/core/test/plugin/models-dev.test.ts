@@ -124,6 +124,25 @@ const richSnapshot = (name = "Acme") => {
 }
 
 describe("ModelsDevPlugin", () => {
+  isolated.effect("loads Oblivion provider limits from the bundled catalog", () =>
+    Effect.gen(function* () {
+      const service = yield* ModelsDev.Service
+      const catalog = yield* service.get()
+      for (const [providerID, modelID, context, output] of [
+        ["abliteration-ai", "abliterated-model", 262_144, 262_134],
+        ["abliteration-ai", "abliterated-model-large-v2", 1_000_000, 999_990],
+        ["abliteration-ai", "abliterated-model-large-flash", 1_048_576, 262_144],
+        ["refuseless", "glm-5.3-abliterated", 1_048_576, 131_072],
+        ["refuseless", "minimax-m3.1-flash", 1_048_576, 512_000],
+      ] as const) {
+        const provider = required(catalog.find((item) => item.info.id === providerID))
+        const model = required(provider.models.find((item) => item.id === modelID))
+        expect(model.limit.context).toBe(context)
+        expect(model.limit.output).toBe(output)
+      }
+    }).pipe(Effect.provide(models(path.join(import.meta.dir, "../../src/models-dev/snapshot.txt")))),
+  )
+
   isolated.effect("shares definitions between Locations while provider and model edits own their copies", () =>
     Effect.gen(function* () {
       const { providerID, modelID, snapshot } = richSnapshot()

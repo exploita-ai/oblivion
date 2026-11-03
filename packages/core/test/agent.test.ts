@@ -179,6 +179,7 @@ describe("Agent", () => {
       const agents = yield* agent.list()
       expect(agents.map((item) => String(item.id)).sort()).toEqual([
         "build",
+        "build-no-tools",
         "compaction",
         "explore",
         "general",
@@ -186,6 +187,15 @@ describe("Agent", () => {
         "title",
       ])
       expect((yield* agent.get(Agent.defaultID))?.system).toBeUndefined()
+      const noTools = yield* agent.get(Agent.noToolsID)
+      expect(noTools).toMatchObject({ name: "Build No Tools", mode: "primary", hidden: false })
+      expect(agents.filter((item) => item.mode === "primary" && !item.hidden).map((item) => item.id)).toEqual([
+        Agent.defaultID,
+        Agent.noToolsID,
+      ])
+      expect(Agent.permissions(noTools, [{ action: "*", resource: "*", effect: "allow" }])).toEqual([
+        { action: "*", resource: "*", effect: "deny" },
+      ])
       const permissions = (yield* agent.get(Agent.defaultID))?.permissions ?? []
       const compaction = yield* agent.get(Agent.ID.make("compaction"))
       expect(compaction?.mode).toBe("primary")

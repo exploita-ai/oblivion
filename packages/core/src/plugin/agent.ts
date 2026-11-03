@@ -60,6 +60,16 @@ export const Plugin = define({
         item.permissions.push({ action: "question", resource: "*", effect: "allow" })
       })
 
+      editor.update(Agent.noToolsID, (item) => {
+        item.name = Agent.Name.make("Build No Tools")
+        item.description =
+          "Discuss, reason and write code in chat without running tools or accessing files and the web."
+        item.mode = "primary"
+        item.system =
+          "You are Build No Tools. Help with conversations, research and code using only the conversation and context explicitly provided to you. Tools are disabled: you cannot read or modify files, execute commands, browse the web, or delegate work. Do not claim to have performed those actions. You may explain steps and provide code for the user to run. If necessary context is missing, ask the user to provide it in the conversation."
+        item.permissions.push({ action: "*", resource: "*", effect: "deny" })
+      })
+
       editor.update(Agent.ID.make("general"), (item) => {
         item.name = Agent.Name.make("General")
         item.description =

@@ -85,6 +85,8 @@ import { TodoTool } from "../tool/plugin/todo.js"
 import { Tool } from "../tool.js"
 import { ToolOutput } from "../tool-output.js"
 import { WebFetchTool } from "../tool/plugin/webfetch.js"
+import { TorRotateTool } from "../tool/plugin/tor-rotate.js"
+import { Oblivion } from "@opencode/util/oblivion"
 import { WebSearchTool } from "../tool/plugin/websearch.js"
 import { WellKnown } from "../wellknown.js"
 import { WriteTool } from "../tool/plugin/write.js"
@@ -249,6 +251,7 @@ const pre = [
   SubagentTool.Plugin,
   TodoTool.Plugin,
   WebFetchTool.Plugin,
+  ...(Oblivion.enabled ? [TorRotateTool.Plugin] : []),
   WebSearchTool.Plugin,
   WriteTool.Plugin,
   WarmingPlugin.Plugin,

@@ -36,7 +36,19 @@ test.skipIf(!Oblivion.enabled).each([100, 80, 44])("Oblivion limits the actual a
       if (request.method === "POST") mutations.push(url.pathname)
       if (url.pathname === "/api/location") return json(location)
       if (url.pathname === "/api/agent")
-        return json({ location, data: [{ id: "build", mode: "primary", hidden: false, permissions: [] }] })
+        return json({
+          location,
+          data: [
+            { id: "build", name: "Build", mode: "primary", hidden: false, permissions: [] },
+            {
+              id: "build-no-tools",
+              name: "Build No Tools",
+              mode: "primary",
+              hidden: false,
+              permissions: [{ action: "*", resource: "*", effect: "deny" }],
+            },
+          ],
+        })
       if (url.pathname === "/api/provider")
         return json({
           location,
@@ -76,8 +88,13 @@ test.skipIf(!Oblivion.enabled).each([100, 80, 44])("Oblivion limits the actual a
   expect(home).not.toContain("Web OPEN")
   expect(setup.captureCharFrame()).not.toContain("DevTools")
   await setup.mockInput.pressKey("F4")
-  await setup.renderOnce()
-  expect(setup.captureCharFrame()).not.toContain("Select agent")
+  await visible(
+    setup,
+    (frame) => frame.includes("Select agent") && setup.renderer.currentFocusedRenderable instanceof InputRenderable,
+  )
+  expect(setup.captureCharFrame()).toContain("Build No Tools")
+  await setup.mockInput.pressEscape()
+  await visible(setup, () => setup.renderer.currentFocusedRenderable instanceof TextareaRenderable)
   await setup.mockInput.pressKey("F2")
   await visible(
     setup,
@@ -88,8 +105,9 @@ test.skipIf(!Oblivion.enabled).each([100, 80, 44])("Oblivion limits the actual a
   expect(palette).toContain("Resume chat")
   expect(palette).not.toContain("Privacy Web")
   expect(palette).not.toContain("Connect integration")
-  expect(palette).not.toContain("Switch agent")
   expect(palette).not.toContain("worktree")
+  await setup.mockInput.typeText("Switch agent")
+  await visible(setup, (frame) => frame.includes("Switch agent"))
   await setup.mockInput.pressEscape()
   await visible(setup, () => setup.renderer.currentFocusedRenderable instanceof TextareaRenderable)
   await setup.mockInput.pressKey("F3")
@@ -99,6 +117,26 @@ test.skipIf(!Oblivion.enabled).each([100, 80, 44])("Oblivion limits the actual a
   )
   expect(setup.captureCharFrame()).toContain("Allowed model")
   expect(setup.captureCharFrame()).not.toContain("Excluded model")
+  await setup.mockInput.pressEscape()
+  await visible(setup, () => setup.renderer.currentFocusedRenderable instanceof TextareaRenderable)
+  await setup.mockInput.pressKey("TAB", { shift: true })
+  await visible(setup, (frame) => frame.includes("Build No Tools"))
+  await setup.mockInput.pressKey("TAB", { shift: true })
+  await visible(setup, (frame) => !frame.includes("Build No Tools"))
+  await setup.mockInput.typeText("/agents")
+  await visible(setup, (frame) => frame.includes("Switch agent"))
+  await setup.mockInput.pressEnter()
+  await visible(
+    setup,
+    (frame) => frame.includes("Select agent") && setup.renderer.currentFocusedRenderable instanceof InputRenderable,
+  )
+  await setup.mockInput.typeText("Build No Tools")
+  await setup.renderOnce()
+  await setup.mockInput.pressEnter()
+  await visible(
+    setup,
+    (frame) => frame.includes("Build No Tools") && setup.renderer.currentFocusedRenderable instanceof TextareaRenderable,
+  )
   expect(mutations).toEqual([])
 })
 

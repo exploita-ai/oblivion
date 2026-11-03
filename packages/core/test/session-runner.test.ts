@@ -56,6 +56,7 @@ import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { PluginPromise } from "@opencode/core/plugin/promise"
 import { OptimizePlugin } from "@opencode/core/plugin/optimize"
 import { IdentityPlugin } from "@opencode/core/plugin/identity"
+import { AgentPlugin } from "@opencode/core/plugin/agent"
 import { QuestionTool } from "@opencode/core/tool/plugin/question"
 import { Agent } from "@opencode/core/agent"
 import { Config } from "@opencode/core/config"
@@ -1124,6 +1125,45 @@ describe("SessionRunnerLLM", () => {
         Expected.completedTool({ id: "call-location" }, { content: [Expected.text('{"answer":"HELLO"}')] }),
       ]),
     ])
+  })
+
+  scenario("Build No Tools never advertises or executes tools and switching back restores Build", function* (s) {
+    const agents = yield* Agent.Service
+    yield* AgentPlugin.Plugin.effect(host({ agent: agentHost(agents) }))
+    yield* s.db
+      .update(SessionTable)
+      .set({
+        agent: Agent.noToolsID,
+        permission: [{ action: "*", resource: "*", effect: "allow" }],
+      })
+      .where(eq(SessionTable.id, sessionID))
+      .run()
+      .pipe(Effect.orDie)
+    yield* s.admit("Discuss this without using tools")
+    // Even unsolicited tool calls from a model must not execute.
+    yield* s.llm.push(
+      TestLLM.tool("call-disabled", "echo", { text: "must not run" }),
+      TestLLM.text("No tools were run.", "text-disabled"),
+    )
+    yield* s.resume
+    expect(s.requests.length).toBeGreaterThan(0)
+    for (const request of s.requests) expect(request.tools).toEqual([])
+    expect(s.executions).toEqual([])
+
+    yield* s.db
+      .update(SessionTable)
+      .set({ agent: Agent.defaultID })
+      .where(eq(SessionTable.id, sessionID))
+      .run()
+      .pipe(Effect.orDie)
+    yield* s.admit("Use Build now")
+    yield* s.llm.push(
+      TestLLM.tool("call-enabled", "echo", { text: "Build still works" }),
+      TestLLM.text("Done.", "text-enabled"),
+    )
+    yield* s.resume
+    expect(s.requests.at(-1)?.tools.map((tool) => tool.name)).toContain("echo")
+    expect(s.executions).toEqual(["Build still works"])
   })
 
   scenario("executes a tool renamed by a session context hook", function* (s) {
@@ -3535,12 +3575,13 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests[1]?.generation?.maxTokens).toBeGreaterThan(100_000 - 50_000 - 200)
   })
 
-  scenario("caps the output limit a large model advertises", function* (s) {
+  scenario("uses a large model output limit within the remaining context", function* (s) {
     s.currentModel = largeOutputModel
     yield* s.llm.push(TestLLM.text("Answer", "text-large-output"))
     yield* s.runPrompt("Question")
 
-    expect(s.requests[0]?.generation?.maxTokens).toBe(256_000)
+    expect(s.requests[0]?.generation?.maxTokens).toBeGreaterThan(900_000)
+    expect(s.requests[0]?.generation?.maxTokens).toBeLessThan(1_000_000)
   })
 
   scenario("gives the summary its full output limit when the conversation overshot the threshold", function* (s) {

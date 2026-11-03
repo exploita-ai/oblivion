@@ -707,6 +707,35 @@ describe("Tool", () => {
     }),
   )
 
+  it.effect("Build No Tools excludes direct, namespaced and Code Mode tools even with permissive rules", () =>
+    Effect.gen(function* () {
+      const service = yield* Tool.Service
+      const executions: string[] = []
+      const tool = {
+        ...make(),
+        execute: () =>
+          Effect.sync(() => {
+            executions.push("executed")
+            return { output: { text: "ran" } }
+          }),
+      }
+      yield* transform(service, { shell: tool }, { codemode: false })
+      yield* transform(service, { fetch: tool }, { codemode: false, namespace: "mcp" })
+      yield* transform(service, { read: tool })
+      const snapshot = yield* service.snapshot(
+        Agent.permissions(Agent.Info.default(Agent.noToolsID), [{ action: "*", resource: "*", effect: "allow" }]),
+      )
+      expect(snapshot.definitions).toEqual([])
+      expect(snapshot.codeModeCatalog).toBeUndefined()
+      for (const name of ["shell", "mcp_fetch", "read", "execute"]) {
+        expect(yield* snapshot.execute({ ...call(name), agent: Agent.noToolsID }).pipe(Effect.flip)).toBeInstanceOf(
+          Tool.Error,
+        )
+      }
+      expect(executions).toEqual([])
+    }),
+  )
+
   it.effect("keeps permission options isolated between registrations", () =>
     Effect.gen(function* () {
       const service = yield* Tool.Service

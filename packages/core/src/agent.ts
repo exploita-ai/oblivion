@@ -11,11 +11,18 @@ export type ID = typeof ID.Type
 export const Name = Agent.Name
 export type Name = Agent.Name
 export const defaultID = ID.make("build")
+export const noToolsID = ID.make("build-no-tools")
 
 export const Color = Agent.Color
 
 export const Info = Agent.Info
 export type Info = Agent.Info
+
+/** This agent is tool-free even when a chat or configuration allows everything. */
+export function permissions(agent: Info | undefined, session: Info["permissions"] = []): Info["permissions"] {
+  if (agent?.id === noToolsID) return [{ action: "*", resource: "*", effect: "deny" }]
+  return [...(agent?.permissions ?? [{ action: "*", resource: "*", effect: "deny" }]), ...session]
+}
 
 export { Event } from "@opencode/schema/agent"
 

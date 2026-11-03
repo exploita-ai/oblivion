@@ -1,7 +1,6 @@
 export * as SessionContext from "./context.js"
 
 import { Model } from "../model.js"
-import { Permission } from "../permission.js"
 import { Context, Effect, Layer } from "effect"
 import { Agent } from "../agent.js"
 import { CodeModeInstructions } from "../codemode/instructions.js"
@@ -133,7 +132,7 @@ const layer = Layer.effect(
       const agent = yield* agents.select(session.agent)
       if (!agent.info) return yield* new AgentNotFoundError({ sessionID: session.id, agent: session.agent ?? agent.id })
       // Session permissions narrow discovery the same way they narrow the tool snapshot.
-      const permissions = Permission.merge(agent.info.permissions, session.permissions ?? [])
+      const permissions = Agent.permissions(agent.info, session.permissions ?? [])
       const loaded = yield* Effect.all(
         {
           tools: registry.snapshot(permissions),

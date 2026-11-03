@@ -16,7 +16,6 @@ import { PluginHooks } from "./plugin/hooks.js"
 const PermissionEffect = Permission.Effect
 export { PermissionEffect as Effect }
 export { Rule, Ruleset } from "@opencode/schema/permission"
-const missingAgentPermissions: Permission.Ruleset = [{ action: "*", resource: "*", effect: "deny" }]
 
 export const ID = Permission.ID
 export type ID = typeof ID.Type
@@ -146,7 +145,7 @@ const layer = Layer.effect(
       const session = yield* sessions.get(sessionID)
       if (!session) return yield* new SessionErrors.NotFoundError({ sessionID })
       const agent = yield* agents.resolve(agentID ?? session.agent)
-      return merge(agent?.permissions ?? missingAgentPermissions, session.permissions ?? [])
+      return Agent.permissions(agent, session.permissions ?? [])
     })
 
     function denied(input: Pick<Request, "action" | "resources">, rules: Permission.Ruleset) {

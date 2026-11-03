@@ -1,8 +1,39 @@
 import { describe, expect, test } from "bun:test"
 import { Message, ToolResultPart, Media } from "@opencode/ai"
-import { boundImages, unsupportedParts } from "@opencode/core/session/model-request"
+import { boundImages, outputLimit, unsupportedParts } from "@opencode/core/session/model-request"
+import snapshotText from "../src/models-dev/snapshot.txt" with { type: "text" }
 
 const capabilities = (input: string[]) => ({ tools: true, input, output: ["text"] })
+
+describe("SessionModelRequest.outputLimit", () => {
+  test("uses each provider model's output limit instead of a universal ceiling", () => {
+    const catalog = JSON.parse(snapshotText) as Record<
+      string,
+      { models: Record<string, { limit: { context: number; output: number } }> }
+    >
+    for (const provider of ["abliteration-ai", "refuseless", "openrouter"]) {
+      for (const model of Object.values(catalog[provider].models)) {
+        expect(outputLimit(model.limit, { measured: 0, estimated: 0 })).toBe(
+          Math.min(model.limit.context, model.limit.output),
+        )
+        expect(outputLimit(model.limit, { measured: 1000, estimated: 200 })).toBe(
+          Math.min(model.limit.output, Math.max(1024, model.limit.context - 1230)),
+        )
+      }
+    }
+  })
+
+  test("allows Large V2 output above 256k and leaves room for its prompt", () => {
+    expect(outputLimit({ context: 1_000_000, output: 999_990 }, { measured: 10_000, estimated: 0 })).toBe(990_000)
+    expect(outputLimit({ context: 1_000_000, output: 999_990 }, { measured: 900_000, estimated: 10_000 })).toBe(88_500)
+    expect(outputLimit({ context: 1_000_000, output: 8192 }, { measured: 10_000, estimated: 0 })).toBe(8192)
+  })
+
+  test("uses the fallback only when the catalog output limit is unknown", () => {
+    expect(outputLimit({ context: 200_000, output: 0 })).toBe(32_000)
+    expect(outputLimit({ context: 200_000, output: 0 }, { measured: 180_000, estimated: 0 })).toBe(20_000)
+  })
+})
 
 describe("SessionModelRequest.unsupportedParts", () => {
   test("replaces unsupported user media with a visible error", () => {

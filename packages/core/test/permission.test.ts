@@ -98,6 +98,33 @@ function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
 }
 
 describe("Permission", () => {
+  it.effect("Build No Tools cannot be re-enabled by agent or session allow rules", () =>
+    Effect.gen(function* () {
+      yield* setup()
+      const agents = yield* Agent.Service
+      yield* agents.transform((editor) =>
+        editor.update(Agent.noToolsID, (agent) => {
+          agent.permissions = [{ action: "*", resource: "*", effect: "allow" }]
+        }),
+      )
+      const database = yield* Database.Service
+      yield* database.db
+        .update(SessionTable)
+        .set({
+          agent: Agent.noToolsID,
+          permission: [{ action: "*", resource: "*", effect: "allow" }],
+        })
+        .where(eq(SessionTable.id, Session.ID.make("ses_test")))
+        .run()
+        .pipe(Effect.orDie)
+      const service = yield* Permission.Service
+      for (const action of ["read", "edit", "shell", "webfetch", "subagent", "execute", "question", "mcp_fetch"]) {
+        expect(yield* service.assert(assertion({ action })).pipe(Effect.flip)).toBeInstanceOf(Permission.BlockedError)
+      }
+      expect(yield* service.list()).toEqual([])
+    }),
+  )
+
   it.effect("returns the evaluated effect and only queues prompts", () =>
     Effect.gen(function* () {
       yield* setup([{ action: "read", resource: "*", effect: "allow" }])
