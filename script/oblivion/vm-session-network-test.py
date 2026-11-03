@@ -566,7 +566,9 @@ if SOCKS:
     assert b"-netdev" not in Path(f"/proc/{documents}/cmdline").read_bytes()
     assert stream_status()["active"] == [] and stream_status()["closed"] == [1, 2]
     assert tor_state.stat().st_uid == 0 and tor_state.stat().st_mode & 0o777 == 0o600
-    assert "TorVersion Tor 0.4.9.15\n" in tor_state.read_text()
+    # Checkpoints write only changed guards. A retained seed may therefore
+    # still carry its original reviewed Tor version instead of the runtime's.
+    assert any(f"TorVersion Tor {version}\n" in tor_state.read_text() for version in ["0.4.9.14", "0.4.9.15"])
     assert guard_id in tor_state.read_text()
     assert all(line.startswith(("Guard ", "TorVersion ", "LastWritten ")) for line in tor_state.read_text().splitlines())
     check("SOCKS-to-Tor imports the session guard; absent bootstrap preserves the same offline Documents VM without a network device or SOCKS fallback")
