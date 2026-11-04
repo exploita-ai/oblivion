@@ -36,6 +36,41 @@ pub fn send(channel: &mut Channel, selection: &mut Selection, id: &str) -> io::R
     Ok(receipt)
 }
 
+/// A personal backup receiver owns one empty local file. The peer can offer
+/// only the fixed LUKS2 payload, never a local path or an archive to extract.
+pub fn download_open_file(channel: &mut Channel, mut file: std::fs::File, maximum: u64, id: &str) -> io::Result<Receipt> {
+    use std::io::Seek;
+    use std::os::fd::AsRawFd;
+    validate_id(id)?;
+    require((32 * 1024 * 1024..=crate::MAX_ENCRYPTED_VOLUME_BYTES).contains(&maximum), "invalid_backup_limit")?;
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    let metadata = file.metadata()?;
+    require(flags >= 0 && flags & libc::O_ACCMODE != libc::O_RDONLY && flags & libc::O_APPEND == 0
+        && metadata.is_file() && metadata.nlink() == 1 && metadata.len() == 0
+        && metadata.uid() == unsafe { libc::getuid() } && metadata.mode() & 0o077 == 0, "unsafe_backup_destination")?;
+    let limits = Limits { entries: 1, bytes: maximum };
+    write_message(channel, &OfferRequest { id: id.into(), limits, paths: vec![crate::ENCRYPTED_VOLUME_NAME.into()] })?;
+    let manifest = Manifest::read(channel, limits)?;
+    let [crate::Entry::File { path, size, sha256 }] = manifest.entries() else { return Err(invalid("invalid_backup_selection")) };
+    require(path == crate::ENCRYPTED_VOLUME_NAME && *size >= 32 * 1024 * 1024, "invalid_backup_selection")?;
+    write_message(channel, &Approval { id: id.into(), manifest_sha256: manifest.sha256() })?;
+    file.rewind()?;
+    let mut magic = [0; 8];
+    channel.read_exact(&mut magic)?;
+    require(&magic == b"LUKS\xba\xbe\x00\x02", "invalid_encrypted_volume")?;
+    let mut content = io::Cursor::new(magic).chain((&mut *channel).take(*size - 8));
+    require(crate::copy_hash(&mut content, &mut file, *size)? == *sha256, "content_changed")?;
+    let mut end = [0; 8]; channel.read_exact(&mut end)?;
+    require(&end == crate::END, "invalid_transfer_end")?;
+    file.sync_all()?;
+    channel.check()?;
+    let receipt = Receipt { id: id.into(), manifest_sha256: manifest.sha256(), entries: 1, bytes: *size };
+    write_message(channel, &receipt)?;
+    let mut copied = [0; 7]; channel.read_exact(&mut copied)?;
+    require(&copied == b"copied\n", "source_not_completed")?;
+    Ok(receipt)
+}
+
 /// The local launcher chooses both roots, name and ceiling. The peer supplies
 /// only one declared top-level file/directory, never an archive to extract.
 pub fn receive_directory(channel: &mut Channel, inbox: &Path, target: &Path, name: &str, limits: Limits) -> io::Result<Receipt> {

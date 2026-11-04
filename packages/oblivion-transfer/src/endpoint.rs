@@ -50,6 +50,16 @@ pub fn documents(channel: &mut Channel, root: &Path) -> io::Result<()> {
 /// ceiling; its peer can neither browse nor request another file. This checks
 /// the LUKS2 signature, not the authenticity or integrity of its filesystem.
 pub fn send_open_file(channel: &mut Channel, file: File, maximum: u64) -> io::Result<()> {
+    send_open_file_receipt(channel, file, maximum).map(|_| ())
+}
+
+pub fn send_open_file_receipt(channel: &mut Channel, file: File, maximum: u64) -> io::Result<Receipt> {
+    send_open_file_completed(channel, file, maximum, |_| Ok(()))
+}
+
+/// Completion is recorded before the final wire acknowledgment. A lost peer
+/// can reconcile the completed copy without replaying its mutation.
+pub fn send_open_file_completed(channel: &mut Channel, file: File, maximum: u64, completed: impl FnOnce(&Receipt) -> io::Result<()>) -> io::Result<Receipt> {
     require(
         (32 * 1024 * 1024..=crate::MAX_ENCRYPTED_VOLUME_BYTES).contains(&maximum),
         "invalid_backup_limit",
@@ -65,7 +75,7 @@ pub fn send_open_file(channel: &mut Channel, file: File, maximum: u64) -> io::Re
         "invalid_backup_limit",
     )?;
     let mut selection = Selection::encrypted_volume(file, request.limits.bytes)?;
-    send_selection(channel, &mut selection, &request.id)
+    send_selection_completed(channel, &mut selection, &request.id, completed)
 }
 
 /// A media source keeps its existing paginated browser, but a backup offer
@@ -86,7 +96,15 @@ pub fn send_encrypted(channel: &mut Channel, root: &Path) -> io::Result<()> {
 /// The controller supplies an empty writable file descriptor, never a root or
 /// destination name from the peer. A receipt means the ciphertext is copied
 /// and synced; the controller must still unlock and validate the new archive.
-pub fn receive_open_file(channel: &mut Channel, mut file: File, maximum: u64) -> io::Result<()> {
+pub fn receive_open_file(channel: &mut Channel, file: File, maximum: u64) -> io::Result<()> {
+    receive_open_file_receipt(channel, file, maximum).map(|_| ())
+}
+
+pub fn receive_open_file_receipt(channel: &mut Channel, file: File, maximum: u64) -> io::Result<Receipt> {
+    receive_open_file_completed(channel, file, maximum, |_| Ok(()))
+}
+
+pub fn receive_open_file_completed(channel: &mut Channel, mut file: File, maximum: u64, completed: impl FnOnce(&Receipt) -> io::Result<()>) -> io::Result<Receipt> {
     require(
         (32 * 1024 * 1024..=crate::MAX_ENCRYPTED_VOLUME_BYTES).contains(&maximum),
         "invalid_backup_limit",
@@ -137,15 +155,15 @@ pub fn receive_open_file(channel: &mut Channel, mut file: File, maximum: u64) ->
     require(&end == crate::END, "invalid_transfer_end")?;
     file.sync_all()?;
     channel.check()?;
-    write_message(
-        channel,
-        &crate::Receipt {
+    let receipt = crate::Receipt {
             id: request.approval.id,
             manifest_sha256: manifest.sha256(),
             entries: 1,
             bytes: *size,
-        },
-    )
+        };
+    completed(&receipt)?;
+    write_message(channel, &receipt)?;
+    Ok(receipt)
 }
 
 fn source_request(channel: &mut Channel, root: &Path, documents: bool) -> io::Result<OfferRequest> {
@@ -184,6 +202,14 @@ fn send_from(channel: &mut Channel, root: &Path, documents: bool) -> io::Result<
 }
 
 fn send_selection(channel: &mut Channel, selection: &mut Selection, id: &str) -> io::Result<()> {
+    send_selection_receipt(channel, selection, id).map(|_| ())
+}
+
+fn send_selection_receipt(channel: &mut Channel, selection: &mut Selection, id: &str) -> io::Result<Receipt> {
+    send_selection_completed(channel, selection, id, |_| Ok(()))
+}
+
+fn send_selection_completed(channel: &mut Channel, selection: &mut Selection, id: &str, completed: impl FnOnce(&Receipt) -> io::Result<()>) -> io::Result<Receipt> {
     selection.manifest().write(channel)?;
     let approval: Approval = read_message(channel, 1024)?;
     require(
@@ -199,7 +225,9 @@ fn send_selection(channel: &mut Channel, selection: &mut Selection, id: &str) ->
             && receipt.bytes == selection.manifest().bytes(),
         "invalid_receipt",
     )?;
-    channel.write_all(b"copied\n")
+    completed(&receipt)?;
+    channel.write_all(b"copied\n")?;
+    Ok(receipt)
 }
 
 /// The destination root is chosen locally, never from the peer's request.
