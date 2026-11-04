@@ -7,15 +7,21 @@ use oblivion_wire::control::{Request, valid_id};
 use oblivion_wire::control_client::{self, Framing};
 use oblivion_wire::slot::Slot;
 use std::io::{self, Read, Write};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::process::Child;
+use std::ptr::null_mut;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+use windows_sys::Win32::Foundation::DuplicateHandle;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
 pub type BoxResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub struct Client {
     name: Vec<u16>,
     identity: Identity,
+    process: Option<OwnedHandle>,
 }
 
 /// One exclusive pipe owner; moving the channel transfers both read/write
@@ -39,7 +45,30 @@ impl Client {
                 .chain(Some(0))
                 .collect(),
             identity: Identity::current()?,
+            process: None,
         })
+    }
+
+    pub(crate) fn for_child(runtime_id: &str, child: &Child) -> crate::Result<Self> {
+        let mut client = Self::new(runtime_id)?;
+        let mut process = null_mut();
+        let current = unsafe { GetCurrentProcess() };
+        if unsafe {
+            DuplicateHandle(
+                current,
+                child.as_raw_handle(),
+                current,
+                &mut process,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                0,
+            )
+        } == 0
+        {
+            return Err(Error("runtime_process_identity_unavailable"));
+        }
+        client.process = Some(unsafe { OwnedHandle::from_raw_handle(process) });
+        Ok(client)
     }
 
     pub fn request(
@@ -73,10 +102,9 @@ impl Client {
         if !valid_id(&client) {
             return Err(Error("invalid_client_id").into());
         }
-        channel.check()?;
+        channel.claim_lease()?;
         // Agent work and idle periods can outlast the initial RPC. Only a
         // successful attachment handshake can remove that exchange deadline.
-        channel.deadline = None;
         // The same Pipe retains any prefetched bytes after the response frame.
         // Transport close revokes the lease; native stdin EOF stays framed.
         Ok((channel, client))
@@ -105,6 +133,9 @@ impl Client {
         }
         let deadline = deadline.min(Instant::now() + request.operation.response_budget());
         let pipe = private::connect_control(&self.name, &self.identity, &stop, deadline)?;
+        if let Some(process) = &self.process {
+            pipe.verify_server_process(process)?;
+        }
         let mut channel = Channel::new(pipe, stop, deadline);
         control_client::write_request(&mut channel, &request, secret, Framing::Native)
             .map_err(control_client::Error::into_boxed)?;
@@ -116,13 +147,21 @@ impl Client {
 }
 
 impl Channel {
-    fn new(pipe: Pipe, stop: Arc<AtomicBool>, deadline: Instant) -> Self {
+    pub(crate) fn new(pipe: Pipe, stop: Arc<AtomicBool>, deadline: Instant) -> Self {
         Self {
             pipe,
             stop,
             deadline: Some(deadline),
             closed: false,
         }
+    }
+
+    // Only authenticated protocol handshakes inside this crate can grant a
+    // long-lived lease. The public deadline setter cannot revive expired I/O.
+    pub(crate) fn claim_lease(&mut self) -> io::Result<()> {
+        self.check()?;
+        self.deadline = None;
+        Ok(())
     }
 
     /// The caller explicitly supplies the next exchange's budget. A timed-out

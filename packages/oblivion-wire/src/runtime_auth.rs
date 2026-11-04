@@ -1,15 +1,42 @@
 //! Private runtime handshakes. OS adapters supply entropy and streams whose
 //! individual I/O calls are bounded; tokens never enter diagnostic data.
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
-pub const READY: &[u8; 8] = b"OBLVPRV1";
-pub const SET: &[u8; 8] = b"OBLVSET1";
+pub const READY: &[u8; 8] = b"OBLVPRV2";
+pub const SET: &[u8; 8] = b"OBLVSET2";
 pub const HELLO: &[u8; 8] = b"OBLVCTL1";
 pub const ACK: &[u8; 8] = b"OBLVAUT1";
+
+pub const DATA_LIMIT: usize = 512;
+
+/// The host may authorize initialization only while it owns the capability
+/// returned by creating a fresh disk. Paths and device selectors are excluded.
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum Data {
+    Existing,
+    NewDisk { runtime_id: String, bytes: u64 },
+}
+
+impl Data {
+    pub fn validate(&self) -> Result<()> {
+        if let Self::NewDisk { runtime_id, bytes } = self {
+            if !crate::control::valid_id(runtime_id)
+                || runtime_id.bytes().all(|byte| byte == b'0')
+                || !(4 * 1024 * 1024 * 1024..=1024 * 1024 * 1024 * 1024).contains(bytes)
+                || bytes % (1024 * 1024) != 0
+            {
+                return Err(Error("invalid_runtime_data_authority"));
+            }
+        }
+        Ok(())
+    }
+}
 
 pub struct Token(Zeroizing<[u8; 32]>);
 impl Token {
@@ -31,9 +58,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub fn provision(
     stream: &mut (impl Read + Write),
     token: &Token,
+    data: &Data,
     stop: &AtomicBool,
     deadline: Instant,
 ) -> Result<()> {
+    data.validate()?;
+    let data = serde_json::to_vec(data).map_err(|_| Error("invalid_runtime_data_authority"))?;
+    if data.len() > DATA_LIMIT {
+        return Err(Error("invalid_runtime_data_authority"));
+    }
     let mut ready = [0; 8];
     receive(stream, &mut ready, stop, deadline)?;
     if &ready != READY {
@@ -42,6 +75,20 @@ pub fn provision(
     send(
         stream,
         token.0.as_slice(),
+        stop,
+        deadline,
+        "runtime_auth_provision_failed",
+    )?;
+    send(
+        stream,
+        &(data.len() as u32).to_be_bytes(),
+        stop,
+        deadline,
+        "runtime_auth_provision_failed",
+    )?;
+    send(
+        stream,
+        &data,
         stop,
         deadline,
         "runtime_auth_provision_failed",
@@ -139,7 +186,7 @@ fn retryable(error: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ACK, Error, HELLO, READY, SET, Token, authenticate, provision};
+    use super::{ACK, Data, Error, HELLO, READY, SET, Token, authenticate, provision};
     use std::io::{self, Cursor, Read, Write};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
@@ -200,13 +247,15 @@ mod tests {
     }
 
     #[test]
-    fn ready_gates_token_and_connection_preserves_existing_wire_bytes() {
+    fn ready_gates_token_and_authority_before_current_control_authentication() {
         let stop = AtomicBool::new(false);
         let deadline = Instant::now() + Duration::from_secs(1);
         let mut bootstrap = stream(&[READY.as_slice(), SET.as_slice()].concat());
-        provision(&mut bootstrap, &token(), &stop, deadline).unwrap();
-        assert_eq!(bootstrap.output.as_slice(), &[7; 32]);
-        assert_eq!(bootstrap.flushed, 1);
+        provision(&mut bootstrap, &token(), &Data::Existing, &stop, deadline).unwrap();
+        assert_eq!(&bootstrap.output[..32], &[7; 32]);
+        assert_eq!(&bootstrap.output[32..36], &19u32.to_be_bytes());
+        assert_eq!(&bootstrap.output[36..], br#"{"kind":"existing"}"#);
+        assert_eq!(bootstrap.flushed, 3);
         let mut connection = stream(ACK);
         authenticate(&mut connection, &token(), &stop, deadline).unwrap();
         assert_eq!(&connection.output[..8], HELLO);
@@ -224,12 +273,14 @@ mod tests {
         provision(
             &mut stream,
             &token(),
+            &Data::Existing,
             &AtomicBool::new(false),
             Instant::now() + Duration::from_secs(1),
         )
         .unwrap();
-        assert_eq!(stream.output.as_slice(), &[7; 32]);
-        assert_eq!(stream.flushed, 1);
+        assert_eq!(&stream.output[..32], &[7; 32]);
+        assert_eq!(&stream.output[36..], br#"{"kind":"existing"}"#);
+        assert_eq!(stream.flushed, 3);
     }
 
     #[test]
@@ -240,6 +291,7 @@ mod tests {
             provision(
                 &mut wrong,
                 &token(),
+                &Data::Existing,
                 &stop,
                 Instant::now() + Duration::from_secs(1)
             ),
@@ -252,6 +304,7 @@ mod tests {
             provision(
                 &mut cancelled,
                 &token(),
+                &Data::Existing,
                 &stop,
                 Instant::now() + Duration::from_secs(1)
             ),
@@ -260,7 +313,13 @@ mod tests {
         assert!(cancelled.output.is_empty());
         stop.store(false, Ordering::Relaxed);
         assert_eq!(
-            provision(&mut cancelled, &token(), &stop, Instant::now()),
+            provision(
+                &mut cancelled,
+                &token(),
+                &Data::Existing,
+                &stop,
+                Instant::now()
+            ),
             Err(Error("runtime_auth_timeout"))
         );
         assert!(cancelled.output.is_empty());
@@ -282,9 +341,52 @@ mod tests {
         );
         let mut failing = stream(READY);
         failing.fail_write = true;
-        let error = provision(&mut failing, &token(), &stop, deadline).unwrap_err();
+        let error =
+            provision(&mut failing, &token(), &Data::Existing, &stop, deadline).unwrap_err();
         assert_eq!(error, Error("runtime_auth_provision_failed"));
         assert!(!format!("{error:?} {error}").contains("canary"));
         assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn fresh_disk_authority_has_only_bounded_identity_and_capacity() {
+        let stop = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut bootstrap = stream(&[READY.as_slice(), SET.as_slice()].concat());
+        provision(
+            &mut bootstrap,
+            &token(),
+            &Data::NewDisk {
+                runtime_id: "a".repeat(32),
+                bytes: 8 * 1024 * 1024 * 1024,
+            },
+            &stop,
+            deadline,
+        )
+        .unwrap();
+        let data: Data = serde_json::from_slice(&bootstrap.output[36..]).unwrap();
+        data.validate().unwrap();
+        for data in [
+            Data::NewDisk {
+                runtime_id: "0".repeat(32),
+                bytes: 8 * 1024 * 1024 * 1024,
+            },
+            Data::NewDisk {
+                runtime_id: "a".repeat(32),
+                bytes: 1,
+            },
+            Data::NewDisk {
+                runtime_id: "a".repeat(32),
+                bytes: 4 * 1024 * 1024 * 1024 + 1,
+            },
+        ] {
+            let mut bootstrap = stream(READY);
+            assert_eq!(
+                provision(&mut bootstrap, &token(), &data, &stop, deadline),
+                Err(Error("invalid_runtime_data_authority"))
+            );
+            assert!(bootstrap.output.is_empty());
+        }
+        assert!(serde_json::from_str::<Data>(r#"{"kind":"new-disk","runtime_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":8589934592,"path":"/dev/sda"}"#).is_err());
     }
 }

@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND, ERROR_IO_INCOMPLETE,
-    ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY,
+    CompareObjectHandles, ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND,
+    ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY,
     ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, ERROR_SEM_TIMEOUT, GENERIC_READ, GENERIC_WRITE,
     GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
     WAIT_FAILED, WAIT_OBJECT_0,
@@ -27,7 +27,8 @@ use windows_sys::Win32::System::Pipes::{
     PIPE_WAIT, WaitNamedPipeW,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, WaitForMultipleObjects, WaitForSingleObject,
+    CreateEventW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, WaitForMultipleObjects,
+    WaitForSingleObject,
 };
 use zeroize::Zeroizing;
 
@@ -43,6 +44,7 @@ pub fn drain_failed() -> bool {
 pub enum Purpose {
     Bootstrap,
     Control,
+    Supervision,
 }
 
 pub struct Endpoint {
@@ -282,6 +284,7 @@ impl Endpoint {
         if !id(runtime)
             || match purpose {
                 Purpose::Control => role != "control",
+                Purpose::Supervision => role != "supervision",
                 Purpose::Bootstrap => !role.strip_prefix("auth.").is_some_and(id),
             }
         {
@@ -395,7 +398,7 @@ impl Endpoint {
         self.connect.take();
         let listener = self.listener.as_ref().expect("owned connected listener");
         let mut pid = 0;
-        let peer = unsafe {
+        let identified = unsafe {
             GetNamedPipeClientProcessId(
                 listener
                     .handle
@@ -403,17 +406,26 @@ impl Endpoint {
                     .map_err(|_| Error("private_peer_check_failed"))?,
                 &mut pid,
             )
-        } != 0
+        } != 0;
+        if !identified
+            && !matches!(
+                unsafe { GetLastError() },
+                ERROR_BROKEN_PIPE | ERROR_NO_DATA | ERROR_PIPE_NOT_CONNECTED
+            )
+        {
+            return Err(Error("private_peer_check_failed"));
+        }
+        let peer = identified
             && self
                 .identity
                 .permits(pid, self.purpose == Purpose::Bootstrap)
                 .unwrap_or(false);
-        let next = if self.purpose == Purpose::Control {
+        let next = if self.purpose != Purpose::Bootstrap {
             Some(self.create(false)?)
         } else {
             None
         };
-        let connected =
+        let mut connected =
             std::mem::replace(&mut self.listener, next).expect("owned connected listener");
         if stop.load(Ordering::Acquire) || drain_failed() {
             drop(connected);
@@ -421,8 +433,16 @@ impl Endpoint {
             return Err(Error("private_pipe_cancelled"));
         }
         if !peer {
-            drop(connected);
-            return Err(Error("untrusted_private_pipe_peer"));
+            // A peer may have exited between connecting and token lookup. Its
+            // lost/untrusted identity revokes only this connection; the next
+            // listener already owns the namespace for other current clients.
+            connected
+                .close()
+                .map_err(|_| Error("private_pipe_cancellation_failed"))?;
+            if drain_failed() {
+                return Err(Error("private_pipe_cancellation_failed"));
+            }
+            return Ok(None);
         }
         Ok(Some(connected))
     }
@@ -452,6 +472,23 @@ impl Drop for Endpoint {
 }
 
 impl Pipe {
+    pub(crate) fn verify_server_process(&self, expected: &impl AsRawHandle) -> io::Result<()> {
+        let mut pid = 0;
+        if self.role != Role::Client
+            || unsafe { GetNamedPipeServerProcessId(self.handle.raw()?, &mut pid) } == 0
+        {
+            return Err(io::Error::other("untrusted_runtime_peer"));
+        }
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return Err(io::Error::other("untrusted_runtime_peer"));
+        }
+        let process = unsafe { OwnedHandle::from_raw_handle(process) };
+        if unsafe { CompareObjectHandles(process.as_raw_handle(), expected.as_raw_handle()) } == 0 {
+            return Err(io::Error::other("untrusted_runtime_peer"));
+        }
+        Ok(())
+    }
     fn new(handle: OwnedHandle, role: Role) -> Self {
         Self {
             handle: Arc::new(PipeHandle(Mutex::new(Some(handle)))),
@@ -737,6 +774,7 @@ pub(crate) mod tests {
     use crate::security::Identity;
     use std::io::{self, Read, Write};
     use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use std::process::{Command, Stdio};
     use std::ptr::{null, null_mut};
     use std::sync::atomic::AtomicBool;
     use std::time::{Duration, Instant};
@@ -762,10 +800,10 @@ pub(crate) mod tests {
             .collect::<String>();
         format!(
             r"\\.\pipe\oblivion.{id}.{}",
-            if purpose == Purpose::Control {
-                "control".to_owned()
-            } else {
-                format!("auth.{id}")
+            match purpose {
+                Purpose::Control => "control".to_owned(),
+                Purpose::Supervision => "supervision".to_owned(),
+                Purpose::Bootstrap => format!("auth.{id}"),
             }
         )
     }
@@ -982,5 +1020,84 @@ pub(crate) mod tests {
             }
         }
         assert!(!drain_failed());
+    }
+
+    #[test]
+    #[ignore = "Private child fixture; parent tests connect then reap it before admission, no VM"]
+    fn disconnected_client_fixture() {
+        let Ok(name) = std::env::var("OBLIVION_DISCONNECTED_PIPE_FIXTURE") else {
+            return;
+        };
+        let wide: Vec<_> = name.encode_utf16().chain(Some(0)).collect();
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED,
+                null_mut(),
+            )
+        };
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+        drop(unsafe { OwnedHandle::from_raw_handle(handle) });
+    }
+
+    #[test]
+    fn disconnected_or_exited_clients_do_not_revoke_other_connections_or_the_next_listener() {
+        for purpose in [Purpose::Control, Purpose::Supervision] {
+            for exited in [false, true] {
+                let name = name(purpose);
+                let mut endpoint = Endpoint::bind(&name, purpose).unwrap();
+                let wide: Vec<_> = name.encode_utf16().chain(Some(0)).collect();
+                let identity = Identity::current().unwrap();
+                let stop = AtomicBool::new(false);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut held = connect_control(&wide, &identity, &stop, deadline).unwrap();
+                let mut held_server = endpoint.accept(&stop, deadline).unwrap().unwrap();
+                if exited {
+                    let mut child = Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "private::tests::disconnected_client_fixture",
+                            "--ignored",
+                            "--nocapture",
+                        ])
+                        .env("OBLIVION_DISCONNECTED_PIPE_FIXTURE", &name)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .unwrap();
+                    assert!(child.wait().unwrap().success());
+                    drop(child);
+                } else {
+                    drop(connect_control(&wide, &identity, &stop, deadline).unwrap());
+                }
+                // Some Windows builds retain the disconnected peer PID. Such a
+                // same-user connection can still pass identity checks, but must
+                // yield only EOF; an unavailable identity is rejected as None.
+                if let Some(mut disconnected) = endpoint.accept(&stop, deadline).unwrap() {
+                    loop {
+                        assert!(Instant::now() < deadline);
+                        match disconnected.read(&mut [0]) {
+                            Ok(0) => break,
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            result => panic!("disconnected peer was not isolated: {result:?}"),
+                        }
+                    }
+                }
+                let mut next = connect_control(&wide, &identity, &stop, deadline).unwrap();
+                let mut next_server = endpoint.accept(&stop, deadline).unwrap().unwrap();
+                assert_eq!(held.write(b"held").unwrap(), 4);
+                assert_eq!(next.write(b"next").unwrap(), 4);
+                assert_eq!(receive(&mut held_server, 4), b"held");
+                assert_eq!(receive(&mut next_server, 4), b"next");
+                assert!(!drain_failed());
+            }
+        }
     }
 }

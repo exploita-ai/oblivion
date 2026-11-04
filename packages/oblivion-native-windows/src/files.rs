@@ -190,21 +190,106 @@ struct Pinned {
     parents: Vec<(String, File, FileId)>,
 }
 
+/// The path-taking SDK must keep the reviewed directory objects in place.
+/// This guard grants no authority to an existing leaf and never creates one.
+pub(crate) struct CreationParent {
+    path: String,
+    parents: Vec<(String, File, FileId)>,
+}
+
+impl CreationParent {
+    pub(crate) fn open(path: &str, identity: &Identity) -> Result<Self> {
+        let parents = pin_parents(path)?;
+        permissions(
+            &parents.last().ok_or(Error("runtime_parent_required"))?.1,
+            identity.sid(),
+            true,
+        )?;
+        Ok(Self {
+            path: path.to_owned(),
+            parents,
+        })
+    }
+
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub(crate) fn verify(&self) -> Result<()> {
+        verify_parents(&self.parents)
+    }
+}
+
+pub(crate) struct Executable(Pinned);
+
+impl Executable {
+    pub(crate) fn open(path: &str, identity: &Identity) -> Result<Self> {
+        if !path.to_ascii_lowercase().ends_with(".exe") {
+            return Err(Error("runtime_executable_required"));
+        }
+        Ok(Self(Pinned::open(path, Role::Asset, identity)?))
+    }
+    pub(crate) fn path(&self) -> &str {
+        &self.0.path
+    }
+    pub(crate) fn verify(&self) -> Result<()> {
+        self.0.verify()
+    }
+}
+
+pub(crate) struct CreatedDiskLeaf(Pinned);
+
+impl CreatedDiskLeaf {
+    pub(crate) fn open(path: &str, identity: &Identity) -> Result<Self> {
+        Ok(Self(Pinned::open(path, Role::Data, identity)?))
+    }
+
+    pub(crate) fn verify(&self, runtime_id: &str, bytes: u64) -> Result<()> {
+        if virtual_disk(&self.0, runtime_id)? != bytes {
+            return Err(Error("runtime_disk_capacity_mismatch"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn identity(&self) -> (u64, [u8; 16]) {
+        (self.0.id.volume, self.0.id.file)
+    }
+}
+
+pub(crate) fn verify_private(file: &File, path: &str, identity: &Identity) -> Result<()> {
+    inspect(file, path, false)?;
+    permissions(file, identity.sid(), true)
+}
+
+fn pin_parents(path: &str) -> Result<Vec<(String, File, FileId)>> {
+    if !crate::config::drive_file(path) {
+        return Err(Error("invalid_runtime_asset_path"));
+    }
+    let mut parents = Vec::new();
+    let mut paths = vec![path[..3].to_owned()];
+    for (index, _) in path[3..].match_indices('\\') {
+        paths.push(path[..index + 3].to_owned());
+    }
+    for parent in paths {
+        let file = open_raw(&parent, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?;
+        let (id, _) = inspect(&file, &parent, true)?;
+        parents.push((parent, file, id));
+    }
+    Ok(parents)
+}
+
+fn verify_parents(parents: &[(String, File, FileId)]) -> Result<()> {
+    for (path, file, id) in parents {
+        if inspect(file, path, true)?.0 != *id {
+            return Err(Error("runtime_asset_changed"));
+        }
+    }
+    Ok(())
+}
+
 impl Pinned {
     fn open(path: &str, role: Role, identity: &Identity) -> Result<Self> {
-        if !crate::config::drive_file(path) {
-            return Err(Error("invalid_runtime_asset_path"));
-        }
-        let mut parents = Vec::new();
-        let mut paths = vec![path[..3].to_owned()];
-        for (index, _) in path[3..].match_indices('\\') {
-            paths.push(path[..index + 3].to_owned());
-        }
-        for parent in paths {
-            let file = open_raw(&parent, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?;
-            let (id, _) = inspect(&file, &parent, true)?;
-            parents.push((parent, file, id));
-        }
+        let parents = pin_parents(path)?;
         // Metadata-only data-file access lets HCS choose its own VHDX sharing
         // mode. Signature reads are short-lived, identity-checked handles.
         let access = if role == Role::Data {
@@ -228,11 +313,7 @@ impl Pinned {
     }
 
     fn verify(&self) -> Result<()> {
-        for (path, file, id) in &self.parents {
-            if inspect(file, path, true)?.0 != *id {
-                return Err(Error("runtime_asset_changed"));
-            }
-        }
+        verify_parents(&self.parents)?;
         if inspect(&self.file, &self.path, false)?.0 != self.id {
             return Err(Error("runtime_asset_changed"));
         }
@@ -440,7 +521,7 @@ fn sid_text(sid: PSID) -> Result<String> {
     value.ok_or(Error("runtime_file_owner_invalid"))
 }
 
-fn virtual_disk(pinned: &Pinned, runtime_id: &str) -> Result<()> {
+fn virtual_disk(pinned: &Pinned, runtime_id: &str) -> Result<u64> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     if unsafe { GetFileInformationByHandle(pinned.file.as_raw_handle(), &mut info) } == 0
         || info.dwFileAttributes & (FILE_ATTRIBUTE_COMPRESSED | FILE_ATTRIBUTE_ENCRYPTED) != 0
@@ -502,7 +583,8 @@ fn virtual_disk(pinned: &Pinned, runtime_id: &str) -> Result<()> {
     {
         return Err(Error("invalid_runtime_disk"));
     }
-    pinned.verify()
+    pinned.verify()?;
+    Ok(size.VirtualSize)
 }
 
 fn disk_info(handle: HANDLE, version: i32) -> Result<GET_VIRTUAL_DISK_INFO> {

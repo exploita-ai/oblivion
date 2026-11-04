@@ -32,25 +32,13 @@ impl Identity {
     }
 
     pub fn descriptor(&self) -> Result<Descriptor> {
-        let wide = self
-            .sddl()
-            .encode_utf16()
-            .chain(Some(0))
-            .collect::<Vec<_>>();
-        let mut descriptor = null_mut();
-        if unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                wide.as_ptr(),
-                1,
-                &mut descriptor,
-                null_mut(),
-            )
-        } == 0
-            || descriptor.is_null()
-        {
-            return Err(Error("private_security_descriptor_failed"));
-        }
-        Ok(Descriptor(descriptor))
+        descriptor(&self.sddl())
+    }
+
+    /// Elevated installation tokens can default to an Administrators owner.
+    /// Managed files retain the actual user's identity and a protected DACL.
+    pub fn file_descriptor(&self) -> Result<Descriptor> {
+        descriptor(&format!("O:{}{}", self.sid, self.sddl()))
     }
 
     pub fn sddl(&self) -> String {
@@ -70,6 +58,24 @@ impl Identity {
         let peer = process_sid(process.as_raw_handle())?;
         Ok(peer == self.sid || allow_system && peer == "S-1-5-18")
     }
+}
+
+fn descriptor(sddl: &str) -> Result<Descriptor> {
+    let wide = sddl.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let mut descriptor = null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            wide.as_ptr(),
+            1,
+            &mut descriptor,
+            null_mut(),
+        )
+    } == 0
+        || descriptor.is_null()
+    {
+        return Err(Error("private_security_descriptor_failed"));
+    }
+    Ok(Descriptor(descriptor))
 }
 
 impl Descriptor {

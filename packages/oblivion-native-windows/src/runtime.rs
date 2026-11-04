@@ -6,6 +6,7 @@ use crate::lifetime::Lifetime;
 use crate::private::{Endpoint, Purpose};
 use crate::security::Identity;
 use crate::{Error, Result, auth, bridge, files, hcs, network, network_model, private};
+use oblivion_wire::runtime_auth::Data;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -45,24 +46,110 @@ pub fn main() -> Result<()> {
         println!("{document}");
         return Ok(());
     }
-    let [operation, option, path] = args.as_slice() else {
+    let [operation, option, path, rest @ ..] = args.as_slice() else {
         return Err(Error("invalid_arguments"));
     };
-    if operation != "run" || option != "--config" {
+    if option != "--config" {
         return Err(Error("invalid_arguments"));
     }
-    let lifetime = Lifetime::inherited()?;
     let identity = Identity::current()?;
+    if operation == "supervise" {
+        let [
+            runtime_option,
+            runtime_id,
+            config_option,
+            config_sha,
+            source_option,
+            source_sha,
+            generation_option,
+            generation,
+        ] = rest
+        else {
+            return Err(Error("invalid_arguments"));
+        };
+        if runtime_option != "--runtime-id"
+            || config_option != "--config-sha256"
+            || source_option != "--source-sha256"
+            || generation_option != "--generation"
+        {
+            return Err(Error("invalid_arguments"));
+        }
+        let helper = std::env::current_exe().map_err(|_| Error("runtime_helper_unavailable"))?;
+        let settings = crate::supervisor::Settings::new(
+            runtime_id
+                .to_str()
+                .ok_or(Error("invalid_runtime_identifier"))?,
+            &helper,
+            std::path::Path::new(path),
+            config_sha
+                .to_str()
+                .ok_or(Error("invalid_runtime_binding"))?,
+            source_sha
+                .to_str()
+                .ok_or(Error("invalid_runtime_binding"))?,
+        )?;
+        return crate::supervisor::supervise(
+            settings,
+            generation
+                .to_str()
+                .ok_or(Error("invalid_runtime_generation"))?,
+        );
+    }
+    let lifetime = Lifetime::inherited()?;
     let config = files::read_config(
         path.to_str().ok_or(Error("invalid_runtime_config_path"))?,
         &identity,
     )?;
-    run(config, lifetime, identity)?;
+    match (operation.to_str(), rest) {
+        (Some("run"), []) => run(config, lifetime, identity)?,
+        (Some("install"), [option, mib]) if option == "--data-mib" => {
+            let bytes = mib
+                .to_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .and_then(|value| value.checked_mul(1024 * 1024))
+                .ok_or(Error("invalid_runtime_disk_size"))?;
+            install(config, lifetime, identity, bytes)?;
+        }
+        _ => return Err(Error("invalid_arguments")),
+    }
     report("runtime_stopped");
     Ok(())
 }
 
 pub fn run(config: RuntimeConfig, lifetime: Lifetime, identity: Identity) -> Result<()> {
+    run_with_data(config, lifetime, identity, Data::Existing)
+}
+
+/// Only this fresh creation path can grant guest initialization. Ordinary run
+/// never manufactures authority from a configuration flag or an existing file.
+pub fn install(
+    config: RuntimeConfig,
+    lifetime: Lifetime,
+    identity: Identity,
+    bytes: u64,
+) -> Result<()> {
+    lifetime.check()?;
+    config.validate()?;
+    if !available(&hcs::capabilities()?) {
+        return Err(Error("hcs_nested_virtualization_required"));
+    }
+    let created = crate::disk::create(&config.disks[1].path, &config.runtime_id, bytes, &identity)?;
+    let evidence = created.evidence()?;
+    let data = Data::NewDisk {
+        runtime_id: evidence.runtime_id().to_owned(),
+        bytes: evidence.bytes(),
+    };
+    let result = run_with_data(config, lifetime, identity, data);
+    drop(created);
+    result
+}
+
+fn run_with_data(
+    config: RuntimeConfig,
+    lifetime: Lifetime,
+    identity: Identity,
+    data: Data,
+) -> Result<()> {
     lifetime.check()?;
     config.validate()?;
     if !available(&hcs::capabilities()?) {
@@ -106,6 +193,7 @@ pub fn run(config: RuntimeConfig, lifetime: Lifetime, identity: Identity) -> Res
             &mut endpoint,
             bootstrap,
             &mut stopped,
+            data,
         )
     })();
     if !stopped {
@@ -137,6 +225,7 @@ fn serve(
     endpoint: &mut Endpoint,
     mut bootstrap: Endpoint,
     confirmed_stop: &mut bool,
+    data: Data,
 ) -> Result<()> {
     let token = Arc::new(auth::token()?);
     *confirmed_stop = false;
@@ -165,7 +254,7 @@ fn serve(
                         let mut stream = bootstrap
                             .accept(&cancelled, deadline)?
                             .ok_or(Error("runtime_auth_timeout"))?;
-                        auth::provision(&mut stream, &secret, &cancelled, deadline)?;
+                        auth::provision(&mut stream, &secret, &data, &cancelled, deadline)?;
                         stream
                             .close()
                             .map_err(|_| Error("private_pipe_cancellation_failed"))
@@ -250,7 +339,7 @@ fn serve(
             }
             let local = match endpoint.accept(&stop, Instant::now() + Duration::from_millis(100)) {
                 Ok(Some(local)) => local,
-                Ok(None) | Err(Error("untrusted_private_pipe_peer")) => continue,
+                Ok(None) => continue,
                 Err(error) => return Err(error),
             };
             lifetime.check()?;

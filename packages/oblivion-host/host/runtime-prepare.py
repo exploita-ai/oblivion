@@ -10,11 +10,13 @@ import sys
 import uuid
 
 SCSI_CLASS = '{ba6163d9-04a1-4d29-b605-72e2ffb1dc7f}'
+INITIALIZATION = Path('/run/oblivion-runtime-auth/new-disk')
 
 
-def run(*arguments):
+def run(*arguments, pass_fds=()):
     return subprocess.run(arguments, check=True, stdin=subprocess.DEVNULL,
-                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                          pass_fds=pass_fds).stdout
 
 
 def profile(arguments):
@@ -77,6 +79,93 @@ def device_metadata(device, system):
     return metadata
 
 
+def disk_marker(identity):
+    marker = f'OBLIVION-RUNTIME-1\n{identity.hex}\n'.encode('ascii')
+    return marker + bytes(4096 - len(marker))
+
+
+def initialize_blank_disk(fd, backend, identity, size, authority):
+    if backend != 'hcs-hyperv':
+        raise RuntimeError('runtime_disk_identity_mismatch')
+    try:
+        authorization = os.open(authority, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise RuntimeError('runtime_disk_identity_mismatch') from None
+    try:
+        info = os.fstat(authorization)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600
+                or not 1 <= info.st_size <= 512):
+            raise RuntimeError('invalid_runtime_data_authority')
+        data = json.loads(os.read(authorization, 513))
+        if (type(data) is not dict or type(data.get('bytes')) is not int
+                or data != {'kind': 'new-disk', 'runtime_id': identity.hex, 'bytes': size}):
+            raise RuntimeError('invalid_runtime_data_authority')
+        # Creation authority came from the private host bootstrap, not a kernel
+        # flag or a disk name. The first block must still be genuinely blank.
+        if os.pread(fd, 4096, 0) != bytes(4096):
+            raise RuntimeError('runtime_disk_identity_mismatch')
+        os.unlink(authority)
+        marker = disk_marker(identity)
+        written = 0
+        while written < len(marker):
+            count = os.pwrite(fd, marker[written:], written)
+            if count <= 0:
+                raise RuntimeError('runtime_disk_marker_write_failed')
+            written += count
+        os.fsync(fd)
+    finally:
+        os.close(authorization)
+
+
+def format_check(fd, backend, identity, size, authority):
+    # Pass the reviewed open object, never a re-resolved /dev spelling. mke2fs
+    # opens this procfd with O_EXCL itself; the parent must not claim O_EXCL.
+    # https://github.com/tytso/e2fsprogs/blob/master/lib/ext2fs/unix_io.c
+    # https://github.com/tytso/e2fsprogs/blob/master/misc/mke2fs.c
+    device = f'/proc/self/fd/{fd}'
+    probe = subprocess.run(['/usr/sbin/blkid', '-p', '-o', 'export', device],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, check=False, pass_fds=(fd,))
+    if probe.returncode == 2:
+        if os.pread(fd, 4096, 0) != disk_marker(identity):
+            initialize_blank_disk(fd, backend, identity, size, authority)
+        run('/usr/sbin/mkfs.ext4', '-q', '-m', '0', '-L', 'OBLIVION-RUNTIME',
+            '-U', str(identity), device, pass_fds=(fd,))
+    elif probe.returncode == 0:
+        values = dict(line.split('=', 1) for line in probe.stdout.decode().splitlines() if '=' in line)
+        if values.get('TYPE') != 'ext4' or values.get('LABEL') != 'OBLIVION-RUNTIME' or values.get('UUID') != str(identity):
+            raise RuntimeError('runtime_disk_identity_mismatch')
+        checked = subprocess.run(['/usr/sbin/e2fsck', '-p', device],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, check=False, pass_fds=(fd,))
+        if checked.returncode not in (0, 1):
+            raise RuntimeError('runtime_filesystem_recovery_required')
+    else:
+        raise RuntimeError('runtime_disk_probe_failed')
+
+
+def readonly_disk(fd):
+    # Linux filesystem mounts may restrict other writable block-device opens.
+    # Retain the exact object with a read-only pin before releasing the writer.
+    # https://github.com/torvalds/linux/blob/v6.12/include/linux/blkdev.h
+    reviewed = os.fstat(fd)
+    reader = os.open(f'/proc/self/fd/{fd}', os.O_RDONLY | os.O_CLOEXEC)
+    opened = os.fstat(reader)
+    if (opened.st_dev, opened.st_ino, opened.st_rdev) != (reviewed.st_dev, reviewed.st_ino, reviewed.st_rdev):
+        os.close(reader)
+        raise RuntimeError('runtime_block_device_mismatch')
+    return reader
+
+
+def mount_disk(fd, destination):
+    # mount(8) otherwise canonicalizes procfd back to a mutable pathname. Do
+    # not delegate to mount.type helpers, which do not inherit this option.
+    # https://github.com/util-linux/util-linux/blob/master/sys-utils/mount.8.adoc
+    run('/usr/bin/mount', '--no-canonicalize', '--internal-only', '-t', 'ext4',
+        '-o', 'nodev,nosuid,noexec', f'/proc/self/fd/{fd}', str(destination), pass_fds=(fd,))
+
+
 def prepare():
     if os.geteuid() != 0:
         raise RuntimeError('root_required')
@@ -93,33 +182,22 @@ def prepare():
     for line in Path('/proc/swaps').read_text().splitlines()[1:]:
         if os.stat(line.split()[0]).st_rdev == metadata.st_rdev:
             raise RuntimeError('runtime_disk_is_swap')
-    probe = subprocess.run(['/usr/sbin/blkid', '-p', '-o', 'export', str(device)],
-                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                           stderr=subprocess.DEVNULL, check=False)
-    if probe.returncode == 2:
-        # Creation is authorized by a per-install identity written only to the
-        # fresh dedicated RAW file by the launcher. An unrelated disk has no
-        # matching marker. No whole-disk read or cache-filling scan is required.
-        marker = f'OBLIVION-RUNTIME-1\n{identity.hex}\n'.encode()
-        with device.open('rb', buffering=0) as disk:
-            first = disk.read(4096)
-        if first != marker + bytes(4096 - len(marker)):
-            raise RuntimeError('runtime_disk_identity_mismatch')
-        run('/usr/sbin/mkfs.ext4', '-q', '-m', '0', '-L', 'OBLIVION-RUNTIME', '-U', str(identity), str(device))
-    elif probe.returncode == 0:
-        values = dict(line.split('=', 1) for line in probe.stdout.decode().splitlines() if '=' in line)
-        if values.get('TYPE') != 'ext4' or values.get('LABEL') != 'OBLIVION-RUNTIME' or values.get('UUID') != str(identity):
-            raise RuntimeError('runtime_disk_identity_mismatch')
-        checked = subprocess.run(['/usr/sbin/e2fsck', '-p', str(device)],
-                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, check=False)
-        if checked.returncode not in (0, 1):
-            raise RuntimeError('runtime_filesystem_recovery_required')
-    else:
-        raise RuntimeError('runtime_disk_probe_failed')
-    destination = Path('/var/lib/oblivion')
-    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
-    run('/usr/bin/mount', '-t', 'ext4', '-o', 'nodev,nosuid,noexec', str(device), str(destination))
+    fd = os.open(device, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(fd)
+        if (not stat.S_ISBLK(opened.st_mode) or opened.st_rdev != metadata.st_rdev
+                or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)):
+            raise RuntimeError('runtime_block_device_mismatch')
+        format_check(fd, backend, identity, size, INITIALIZATION)
+        reader = readonly_disk(fd)
+    finally:
+        os.close(fd)
+    try:
+        destination = Path('/var/lib/oblivion')
+        destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+        mount_disk(reader, destination)
+    finally:
+        os.close(reader)
     destination.chmod(0o700)
     config = json.loads(Path('/etc/oblivion/controller.json').read_text())
     config.update(general_image=str(destination / 'general.luks'),

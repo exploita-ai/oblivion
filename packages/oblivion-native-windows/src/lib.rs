@@ -17,6 +17,7 @@ pub mod auth;
 #[cfg(windows)]
 pub mod bridge;
 pub mod config;
+pub mod disk;
 #[cfg(windows)]
 pub mod client;
 #[cfg(windows)]
@@ -35,3 +36,5 @@ pub mod private;
 pub mod runtime;
 #[cfg(windows)]
 pub mod security;
+#[cfg(windows)]
+pub mod supervisor;

@@ -1,5 +1,7 @@
 """Production native-runtime selection against actual temporary sysfs trees."""
 import importlib.util
+import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -162,6 +164,103 @@ class NativeRuntime(unittest.TestCase):
                 selected, size = prepare.select_disk(backend, IDENTITY, tree.root)
                 self.assertEqual(selected.name, "vdb")
                 self.assertEqual(size, 8 * 1024**3)
+
+
+class NativeDiskAuthority(unittest.TestCase):
+    CAPACITY = 8 * 1024**3
+
+    def record(self):
+        return {"kind": "new-disk", "runtime_id": IDENTITY.hex, "bytes": self.CAPACITY}
+
+    def fixture(self, root):
+        disk = root / "virtual-blocks"
+        # The device-selection tests above own block-device/size validation.
+        # This real FD tests the byte-level initializer without mounting a disk.
+        disk.write_bytes(bytes(4096) + b"UNTOUCHED_AFTER_FIRST_BLOCK\0\xff" * 32)
+        authority = root / "new-disk"
+        authority.write_text(json.dumps(self.record()))
+        authority.chmod(0o600)
+        return disk, authority
+
+    def test_authenticated_new_disk_record_is_specific_to_backend_runtime_and_capacity(self):
+        encoded = json.dumps(self.record()).encode()
+        self.assertEqual(bootstrap.data_authority(encoded, "hcs-hyperv", IDENTITY.hex), self.record())
+        self.assertIsNone(bootstrap.data_authority(b'{"kind":"existing"}', "qemu-kvm", IDENTITY.hex))
+        for backend in ["qemu-kvm", "apple-vz", "foreign"]:
+            with self.subTest(backend=backend), self.assertRaises(ValueError):
+                bootstrap.data_authority(encoded, backend, IDENTITY.hex)
+        with self.assertRaises(ValueError):
+            bootstrap.data_authority(encoded, "hcs-hyperv", "a" * 32)
+        invalid = [
+            {**self.record(), "bytes": True},
+            {**self.record(), "bytes": float(self.CAPACITY)},
+            {**self.record(), "bytes": 4 * 1024**3 - 1},
+            {**self.record(), "bytes": 1024**4 + 1},
+            {**self.record(), "bytes": self.CAPACITY + 512},
+            {**self.record(), "runtime_id": "0" * 32},
+            {**self.record(), "runtime_id": IDENTITY.hex.upper()},
+            {**self.record(), "path": "/dev/sda"},
+            {"kind": "existing", "bytes": self.CAPACITY},
+            [],
+        ]
+        for record in invalid:
+            with self.subTest(record=record), self.assertRaises(ValueError):
+                bootstrap.data_authority(json.dumps(record).encode(), "hcs-hyperv", IDENTITY.hex)
+        with self.assertRaises(ValueError):
+            bootstrap.data_authority(b'{"kind":"existing","kind":"existing"}', "hcs-hyperv", IDENTITY.hex)
+
+    def test_first_block_marker_is_durable_and_authority_is_consumed_only_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            disk, authority = self.fixture(Path(directory))
+            before = disk.read_bytes()
+            with disk.open("r+b", buffering=0) as opened:
+                prepare.initialize_blank_disk(opened.fileno(), "hcs-hyperv", IDENTITY, self.CAPACITY, authority)
+                after = os.pread(opened.fileno(), len(before), 0)
+                expected = f"OBLIVION-RUNTIME-1\n{IDENTITY.hex}\n".encode()
+                self.assertEqual(after[:4096], expected + bytes(4096 - len(expected)))
+                self.assertEqual(after[4096:], before[4096:])
+                self.assertFalse(authority.exists())
+                with self.assertRaises(RuntimeError):
+                    prepare.initialize_blank_disk(opened.fileno(), "hcs-hyperv", IDENTITY, self.CAPACITY, authority)
+                self.assertEqual(os.pread(opened.fileno(), len(after), 0), after)
+
+    def test_invalid_or_missing_authority_never_changes_disk_or_consumes_the_record(self):
+        for invalid in ["missing", "foreign-bytes", "wrong-id", "wrong-size", "wrong-backend", "symlink", "mode", "directory", "hardlink"]:
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                disk, authority = self.fixture(root)
+                backend = "hcs-hyperv"
+                if invalid == "missing":
+                    authority.unlink()
+                elif invalid == "foreign-bytes":
+                    with disk.open("r+b", buffering=0) as opened:
+                        opened.write(b"UNRELATED_DISK")
+                elif invalid == "wrong-id":
+                    authority.write_text(json.dumps({**self.record(), "runtime_id": "a" * 32}))
+                elif invalid == "wrong-size":
+                    authority.write_text(json.dumps({**self.record(), "bytes": self.CAPACITY + 1024**2}))
+                elif invalid == "wrong-backend":
+                    backend = "qemu-kvm"
+                elif invalid == "symlink":
+                    target = root / "unrelated-authority"
+                    authority.rename(target)
+                    authority.symlink_to(target)
+                elif invalid == "mode":
+                    authority.chmod(0o644)
+                elif invalid == "directory":
+                    authority.unlink()
+                    authority.mkdir(mode=0o600)
+                elif invalid == "hardlink":
+                    os.link(authority, root / "linked-authority")
+                before = disk.read_bytes()
+                record = authority.read_bytes() if authority.is_file() else None
+                with disk.open("r+b", buffering=0) as opened:
+                    with self.assertRaises((RuntimeError, OSError, ValueError)):
+                        prepare.initialize_blank_disk(opened.fileno(), backend, IDENTITY, self.CAPACITY, authority)
+                self.assertEqual(disk.read_bytes(), before)
+                self.assertEqual(authority.read_bytes() if authority.is_file() else None, record)
+                if invalid == "symlink":
+                    self.assertTrue(authority.is_symlink())
 
 
 if __name__ == "__main__":

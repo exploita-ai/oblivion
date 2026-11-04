@@ -1,7 +1,8 @@
 [Unit]
 Description=Oblivion dedicated runtime storage
 ConditionKernelCommandLine=oblivion.runtime=1
-After=local-fs.target
+Requires=oblivion-runtime-auth.service
+After=local-fs.target oblivion-runtime-auth.service
 Before=oblivion-controller.service oblivion-control-relay.service
 
 [Service]

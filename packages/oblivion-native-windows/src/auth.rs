@@ -15,10 +15,11 @@ pub fn token() -> Result<Token> {
 pub fn provision(
     stream: &mut (impl Read + Write),
     token: &Token,
+    data: &runtime_auth::Data,
     stop: &AtomicBool,
     deadline: Instant,
 ) -> Result<()> {
-    runtime_auth::provision(stream, token, stop, deadline).map_err(|error| Error(error.0))
+    runtime_auth::provision(stream, token, data, stop, deadline).map_err(|error| Error(error.0))
 }
 
 pub fn authenticate(

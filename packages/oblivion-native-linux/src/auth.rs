@@ -22,7 +22,8 @@ pub fn provision(
     deadline: Instant,
 ) -> Result<()> {
     prepare(stream)?;
-    runtime_auth::provision(stream, token, stop, deadline).map_err(|error| Error(error.0))
+    runtime_auth::provision(stream, token, &runtime_auth::Data::Existing, stop, deadline)
+        .map_err(|error| Error(error.0))
 }
 
 pub fn authenticate(stream: &mut UnixStream, token: &Token, stop: &AtomicBool) -> Result<()> {

@@ -3,7 +3,7 @@
 use crate::controller::{Call, Controller, Result};
 use crate::run;
 use crate::windows_terminal::{self, Terminal};
-use oblivion_native_windows::client;
+use oblivion_native_windows::{client, supervisor};
 use oblivion_wire::agent::{Command, Launch, Size};
 use oblivion_wire::control::{Operation, Request};
 use oblivion_wire::idle;
@@ -86,6 +86,9 @@ pub struct Runtime {
     runtime_id: String,
     client: Client,
     terminal: Option<Terminal>,
+    // Kept until terminal/controller handles have been released. Another
+    // terminal owns its own lease on the same supervisor and controller VM.
+    _supervision: Option<supervisor::Lease>,
 }
 
 impl Runtime {
@@ -94,7 +97,34 @@ impl Runtime {
             runtime_id: runtime_id.to_owned(),
             client: Client::new(runtime_id)?,
             terminal: None,
+            _supervision: None,
         })
+    }
+
+    pub fn supervised(
+        settings: &supervisor::Settings,
+        stop: Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Result<Self> {
+        let lease = supervisor::acquire(settings, Arc::clone(&stop), deadline)?;
+        Self::with_supervision(lease, stop)
+    }
+
+    pub fn initialize(
+        settings: &supervisor::Settings,
+        bytes: u64,
+        stop: Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Result<Self> {
+        let lease = supervisor::initialize(settings, bytes, Arc::clone(&stop), deadline)?;
+        Self::with_supervision(lease, stop)
+    }
+
+    fn with_supervision(lease: supervisor::Lease, stop: Arc<AtomicBool>) -> Result<Self> {
+        let mut runtime = Self::new(lease.runtime_id())?;
+        runtime.client.cancelled = stop;
+        runtime._supervision = Some(lease);
+        Ok(runtime)
     }
 
     /// Embedders may supply owned stdio handles without changing the process's

@@ -34,6 +34,9 @@ jobs:
         run: |
           cargo check --locked --lib --target x86_64-pc-windows-msvc
           cargo test --locked
+      - name: Verify the common desktop bundle manifest
+        working-directory: packages/oblivion-bundle
+        run: cargo test --locked
       - name: Compile and exercise portable Files validation and framing
         working-directory: packages/oblivion-transfer
         run: |
@@ -182,6 +185,9 @@ jobs:
       - name: Exercise the portable private wire
         working-directory: packages/oblivion-wire
         run: cargo test --locked
+      - name: Verify the common desktop bundle manifest
+        working-directory: packages/oblivion-bundle
+        run: cargo test --locked
       - name: Verify native bundle pairing and distribution inventory
         run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
       - name: Verify outer hypervisor kernel and QEMU evidence
@@ -201,6 +207,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 tests/agent-channel.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/credential-delegation.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/native-runtime.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/runtime-disk-fd.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/runtime-network.py
       - name: Check native agent configuration preservation
         working-directory: packages/oblivion-host/guest/native-tools
@@ -363,12 +370,16 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 tests/agent-channel.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/credential-delegation.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/native-runtime.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/runtime-disk-fd.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/runtime-network.py
       - name: Compile the actual Apple helper
         working-directory: packages/oblivion-native
         run: swift build --configuration release
       - name: Exercise the portable private wire
         working-directory: packages/oblivion-wire
+        run: cargo test --locked
+      - name: Verify the common desktop bundle manifest
+        working-directory: packages/oblivion-bundle
         run: cargo test --locked
       - name: Verify native bundle pairing and distribution inventory
         run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py

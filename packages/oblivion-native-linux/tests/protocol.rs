@@ -170,7 +170,11 @@ fn bounded_bridge_preserves_binary_data_and_flushes_guest_final_bytes() {
     let mut received = Vec::new();
     client.read_to_end(&mut received).unwrap();
     let expected = writer.join().unwrap();
-    assert_eq!(received.len(), expected.len(), "bridge truncated its final bytes");
+    assert_eq!(
+        received.len(),
+        expected.len(),
+        "bridge truncated its final bytes"
+    );
     assert!(received == expected, "bridge changed the binary stream");
     echo.join().unwrap();
     worker.join().unwrap().unwrap();
@@ -198,8 +202,18 @@ fn stalled_bridge_releases_its_lease_without_waiting_for_the_guest_to_read() {
     let (mut client, local) = UnixStream::pair().unwrap();
     let (guest, _server) = UnixStream::pair().unwrap();
     for (stream, bytes) in [(&client, 256 * 1024_i32), (&guest, 4096_i32)] {
-        assert_eq!(unsafe { libc::setsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_SNDBUF,
-            (&bytes as *const i32).cast(), std::mem::size_of::<i32>() as libc::socklen_t) }, 0);
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    stream.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&bytes as *const i32).cast(),
+                    std::mem::size_of::<i32>() as libc::socklen_t,
+                )
+            },
+            0
+        );
     }
     client.set_nonblocking(true).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
@@ -225,7 +239,10 @@ fn stalled_bridge_releases_its_lease_without_waiting_for_the_guest_to_read() {
     stop.store(true, Ordering::Relaxed);
     worker.join().unwrap().unwrap();
     assert!(written > 65536, "fixture did not fill the outbound buffer");
-    assert!(released.is_ok(), "a disconnected client retained its guest lease");
+    assert!(
+        released.is_ok(),
+        "a disconnected client retained its guest lease"
+    );
 }
 
 #[test]
@@ -316,7 +333,9 @@ def load(name, filename):
     return module
 bootstrap = load('bootstrap', sys.argv[1] + '/runtime-auth.py')
 relay = load('relay', sys.argv[1] + '/control-relay.py')
-bootstrap.provision(0, sys.argv[2], os.getuid(), os.getgid())
+from pathlib import Path
+bootstrap.provision(0, sys.argv[2], os.getuid(), os.getgid(), Path(sys.argv[2] + '.new-disk'), 'qemu-kvm', 'a' * 32)
+assert not Path(sys.argv[2] + '.new-disk').exists()
 with open(sys.argv[2], 'rb') as source:
     token = bytearray(source.read())
 assert os.stat(sys.argv[2]).st_mode & 0o777 == 0o600
@@ -346,6 +365,85 @@ token[:] = bytes(32)
     oblivion_native_linux::auth::authenticate(&mut host, &token, &stop).unwrap();
     host.set_nonblocking(false).unwrap();
     host.write_all(b"AFTER_AUTH").unwrap();
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn private_new_disk_authority_matches_the_actual_guest_and_preserves_authenticated_data() {
+    let root = Directory::new();
+    let (mut host, guest) = UnixStream::pair().unwrap();
+    let guest_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../oblivion-host/host");
+    let script = r#"
+import importlib.util, json, os, socket, stat, sys, uuid
+from pathlib import Path
+def load(name, filename):
+    spec = importlib.util.spec_from_file_location(name, filename)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+bootstrap = load('bootstrap', sys.argv[1] + '/runtime-auth.py')
+relay = load('relay', sys.argv[1] + '/control-relay.py')
+prepare = load('prepare', sys.argv[1] + '/runtime-prepare.py')
+root = Path(sys.argv[2])
+token_path = root / 'new-disk-token'
+authority = root / 'new-disk-authority'
+runtime_id = '00112233445566778899aabbccddeeff'
+capacity = 8 * 1024**3
+bootstrap.provision(0, token_path, os.getuid(), os.getgid(), authority, 'hcs-hyperv', runtime_id)
+for path in [token_path, authority]:
+    info = path.lstat()
+    assert stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid()
+    assert stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1
+assert json.loads(authority.read_bytes()) == {'kind':'new-disk','runtime_id':runtime_id,'bytes':capacity}
+disk_path = root / 'virtual-blocks'
+tail = b'UNAFFECTED_VIRTUAL_BLOCKS\x00\xff'
+with disk_path.open('x+b', buffering=0) as disk:
+    disk.write(bytes(4096) + tail)
+    prepare.initialize_blank_disk(disk.fileno(), 'hcs-hyperv', uuid.UUID(hex=runtime_id), capacity, authority)
+    assert os.pread(disk.fileno(), 4096, 0) == prepare.disk_marker(uuid.UUID(hex=runtime_id))
+    assert os.pread(disk.fileno(), len(tail), 4096) == tail
+assert not authority.exists()
+token = bytearray(token_path.read_bytes())
+assert len(token) == 32
+stream = socket.socket(fileno=os.dup(0))
+relay.authenticate_runtime(stream, token)
+assert relay.exact(stream, 10) == b'AFTER_AUTH'
+stream.sendall(b'NEW_DISK_READY')
+token[:] = bytes(32)
+"#;
+    let mut child = Command::new("python3")
+        .args(["-I", "-c", script])
+        .arg(guest_root)
+        .arg(&root.0)
+        .stdin(Stdio::from(OwnedFd::from(guest)))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    host.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    host.set_write_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let token = oblivion_native_linux::auth::token().unwrap();
+    let stop = AtomicBool::new(false);
+    oblivion_wire::runtime_auth::provision(
+        &mut host,
+        &token,
+        &oblivion_wire::runtime_auth::Data::NewDisk {
+            runtime_id: "00112233445566778899aabbccddeeff".into(),
+            bytes: 8 * 1024 * 1024 * 1024,
+        },
+        &stop,
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap();
+    oblivion_native_linux::auth::authenticate(&mut host, &token, &stop).unwrap();
+    host.set_nonblocking(false).unwrap();
+    host.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    host.write_all(b"AFTER_AUTH").unwrap();
+    let mut result = [0; 14];
+    host.read_exact(&mut result).unwrap();
+    assert_eq!(&result, b"NEW_DISK_READY");
     assert!(child.wait().unwrap().success());
 }
 
