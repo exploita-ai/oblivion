@@ -56,5 +56,6 @@
       "memory_mib": 1152,
       "cpus": 1
     }
-  }
+  },
+  "manage_os_preferences": true
 }

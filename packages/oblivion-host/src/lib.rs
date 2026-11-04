@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod agent;
 pub mod channel;
 pub mod chat_export;
 pub mod chat_screen;
@@ -10,6 +11,8 @@ pub mod display;
 pub mod egress;
 pub mod keys;
 pub mod network;
+#[cfg(target_os = "macos")]
+pub mod native_runtime;
 pub mod onion;
 pub mod onion_copy;
 pub mod onion_task;
@@ -23,4 +26,5 @@ pub mod tor_profile;
 pub mod transfers;
 pub mod volume;
 
+pub mod remote_control;
 pub mod scope;

@@ -1,6 +1,7 @@
 [Unit]
 Description=Oblivion offline workspace
 ConditionKernelCommandLine=!oblivion.resize=1
+ConditionKernelCommandLine=!oblivion.native=1
 ConditionKernelCommandLine=oblivion.documents=1
 Requires=oblivion-vault.service
 After=oblivion-vault.service oblivion-session-network.service

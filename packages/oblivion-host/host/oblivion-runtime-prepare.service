@@ -1,0 +1,17 @@
+[Unit]
+Description=Oblivion dedicated runtime storage
+ConditionKernelCommandLine=oblivion.runtime=1
+After=local-fs.target
+Before=oblivion-controller.service oblivion-control-relay.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 -B /usr/lib/oblivion/host/runtime-prepare.py
+TimeoutStartSec=5min
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+StandardInput=null
+StandardOutput=null
+StandardError=null

@@ -222,7 +222,7 @@ fn request(request: &Request<'_>, active: bool) -> Result<()> {
 
 pub fn serve(
     config: &vm::Config,
-    key: crate::storage::ApiKey,
+    key: Option<crate::storage::ApiKey>,
     transport: Transport,
     network: bool,
 ) -> Result<()> {
@@ -239,7 +239,7 @@ pub fn serve(
     stopped
 }
 
-fn connected(key: crate::storage::ApiKey, transport: Transport, network: bool) -> Result<()> {
+fn connected(key: Option<crate::storage::ApiKey>, transport: Transport, network: bool) -> Result<()> {
     let tor = matches!(transport, Transport::Tor {});
     let stream = UnixStream::connect(format!("{}/control.sock", Role::Gateway.runtime()))
         .map_err(|_| Error("gateway_channel_unavailable"))?;
@@ -256,15 +256,13 @@ fn connected(key: crate::storage::ApiKey, transport: Transport, network: bool) -
         api_key: &'a str,
         transport: &'a Transport,
     }
-    let request = Zeroizing::new(
-        serde_json::to_vec(&Configure {
-            operation: "configure",
-            provider: key.provider,
-            transport: &transport,
+    let request = Zeroizing::new(match key.as_ref() {
+        Some(key) => serde_json::to_vec(&Configure {
+            operation: "configure", provider: key.provider, transport: &transport,
             api_key: std::str::from_utf8(&key.secret).map_err(|_| Error("invalid_api_key"))?,
-        })
-        .map_err(|_| Error("gateway_encode_failed"))?,
-    );
+        }),
+        None => serde_json::to_vec(&serde_json::json!({"operation":"configure-tools", "transport":&transport})),
+    }.map_err(|_| Error("gateway_encode_failed"))?);
     let mut channel = Channel::new(&stream, Duration::from_secs(30));
     send(&mut channel, &request)?;
     drop(request);

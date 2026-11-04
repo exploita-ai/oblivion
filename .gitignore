@@ -18,3 +18,6 @@ logs/
 /artifacts/
 *.bun-build
 tsconfig.tsbuildinfo
+
+__pycache__/
+*.pyc

@@ -95,7 +95,7 @@ RUN cargo test --locked && cargo build --locked --release --bins --examples && c
 RUN cd /oblivion-transfer && cargo test --locked && cargo build --locked --release --bins
 RUN mkdir /bundle && cp /oblivion-transfer/target/release/oblivion-copy /oblivion-transfer/target/release/oblivion-onion-file /bundle/ && cp /tmp/oblivion-storage /bundle/oblivion-storage \
     && cp target/release/oblivion-storage /bundle/oblivion-storage-lab \
-    && cp target/release/oblivion-control target/release/oblivion-manager target/release/oblivion-console target/release/oblivion-display /bundle/ \
+    && cp target/release/oblivion target/release/oblivion-control target/release/oblivion-manager target/release/oblivion-console target/release/oblivion-display /bundle/ \
     && cp host/*.service /bundle/ \
     && find Cargo.toml Cargo.lock src tests host ../oblivion-transfer/Cargo.toml ../oblivion-transfer/Cargo.lock ../oblivion-transfer/src ../oblivion-tor-state/Cargo.toml ../oblivion-tor-state/src ../oblivion-transport/Cargo.toml ../oblivion-transport/src -type f -print0 | sort -z | xargs -0 sha256sum > /bundle/sources.sha256 \
     && cd /bundle && sha256sum oblivion-* sources.sha256 > SHA256SUMS
@@ -757,11 +757,11 @@ RUN case "$TARGETARCH" in arm64|amd64) ;; *) exit 1;; esac \
     && apt-get update && apt-get install -y --no-install-recommends \
     live-boot live-boot-initramfs-tools cryptsetup-bin dmsetup fdisk \
     $(if [ "$TARGETARCH" = arm64 ]; then printf qemu-system-arm; else printf qemu-system-x86; fi) \
-    network-manager wpasupplicant iproute2 nftables console-setup-mini kbd tzdata xkb-data \
+    python3 network-manager wpasupplicant iproute2 nftables console-setup-mini kbd tzdata xkb-data \
     libwlroots-0.18 foot seatd fonts-dejavu-mono libxkbcommon-tools libpciaccess0 \
     firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211 firmware-mediatek \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=compiler /bundle/oblivion-storage /bundle/oblivion-control /bundle/oblivion-console /bundle/oblivion-display /bundle/oblivion-copy /usr/bin/
+COPY --from=compiler /bundle/oblivion /bundle/oblivion-storage /bundle/oblivion-control /bundle/oblivion-console /bundle/oblivion-display /bundle/oblivion-copy /usr/bin/
 COPY --from=cage-build /out/oblivion-cage /usr/bin/
 COPY --from=cage-build /out/LICENSE /out/oblivion.patch /out/cage-source.sha256 /usr/share/doc/oblivion-display/
 COPY --from=clipboard-compiler /clipboard/target/release/oblivion-clipboard /usr/bin/
@@ -773,6 +773,9 @@ COPY --from=vbox-clipboard /out/ /usr/lib/oblivion/virtualbox/
 COPY ${MANAGER_BINARY} /usr/bin/oblivion-manager
 COPY ${MANAGER_ASSETS} /usr/lib/oblivion/manager/
 COPY packages/oblivion-host/host/ /etc/systemd/system/
+COPY packages/oblivion-host/host/control-relay.py /usr/lib/oblivion/control-relay.py
+COPY packages/oblivion-host/host/runtime-prepare.py /usr/lib/oblivion/host/runtime-prepare.py
+COPY packages/oblivion-host/host/oblivion-runtime-generator /usr/lib/systemd/system-generators/oblivion-runtime-generator
 COPY script/oblivion/live-setup.sh /tmp/live-setup
 COPY script/oblivion/session-identities.sh /tmp/session-identities
 COPY script/oblivion/live-controller.json /etc/oblivion/controller.json
@@ -909,3 +912,38 @@ RUN --mount=type=bind,from=multisession-gateway,source=/,target=/gateway,ro \
 
 FROM scratch AS multisession-artifacts
 COPY --from=multisession-pack /out/ /
+
+# Official-client runtime used by the headless privacy stack. No fork binary or
+# automatic chat server enters this guest image.
+FROM session-tools AS stack-session
+ARG TARGETARCH
+ARG OBLIVION_AGENTS="codex claude opencode2"
+COPY script/oblivion/install-agents.py script/oblivion/install-agents.json /build/agents/
+RUN python3 /build/agents/install-agents.py "$TARGETARCH" / $OBLIVION_AGENTS --verify \
+    && systemctl disable oblivion-chat-server.service oblivion-conversation.service oblivion-terminal.service \
+    && rm -f /usr/bin/chat /usr/libexec/oblivion \
+       /etc/systemd/system/oblivion-chat-server.service \
+       /etc/systemd/system/oblivion-conversation.service \
+       /etc/systemd/system/oblivion-terminal.service \
+       /usr/lib/oblivion/guest/chat-client.sh /usr/lib/oblivion/guest/chat-server.sh \
+       /usr/lib/oblivion/guest/chat-environment.sh /usr/lib/oblivion/guest/chat-ready.py \
+       /usr/lib/oblivion/guest/conversation.sh \
+    && cp /build/agents/install-agents.json /usr/lib/oblivion/build-evidence.json \
+    && rm -rf /build/agents
+
+FROM live-pack-tools AS stack-pack
+ARG OBLIVION_IMAGE_NAME=oblivion-stack-development
+COPY --from=live-host / /host/
+COPY --from=stack-session / /session/
+COPY --from=gateway-system / /gateway/
+COPY --from=import-guest / /import/
+COPY --from=export-guest / /export/
+COPY --from=onion-gateway-system / /onion-gateway/
+COPY --from=live-onion-file / /onion-file/
+COPY --from=compiler /bundle/sources.sha256 /sources/host-sources.sha256
+COPY --from=gateway-compiler /gateway-bundle/sources.sha256 /sources/gateway-sources.sha256
+COPY script/oblivion/live-* script/oblivion/settings-catalog.py script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/Dockerfile.vm-lab /sources/
+RUN OBLIVION_IMAGE_NAME="$OBLIVION_IMAGE_NAME" sh /sources/live-pack.sh
+
+FROM scratch AS stack-runtime-iso
+COPY --from=stack-pack /out/ /

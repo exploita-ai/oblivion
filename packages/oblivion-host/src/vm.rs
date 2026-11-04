@@ -157,7 +157,7 @@ impl Config {
             matches!(web_access, "strict" | "open"),
             "invalid_web_access",
         )?;
-        self.launch(Role::Session, token.is_some(), false, false)?;
+        self.launch(Role::Session, token.is_some(), false, false, false)?;
         if let Some(token) = token {
             let stream = UnixStream::connect(&scope::path("/run/oblivion-session/token.sock"))
                 .map_err(|_| Error("session_channel_unavailable"))?;
@@ -195,12 +195,30 @@ impl Config {
         Ok(())
     }
 
+    pub fn start_agent(&self, token: &str, web_access: &str, tools: Tools) -> Result<()> {
+        require(matches!(web_access, "strict" | "open"), "invalid_web_access")?;
+        self.launch(Role::Session, true, false, false, true)?;
+        let stream = UnixStream::connect(scope::path("/run/oblivion-session/token.sock"))
+            .map_err(|_| Error("session_channel_unavailable"))?;
+        crate::gateway::peer(&stream, scope::uid(VM_UID))?;
+        crate::gateway::grant(token, Some(tools))?;
+        let mut channel = Channel::new(&stream, Duration::from_secs(60));
+        qmp(Role::Session, "cont")?;
+        let mut ready = [0; 6];
+        channel.read_exact(&mut ready).map_err(|_| Error("session_channel_failed"))?;
+        require(&ready == b"token\n", "invalid_session_ready")?;
+        channel.write_all(format!("{token}native\n{web_access}\n").as_bytes())
+            .map_err(|_| Error("session_channel_failed"))?;
+        channel.read_exact(&mut ready).map_err(|_| Error("session_channel_failed"))?;
+        require(&ready == b"ready\n", "invalid_session_ready")
+    }
+
     pub fn start_role(&self, role: Role) -> Result<()> {
-        self.launch(role, false, false, false)
+        self.launch(role, false, false, false, false)
     }
 
     pub fn start_documents(&self) -> Result<()> {
-        self.launch(Role::Session, false, true, false)?;
+        self.launch(Role::Session, false, true, false, false)?;
         let stream = UnixStream::connect(&scope::path("/run/oblivion-session/ready.sock"))
             .map_err(|_| Error("session_channel_unavailable"))?;
         crate::gateway::peer(&stream, scope::uid(VM_UID))?;
@@ -216,7 +234,7 @@ impl Config {
     }
 
     pub fn resize_session(&self, target: u64) -> Result<()> {
-        self.launch(Role::Session, false, false, true)?;
+        self.launch(Role::Session, false, false, true, false)?;
         let stream = UnixStream::connect(&scope::path("/run/oblivion-session/ready.sock"))
             .map_err(|_| Error("session_channel_unavailable"))?;
         crate::gateway::peer(&stream, scope::uid(VM_UID))?;
@@ -234,7 +252,7 @@ impl Config {
         )
     }
 
-    fn launch(&self, role: Role, network: bool, documents: bool, resize: bool) -> Result<()> {
+    fn launch(&self, role: Role, network: bool, documents: bool, resize: bool, native: bool) -> Result<()> {
         if matches!(role, Role::OnionUplink) {
             require(!network && !documents && !resize, "invalid_onion_launch")?;
             return self.launch_onion_uplink();
@@ -431,7 +449,7 @@ impl Config {
             // binary; the production gateway never exposes a serial console.
             "-serial".to_owned(), if !matches!(role, Role::Session) && cfg!(feature = "lab-emulation") { format!("unix:{}/console.sock,server=on,wait=off", role.runtime()) } else { "null".to_owned() },
             "-kernel".to_owned(), "/kernel".to_owned(), "-initrd".to_owned(), "/initrd".to_owned(),
-            "-append".to_owned(), format!("root=/dev/vda ro rootfstype=squashfs console={console} quiet loglevel=0 systemd.show_status=false panic=-1{}{}{}", if network { " oblivion.network=1" } else { "" }, if documents { " oblivion.documents=1" } else { "" }, if resize { " oblivion.resize=1" } else { "" }),
+            "-append".to_owned(), format!("root=/dev/vda ro rootfstype=squashfs console={console} quiet loglevel=0 systemd.show_status=false panic=-1{}{}{}{}", if network { " oblivion.network=1" } else { "" }, if documents { " oblivion.documents=1" } else { "" }, if resize { " oblivion.resize=1" } else { "" }, if native { " oblivion.native=1" } else { "" }),
             "-drive".to_owned(), "file=/root.squashfs,format=raw,if=none,id=root,readonly=on".to_owned(),
             "-device".to_owned(), "virtio-blk-pci,drive=root,serial=oblivion-root".to_owned(),
         ]);
@@ -781,6 +799,10 @@ pub fn resume_transfer(role: Role) -> Result<()> {
 /// guest port so the guest's readiness marker cannot be discarded by QEMU.
 pub fn copy_port(id: &str, export: bool) -> Result<UnixStream> {
     session_port(id, if export { "export" } else { "copy" })
+}
+
+pub fn agent_port(id: &str) -> Result<UnixStream> {
+    session_port(id, "agent")
 }
 
 pub fn chat_export_port(id: &str) -> Result<UnixStream> {

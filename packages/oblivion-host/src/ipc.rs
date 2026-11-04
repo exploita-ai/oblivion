@@ -27,6 +27,11 @@ enum Operation {
     OpenDocuments,
     OpenDocumentsEphemeral,
     StartChat,
+    StartAgent,
+    AgentAttach,
+    AgentRelease,
+    ShutdownRuntime,
+    ShutdownIdle,
     StopChat,
     ChatReady,
     ChatRecover,
@@ -79,6 +84,8 @@ struct Response {
     error: Option<String>,
     #[serde(skip)]
     console: Option<UnixStream>,
+    #[serde(skip)]
+    lease: Option<(oblivion_host::scope::Slot, String, String)>,
 }
 
 pub fn serve(config: &Path, uid: u32) -> Result<()> {
@@ -107,11 +114,32 @@ pub fn serve(config: &Path, uid: u32) -> Result<()> {
                 output: String::new(),
                 error: Some(error.0.to_owned()),
                 console: None,
+                lease: None,
             },
         };
-        // Only a connected serial console descriptor is delegated, never QMP or
-        // permission to traverse the hypervisor's private runtime directory.
         let mut channel = Channel::new(&stream, Duration::from_secs(10));
+        if let Some((slot, id, session)) = response.lease {
+            let delivered = response.console.as_ref().is_some_and(|console| {
+                channel.prepare_write().is_ok() && send_console(&stream, console).is_ok()
+                    && channel.write_all(id.as_bytes()).is_ok()
+            });
+            let config = config.to_owned();
+            std::thread::spawn(move || {
+                // A held local connection owns this client. Register cleanup
+                // even if the launcher disappeared during descriptor delivery.
+                if delivered && stream.set_read_timeout(None).is_ok() {
+                    let mut byte = [0];
+                    let _ = stream.read(&mut byte);
+                }
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = Command::new(exe).arg("--config").arg(config)
+                        .args(["agent-release", &id, "--slot", &slot.index().to_string(), "--expected-session", &session])
+                        .env_clear().stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+                }
+            });
+            continue;
+        }
+        // Delegate only a connected terminal, never the hypervisor monitor.
         if let Some(console) = &response.console {
             if channel.prepare_write().is_err() || send_console(&stream, console).is_err() {
                 continue;
@@ -178,7 +206,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
     require(
         matches!(
             request.operation,
-            Operation::Open | Operation::OpenDocuments | Operation::DiscardSessionPending
+            Operation::Open | Operation::OpenDocuments | Operation::DiscardSessionPending | Operation::AgentRelease
         ) == request.session.is_some(),
         "invalid_session_argument",
     )?;
@@ -224,6 +252,37 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
     channel
         .read_exact(&mut secret)
         .map_err(|_| Error("incomplete_secret"))?;
+    if matches!(request.operation, Operation::AgentAttach) {
+        let _lock = lock_named("storage.lock")?;
+        require(!crate::storage::recovery_required()?, "recovery_required")?;
+        let (session, mode) = crate::storage::session_info()?.ok_or(Error("session_not_open"))?;
+        require(mode == "agent" && request.expected_session.as_deref() == Some(&session), "session_changed")?;
+        let id = crate::storage::random_id()?;
+        let clients = Path::new(&oblivion_host::scope::current().runtime()).join("agent-clients");
+        fs::create_dir_all(&clients).map_err(|_| Error("client_register_failed"))?;
+        fs::write(clients.join(&id), b"").map_err(|_| Error("client_register_failed"))?;
+        let console = match crate::vm::agent_port(&id) {
+            Ok(port) => {
+                let mut ready = [0; 6];
+                let result = Channel::new(&port, Duration::from_secs(60)).read_exact(&mut ready);
+                if result.is_err() || &ready != b"ready\n" {
+                    let _ = fs::remove_file(clients.join(&id));
+                    let _ = crate::vm::remove_copy_port(&id);
+                    return Err(Error("agent_not_ready"));
+                }
+                port.set_read_timeout(None).map_err(|_| Error("agent_not_ready"))?;
+                port
+            },
+            Err(error) => {
+                let _ = fs::remove_file(clients.join(&id));
+                let _ = crate::vm::remove_copy_port(&id);
+                return Err(error);
+            }
+        };
+        return Ok(Response { ok: true, output: String::new(), error: None,
+            console: Some(console),
+            lease: Some((request.slot, id, session)) });
+    }
     if matches!(request.operation, Operation::Console | Operation::Terminal) {
         let _lock = lock_named("storage.lock")?;
         require(!crate::storage::recovery_required()?, "recovery_required")?;
@@ -243,6 +302,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
             output: String::new(),
             error: None,
             console: Some(console),
+            lease: None,
         });
     }
     let operation = match request.operation {
@@ -255,6 +315,10 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
         Operation::OpenDocuments => "enter-documents",
         Operation::OpenDocumentsEphemeral => "enter-documents-ephemeral",
         Operation::StartChat => "start-chat",
+        Operation::StartAgent => "start-agent",
+        Operation::AgentRelease => "agent-release",
+        Operation::ShutdownRuntime => "shutdown-runtime",
+        Operation::ShutdownIdle => "shutdown-idle",
         Operation::StopChat => "stop-chat",
         Operation::ChatReady => "chat-ready",
         Operation::ChatRecover => "chat-recover",
@@ -285,7 +349,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
         Operation::NetworkPolicy => "network-policy",
         Operation::Transfers => "transfers",
         Operation::Onion => "onion",
-        Operation::Console | Operation::Terminal => unreachable!(),
+        Operation::Console | Operation::Terminal | Operation::AgentAttach => unreachable!(),
     };
     let mut command =
         Command::new(std::env::current_exe().map_err(|_| Error("executable_unavailable"))?);
@@ -317,6 +381,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
     input.map_err(|_| Error("secret_pipe_failed"))?;
     Ok(Response {
         console: None,
+        lease: None,
         ok: output.status.success(),
         output: String::from_utf8(output.stdout).map_err(|_| Error("invalid_response"))?,
         error: if output.status.success() {

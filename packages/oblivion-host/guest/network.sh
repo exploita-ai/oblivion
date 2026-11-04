@@ -13,7 +13,7 @@ test "$(wc -c < /run/oblivion-api/token)" = 64
 LC_ALL=C grep -Eq '^[a-f0-9]{64}$' /run/oblivion-api/token
 IFS= read -r provider <&3
 case "$provider" in
-    abliteration-ai|refuseless|openrouter) ;;
+    abliteration-ai|refuseless|openrouter|native) ;;
     *) exit 1 ;;
 esac
 IFS= read -r web_access <&3

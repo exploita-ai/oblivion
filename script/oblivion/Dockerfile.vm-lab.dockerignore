@@ -75,6 +75,8 @@ script/oblivion/*
 !script/oblivion/onionshare-licenses.json
 !script/oblivion/onionshare-requirements.lock
 !script/oblivion/install-session-node.py
+!script/oblivion/install-agents.py
+!script/oblivion/install-agents.json
 !script/oblivion/test-host-firewall.py
 !script/oblivion/vm-*.sh
 !script/oblivion/vm-*.py
@@ -198,3 +200,6 @@ packages/oblivion-clipboard/target/
 !script/oblivion/test-vm-clipboard.py
 !script/oblivion/test-onionshare.py
 !script/oblivion/test-onion-tor.py
+
+**/__pycache__
+**/*.pyc

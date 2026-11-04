@@ -25,6 +25,10 @@ enum Request {
         #[serde(default)]
         transport: Transport,
     },
+    ConfigureTools {
+        #[serde(default)]
+        transport: Transport,
+    },
     Grant {
         token: Zeroizing<String>,
         #[serde(default)]
@@ -113,7 +117,7 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
             Request::TorInitialize { state } => {
                 if tor.is_some()
                     || api.is_some()
-                    || key.is_none()
+                    || transport.is_none()
                     || !matches!(transport, Some(Transport::Tor {}))
                 {
                     return Err(io::Error::other("invalid_tor_initialization"));
@@ -165,7 +169,7 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                 api_key,
                 transport: selected,
             } => {
-                if key.is_some()
+                if transport.is_some()
                     || !(16..=4096).contains(&api_key.len())
                     || !api_key.bytes().all(|byte| byte.is_ascii_graphic())
                 {
@@ -177,6 +181,14 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                 provider = Some(selected_provider);
                 key = Some(api_key);
             }
+            Request::ConfigureTools { transport: selected } => {
+                if transport.is_some() {
+                    return Err(io::Error::other("invalid_configuration"));
+                }
+                crate::network::configure(&selected)?;
+                firewall = Some(crate::network::snapshot()?);
+                transport = Some(selected);
+            }
             Request::Grant { token, tools, rotation_allowed } => {
                 if api.is_some()
                     || token.len() != 64
@@ -184,13 +196,9 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                 {
                     return Err(io::Error::other("invalid_grant"));
                 }
-                let key = key
-                    .as_ref()
-                    .ok_or_else(|| io::Error::other("not_configured"))?;
                 let transport = transport
                     .as_ref()
                     .ok_or_else(|| io::Error::other("not_configured"))?;
-                let provider = provider.ok_or_else(|| io::Error::other("not_configured"))?;
                 if matches!(transport, Transport::Tor {}) && tor.is_none() {
                     return Err(io::Error::other("tor_not_initialized"));
                 }
@@ -200,7 +208,7 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                 }
                 *api = Some(Grant::start(
                     provider,
-                    key,
+                    key.as_deref().map(String::as_str),
                     &token,
                     transport,
                     tools,
@@ -239,9 +247,8 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                 firewall = Some(crate::network::snapshot()?);
                 access = tools.access;
                 *api = Some(Grant::start(
-                    provider.ok_or_else(|| io::Error::other("not_configured"))?,
-                    key.as_ref()
-                        .ok_or_else(|| io::Error::other("not_configured"))?,
+                    provider,
+                    key.as_deref().map(String::as_str),
                     &previous.token,
                     transport,
                     Some(tools),
@@ -293,7 +300,7 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
         channel.write(
             &serde_json::to_vec(&Reply {
                 ok: true,
-                configured: key.is_some() && provider.is_some(),
+                configured: transport.is_some(),
                 active: api.is_some(),
             })?,
             api,
@@ -325,7 +332,7 @@ struct PendingRotation {
 }
 
 struct Plane {
-    api: Process,
+    api: Option<Process>,
     egress: Process,
     tools: Option<Process>,
     web: Process,
@@ -333,8 +340,8 @@ struct Plane {
 
 impl Grant {
     fn start(
-        provider: Provider,
-        key: &str,
+        provider: Option<Provider>,
+        key: Option<&str>,
         token: &str,
         transport: &Transport,
         tools: Option<Tools>,
@@ -417,8 +424,7 @@ impl Grant {
             if !tor.circuit_ready(pending.circuit.unwrap(), &self.previous_exits)? { return Ok(false); }
             if !crate::network::isolated(&self.rotation_firewall)? { return Err(io::Error::other("isolation_lost")); }
             self.plane = Some(Plane::start(
-                provider.ok_or_else(|| io::Error::other("not_configured"))?,
-                key.ok_or_else(|| io::Error::other("not_configured"))?, &self.token,
+                provider, key, &self.token,
                 transport.ok_or_else(|| io::Error::other("not_configured"))?, self.policy.as_ref(),
             )?);
             if !crate::network::isolated(&self.rotation_firewall)? { return Err(io::Error::other("isolation_lost")); }
@@ -475,10 +481,14 @@ impl Grant {
 }
 
 impl Plane {
-    fn start(provider: Provider, key: &str, token: &str, transport: &Transport, tools: Option<&Tools>) -> io::Result<Self> {
+    fn start(provider: Option<Provider>, key: Option<&str>, token: &str, transport: &Transport, tools: Option<&Tools>) -> io::Result<Self> {
+        if provider.is_some() != key.is_some() {
+            return Err(io::Error::other("invalid_provider_credentials"));
+        }
         #[derive(Serialize)]
         struct EgressCredentials<'a> {
-            provider: Provider,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            provider: Option<Provider>,
             transport: &'a Transport,
             session_token: &'a str,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -500,15 +510,17 @@ impl Plane {
             session_token: &'a str,
             socks: &'static str,
         }
-        let api = Process::start(
-            Role::Api,
-            Zeroizing::new(serde_json::to_vec(&ApiCredentials {
-                provider,
-                api_key: key,
-                session_token: token,
-                socks: "127.0.0.1:9051",
-            })?),
-        )?;
+        let api = provider.zip(key).map(|(provider, key)| {
+            Process::start(
+                Role::Api,
+                Zeroizing::new(serde_json::to_vec(&ApiCredentials {
+                    provider,
+                    api_key: key,
+                    session_token: token,
+                    socks: "127.0.0.1:9051",
+                })?),
+            )
+        }).transpose()?;
         #[derive(Serialize)]
         struct ToolsCredentials<'a> {
             session_token: &'a str,
@@ -544,14 +556,14 @@ impl Plane {
         // Try every closure even if one fails. Process::drop also prevents a
         // startup error from leaving the other service or its sockets alive.
         self.egress.control.take();
-        self.api.control.take();
+        if let Some(api) = &mut self.api { api.control.take(); }
         self.web.control.take();
         if let Some(tools) = &mut self.tools { tools.control.take(); }
         let deadline = Instant::now() + Duration::from_secs(5);
         let egress = self.egress.stop_until(deadline);
         let tools = self.tools.as_mut().map(|tools| tools.stop_until(deadline)).transpose();
         let web = self.web.stop_until(deadline);
-        let api = self.api.stop_until(deadline);
+        let api = self.api.as_mut().map(|api| api.stop_until(deadline)).transpose();
         tools?;
         web?;
         api?;
@@ -560,7 +572,7 @@ impl Plane {
 
     fn exited(&mut self) -> io::Result<bool> {
         Ok(self.tools.as_mut().map(|tools| tools.child.try_wait()).transpose()?.flatten().is_some()
-            || self.web.child.try_wait()?.is_some() || self.api.child.try_wait()?.is_some() || self.egress.child.try_wait()?.is_some())
+            || self.web.child.try_wait()?.is_some() || self.api.as_mut().map(|api| api.child.try_wait()).transpose()?.flatten().is_some() || self.egress.child.try_wait()?.is_some())
     }
 }
 

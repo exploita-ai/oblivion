@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "agents": {
+    "codex": {
+      "version": "0.159.2",
+      "architectures": {
+        "arm64": {
+          "package": "@openai/codex",
+          "version": "0.159.2-linux-arm64",
+          "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.159.2-linux-arm64.tgz",
+          "integrity": "sha512-Pm0W2PnFeTEqPx+AOIwgOVB4dBtY24cuD0tx1hjCor60CbSAT7WBPZVNUINSrTCDrMndvQC67p71ZEz+gmPPkA==",
+          "executable": "vendor/aarch64-unknown-linux-musl/bin/codex"
+        },
+        "amd64": {
+          "package": "@openai/codex",
+          "version": "0.159.2-linux-x64",
+          "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.159.2-linux-x64.tgz",
+          "integrity": "sha512-RrCZ1X52wpa1lOsXtCtSyhjOFdQPh7LH5Ccv8HsKmd/2UXbUwxXFqWXFK3JzatquUNGtW/TLox5Y7qVOGkV0/Q==",
+          "executable": "vendor/x86_64-unknown-linux-musl/bin/codex"
+        }
+      }
+    },
+    "claude": {
+      "version": "2.1.302",
+      "architectures": {
+        "arm64": {
+          "package": "@anthropic-ai/claude-code-linux-arm64",
+          "version": "2.1.302",
+          "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-arm64/-/claude-code-linux-arm64-2.1.302.tgz",
+          "integrity": "sha512-eRgp1cK2oSC7vK1/Dha9EsfSxNb6b/LyduzBxRW02c0X+C6xtyAzeGMmRobQSNuTazRxsr/Cf2/l4Sf/LMgxCA==",
+          "executable": "claude"
+        },
+        "amd64": {
+          "package": "@anthropic-ai/claude-code-linux-x64",
+          "version": "2.1.302",
+          "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.302.tgz",
+          "integrity": "sha512-+d4RUq3E3K+3/J4MysB3z4QXA4rkDNt70VYpTLE6kJCnUe/Z6SB8VJsVJG/NV4bECrvkxkLHjXk+vrgBstfZkw==",
+          "executable": "claude"
+        }
+      }
+    },
+    "opencode2": {
+      "version": "2.0.1",
+      "architectures": {
+        "arm64": {
+          "package": "@opencode/cli-linux-arm64",
+          "version": "2.0.1",
+          "url": "https://registry.npmjs.org/@opencode/cli-linux-arm64/-/cli-linux-arm64-2.0.1.tgz",
+          "integrity": "sha512-1mXYCVKJwYfcotPF5KW5lPxGaWrlfEu+HXsSNXDeR6v04lmCVVdF8o7gDzMRxuavfcZMTZNJ0jl/Ix0wJCav9A==",
+          "executable": "bin/opencode"
+        },
+        "amd64": {
+          "package": "@opencode/cli-linux-x64-baseline",
+          "version": "2.0.1",
+          "url": "https://registry.npmjs.org/@opencode/cli-linux-x64-baseline/-/cli-linux-x64-baseline-2.0.1.tgz",
+          "integrity": "sha512-zekoKBEO8ultl397UzVElyo0iTGW7/3dVJPYyKnqrX0esOcDrAXf/AfOiM6K6LLfMLQ7XCFs8L+EsQrQbeFsSQ==",
+          "executable": "bin/opencode"
+        }
+      }
+    }
+  }
+}

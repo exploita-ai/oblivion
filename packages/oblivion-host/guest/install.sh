@@ -5,6 +5,8 @@ cp /usr/lib/oblivion/guest/oblivion-documents-ready.service /etc/systemd/system/
 cp /usr/lib/oblivion/guest/oblivion-conversation.service /etc/systemd/system/
 cp /usr/lib/oblivion/guest/oblivion-chat-server.service /etc/systemd/system/
 ln -sf /usr/lib/oblivion/guest/chat-client.sh /usr/bin/chat
+ln -sf /usr/lib/oblivion/guest/agent.sh /usr/bin/oblivion-agent
+cp /usr/lib/oblivion/guest/oblivion-agent@.service /etc/systemd/system/
 cp /usr/lib/oblivion/guest/oblivion-terminal.service /etc/systemd/system/
 cp /usr/lib/oblivion/guest/oblivion-resize.service /etc/systemd/system/
 mkdir -p /etc/systemd/system/vault.mount.d
@@ -24,6 +26,7 @@ printf '%s\n' 'SUBSYSTEM=="virtio-ports", ATTR{name}=="oblivion.resize", OWNER="
 printf '%s\n' 'SUBSYSTEM=="virtio-ports", ATTR{name}=="oblivion.copy.*", OWNER="1001", GROUP="1000", MODE="0600", TAG+="systemd", ENV{SYSTEMD_WANTS}="oblivion-import-receive@%k.service"' > /etc/udev/rules.d/71-oblivion-import.rules
 printf '%s\n' 'SUBSYSTEM=="virtio-ports", ATTR{name}=="oblivion.export.*", OWNER="1000", GROUP="1000", MODE="0600", TAG+="systemd", ENV{SYSTEMD_WANTS}="oblivion-export-send@%k.service"' > /etc/udev/rules.d/72-oblivion-export.rules
 printf '%s\n' 'SUBSYSTEM=="virtio-ports", ATTR{name}=="oblivion.archive.*", OWNER="1000", GROUP="1000", MODE="0600", TAG+="systemd", ENV{SYSTEMD_WANTS}="oblivion-chat-export@$attr{name}.service"' > /etc/udev/rules.d/73-oblivion-chat-export.rules
+printf '%s\n' 'SUBSYSTEM=="virtio-ports", ATTR{name}=="oblivion.agent.*", OWNER="1000", GROUP="1000", MODE="0600", TAG+="systemd", ENV{SYSTEMD_WANTS}="oblivion-agent@%k.service"' > /etc/udev/rules.d/74-oblivion-agent.rules
 printf '/dev/vdb /vault ext4 nodev,nosuid,noatime 0 0\n' >> /etc/fstab
 # Session package state must survive together with its binaries. Other VM
 # roles retain vm-common-setup.sh's read-only root and RAM-backed /var.

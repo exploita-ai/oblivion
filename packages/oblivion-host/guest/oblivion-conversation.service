@@ -2,6 +2,7 @@
 Description=Oblivion protected workspace
 ConditionKernelCommandLine=!oblivion.documents=1
 ConditionKernelCommandLine=!oblivion.resize=1
+ConditionKernelCommandLine=!oblivion.native=1
 Requires=oblivion-vault.service oblivion-chat-server.service
 After=oblivion-vault.service oblivion-chat-server.service
 

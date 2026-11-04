@@ -27,7 +27,8 @@ const HANDSHAKE: Duration = Duration::from_secs(10);
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
-    pub provider: Provider,
+    #[serde(default)]
+    pub provider: Option<Provider>,
     pub transport: Transport,
     pub session_token: Zeroizing<String>,
     #[serde(default)]
@@ -124,6 +125,7 @@ impl Egress {
         let tools = username.as_slice() == TOOLS_USER && self.credentials.tools.is_some();
         let web = username.as_slice() == WEB_USER;
         if (!tools && !web && username.as_slice() != USER)
+            || (username.as_slice() == USER && self.credentials.provider.is_none())
             || !bool::from(
                 password
                     .as_slice()
@@ -180,7 +182,7 @@ impl Egress {
                         .is_some_and(|tools| tools.decision(destination) == Action::Allow)
             }
             (Some(destination), false, false) => {
-                host == self.credentials.provider.host()
+                self.credentials.provider.is_some_and(|provider| host == provider.host())
                     && port == 443
                     && self.credentials.tools.as_ref().is_none_or(|tools| {
                         tools.access != Access::Offline

@@ -1,0 +1,24 @@
+[Unit]
+Description=Official agent attached to a protected Safe
+Requires=oblivion-vault.service
+After=oblivion-vault.service oblivion-session-network.service
+BindsTo=dev-%i.device
+After=dev-%i.device
+
+[Service]
+Type=exec
+User=1000
+Group=1000
+WorkingDirectory=/vault/workspace
+ExecStart=/usr/bin/python3 -B /usr/lib/oblivion/guest/agent-channel.py /dev/%I
+UMask=0077
+# sudo is scoped to this Safe's guest and encrypted system overlay.
+NoNewPrivileges=no
+LimitCORE=0
+MemorySwapMax=0
+KillMode=control-group
+TimeoutStopSec=5
+StandardInput=null
+StandardOutput=null
+StandardError=null
+Restart=no

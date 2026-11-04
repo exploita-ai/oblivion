@@ -1,8 +1,7 @@
 [Unit]
 Description=Oblivion trusted console
-BindsTo=oblivion-controller.service
-Wants=oblivion-recover.service
-After=oblivion-controller.service oblivion-recover.service
+Requires=oblivion-controller.service
+After=oblivion-controller.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=0
 
@@ -11,9 +10,6 @@ Type=exec
 User=1000
 Group=1000
 ExecStart=/usr/bin/oblivion-manager
-# Queue cleanup without waiting inside a unit ordered after that cleanup.
-# The next start waits for recovery; a failure is shown by the recovery latch.
-ExecStopPost=+/usr/bin/systemctl --no-block start oblivion-recover.service
 Restart=always
 RestartSec=2
 KillMode=control-group
@@ -49,3 +45,6 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 LimitCORE=0
 MemorySwapMax=0
+
+[Install]
+WantedBy=multi-user.target

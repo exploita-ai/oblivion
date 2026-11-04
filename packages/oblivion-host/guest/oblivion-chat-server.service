@@ -2,6 +2,7 @@
 Description=Oblivion session-local OpenCode server
 ConditionKernelCommandLine=!oblivion.documents=1
 ConditionKernelCommandLine=!oblivion.resize=1
+ConditionKernelCommandLine=!oblivion.native=1
 Requires=oblivion-vault.service oblivion-session-network.service
 After=oblivion-vault.service oblivion-session-network.service
 

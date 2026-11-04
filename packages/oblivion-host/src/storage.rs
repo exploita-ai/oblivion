@@ -43,6 +43,8 @@ struct Config {
     usb_persistence: bool,
     #[serde(default)]
     network_profiles: bool,
+    #[serde(default)]
+    manage_os_preferences: bool,
     #[serde(skip)]
     usb: Option<crate::usb::Inspection>,
 }
@@ -160,7 +162,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         let (saved, selected) = transport_profiles()?;
         return crate::gateway::serve(
             gateway,
-            read_api_key()?,
+            if !runtime_record("native-agent").exists() && api_key_present()? { Some(read_api_key()?) } else { None },
             selected.unwrap_or(saved).into_transport(),
             config.gateway_network,
         );
@@ -169,7 +171,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         args.len()
             == if matches!(
                 op,
-                "open" | "enter" | "enter-documents" | "discard-session-pending"
+                "open" | "enter" | "enter-documents" | "discard-session-pending" | "agent-release"
             ) {
                 4
             } else {
@@ -237,6 +239,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             | "enter-documents-ephemeral"
             | "stop-chat"
             | "start-chat"
+            | "start-agent"
             | "chat-ready"
             | "discard-general-pending"
             | "discard-session-pending"
@@ -423,7 +426,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         }
         "unlock" | "unlock-ephemeral" => {
             config.unlock(&password(false)?, op == "unlock-ephemeral")?;
-            crate::host_settings::restore()?;
+            if config.manage_os_preferences { crate::host_settings::restore()?; }
             if config.network_profiles {
                 crate::host_network::restore()?;
             }
@@ -522,6 +525,62 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 return Err(error);
             }
             write_session_info(&id, "documents")
+        }
+        "shutdown-runtime" | "shutdown-idle" => {
+            require(fs::read_to_string("/proc/cmdline").map_err(|_| Error("runtime_unavailable"))?
+                .split_whitespace().any(|arg| arg == "oblivion.runtime=1"), "native_runtime_required")?;
+            require(open_sessions()?.is_empty(), "runtime_busy")?;
+            if op == "shutdown-idle" {
+                close_general()?;
+                clear_key_file("api-keys.json")?;
+                clear_key_file("api-key-default")?;
+            }
+            require(mount_mode()? == MountMode::Closed, "runtime_busy")?;
+            run("/usr/bin/systemctl", &["poweroff", "--no-block"], None)
+        }
+        "agent-release" => {
+            validate_id(&args[3])?;
+            let clients = Path::new(&scope::current().runtime()).join("agent-clients");
+            let path = clients.join(&args[3]);
+            if path.exists() {
+                fs::remove_file(path).map_err(|_| Error("client_release_failed"))?;
+            }
+            crate::vm::remove_copy_port(&args[3])?;
+            if clients.exists() && fs::read_dir(&clients).map_err(|_| Error("client_release_failed"))?.next().is_none() {
+                require(config.close_slot(false)?, "locked_without_tor_state")?;
+            }
+            Ok(())
+        }
+        "start-agent" => {
+            let (id, mode) = session_info()?.ok_or(Error("session_not_open"))?;
+            if mode == "agent" { return Ok(()); }
+            require(mode == "documents", "documents_not_open")?;
+            require(!crate::onion_host::prepared()? && !crate::transfer_host::prepared()?, "transfer_active")?;
+            let access = Access::parse(&crate::host_settings::status(true)?.current.web_access).map_err(Error)?;
+            if access == Access::Offline {
+                return write_session_info(&id, "agent");
+            }
+            require(config.gateway.is_some(), "gateway_not_configured")?;
+            write_key_file("native-agent", b"1")?;
+            if matches!(crate::gateway::state()?.as_str(), "inactive" | "failed") {
+                crate::gateway::start(false)?;
+            }
+            require(crate::gateway::state()? == "active", "gateway_not_ready")?;
+            crate::gateway::ready()?;
+            let vm = config.vm.as_ref().ok_or(Error("vm_not_configured"))?;
+            let tools = session_policy(&id, access)?;
+            write_session_info(&id, "starting")?;
+            let result = (|| {
+                crate::vm::stop(false)?;
+                let token = crate::gateway::prepare()?;
+                vm.start_agent(&token, if access == Access::Open { "open" } else { "strict" }, tools)?;
+                write_session_info(&id, "agent")
+            })();
+            if result.is_err() {
+                recover_chat(&config)?;
+                crate::gateway::shutdown()?;
+            }
+            result
         }
         "start-chat" => {
             require(!crate::onion_host::prepared()?, "transfer_active")?;
@@ -1187,7 +1246,7 @@ impl Config {
         )?;
         let gateway = crate::gateway::state()?;
         if gateway == "active" {
-            if let Some((id, _)) = session_info()?.filter(|(_, mode)| mode == "chat") {
+            if let Some((id, _)) = session_info()?.filter(|(_, mode)| matches!(mode.as_str(), "chat" | "agent")) {
                 crate::gateway::policy(session_policy(&id, access)?)?;
             } else {
                 crate::gateway::stop()?;
@@ -1238,7 +1297,7 @@ impl Config {
         // Revoke existing tunnels before publishing the new rules. A failed
         // acknowledgement destroys the gateway instead of retaining old access.
         if crate::gateway::state()? == "active" {
-            if let Some((id, _)) = session_info()?.filter(|(_, mode)| mode == "chat") {
+            if let Some((id, _)) = session_info()?.filter(|(_, mode)| matches!(mode.as_str(), "chat" | "agent")) {
                 crate::gateway::policy(Tools {
                     session: Session::new(&id).map_err(Error)?,
                     policy: policy.clone(),
@@ -1738,8 +1797,8 @@ impl Config {
     fn open_ephemeral(&self) -> Result<()> {
         self.admit_session()?;
         require(
-            mount_mode()? == MountMode::ReadOnly && mapping_open("oblivion-general")?,
-            "ephemeral_boot_required",
+            mount_mode()? != MountMode::Closed && mapping_open("oblivion-general")?,
+            "general_not_open",
         )?;
         require(!mapping_open("oblivion-session")?, "session_already_open")?;
         // runtime() checks tmpfs; secure_process() rejects swap. Reuse the same
@@ -2882,7 +2941,7 @@ pub(crate) fn session_info() -> Result<Option<(String, String)>> {
         .map_err(|_| Error("invalid_session_state"))?;
     validate_id(&value.0)?;
     require(
-        matches!(value.1.as_str(), "documents" | "chat" | "starting"),
+        matches!(value.1.as_str(), "documents" | "chat" | "starting" | "agent"),
         "invalid_session_state",
     )?;
     Ok(Some(value))
@@ -3169,6 +3228,9 @@ impl Config {
             clear_key_selection()?;
             clear_key_file("session-info")?;
             clear_key_file("access.json")?;
+            clear_key_file("native-agent")?;
+            let clients = Path::new(&scope::current().runtime()).join("agent-clients");
+            if clients.exists() { fs::remove_dir_all(clients).map_err(|_| Error("client_cleanup_failed"))?; }
             clear_key_file("session-recovery-required")?;
             clear_transport_selection()?;
             clear_network_selection()?;

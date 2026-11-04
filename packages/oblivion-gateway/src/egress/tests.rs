@@ -19,7 +19,7 @@ fn provider_configuration(
     authenticated: bool,
 ) -> Credentials {
     Credentials {
-        provider,
+        provider: Some(provider),
         session_token: Zeroizing::new(TOKEN.into()),
         tools: None,
         transport: Transport::Socks5 {
@@ -52,13 +52,13 @@ async fn configured_fixture(
     TcpListener,
     tokio::task::JoinHandle<io::Result<()>>,
 ) {
-    configured_provider_fixture(authenticated, tools, Provider::AbliterationAi).await
+    configured_provider_fixture(authenticated, tools, Some(Provider::AbliterationAi)).await
 }
 
 async fn configured_provider_fixture(
     authenticated: bool,
     tools: Option<Tools>,
-    provider: Provider,
+    provider: Option<Provider>,
 ) -> (
     Arc<Egress>,
     TcpStream,
@@ -74,8 +74,9 @@ async fn configured_provider_fixture(
     let egress = Arc::new(Egress {
         credentials: Credentials {
             tools,
+            provider,
             ..provider_configuration(
-                provider,
+                provider.unwrap_or_default(),
                 SocketAddrV4::new(Ipv4Addr::LOCALHOST, upstream.local_addr().unwrap().port()),
                 authenticated,
             )
@@ -97,7 +98,7 @@ async fn api_role_is_pinned_to_the_selected_provider_hostname() {
             Provider::Openrouter,
         ] {
             let (egress, mut client, upstream, server) =
-                configured_provider_fixture(false, None, provider).await;
+                configured_provider_fixture(false, None, Some(provider)).await;
             assert_eq!(authenticate(&mut client, TOKEN.as_bytes()).await, [1, 0]);
             request(&mut client, b"example.com", 443).await;
             let mut reply = [0; 10];
@@ -108,7 +109,7 @@ async fn api_role_is_pinned_to_the_selected_provider_hostname() {
             server.await.unwrap().unwrap();
 
             let (egress, mut client, upstream, server) =
-                configured_provider_fixture(false, None, provider).await;
+                configured_provider_fixture(false, None, Some(provider)).await;
             assert_eq!(authenticate(&mut client, TOKEN.as_bytes()).await, [1, 0]);
             request(&mut client, provider.host().as_bytes(), 443).await;
             let _ = upstream.accept().await.unwrap();
@@ -885,5 +886,42 @@ async fn curl_passive_ftp_tunnels_control_and_data_through_open_egress() {
         assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
         assert_eq!(result.stdout, b"oblivion-files\n");
         peer.await.unwrap();
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn tools_only_grant_rejects_provider_role_and_routes_tools_without_provider_credentials() {
+    use futures_util::FutureExt;
+    timeout(Duration::from_secs(5), async {
+        let (egress, mut client, upstream, server) = configured_provider_fixture(
+            false,
+            Some(Tools { access: Access::Open, ..tools(json!([])) }),
+            None,
+        ).await;
+        assert_eq!(authenticate(&mut client, TOKEN.as_bytes()).await, [1, 1]);
+        assert!(upstream.accept().now_or_never().is_none());
+        egress.revoke();
+        server.await.unwrap().unwrap();
+
+        let (egress, mut client, upstream, server) = configured_provider_fixture(
+            false,
+            Some(Tools { access: Access::Open, ..tools(json!([])) }),
+            None,
+        ).await;
+        assert_eq!(authenticate_as(&mut client, TOOLS_USER, TOKEN.as_bytes()).await, [1, 0]);
+        let proxy = tokio::spawn(async move {
+            let mut expected = vec![5, 1, 0, 3, 11];
+            expected.extend_from_slice(b"example.com");
+            expected.extend_from_slice(&443u16.to_be_bytes());
+            let mut connection = external_request(&upstream, false, &expected).await;
+            assert_eq!(connection.read(&mut [0]).await.unwrap(), 0);
+        });
+        request(&mut client, b"example.com", 443).await;
+        let mut reply = [0; 10];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply[1], 0);
+        egress.revoke();
+        server.await.unwrap().unwrap();
+        proxy.await.unwrap();
     }).await.unwrap();
 }

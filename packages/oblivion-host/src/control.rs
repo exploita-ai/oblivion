@@ -32,6 +32,15 @@ pub fn protect() -> Result<()> {
 }
 
 fn connect(operation: &str, session: Option<&str>, secret: &[u8]) -> Result<UnixStream> {
+    connect_expected(operation, session, secret, None)
+}
+
+fn connect_expected(
+    operation: &str,
+    session: Option<&str>,
+    secret: &[u8],
+    expected: Option<&str>,
+) -> Result<UnixStream> {
     if secret.len()
         > if matches!(
             operation,
@@ -72,16 +81,27 @@ fn connect(operation: &str, session: Option<&str>, secret: &[u8]) -> Result<Unix
     }
     let mut channel = Channel::new(&stream, Duration::from_secs(10));
     let header = serde_json::to_vec(
-        &json!({"operation": operation, "session": session, "secret_len": secret.len(), "slot": crate::scope::current()}),
+        &json!({"operation": operation, "session": session, "secret_len": secret.len(), "slot": crate::scope::current(), "expected_session": expected}),
     )?;
     channel.write_all(&(header.len() as u32).to_be_bytes())?;
     channel.write_all(&header)?;
     channel.write_all(secret)?;
-    stream.shutdown(std::net::Shutdown::Write)?;
+    if operation != "agent-attach" {
+        stream.shutdown(std::net::Shutdown::Write)?;
+    }
     Ok(stream)
 }
 
 pub fn request(operation: &str, session: Option<&str>, secret: &[u8]) -> Result<String> {
+    if let Some(path) = std::env::var_os("OBLIVION_CONTROL_SOCKET") {
+        return crate::remote_control::request(
+            std::path::Path::new(&path),
+            operation,
+            session,
+            secret,
+            None,
+        );
+    }
     let stream = connect(operation, session, secret)?;
     response(Channel::new(
         &stream,
@@ -124,9 +144,33 @@ pub fn terminal() -> Result<UnixStream> {
 
 #[cfg(target_os = "linux")]
 fn descriptor(operation: &str) -> Result<UnixStream> {
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let stream = connect(operation, None, &[])?;
     let channel = Channel::new(&stream, Duration::from_secs(120));
+    let console = receive_descriptor(&stream, &channel)?;
+    response(channel)?;
+    Ok(console)
+}
+
+#[cfg(target_os = "linux")]
+pub fn attach_agent(expected: &str) -> Result<(UnixStream, UnixStream, String)> {
+    if let Some(path) = std::env::var_os("OBLIVION_CONTROL_SOCKET") {
+        let (stream, client) =
+            crate::remote_control::attach_agent(std::path::Path::new(&path), expected)?;
+        return Ok((stream.try_clone()?, stream, client));
+    }
+    let stream = connect_expected("agent-attach", None, &[], Some(expected))?;
+    let channel = Channel::new(&stream, Duration::from_secs(120));
+    let console = receive_descriptor(&stream, &channel)?;
+    // This connection is a lease. EOF releases this client and locks the Safe
+    // when its last launcher disconnects, including after a launcher crash.
+    let mut client = [0; 32];
+    Channel::new(&stream, Duration::from_secs(10)).read_exact(&mut client)?;
+    Ok((console, stream, String::from_utf8(client.to_vec())?))
+}
+
+#[cfg(target_os = "linux")]
+fn receive_descriptor(stream: &UnixStream, channel: &Channel<'_>) -> Result<UnixStream> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let mut byte = 0u8;
     let mut data = libc::iovec {
         iov_base: (&mut byte as *mut u8).cast(),
@@ -157,7 +201,6 @@ fn descriptor(operation: &str) -> Result<UnixStream> {
         if byte != b'F' || message.msg_flags & libc::MSG_CTRUNC != 0 {
             return Err("console_transfer_failed".into());
         }
-        response(channel)?;
         Ok(UnixStream::from(fd))
     }
 }
@@ -170,4 +213,28 @@ pub fn console() -> Result<UnixStream> {
 #[cfg(not(target_os = "linux"))]
 pub fn terminal() -> Result<UnixStream> {
     Err("linux_required".into())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn attach_agent(expected: &str) -> Result<(UnixStream, UnixStream, String)> {
+    let path = std::env::var_os("OBLIVION_CONTROL_SOCKET").ok_or("native_runtime_required")?;
+    let (stream, client) =
+        crate::remote_control::attach_agent(std::path::Path::new(&path), expected)?;
+    Ok((stream.try_clone()?, stream, client))
+}
+
+pub fn release_agent(client: &str, expected: &str) -> Result<()> {
+    if let Some(path) = std::env::var_os("OBLIVION_CONTROL_SOCKET") {
+        crate::remote_control::request(
+            std::path::Path::new(&path),
+            "agent-release",
+            Some(client),
+            &[],
+            Some(expected),
+        )?;
+        return Ok(());
+    }
+    let stream = connect_expected("agent-release", Some(client), &[], Some(expected))?;
+    response(Channel::new(&stream, Duration::from_secs(120)))?;
+    Ok(())
 }
