@@ -42,24 +42,57 @@ does not become a canonical user message in the tested cases. This is not a
 boundary against a user deliberately modifying the Safe's root-owned policy
 with its own sudo access.
 
-## Remaining release gates
+## Managed handoff contract for 1.0
+
+Different conversations and agents may run concurrently inside one Safe.
+Moving the same conversation to another agent is a managed handoff: verify
+that the previous client and its backend writers stopped, reconcile saved
+history, update the inactive target profile, resolve its native ID, then open
+that ID in the official client. The saved task is not submitted again.
+
+The first version requires the destination profile to be inactive during
+projection. A busy profile or uncertain backend lifetime blocks the handoff
+until work finishes or explicit recovery succeeds. Other conversations are
+not automatically stopped. These lifecycle and continuation steps remain
+under implementation and qualification.
+
+Native arguments, pickers and plugins stay available. Universal exclusion of
+all manual same-chat mutations is outside this 1.0 contract. The supported
+handoff must report its actual busy/recovery state rather than claim that a
+closed terminal proves an idle backend.
+
+## Admission coverage and remaining work
 
 This is prompt admission, **not a complete single-author guarantee**. Claude's
 native `/compact` command bypasses `UserPromptSubmit`; even a denied
 `PreCompact` writes local command transcript rows in the pinned version.
-Interactive picker mutations, background continuations and all other native
-mutation paths need a complete admission boundary before that claim is made.
+Interactive picker mutations, background continuations and other native
+mutation paths remain outside that coverage. The 1.0 handoff contract above
+does not claim universal interception of those paths.
 
 Codex and OpenCode prompt admission is not integrated. Codex's pinned hook
 execution errors fail open and its shared backend does not expose the
 attaching TUI's owner to those hooks. OpenCode's pinned prompt hook lacks a
 supported denial result and frontend owner. Their public local control
-protocols are the next integration seam, preserving official binaries and
-native TUIs. No shared environment nonce or post-hoc watcher is treated as
-full writer enforcement.
+protocols offer bounded integration seams. Codex's pinned `exec` and `review`
+paths use an in-process backend and reject `--remote`; see the
+[native executor](https://github.com/openai/codex/blob/ff6aec96948b70d94983af2641a6b67c94faeff5/codex-rs/exec/src/lib.rs#L986).
+OpenCode's external-server mode changes managed reconnect and environment
+forwarding, while plugins can invoke core Session methods directly; see
+[frontend startup](https://github.com/anomalyco/opencode/blob/afc3359eda634d9df012df5fe599e6bbfe26a655/packages/cli/src/commands/handlers/default.ts#L59-L101)
+and [plugin methods](https://github.com/anomalyco/opencode/blob/afc3359eda634d9df012df5fe599e6bbfe26a655/packages/core/src/plugin/host.ts#L505-L530).
+Redirecting a TUI through a relay therefore needs an explicit supported-mode
+contract before it can provide complete ownership. The launcher currently
+forwards native arguments unchanged. A shared environment nonce or post-hoc
+watcher does not provide full writer enforcement.
+
+Backend lifetime also needs separate tracking: Codex's detached daemon can
+retain threads after a frontend exits. A wrapper's profile flock alone cannot
+establish that every writer has stopped. Projection safety and a reliable
+cross-agent handoff require actual backend shutdown or retained authority.
 
 Focused Linux socket/process tests and offline tests with the actual pinned
 Claude binary pass without a provider or model call. Safe-wide shutdown,
-power loss and complete cross-agent ownership still require qualification.
+power loss and verified cross-agent handoff still require qualification.
 Implementation and fixture commands are in
 [the history package](../packages/oblivion-history/README.md).

@@ -23,9 +23,18 @@ Claude now has process-bound prompt admission through its mandatory managed
 hook, with canonical-chat checks, stale-projection denial and a same-boot
 restart fence. Pinned native offline fixtures exercise resume conflicts and
 hook failures. This does not cover every native mutation: `/compact` and
-interactive picker behavior remain part of the complete ownership gate.
-Codex/OpenCode admission still needs their local control-protocol integrations.
+interactive picker behavior remain outside its prompt coverage. The chosen
+1.0 contract keeps different chats concurrent and requires a managed handoff
+for the same chat after verified writer shutdown. Universal interception of
+manual native commands and plugins is outside that contract.
 See [history and admission](HISTORY.md).
+
+The agent chooser now separates Enter for a new conversation from C to
+continue that agent's latest conversation in its current workspace. A saved
+task with an observed native chat ID offers a reviewed native resume after
+rechecking the exact task, job cleanup and Safe opening. It sends no task
+again. Native pickers and arguments retain their own behavior; this does not
+implement the remaining same-chat cross-agent handoff and backend lifecycle guard.
 
 Agent-created Safes have an explicit review screen. Closed RAM children resolve
 to their existing volume and require their live parent's family authority; they
@@ -97,7 +106,7 @@ remain open.
 
 Remaining release gates include real login and scoped child-credential delegation,
 chat persistence after cold restart,
-interactive cross-agent resume and author admission, close during active jobs,
+interactive cross-agent resume and verified handoff, close during active jobs,
 family password rotation and independent restore, concurrent Tor/SOCKS5 failures,
 Share between two installed candidates, physical media, resource measurements,
 desktop installation/uninstall qualification and signed release provenance. Local inference is deferred until after

@@ -170,6 +170,12 @@ an explicit local selection, with no shared folder or virtual exchange disk.
 Literal paths and a single surrounding quote pair are accepted; shell escapes
 and environment-variable expansion are not interpreted.
 
+When choosing an agent in an existing Safe, **Enter** starts a new conversation
+and **C** continues that agent's latest conversation for its current workspace.
+Saved tasks can reopen their recorded native chat after completion and verified
+cleanup, without submitting the task again. Each agent retains its native
+history picker.
+
 Share differs from a personal backup: a full disk backup can contain saved
 provider credentials. Share selects portable conversations and files, excluding
 agent profiles, credential stores and the installed OS overlay. Possible secrets
