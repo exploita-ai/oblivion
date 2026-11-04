@@ -13,4 +13,5 @@ pub mod managed;
 pub mod runtime_auth;
 pub mod session_title;
 pub mod slot;
+pub mod terminal_guard;
 pub mod volume;
