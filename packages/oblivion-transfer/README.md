@@ -38,6 +38,22 @@ lifetime channels, while Linux tests and the VM laboratory exercise real pidfds.
 
 ## Native copy outcomes
 
+Native uploads retain one prepared source selection through review. Downloads
+retain the source offer and pinned destination descriptor, without authorizing
+payload or creating receiver staging before approval. Recursive counts and total
+bytes come from that manifest; approval binds its digest. File contents that no
+longer match the reviewed manifest abort the copy.
+
+The manager communicates through a bounded, metadata-only NDJSON channel while
+remaining active. A single owned copy process handles review, approval, payload
+progress and finalizing. Progress counts actual document bytes, excluding wire
+framing. The output total is not a completion receipt. Cancel, malformed input
+or owner EOF revoke the private data channel, including blocked I/O. A verified
+pre-approval cancellation has copied no file contents; interruption after
+approval still needs receiver reconciliation because publication may have won
+the race. The terminal CLI uses the same prepared engine with review and a
+confirmation prompt; `--yes` is its explicit unattended-copy option.
+
 The desktop CLI creates an operation ID before mutating a receiver. Native
 import operations keep bounded context and receipts in the Safe's encrypted
 staging; exports keep them in `.oblivion-transfers` inside the explicitly chosen

@@ -29,8 +29,19 @@ without recopying; discard preserves published output and later user edits.
 Records bind the Safe and destination identity, and file attachment checks the
 current opening and lock fences under the controller lock. The manager's latest
 32 references stay in RAM; durable context is only in encrypted Safe staging or
-the selected export destination. Transfer progress/cancellation UI, multi-select
-and source manifest summaries before confirmation remain incomplete.
+the selected export destination.
+
+Native copies now prepare one actual manifest before confirmation, retaining
+the selected source or offered guest data and pinned destination through review.
+The manager remains rendered while a private subprocess reports recursive
+counts, total bytes, payload progress and finalizing. Its bounded event channel
+requires an approval for that digest; a Cancel or owner EOF revokes copy I/O.
+Only confirmed pre-approval cancellation claims that no file contents were
+copied. Later interruption is reconciled from receiver records. The process
+client retains ownership until actual child exit and uses bounded cleanup of
+that child alone. CLI terminal copies review and confirm too; unattended copies
+require `--yes`, which cannot bypass the manager's event approval. Multi-select,
+native GUI drop APIs and installed-platform acceptance remain incomplete.
 
 Cross-agent conversation sharing, synchronization, conversion and handoff are
 outside the 1.0 scope. Each agent owns its native chats and resume inside the

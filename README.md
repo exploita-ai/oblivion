@@ -177,6 +177,18 @@ Existing literal paths take precedence. A single surrounding quote pair or a
 terminal-escaped path is also accepted, without running a shell or expanding
 environment variables, globs or multiple selections.
 
+Before approval, Oblivion prepares the selected content and shows recursive file
+and folder counts, total bytes and the manifest digest. The same prepared
+selection is used for the copy. The manager stays visible during preparation
+and transfer, reports actual document bytes, and offers **Cancel**. Transferred
+bytes reaching the total is followed by verification and publication, not an
+immediate success claim. Cancellation near publication is reconciled against
+the recorded outcome.
+
+Terminal copies ask for confirmation after this review. Use `--yes` only to
+approve an explicit unattended import or export. The manager uses its own
+bounded event/approval channel and does not accept that bypass.
+
 **Files → Transfers and recovery** checks the receiver's recorded outcome after
 a copy, including a lost final reply. It can finish publication of a verified
 copy without copying its source again, or discard only private incomplete
