@@ -20,7 +20,7 @@ PLATFORMS = {
     "linux-arm64": ("arm64", "qemu-kvm", "@opentui/core-linux-arm64/libopentui.so"),
 }
 EVIDENCE = ("host-sources.sha256", "gateway-sources.sha256", "iso-sources.sha256",
-            "runtime.sha256", "client-evidence.json", "host-packages.tsv",
+            "runtime.sha256", "client-evidence.json", "hypervisor-kernel.json", "host-packages.tsv",
             "session-packages.tsv", "gateway-packages.tsv", "import-packages.tsv",
             "export-packages.tsv", "onion-gateway-packages.tsv", "onion-file-packages.tsv",
             "qemu-packages.tsv")

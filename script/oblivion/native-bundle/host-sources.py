@@ -8,7 +8,7 @@ import sys
 
 
 SCRIPT_INPUTS = (
-    "Dockerfile.vm-lab", "controller-setup.sh", "controller-pack.sh", "live-setup.sh", "live-pack.sh", "live-storage.py", "live-grub.cfg",
+    "Dockerfile.vm-lab", "hypervisor-kernel.py", "controller-setup.sh", "controller-pack.sh", "live-setup.sh", "live-pack.sh", "live-storage.py", "live-grub.cfg",
     "live-controller.json", "vm-common-setup.sh", "journald-forwarding.conf",
     "session-identities.sh", "pack-vm-assets.sh", "host-firewall.nft",
     "install-agents.py", "install-agents.json", "session-node.json",
@@ -17,7 +17,7 @@ SCRIPT_INPUTS = (
     "onionshare-source.json", "onionshare-requirements.lock",
     "onionshare-licenses.json", "install-onionshare.py",
     "install-vbox-clipboard.py", "vbox-clipboard.json",
-    "native-bundle/host-sources.py", "display",
+    "native-bundle/host-sources.py", "display", "live-os",
 )
 PACKAGE_INPUTS = {
     "oblivion-transfer": ("Cargo.toml", "Cargo.lock", "src"),

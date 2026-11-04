@@ -34,6 +34,16 @@ COPY script/oblivion/vm-common-setup.sh /tmp/setup
 COPY script/oblivion/journald-forwarding.conf /etc/systemd/journald.conf.d/90-oblivion-forwarding.conf
 RUN sh /tmp/setup && rm /tmp/setup
 
+# Only OS layers that run nested guests need ARM EL2 support. Other roles keep
+# Debian stable. Desktop and Live share this exact controller kernel selection.
+FROM os AS nested-hypervisor-os
+ARG TARGETARCH
+ARG OBLIVION_HOST_KERNEL_VERSION=""
+COPY script/oblivion/hypervisor-kernel.py /tmp/hypervisor-kernel.py
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && python3 -B /tmp/hypervisor-kernel.py install "$TARGETARCH" --version "$OBLIVION_HOST_KERNEL_VERSION" \
+    && rm /tmp/hypervisor-kernel.py && rm -rf /var/lib/apt/lists/*
+
 FROM os AS rust-toolchain
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends rustup git gcc g++ libc6-dev cmake make perl libclang-dev python3 \
@@ -97,8 +107,9 @@ COPY packages/oblivion-manager/package.json /oblivion-manager/package.json
 COPY packages/theme/src/ /theme/src/
 COPY packages/tui-kit/src/ /tui-kit/src/
 COPY package.json bun.lock LICENSE NOTICE /workspace-inputs/
-COPY script/oblivion/Dockerfile.vm-lab script/oblivion/controller-setup.sh script/oblivion/controller-pack.sh script/oblivion/live-setup.sh script/oblivion/live-pack.sh script/oblivion/live-storage.py script/oblivion/live-grub.cfg script/oblivion/live-controller.json script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/session-identities.sh script/oblivion/pack-vm-assets.sh script/oblivion/host-firewall.nft script/oblivion/install-agents.py script/oblivion/install-agents.json script/oblivion/session-node.json script/oblivion/install-session-node.py script/oblivion/session-packages.txt script/oblivion/session-analysis.lock script/oblivion/session-analysis-licenses.json script/oblivion/install-session-analysis.py script/oblivion/onionshare-source.json script/oblivion/onionshare-requirements.lock script/oblivion/onionshare-licenses.json script/oblivion/install-onionshare.py script/oblivion/install-vbox-clipboard.py script/oblivion/vbox-clipboard.json /runtime-inputs/
+COPY script/oblivion/Dockerfile.vm-lab script/oblivion/hypervisor-kernel.py script/oblivion/controller-setup.sh script/oblivion/controller-pack.sh script/oblivion/live-setup.sh script/oblivion/live-pack.sh script/oblivion/live-storage.py script/oblivion/live-grub.cfg script/oblivion/live-controller.json script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/session-identities.sh script/oblivion/pack-vm-assets.sh script/oblivion/host-firewall.nft script/oblivion/install-agents.py script/oblivion/install-agents.json script/oblivion/session-node.json script/oblivion/install-session-node.py script/oblivion/session-packages.txt script/oblivion/session-analysis.lock script/oblivion/session-analysis-licenses.json script/oblivion/install-session-analysis.py script/oblivion/onionshare-source.json script/oblivion/onionshare-requirements.lock script/oblivion/onionshare-licenses.json script/oblivion/install-onionshare.py script/oblivion/install-vbox-clipboard.py script/oblivion/vbox-clipboard.json /runtime-inputs/
 COPY script/oblivion/display/ /runtime-inputs/display/
+COPY script/oblivion/live-os/ /runtime-inputs/live-os/
 COPY script/oblivion/native-bundle/host-sources.py /runtime-inputs/native-bundle/host-sources.py
 COPY script/oblivion/native-bundle/host-sources.py /host-sources.py
 RUN cargo test --locked && cargo build --locked --release --bins --examples && cp target/release/oblivion-storage /tmp/oblivion-storage \
@@ -439,17 +450,8 @@ USER 1000:1000
 ENTRYPOINT ["/usr/bin/python3", "-B", "/usr/lib/oblivion/vm-onion-recipient.py"]
 
 # Private Debian controller; never installed as the outer Live OS.
-FROM os AS controller-host
+FROM nested-hypervisor-os AS controller-host
 ARG TARGETARCH
-ARG OBLIVION_HOST_KERNEL_VERSION=""
-# Native Mac qualification can select an official Debian backports kernel.
-# Guest kernels and the rest of the runtime keep their own package manifests.
-RUN if [ -n "$OBLIVION_HOST_KERNEL_VERSION" ]; then \
-        original_kernels=$(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' | tr '\n' ' '); \
-        printf 'deb https://deb.debian.org/debian trixie-backports main\n' > /etc/apt/sources.list.d/oblivion-kernel.list; \
-        apt-get update && apt-get install -y --no-install-recommends -t trixie-backports "linux-image-$TARGETARCH=$OBLIVION_HOST_KERNEL_VERSION" \
-        && apt-get purge -y $original_kernels && rm -rf /var/lib/apt/lists/*; \
-    fi
 ARG MANAGER_BINARY=artifacts/oblivion-manager/bun-linux-x64/oblivion-manager
 ARG MANAGER_ASSETS=artifacts/oblivion-manager/bun-linux-x64/assets
 RUN case "$TARGETARCH" in arm64|amd64) ;; *) exit 1;; esac \
@@ -556,7 +558,7 @@ COPY --from=onion-gateway-system / /onion-gateway/
 COPY --from=live-onion-file / /onion-file/
 COPY --from=compiler /bundle/sources.sha256 /sources/host-sources.sha256
 COPY --from=gateway-compiler /gateway-bundle/sources.sha256 /sources/gateway-sources.sha256
-COPY script/oblivion/controller-* script/oblivion/live-* script/oblivion/pack-vm-assets.sh script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/Dockerfile.vm-lab /sources/
+COPY script/oblivion/hypervisor-kernel.py script/oblivion/controller-* script/oblivion/live-* script/oblivion/pack-vm-assets.sh script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/Dockerfile.vm-lab /sources/
 RUN OBLIVION_IMAGE_NAME="$OBLIVION_IMAGE_NAME" sh /sources/controller-pack.sh
 
 FROM scratch AS controller-runtime-artifacts
@@ -590,7 +592,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libarchive-tool
     && cargo build --manifest-path /native-helper/Cargo.toml --locked --release \
     && python3 -B /script/oblivion/bundle-native.py assemble --prepared /prepared --platform "$platform" --product-version '1.0.0~dev' --cli /build/target/release/oblivion --helper /native-helper/target/release/oblivion-vm --manager /native-manager/oblivion-manager --manager-assets /native-manager/assets --output /desktop
 
-FROM os AS live-launcher
+FROM nested-hypervisor-os AS live-launcher
 ARG TARGETARCH
 RUN sed -i 's/^Components: main$/Components: main non-free-firmware/' /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
@@ -623,7 +625,8 @@ RUN sh /tmp/display-setup && rm /tmp/display-setup
 FROM live-pack-tools AS live-iso-pack
 ARG OBLIVION_IMAGE_NAME=oblivion-development
 COPY --from=live-launcher / /host/
-COPY script/oblivion/live-* /sources/
+COPY script/oblivion/live-* script/oblivion/hypervisor-kernel.py /sources/
+COPY script/oblivion/live-os/ /sources/live-os/
 RUN OBLIVION_IMAGE_NAME="$OBLIVION_IMAGE_NAME" sh /sources/live-pack.sh
 
 FROM scratch AS live-iso-artifacts
