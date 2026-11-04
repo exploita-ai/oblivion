@@ -1,17 +1,36 @@
 Oblivion
 ========
 
-Oblivion is an independent project developed by Exploita AI.
+Oblivion is an independent project developed by Exploita AI. The privacy
+framework, controller, launcher and manager are distributed under the MIT
+License. Oblivion is not affiliated with or endorsed by OpenAI, Anthropic,
+Anomaly, Debian, or the maintainers of its other dependencies.
 
-The coding-agent runtime is derived from OpenCode v2, originally published by
-Anomaly under the MIT License:
+Selected terminal UI and theme utilities are retained from OpenCode, originally
+published by Anomaly under the MIT License:
 
     https://github.com/anomalyco/opencode
 
-Oblivion is not affiliated with or endorsed by Anomaly or the OpenCode team.
-The upstream copyright and license notice are preserved in LICENSE and in
-substantial retained source files.
+The original copyright and license notices remain in LICENSE and retained
+source files. The manager also uses selected Termcn-derived components; their
+license and provenance are stored with that source and included in its build
+assets. Clipboard and display components have their own adjacent license and
+provenance records.
 
-Third-party components retain their own notices. In particular, the Oblivion
-manager vendors selected components inspired by termcn; its license and
-provenance are stored with that source and copied into compiled manager assets.
+Oblivion 1.0 runs pinned, unmodified official agent executables. It no longer
+ships an Oblivion fork of the coding agent. Their original notices and terms
+are separate from the license for the Oblivion framework:
+
+    Codex:       https://github.com/openai/codex
+    Claude Code: https://code.claude.com/docs/en/legal-and-compliance
+    OpenCode:    https://github.com/anomalyco/opencode
+
+Claude Code is not covered by Oblivion's MIT license. Its documented commercial
+integration conditions require an unmodified client, users authenticating with
+their own accounts, and direct provider billing. Oblivion does not resell API
+usage or authenticate users through an intermediary provider account.
+
+Agent package versions, download URLs and integrity values are recorded in
+script/oblivion/install-agents.json. Debian packages, Python tool bundles and
+other dependencies retain their own licenses; image inventories and bundled
+notices identify their contents.
