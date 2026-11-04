@@ -42,7 +42,7 @@ def catalog_state(directory, cursor):
             if db.execute("PRAGMA quick_check(1)").fetchall()[0][0] != "ok":
                 raise ValueError("history_catalog_unavailable")
             rows = db.execute(
-                "SELECT id,substr(title,1,240) AS title,updated FROM chat WHERE id>? AND id NOT IN (SELECT chat_id FROM deleted_chat) ORDER BY id LIMIT 51",
+                "SELECT id,substr(title,1,240) AS title,updated FROM chat WHERE id>? AND id NOT IN (SELECT chat_id FROM deleted_chat) AND EXISTS (SELECT 1 FROM item WHERE chat_id=chat.id) ORDER BY id LIMIT 51",
                 (cursor or "",),
             ).fetchall()
             entries = []

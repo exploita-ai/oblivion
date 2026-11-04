@@ -15,7 +15,9 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from oblivion_history.author import call
+from oblivion_history.admin import catalog_state
 from oblivion_history.catalog import Catalog
+from oblivion_history.model import Item, Snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -69,6 +71,27 @@ def line(process):
 
 
 class IdentityTests(unittest.TestCase):
+    def test_admin_snapshot_hides_reservations_until_real_message_ingestion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "history"
+            self.assertEqual(catalog_state(state, None)["consistency"], "catalog-empty")
+            self.assertFalse(state.exists())
+            state.mkdir(mode=0o700)
+            self.assertEqual(catalog_state(state, None)["entries"], [])
+            self.assertEqual(list(state.iterdir()), [])
+            catalog = Catalog(state)
+            (state / "history.sqlite").chmod(0o600)
+            chat = catalog.author_identity("claude", "native-one", "/vault/workspace", set())
+            self.assertEqual(catalog_state(state, None)["entries"], [])
+            self.assertEqual(catalog.chats(), [])
+            observed, _ = catalog.ingest(Snapshot("claude", "native-one", "/vault/workspace", "Real saved message", 1, 2,
+                [Item("user-one", "text", "user", {"text": "Synthetic saved message"}, 2)], fingerprint="saved"))
+            self.assertEqual(observed, chat)
+            entries = catalog_state(state, None)["entries"]
+            self.assertEqual([(row["chat_id"], row["title"], row["agents"]) for row in entries], [(chat, "Real saved message", ["claude"])])
+            self.assertEqual([row[0]["id"] for row in catalog.chats()], [chat])
+            catalog.close()
+
     def test_admission_resolves_alias_and_rejects_a_stale_foreign_projection(self):
         with tempfile.TemporaryDirectory() as tmp:
             catalog = Catalog(tmp)
