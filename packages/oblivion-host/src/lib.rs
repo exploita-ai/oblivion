@@ -35,3 +35,4 @@ pub mod scope;
 pub mod safe_admin;
 pub mod managed;
 pub mod child_task;
+pub mod delegation;

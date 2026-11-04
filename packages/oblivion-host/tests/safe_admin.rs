@@ -53,6 +53,9 @@ with os.fdopen(0,'r+b',buffering=0) as channel:
 "#;
         let mut process = std::process::Command::new("python3");
         process
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()))
+            .env("HOME", self.0.join("home"))
             .args(["-B", "-c", script])
             .arg(&self.0)
             .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../oblivion-history"))
@@ -368,4 +371,27 @@ fn native_frame_reader_refuses_oversized_and_cross_operation_replies() {
         assert!(safe_admin::exchange(&mut client, &Request::new(Command::Usage {})).is_err());
         worker.join().unwrap();
     }
+}
+
+#[test]
+fn real_private_guest_handoff_installs_only_the_requested_native_identity() {
+    let source = Fixture::new();
+    let child = Fixture::new();
+    let directory = source.0.join("home/.codex");
+    fs::DirBuilder::new().mode(0o700).create(&directory).unwrap();
+    fs::write(directory.join("auth.json"), br#"{"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-safe-identity-canary"}"#).unwrap();
+    fs::set_permissions(directory.join("auth.json"), fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(directory.join("config.toml"), "[mcp_servers.untrusted]\ncommand='must-not-copy'\n").unwrap();
+    fs::write(directory.join("history.jsonl"), "source-chat-must-not-copy").unwrap();
+    let Response::Credential { credential: Some(credential), reason: None } = source.call(Command::CredentialExport { agent: safe_admin::Agent::Codex }).unwrap() else { panic!("credential unavailable") };
+    assert!(matches!(child.call(Command::CredentialInstall { credential }).unwrap(), Response::CredentialInstalled {}));
+    assert!(!child.0.join("home/.codex/config.toml").exists());
+    assert!(!child.0.join("home/.codex/history.jsonl").exists());
+    assert!(!child.0.join("home/.claude").exists());
+    assert!(!child.0.join("state/opencode").exists());
+    let installed = fs::read(child.0.join("home/.codex/auth.json")).unwrap();
+    assert!(String::from_utf8_lossy(&installed).contains("synthetic-safe-identity-canary"));
+    assert!(matches!(source.call(Command::CredentialExport { agent: safe_admin::Agent::Claude }).unwrap(), Response::Credential { credential: None, reason: Some(safe_admin::CredentialReason::NeedsAuth) }));
+    fs::write(directory.join("auth.json"), br#"{"auth_mode":"chatgpt","tokens":{"access_token":"synthetic-oauth-must-not-clone","refresh_token":"synthetic-refresh"}}"#).unwrap();
+    assert!(matches!(source.call(Command::CredentialExport { agent: safe_admin::Agent::Codex }).unwrap(), Response::Credential { credential: None, reason: Some(safe_admin::CredentialReason::UnsupportedOauth) }));
 }

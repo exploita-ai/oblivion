@@ -1,4 +1,8 @@
-"""SafeAdmin v1. Fixed Safe-local roots, metadata only, no agent/server process."""
+"""SafeAdmin v1. Fixed Safe-local roots and private credential-only handoff.
+
+Credential bodies travel only on this root-opened private channel. Ordinary
+metadata operations never start a native agent or read a credential store.
+"""
 
 import contextlib
 import base64
@@ -23,6 +27,13 @@ READY = b"OBSA1\n"
 REQUEST_LIMIT = 32768
 RESPONSE_LIMIT = 65536
 AGENTS = {"codex", "claude", "opencode2"}
+
+
+def credential_adapter():
+    spec = importlib.util.spec_from_file_location("oblivion_credential_delegation", Path(__file__).with_name("credential-delegation.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class Rejected(ValueError):
@@ -136,6 +147,11 @@ def request(value):
     if command in ({"operation": "usage"}, {"operation": "inspect"}):
         return command
     if command.get("operation") == "job" and set(command) == {"operation", "job_id"} and safe_id(command["job_id"]):
+        return command
+    if command.get("operation") == "credential-export" and set(command) == {"operation", "agent"} and command["agent"] in AGENTS:
+        return command
+    if command.get("operation") == "credential-install" and set(command) == {"operation", "credential"}:
+        credential_adapter().credential(command["credential"])
         return command
     if command.get("operation") == "diagnostics" and set(command) == {"operation", "report"}:
         report(command["report"])
@@ -271,6 +287,20 @@ def execute(value, *, vault=Path("/vault"), owner):
         raise ValueError("invalid_safe_admin_owner")
     command = request(value)
     operation = command["operation"]
+    if operation in ("credential-export", "credential-install"):
+        adapter = credential_adapter()
+        try:
+            if operation == "credential-export":
+                return {"result": "credential", "credential": adapter.export(vault, command["agent"]), "reason": None}
+            adapter.install(vault, command["credential"])
+            return {"result": "credential-installed"}
+        except adapter.Rejected as error:
+            reason = error.code
+        except (OSError, ValueError, sqlite3.Error):
+            reason = "needs-auth" if operation == "credential-export" else "install-failed"
+        if operation == "credential-export":
+            return {"result": "credential", "credential": None, "reason": reason}
+        return {"result": "credential-not-installed", "reason": reason}
     if operation == "job":
         home = os.open(vault / "home", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -371,22 +401,39 @@ def serve_channel(channel, *, vault=Path("/vault"), owner):
         length = struct.unpack("!I", exact(4))[0]
         if not 0 < length <= REQUEST_LIMIT:
             raise ValueError("invalid_safe_admin_frame")
-        value = json.loads(exact(length), object_pairs_hook=unique)
-        if length > 4096 and request(value)["operation"] != "checkpoint":
-            raise ValueError("invalid_safe_admin_frame")
-        result = execute(value, vault=vault, owner=owner)
+        body = exact(length)
+        try:
+            value = json.loads(body, object_pairs_hook=unique)
+            if length > 4096 and request(value)["operation"] not in ("checkpoint", "credential-install"):
+                raise ValueError("invalid_safe_admin_frame")
+            result = execute(value, vault=vault, owner=owner)
+        finally:
+            body[:] = b"\0" * len(body)
     except Exception:
         # No filename, user text, credential or raw exception crosses this channel.
         result = {"result": "unavailable"}
-    payload = json.dumps({"version": 1, "response": result}, separators=(",", ":"), ensure_ascii=True).encode()
+    payload = bytearray(json.dumps({"version": 1, "response": result}, separators=(",", ":"), ensure_ascii=True).encode())
     if len(payload) > RESPONSE_LIMIT:
         payload = b'{"version":1,"response":{"result":"unavailable"}}'
-    write(struct.pack("!I", len(payload)) + payload)
+    try:
+        write(struct.pack("!I", len(payload)))
+        write(payload)
+    finally:
+        if isinstance(payload, bytearray):
+            payload[:] = b"\0" * len(payload)
+
+
+def drop_privileges():
+    if os.geteuid() == 0:
+        os.setgroups([])
+        os.setgid(1000)
+        os.setuid(1000)
 
 
 def main():
     os.umask(0o077)
     if len(sys.argv) == 3 and sys.argv[1] == "--cleanup":
+        drop_privileges()
         cleanup(Path("/vault"), sys.argv[2])
         return
     if len(sys.argv) != 2:
@@ -398,6 +445,7 @@ def main():
     if not stat.S_ISCHR(os.fstat(descriptor).st_mode):
         os.close(descriptor)
         raise ValueError("invalid_safe_admin_port")
+    drop_privileges()
     with os.fdopen(descriptor, "r+b", buffering=0) as channel:
         serve_channel(channel, owner=path.name)
 

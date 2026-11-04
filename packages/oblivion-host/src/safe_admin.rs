@@ -1,7 +1,9 @@
-//! Neutral, bounded administration inside one unlocked Safe. No agent process.
+//! Bounded administration inside one unlocked Safe. Credential bodies are
+//! private: they never belong to public status or diagnostics responses.
 use crate::control::Result;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
+use zeroize::Zeroizing;
 
 pub const READY: &[u8; 6] = b"OBSA1\n";
 pub const REQUEST_LIMIT: usize = 32768;
@@ -24,6 +26,8 @@ pub enum Command {
     Inspect {},
     ArchiveState { cursor: Option<String> },
     Job { job_id: String },
+    CredentialExport { agent: Agent },
+    CredentialInstall { credential: crate::delegation::Credential },
 }
 
 impl Request {
@@ -42,6 +46,8 @@ impl Request {
                     cursor.as_ref().is_none_or(|id| valid_chat_id(id))
                 }
                 Command::Job { job_id } => crate::managed::id(job_id),
+                Command::CredentialExport { .. } => true,
+                Command::CredentialInstall { credential } => credential.valid(),
                 Command::Usage {} | Command::Inspect {} => true,
             }
     }
@@ -87,6 +93,9 @@ pub enum Response {
     Metadata { metadata: Metadata },
     ArchiveState { state: ArchiveState },
     Job { info: Option<crate::managed::Info> },
+    Credential { credential: Option<crate::delegation::Credential>, reason: Option<CredentialReason> },
+    CredentialInstalled {},
+    CredentialNotInstalled { reason: CredentialReason },
     Rejected { error: Rejection },
     Unavailable {},
 }
@@ -100,11 +109,31 @@ pub enum Rejection {
 }
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CredentialReason {
+    NeedsAuth,
+    UnsupportedOauth,
+    UnsupportedRouting,
+    AmbiguousAuth,
+    ModelRequired,
+    AuthConflict,
+    InstallFailed,
+    InstallTimeout,
+    InvalidCredential,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
     Codex,
     Claude,
     Opencode2,
+}
+
+impl Agent {
+    pub fn as_str(self) -> &'static str {
+        match self { Self::Codex => "codex", Self::Claude => "claude", Self::Opencode2 => "opencode2" }
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -147,6 +176,13 @@ impl Response {
             }
             (Self::Metadata { metadata }, Command::Inspect {}) => metadata.valid(),
             (Self::Job { info }, Command::Job { job_id }) => info.as_ref().is_none_or(|info| info.valid() && info.job_id == *job_id),
+            (Self::Credential { credential, reason }, Command::CredentialExport { agent }) => match (credential, reason) {
+                (Some(credential), None) => credential.valid() && credential.agent() == agent.as_str(),
+                (None, Some(_)) => true,
+                _ => false,
+            },
+            (Self::CredentialInstalled {}, Command::CredentialInstall { .. }) => true,
+            (Self::CredentialNotInstalled { .. }, Command::CredentialInstall { .. }) => true,
             (Self::ArchiveState { state }, Command::ArchiveState { cursor }) => {
                 state.history_version == 1
                     && (!matches!(state.consistency, Consistency::CatalogEmpty)
@@ -181,7 +217,7 @@ impl Response {
             }
             (
                 Self::Rejected { .. },
-                Command::Checkpoint { .. } | Command::Inspect {} | Command::ArchiveState { .. } | Command::Job { .. },
+                Command::Checkpoint { .. } | Command::Inspect {} | Command::ArchiveState { .. } | Command::Job { .. } | Command::CredentialInstall { .. },
             ) => true,
             (Self::Unavailable {}, _) => true,
             _ => false,
@@ -193,8 +229,8 @@ pub fn exchange(channel: &mut (impl Read + Write), request: &Request) -> Result<
     if !request.valid() {
         return Err("invalid_safe_admin_request".into());
     }
-    let request_bytes = serde_json::to_vec(request)?;
-    if request_bytes.len() > if matches!(request.command, Command::Checkpoint { .. }) { REQUEST_LIMIT } else { 4096 } {
+    let request_bytes = Zeroizing::new(serde_json::to_vec(request)?);
+    if request_bytes.len() > if matches!(request.command, Command::Checkpoint { .. } | Command::CredentialInstall { .. }) { REQUEST_LIMIT } else { 4096 } {
         return Err("safe_admin_request_too_large".into());
     }
     let mut ready = [0; 6];
@@ -211,7 +247,7 @@ pub fn exchange(channel: &mut (impl Read + Write), request: &Request) -> Result<
     if !(1..=RESPONSE_LIMIT).contains(&length) {
         return Err("invalid_safe_admin_frame".into());
     }
-    let mut payload = vec![0; length];
+    let mut payload = Zeroizing::new(vec![0; length]);
     channel.read_exact(&mut payload)?;
     let reply: Reply = serde_json::from_slice(&payload)?;
     if reply.version != 1 || !reply.response.valid(request) {

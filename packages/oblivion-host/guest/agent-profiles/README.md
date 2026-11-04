@@ -34,6 +34,39 @@ These are launch defaults. A user with root access inside their Safe can
 change application configuration or invoke a client directly. The VM's enforced
 Tor/SOCKS5 path and prohibition of direct egress remain the controller boundary.
 
+## Child Safe authentication
+
+SafeAdmin can transfer only the requested agent's compatible identity through
+its private channel. Codex API keys and native `at-` personal access tokens,
+Claude API keys and separately provisioned `setup-token` credentials, and
+selected standard OpenCode2 API-key integrations have dedicated adapters.
+The child gets a separate native credential store. Native homes, histories,
+MCP configuration, hooks and plugins are never cloned.
+
+Ordinary rotating OAuth caches are refused. A missing, ambiguous or unsupported
+identity leaves the task waiting for authentication. Oblivion never changes a
+subscription login into API billing automatically. Custom endpoints and auth
+commands need an explicit adapter; the initial implementation refuses them.
+Per-launch configuration overrides, project-local profiles and user provider
+plugins are also refused when their effective routing cannot be qualified.
+OpenCode2 additionally requires an explicit default model in its own config,
+so the delegated key cannot select a different provider accidentally.
+
+Installation runs before the child has a network device. Codex and Claude use
+their current native identity storage formats. OpenCode2 briefly serves its
+public 2.0.1 key-connect API on private loopback; a transient identity-only
+catalog registers the known built-in integration without inventing inference
+models or fetching remote metadata. The source of that metadata is the
+[pinned upstream snapshot](https://github.com/anomalyco/opencode/blob/v2.0.1/packages/core/src/models-dev/snapshot.txt).
+The subprocess is stopped and reaped before the helper returns. Its configured
+model still needs to exist in the normal native catalog when execution starts.
+
+`tests/credential-delegation.py` exercises synthetic stores and first-launch
+profile preservation. `tests/credential-native.py` qualifies the pinned native
+clients inside a Linux network namespace with no external connection: native
+auth readers, real OpenCode key import, idempotence, native config loading and
+profile preservation. It makes no inference or authenticated provider request.
+
 ## Dedicated collector enforcement
 
 The gateway additionally denies these exact collector hosts on every port,
