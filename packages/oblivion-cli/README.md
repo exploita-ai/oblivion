@@ -48,6 +48,17 @@ bounded public metadata, with static errors that cannot repeat rejected peer
 fields. Private URL and proxy-password entry use the shared completion helper;
 adding or removing a saved profile leaves active Safe transports unchanged.
 
+`safe open/rename/grow` and `settings idle` also use shared executors. Offline
+opening pins the selected Safe without starting an agent or gateway. Persistent
+rename changes catalog metadata even when all VM slots are occupied; temporary
+rename stays bound to its active opening. Growth requires closed writable
+persistent storage and a free maintenance slot before private password entry.
+The size is the requested total capacity in MiB, with actual growth and free-space
+checks left to the controller. Automatic-lock updates preserve an omitted timer;
+zero explicitly disables it. The preferences and full status view have one wire
+model shared with the controller; human-activity and monotonic-clock logic remain
+there.
+
 SOCKS5 URLs accept the existing literal IPv4/port syntax and optional percent-
 encoded credentials. Both `socks5://` and `socks5h://` use the existing transport;
 no destination DNS lookup occurs here. A username without `:PASSWORD` returns a

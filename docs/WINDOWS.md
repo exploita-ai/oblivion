@@ -6,28 +6,37 @@ execution and complete installed path still need qualification. This is a propos
 [roadmap](oblivion1.0-roadmap.md), rather than instructions for an available product.
 No VM or Windows configuration was changed during this audit.
 
-## First target: Windows 11 x64 with explicit Hyper-V
+## First target: Windows 11 x64 with an HCS-owned Hyper-V VM
 
 Start with Windows 11 Pro/Enterprise, Intel VT-x/EPT or AMD Ryzen/EPYC, firmware
-virtualization enabled, and a Generation 2 Hyper-V controller VM. The role is an
-optional Windows component requiring an elevated setup and potentially a reboot;
+virtualization enabled, and a headless controller created through Host Compute
+System (HCS). This is a real Hyper-V VM, owned by Oblivion, rather than a WSL
+distribution or a software-emulation fallback. The first proposed installation
+uses the full Hyper-V role, an optional component requiring elevated setup and
+potentially a reboot;
 Microsoft excludes Home from the full Hyper-V role. Its 4 GiB platform minimum is
 not an Oblivion capacity recommendation. Our controller plus nested Safes needs
 its own measured admission budget. [Installation](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/get-started/Install-Hyper-V),
 [hardware requirements](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/host-hardware-requirements).
 
-Enable `ExposeVirtualizationExtensions` on the stopped, owned controller VM.
-Microsoft lists Intel VM configuration version 8.0+ and AMD version 9.3+, with
-Windows 11 or Server 2022+ for AMD. These documents establish a mechanism for
-exposing CPU extensions; they do not qualify our Debian/KVM nested workload.
-A successful outer boot must therefore be followed by an actual inner KVM boot,
-not merely a CPU-feature check. Windows ARM64, Home and other editions remain
-outside this first proposed matrix. No UTM/VirtualBox window or software-emulation
-fallback is part of this path. [Nested virtualization](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/enable-nested-virtualization).
+The HCS schema provides `ComputeTopology.Processor.ExposeVirtualizationExtensions`
+as a boolean from version 2.0. `Chipset.LinuxKernelDirect` and `Devices.VirtioSerial`
+are available from schema 2.2. Use the versioned controller kernel/initrd directly;
+the initial backend therefore does not depend on VMMS Generation 2 ISO/EFI boot.
+[HCS schema](https://learn.microsoft.com/en-us/virtualization/api/hcs/schemareference).
+
+Microsoft's WSL implementation checks Windows 11 and the HCS processor capability
+`NestedVirt` before enabling that flag. Its native helper obtains the capability
+through `HcsGetServiceProperties`, with a `ProcessorCapabilities` query. Reuse
+that detection pattern without creating a WSL distribution. A reported capability
+still needs an actual Debian/KVM inner Safe boot. Windows ARM64, Home and other
+editions remain outside the first proposed matrix; no GUI hypervisor or emulation
+fallback is part of this path. [Microsoft capability check](https://github.com/microsoft/WSL/blob/master/src/windows/service/exe/WslCoreVm.cpp#L1472),
+[HCS query](https://github.com/microsoft/WSL/blob/master/src/windows/common/hcs.cpp#L101).
 
 ```text
 Windows Terminal / PowerShell -> oblivion.exe
-  -> owned headless Hyper-V Generation 2 controller
+  -> Oblivion-owned headless HCS / Hyper-V controller
        -> the same versioned Debian controller for amd64
             -> Safe Linux VMs + per-Safe gateways
 ```
@@ -65,9 +74,51 @@ Hyper-V provides local stream sockets: `AF_HYPERV` on Windows and `AF_VSOCK` in
 Linux, addressed using VMID plus a service GUID. Microsoft describes the Linux
 service-GUID-to-port template and requires `CONFIG_HYPERV_VSOCKETS`. This is a
 suitable candidate for the existing controller relay on port 4050, without a LAN
-control listener. Socket registration requires administrative setup; retain the
+control listener. The HCS backend must configure its owned VM's services; retain the
 per-boot authentication and opening nonces, since a transport address alone is
 not application authorization. [Hyper-V sockets](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/make-integration-service).
+
+HCS exposes per-service host bind/connect security descriptors under
+`Devices.HvSocket.HvSocketConfig.ServiceTable`. Configure explicit broker access
+and avoid wildcard binds. This documented HCS configuration must not be assumed
+to apply to a VM created through the separate VMMS management interface.
+[Socket configuration](https://learn.microsoft.com/en-us/virtualization/api/hcs/schemareference#hvsocketserviceconfig).
+
+### Per-boot authentication: private VirtioSerial
+
+Keep the existing bootstrap: guest `READY`, a fresh 32-byte host token, then guest
+`SET`. `host/runtime-auth.py` currently accepts only `apple-vz` and `qemu-kvm`;
+an HCS profile and backend provisioner remain to be implemented. The token stays
+in broker memory and the guest's private `/run` directory, never argv, the HCS
+configuration, KVP or a plaintext host file.
+
+Microsoft's implementation provides a concrete transport pattern. Its
+`DmesgCollector` creates a host named-pipe server before VM creation; the VM
+configuration then connects a VirtioSerial port to that pipe. Use a dedicated
+non-console port named `oblivion.runtime-auth`, not a debug console or log relay.
+[Host pipe creation](https://github.com/microsoft/WSL/blob/master/src/windows/common/Dmesg.cpp#L49),
+[creation order](https://github.com/microsoft/WSL/blob/master/src/windows/service/exe/WslCoreVm.cpp#L283),
+[port configuration](https://github.com/microsoft/WSL/blob/master/src/windows/service/exe/WslCoreVm.cpp#L1539).
+
+Create the pipe with an explicit restrictive DACL before handing its name to HCS,
+one instance, `FILE_FLAG_FIRST_PIPE_INSTANCE` and `PIPE_REJECT_REMOTE_CLIENTS`.
+Windows documents these controls; default pipe security is unsuitable because it
+also permits Everyone/anonymous reads. The exact HCS connecting identity and
+its access under the proposed DACL still require qualification on Windows.
+Do not silently broaden permissions if it fails. `HcsGrantVmAccess` is documented
+for files, so it is not evidence of a named-pipe permission solution.
+[Pipe API](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createnamedpipew),
+[pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights),
+[VM file access](https://learn.microsoft.com/en-us/virtualization/api/hcs/reference/hcsgrantvmaccess).
+
+KVP is excluded from secret provisioning: Linux stores its pools in
+`/var/lib/hyperv/.kvp_pool_*`. HCS configuration must also contain no token or
+credentials; Microsoft's wrapper demonstrates that configuration JSON can enter
+diagnostic logs. No public-key bootstrap or new cryptographic protocol is needed
+for the proposed private serial path. [KVP storage](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/integration-services-data-exchange),
+[configuration logging](https://github.com/microsoft/WSL/blob/master/src/windows/common/hcs.cpp#L81).
+
+### Controller image and remaining integration
 
 Driver groundwork is implemented in the shared controller build sources. On
 amd64, kernel selection now requires Hyper-V VMBus, synthetic SCSI storage,
@@ -90,15 +141,15 @@ no Hyper-V runtime backend, authentication alternative or firmware policy.
 
 Concrete changes still required by our source:
 
-- Qualify Generation 2 EFI boot and its VM-local Secure Boot policy. The present
-  bundle's direct-kernel paths do not prove the ISO boots in Hyper-V firmware.
+- Package and qualify the HCS direct-kernel/initrd boot, supported schema and
+  nested processor capability. Neither the Linux helper nor driver fixtures
+  establish a Windows boot or an accelerated inner Safe.
 - Replace assumptions about VirtIO block names with validated runtime disk
   identity; Hyper-V synthetic SCSI devices use a different presentation.
-- Implement a Hyper-V boot-auth provisioner. `host/runtime-auth.py` currently
-  recognizes only `apple-vz`/`qemu-kvm` and uses a private VirtIO serial port for
-  the Linux token. Hyper-V does not supply that device. Choose a versioned,
-  VMID-bound bootstrap through the native backend; do not bypass authentication
-  or introduce SSH, a shared host folder or unauthenticated TCP.
+- Implement the HCS-owned pipe/provisioner above, bind its lifetime to the owned
+  compute-system identity, and qualify the pipe peer/DACL and guest port identity.
+  An unsuccessful handshake must prevent control access; no SSH, shared host
+  folder, unauthenticated TCP or weaker fallback is part of this bootstrap.
 - Implement local Windows IPC with explicit per-user/broker ACLs and verified
   client identity. Named-pipe defaults can grant read access to Everyone and
   anonymous users, so default ACLs are unsuitable here. [Pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights).
@@ -114,12 +165,13 @@ merely a mutable pathname. Reject unrelated, replaced or reparse-point objects.
 [New-VHD](https://learn.microsoft.com/en-us/powershell/module/hyper-v/new-vhd?view=windowsserver2025-ps),
 [Get-VHD](https://learn.microsoft.com/en-us/powershell/module/hyper-v/get-vhd?view=windowsserver2025-ps).
 
-Use verified guest shutdown, explicit failed-shutdown recovery and actual VM
-state. Do not interpret a helper PID disappearing as the Hyper-V VM stopping.
-Disable automatic checkpoints and avoid a saved-memory stop policy for the
-owned VM; Windows exposes both checkpoint and automatic-stop controls.
-[VM settings](https://learn.microsoft.com/en-us/powershell/module/hyper-v/set-vm?view=windowsserver2025-ps),
-[checkpoints](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/checkpoints).
+Use verified guest shutdown, explicit failed-shutdown recovery and actual HCS VM
+state. Do not interpret a helper PID disappearing as the VM stopping. HCS compute
+systems are ephemeral and must be recreated after stopping; configure
+`ShouldTerminateOnLastHandleClosed` and keep the owning handle under the runtime
+lifetime contract. Do not use saved-memory stop, save/restore or checkpoints as
+the normal shutdown mechanism. [HCS lifecycle](https://learn.microsoft.com/en-us/virtualization/api/hcs/overview),
+[handle lifetime](https://learn.microsoft.com/en-us/virtualization/api/hcs/schemareference#computesystem).
 A crashed or privileged Windows host may still capture RAM in pagefiles, dumps
 or external snapshots. This remains a desktop trust boundary, not a guarantee
 of an air gap or of zero plaintext managed by Windows itself.
@@ -176,13 +228,13 @@ parser and executor too. First-run setup calls the same Init and Unlock rather
 than an OS-specific initializer. The Unix adapter supplies only private entry and
 confirmation. The network frontend keeps every Safe mutation and final status
 bound to its observed slot/ID; saved proxy listing decodes bounded public metadata.
-Malformed syntax is rejected before VM startup or password entry. These source
+Malformed command arguments are rejected before VM startup or password entry. These source
 paths and Unix-socket fixtures do not implement the Windows OS adapters below.
 
 Remaining split, without a second command implementation:
 
-1. Move the remaining command orchestration, including Files, Safe management,
-   automatic-lock settings, Share and backup, into the portable frontend boundary.
+1. Move the remaining command orchestration, including Files, family passwords,
+   saved tasks, Share and backup, into the portable frontend boundary.
    Keep Linux controller services and storage code in the Linux host package,
    rather than linking them into every desktop executable.
 2. Connect the shared CLI, wire and transfer boundaries to Windows transports
@@ -192,7 +244,7 @@ Remaining split, without a second command implementation:
    adapters for Unix and Windows. Preserve opaque argument arrays; never feed
    agent arguments into a PowerShell command string. The three agent binaries
    remain the existing pinned Linux binaries inside the Safe.
-4. Add a Windows backend/installer using Hyper-V management APIs and the same
+4. Add a Windows backend/installer using HCS and the same
    runtime lifetime/lease contract. Compile and qualify a native OpenTUI manager
    artifact as well; a CLI-only substitute would not satisfy bare `oblivion`.
 

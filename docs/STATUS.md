@@ -180,7 +180,7 @@ remain open.
 Portable CLI run/proxy parsing, private wire framing and Files validation now
 compile for Windows MSVC; the Windows CI job includes their portable tests. The shared
 amd64 controller build also verifies Hyper-V driver coverage in its kernel and
-initramfs. Remaining Windows command orchestration, backend, bootstrap authentication, EFI boot and
+initramfs. Remaining Windows command orchestration, backend, bootstrap authentication, direct-kernel boot and
 installer remain unimplemented or unqualified; see [Windows requirements](WINDOWS.md).
 
 The manager's target descriptor now drives both its builder and native launcher
@@ -219,6 +219,26 @@ or raw parser diagnostics. Hidden URL/password entry shares one completion path.
 Actual Unix-socket fixtures cover temporary read-only routing, private credential
 entry, unchanged active transports and malformed-listing rejection. They do not
 qualify public Tor/SOCKS5 paths or replace the real-gateway acceptance gates.
+
+Safe open/rename/grow and automatic-lock settings now use the portable frontend
+as well. Offline open pins the exact Safe without starting an agent; growth uses
+a free maintenance slot after checking mode and closed state. Persistent rename
+does not need an idle slot. The controller explicitly allows that catalog-only
+operation while a Share maintenance VM occupies the default slot, retaining the
+other maintenance restrictions. Temporary rename stays bound to its opening.
+Idle preferences and complete status now share one wire model with the producer;
+partial updates preserve the other timer and zero remains an explicit disable.
+The controller's human-activity tracker is unchanged. Real Unix-socket fixtures,
+portable DTO/command tests and the Linux maintenance-admission predicate cover
+these source boundaries. Actual disk growth and cold-restart acceptance remain open.
+
+Windows research now selects an HCS-owned Hyper-V VM with direct kernel/initrd
+boot and a dedicated private VirtioSerial bootstrap. Microsoft's implementation
+demonstrates a host-created pipe before VM creation, and HCS exposes nested CPU
+extensions. KVP is excluded for secrets because its pools persist. This is a
+source-based implementation choice, not an implemented backend; restrictive pipe
+peer/ACL behavior, VM ownership and actual inner KVM still require Windows tests.
+See the [Windows backend design](WINDOWS.md).
 
 Remaining release gates include real login and scoped child-credential delegation,
 chat persistence after cold restart,
