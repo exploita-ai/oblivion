@@ -11,7 +11,7 @@ pub mod diagnostics;
 pub mod display;
 pub mod egress;
 pub mod family;
-pub mod family_rotation;
+pub use oblivion_wire::family_rotation;
 pub mod network;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod native_runtime;
@@ -34,6 +34,5 @@ pub mod volume;
 pub mod remote_control;
 pub mod scope;
 pub mod safe_admin;
-pub mod managed;
-pub mod child_task;
+pub use oblivion_wire::{managed, child_task};
 pub mod delegation;

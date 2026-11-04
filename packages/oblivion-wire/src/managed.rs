@@ -101,7 +101,7 @@ pub enum Rejection {
 }
 
 pub fn id(value: &str) -> bool {
-    oblivion_wire::control::valid_id(value)
+    crate::control::valid_id(value)
 }
 
 fn native_id(agent: &str, value: &str) -> bool {

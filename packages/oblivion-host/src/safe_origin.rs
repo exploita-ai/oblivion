@@ -3,7 +3,7 @@
 use crate::family::{SealedTask, TaskContext};
 use serde::{Deserialize, Serialize};
 
-pub const ATTEMPT_LIMIT: usize = 16;
+pub use oblivion_wire::child_task::ATTEMPT_LIMIT;
 
 #[derive(Clone, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

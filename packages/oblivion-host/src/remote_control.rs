@@ -94,18 +94,10 @@ pub fn attach_scoped_with_secret(
     expected: Option<&str>,
     secret: &[u8],
 ) -> Result<(UnixStream, String)> {
-    if !matches!(
-        operation,
-        "agent-attach"
-            | "file-attach"
-            | "share-attach"
-            | "share-import-attach"
-            | "share-export-lease"
-            | "backup-attach"
-    ) {
+    let operation = Operation::parse(operation).map_err(|_| "invalid_attachment")?;
+    if !operation.is_attachment() {
         return Err("invalid_attachment".into());
     }
-    let operation = Operation::parse(operation)?;
     let stream = connect(
         path,
         operation,
@@ -134,15 +126,7 @@ fn connect(
     budget: Duration,
 ) -> Result<UnixStream> {
     let deadline = Instant::now() + budget;
-    if secret.len()
-        > if operation == Operation::FamilyPasswordChange {
-            crate::family_rotation::CHANGE_LIMIT
-        } else if operation == Operation::ShareImportBegin {
-            oblivion_share::manifest::MAX_METADATA + 4096
-        } else {
-            4096
-        }
-    {
+    if secret.len() > operation.native_secret_limit() {
         return Err("secret_too_large".into());
     }
     let metadata = std::fs::symlink_metadata(path)?;
@@ -190,23 +174,7 @@ fn connect(
 fn read_response(stream: &UnixStream, operation: Operation) -> Result<String> {
     read_response_with_budget(
         stream,
-        Duration::from_secs(if operation == Operation::SessionStorage {
-            1800
-        } else if matches!(
-            operation,
-            Operation::Egress
-                | Operation::ProxyProfiles
-                | Operation::StartAgent
-                | Operation::OpenChildDocuments
-                | Operation::BackupExportBegin
-                | Operation::BackupImportFinish
-                | Operation::FamilyPasswordChange
-                | Operation::FamilyPasswordRecover
-        ) {
-            210
-        } else {
-            120
-        }),
+        operation.response_budget(),
     )
 }
 

@@ -81,6 +81,31 @@ impl Operation {
     pub fn parse(value: &str) -> Result<Self, serde::de::value::Error> {
         Self::deserialize(value.into_deserializer())
     }
+
+    pub const fn is_attachment(self) -> bool {
+        matches!(self, Self::AgentAttach | Self::FileAttach | Self::ShareAttach
+            | Self::ShareImportAttach | Self::ShareExportLease | Self::BackupAttach)
+    }
+
+    /// Native relay framing cap. Domain handlers may impose narrower limits;
+    /// this does not authorize the operation or interpret its payload.
+    pub const fn native_secret_limit(self) -> usize {
+        match self {
+            Self::FamilyPasswordChange => crate::family_rotation::CHANGE_LIMIT,
+            Self::ShareImportBegin => 4 * 1024 * 1024 + 4096,
+            _ => 4096,
+        }
+    }
+
+    pub const fn response_budget(self) -> std::time::Duration {
+        std::time::Duration::from_secs(match self {
+            Self::SessionStorage => 1800,
+            Self::Egress | Self::ProxyProfiles | Self::StartAgent | Self::OpenChildDocuments
+                | Self::BackupExportBegin | Self::BackupImportFinish | Self::FamilyPasswordChange
+                | Self::FamilyPasswordRecover => 210,
+            _ => 120,
+        })
+    }
 }
 
 /// A secret is a separate bounded byte sequence after this JSON header. It can

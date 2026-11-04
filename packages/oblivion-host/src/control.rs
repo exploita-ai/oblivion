@@ -88,15 +88,7 @@ fn connect_expected(
     };
     control_client::write_request(&mut channel, &request, secret, Framing::Local)
         .map_err(control_client::Error::into_boxed)?;
-    if !matches!(
-        operation,
-        Operation::AgentAttach
-            | Operation::FileAttach
-            | Operation::ShareAttach
-            | Operation::ShareImportAttach
-            | Operation::ShareExportLease
-            | Operation::BackupAttach
-    ) {
+    if !operation.is_attachment() {
         stream.shutdown(std::net::Shutdown::Write)?;
     }
     Ok(stream)
@@ -191,23 +183,7 @@ fn request_local(
     control_client::read_response(
         &mut Channel::new(
             &stream,
-            Duration::from_secs(if operation == Operation::SessionStorage {
-                1800
-            } else if matches!(
-                operation,
-                Operation::Egress
-                    | Operation::ProxyProfiles
-                    | Operation::StartAgent
-                    | Operation::OpenChildDocuments
-                    | Operation::BackupExportBegin
-                    | Operation::BackupImportFinish
-                    | Operation::FamilyPasswordChange
-                    | Operation::FamilyPasswordRecover
-            ) {
-                210
-            } else {
-                120
-            }),
+            operation.response_budget(),
         ),
         Framing::Local,
     )
