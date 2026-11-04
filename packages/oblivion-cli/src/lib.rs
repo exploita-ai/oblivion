@@ -8,8 +8,12 @@ pub mod shell;
 pub mod storage;
 
 pub mod controller;
+pub mod child_task;
+pub mod family_password;
 pub mod files;
 pub mod network;
 pub mod proxy_profiles;
 pub mod safe;
 pub mod settings;
+#[cfg(windows)]
+pub mod windows;

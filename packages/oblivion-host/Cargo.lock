@@ -963,6 +963,7 @@ dependencies = [
 name = "oblivion-cli"
 version = "0.1.0"
 dependencies = [
+ "oblivion-native-windows",
  "oblivion-transfer",
  "oblivion-transport",
  "oblivion-wire",
@@ -991,6 +992,18 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "vt100",
+ "zeroize",
+]
+
+[[package]]
+name = "oblivion-native-windows"
+version = "0.1.0"
+dependencies = [
+ "getrandom",
+ "oblivion-wire",
+ "serde",
+ "serde_json",
+ "windows-sys",
  "zeroize",
 ]
 

@@ -214,6 +214,20 @@ fn run() -> control::Result<i32> {
     } else {
         None
     };
+    let family_password_command = if args.first().is_some_and(|arg| arg == "safe")
+        && args.get(1).is_some_and(|arg| arg == "password")
+    {
+        Some(oblivion_cli::family_password::parse(&args[2..])?)
+    } else {
+        None
+    };
+    let child_task_command = if args.first().is_some_and(|arg| arg == "safe")
+        && args.get(1).is_some_and(|arg| arg == "task")
+    {
+        Some(oblivion_cli::child_task::parse(&args[2..])?)
+    } else {
+        None
+    };
     let safe_command = if args.first().is_some_and(|arg| arg == "safe")
         && !args
             .get(1)
@@ -318,10 +332,12 @@ fn run() -> control::Result<i32> {
         "backup" => backup_commands::run(&args[1..]),
         "share" => share_commands::run(&args[1..]),
         "safe" if args.get(1).is_some_and(|arg| arg == "password") => {
-            family_password_commands::run(&args[2..])
+            family_password_commands::run(
+                family_password_command.ok_or("family_password_command_missing")?,
+            )
         }
         "safe" if args.get(1).is_some_and(|arg| arg == "task") => {
-            child_task_commands::run(&args[2..])
+            child_task_commands::run(child_task_command.ok_or("child_task_command_missing")?)
         }
         "safe" => safe_commands::run(safe_command.ok_or("safe_command_missing")?),
         "network" => network_commands::run(network_command.ok_or("network_command_missing")?),
@@ -439,10 +455,6 @@ impl oblivion_cli::run::Runtime for UnixRuntime {
 
 fn free_slot(state: &Status) -> control::Result<scope::Slot> {
     oblivion_cli::run::free_slot(&UnixRuntime::new(), state)
-}
-
-fn start_agent(id: &str) -> control::Result<()> {
-    oblivion_cli::run::start_agent(&mut UnixRuntime::new(), scope::current(), id)
 }
 
 fn password(label: &str, confirm: bool) -> control::Result<Zeroizing<Vec<u8>>> {
