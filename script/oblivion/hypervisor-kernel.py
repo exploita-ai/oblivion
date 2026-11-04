@@ -25,6 +25,12 @@ HYPERV_DRIVERS = (
     ('CONFIG_HYPERV_NET', 'hv_netvsc'),
     ('CONFIG_VSOCKETS', 'vsock'),
     ('CONFIG_HYPERV_VSOCKETS', 'hv_sock'),
+    # The private bootstrap requires named virtio serial ports, not a console.
+    ('CONFIG_VIRTIO_CONSOLE', 'virtio_console'),
+    # Microsoft's reference WSL x86 config enables MMIO for its HCS virtio
+    # devices. Keep this transport in the initrd; do not invent MMIO boot args.
+    # https://github.com/microsoft/WSL2-Linux-Kernel/blob/linux-msft-wsl-6.6.y/arch/x86/configs/config-wsl
+    ('CONFIG_VIRTIO_MMIO', 'virtio_mmio'),
 )
 
 

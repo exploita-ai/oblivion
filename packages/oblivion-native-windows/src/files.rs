@@ -1,0 +1,705 @@
+//! Pinned Windows assets for one owned HCS VM. The new 1.0 installation contract
+//! sets the VHDX Identifier to UUID(runtime_id), matching the guest marker/UUID.
+//! This module never creates, repairs, mounts or adopts an unrelated disk.
+use crate::config::{CONFIG_LIMIT, RuntimeConfig};
+use crate::security::Identity;
+use crate::{Error, Result};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::ptr::{null, null_mut};
+use windows_sys::Win32::Foundation::{
+    GENERIC_EXECUTE, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT,
+};
+use windows_sys::Win32::Security::{
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, AclSizeInformation,
+    DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetLengthSid, INHERIT_ONLY_ACE,
+    IsValidAcl, IsValidSecurityDescriptor, IsValidSid, OWNER_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, SID,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DEVICE,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_REPARSE_POINT, FILE_EXECUTE,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_ID_INFO,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, FileIdInfo,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType,
+    GetFinalPathNameByHandleW, OPEN_EXISTING, READ_CONTROL,
+};
+use windows_sys::Win32::Storage::Vhd::{
+    GET_VIRTUAL_DISK_INFO, GET_VIRTUAL_DISK_INFO_IDENTIFIER, GET_VIRTUAL_DISK_INFO_IS_LOADED,
+    GET_VIRTUAL_DISK_INFO_PROVIDER_SUBTYPE, GET_VIRTUAL_DISK_INFO_SIZE, GetVirtualDiskInformation,
+    OPEN_VIRTUAL_DISK_FLAG_NO_PARENTS, OPEN_VIRTUAL_DISK_PARAMETERS,
+    OPEN_VIRTUAL_DISK_PARAMETERS_0, OPEN_VIRTUAL_DISK_PARAMETERS_0_0, OPEN_VIRTUAL_DISK_VERSION_1,
+    OpenVirtualDisk, VIRTUAL_DISK_ACCESS_GET_INFO, VIRTUAL_STORAGE_TYPE,
+    VIRTUAL_STORAGE_TYPE_DEVICE_VHDX, VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT,
+};
+use windows_sys::Win32::System::HostComputeSystem::{HcsGrantVmAccess, HcsRevokeVmAccess};
+use windows_sys::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
+
+const GIB: u64 = 1024 * 1024 * 1024;
+const MAX_DISK: u64 = 1024 * GIB;
+
+pub fn read_config(path: &str, identity: &Identity) -> Result<RuntimeConfig> {
+    let pinned = Pinned::open(path, Role::Configuration, identity)?;
+    if pinned.size == 0 || pinned.size > CONFIG_LIMIT as u64 {
+        return Err(Error("invalid_runtime_configuration"));
+    }
+    let mut bytes = Vec::new();
+    pinned
+        .file
+        .take((CONFIG_LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Error("runtime_configuration_unavailable"))?;
+    RuntimeConfig::decode(&bytes)
+}
+
+pub struct Lease {
+    files: Vec<Pinned>,
+    vm_id: String,
+    granted: Vec<usize>,
+    owner: String,
+}
+
+impl Lease {
+    pub fn acquire(config: &RuntimeConfig, identity: &Identity) -> Result<Self> {
+        config.validate()?;
+        let mut files = Vec::new();
+        for (path, role) in [
+            (&config.kernel, Role::Asset),
+            (&config.initrd, Role::Asset),
+            (&config.disks[0].path, Role::Asset),
+            (&config.disks[1].path, Role::Data),
+        ] {
+            let pinned = Pinned::open(path, role, identity)?;
+            if pinned.size == 0 || files.iter().any(|other: &Pinned| other.id == pinned.id) {
+                return Err(Error("runtime_asset_identity_invalid"));
+            }
+            files.push(pinned);
+        }
+        let mut signature = [0; 8];
+        read_at(&files[2], 32768, &mut signature)?;
+        if files[2].size < 34816
+            || files[2].size % 2048 != 0
+            || signature[1..6] != *b"CD001"
+            || signature[6] != 1
+        {
+            return Err(Error("runtime_iso_required"));
+        }
+        read_at(&files[3], 0, &mut signature)?;
+        if signature != *b"vhdxfile" || files[3].size < 1024 * 1024 {
+            return Err(Error("runtime_vhdx_required"));
+        }
+        virtual_disk(&files[3], &config.runtime_id)?;
+        Ok(Self {
+            files,
+            vm_id: config.vm_id(),
+            granted: Vec::new(),
+            owner: identity.sid().to_owned(),
+        })
+    }
+
+    /// These APIs take paths, not handles. Leaf and ancestor handles keep those
+    /// exact objects non-deletable throughout grant, HCS use and explicit revoke.
+    /// https://learn.microsoft.com/virtualization/api/hcs/reference/hcsgrantvmaccess
+    pub fn grant_vm_access(&mut self, vm_id: &str) -> Result<()> {
+        if vm_id != self.vm_id || !self.granted.is_empty() {
+            return Err(Error("runtime_vm_access_identity_invalid"));
+        }
+        let id = wide(&self.vm_id);
+        let result = (|| {
+            for index in 0..self.files.len() {
+                self.files[index].verify()?;
+                // Include a failed grant in rollback: failure must not be
+                // interpreted as proof that the file ACL was unchanged.
+                self.granted.push(index);
+                if unsafe { HcsGrantVmAccess(id.as_ptr(), wide(&self.files[index].path).as_ptr()) }
+                    < 0
+                {
+                    return Err(Error("runtime_vm_access_grant_failed"));
+                }
+                self.files[index].verify()?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.revoke_vm_access()?;
+        }
+        result
+    }
+
+    /// Call only after confirmed HCS stop, before releasing this lease. A failed
+    /// revoke remains tracked and must not become a successful cleanup report.
+    /// https://learn.microsoft.com/virtualization/api/hcs/reference/hcsrevokevmaccess
+    pub fn revoke_vm_access(&mut self) -> Result<()> {
+        let id = wide(&self.vm_id);
+        let mut pending = Vec::new();
+        for index in self.granted.iter().copied() {
+            let result = self.files[index].verify().and_then(|()| {
+                if unsafe { HcsRevokeVmAccess(id.as_ptr(), wide(&self.files[index].path).as_ptr()) }
+                    < 0
+                {
+                    return Err(Error("runtime_vm_access_revoke_failed"));
+                }
+                permissions(
+                    &self.files[index].file,
+                    &self.owner,
+                    self.files[index].role != Role::Asset,
+                )
+            });
+            if result.is_err() {
+                pending.push(index);
+            }
+        }
+        self.granted = pending;
+        if !self.granted.is_empty() {
+            return Err(Error("runtime_vm_access_revoke_failed"));
+        }
+        Ok(())
+    }
+
+    /// The one-shot backend could not confirm VM stop. Do not revoke a live
+    /// VM's access or release its pinned paths while cleanup is uncertain. The
+    /// process exit closes handles; the caller must report the failed shutdown.
+    pub fn retain_until_exit(self) {
+        std::mem::forget(self);
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct FileId {
+    volume: u64,
+    file: [u8; 16],
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Role {
+    Configuration,
+    Asset,
+    Data,
+}
+
+struct Pinned {
+    path: String,
+    file: File,
+    id: FileId,
+    size: u64,
+    role: Role,
+    parents: Vec<(String, File, FileId)>,
+}
+
+impl Pinned {
+    fn open(path: &str, role: Role, identity: &Identity) -> Result<Self> {
+        if !crate::config::drive_file(path) {
+            return Err(Error("invalid_runtime_asset_path"));
+        }
+        let mut parents = Vec::new();
+        let mut paths = vec![path[..3].to_owned()];
+        for (index, _) in path[3..].match_indices('\\') {
+            paths.push(path[..index + 3].to_owned());
+        }
+        for parent in paths {
+            let file = open_raw(&parent, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?;
+            let (id, _) = inspect(&file, &parent, true)?;
+            parents.push((parent, file, id));
+        }
+        // Metadata-only data-file access lets HCS choose its own VHDX sharing
+        // mode. Signature reads are short-lived, identity-checked handles.
+        let access = if role == Role::Data {
+            READ_CONTROL | FILE_READ_ATTRIBUTES
+        } else {
+            GENERIC_READ | READ_CONTROL
+        };
+        let file = open_raw(path, access, role == Role::Data, false)?;
+        let (id, size) = inspect(&file, path, false)?;
+        permissions(&file, identity.sid(), role != Role::Asset)?;
+        let pinned = Self {
+            path: path.to_owned(),
+            file,
+            id,
+            size,
+            role,
+            parents,
+        };
+        pinned.verify()?;
+        Ok(pinned)
+    }
+
+    fn verify(&self) -> Result<()> {
+        for (path, file, id) in &self.parents {
+            if inspect(file, path, true)?.0 != *id {
+                return Err(Error("runtime_asset_changed"));
+            }
+        }
+        if inspect(&self.file, &self.path, false)?.0 != self.id {
+            return Err(Error("runtime_asset_changed"));
+        }
+        Ok(())
+    }
+}
+
+fn open_raw(path: &str, access: u32, share_write: bool, directory: bool) -> Result<File> {
+    let handle = unsafe {
+        CreateFileW(
+            wide(path).as_ptr(),
+            access,
+            FILE_SHARE_READ | if share_write { FILE_SHARE_WRITE } else { 0 },
+            null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT
+                | if directory {
+                    FILE_FLAG_BACKUP_SEMANTICS
+                } else {
+                    0
+                },
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(Error("runtime_file_unavailable"));
+    }
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+fn inspect(file: &File, path: &str, directory: bool) -> Result<(FileId, u64)> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    let mut id = FILE_ID_INFO::default();
+    if unsafe { GetFileType(file.as_raw_handle()) } != FILE_TYPE_DISK
+        || unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0
+        || unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileIdInfo,
+                (&mut id as *mut FILE_ID_INFO).cast(),
+                size_of::<FILE_ID_INFO>() as u32,
+            )
+        } == 0
+        || info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE) != 0
+        || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0) != directory
+        || !directory && info.nNumberOfLinks != 1
+    {
+        return Err(Error("regular_runtime_asset_required"));
+    }
+    let mut resolved = vec![0u16; 32768];
+    let count = unsafe {
+        GetFinalPathNameByHandleW(
+            file.as_raw_handle(),
+            resolved.as_mut_ptr(),
+            resolved.len() as u32,
+            0,
+        )
+    } as usize;
+    if count == 0 || count >= resolved.len() {
+        return Err(Error("runtime_asset_path_unavailable"));
+    }
+    let resolved = String::from_utf16(&resolved[..count])
+        .map_err(|_| Error("runtime_asset_path_unavailable"))?;
+    if !resolved
+        .strip_prefix(r"\\?\")
+        .is_some_and(|resolved| resolved.eq_ignore_ascii_case(path))
+    {
+        return Err(Error("runtime_asset_path_alias"));
+    }
+    Ok((
+        FileId {
+            volume: id.VolumeSerialNumber,
+            file: id.FileId.Identifier,
+        },
+        ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64,
+    ))
+}
+
+fn read_at(pinned: &Pinned, offset: u64, bytes: &mut [u8]) -> Result<()> {
+    let mut file = open_raw(
+        &pinned.path,
+        GENERIC_READ | READ_CONTROL,
+        pinned.role == Role::Data,
+        false,
+    )?;
+    if inspect(&file, &pinned.path, false)?.0 != pinned.id {
+        return Err(Error("runtime_asset_changed"));
+    }
+    file.seek(SeekFrom::Start(offset))
+        .and_then(|_| file.read_exact(bytes))
+        .map_err(|_| Error("runtime_asset_read_failed"))
+}
+
+struct Security(PSECURITY_DESCRIPTOR);
+impl Drop for Security {
+    fn drop(&mut self) {
+        unsafe {
+            LocalFree(self.0);
+        }
+    }
+}
+
+fn permissions(file: &File, owner_sid: &str, private: bool) -> Result<()> {
+    let mut owner = null_mut();
+    let mut acl = null_mut();
+    let mut descriptor = null_mut();
+    if unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            &mut acl,
+            null_mut(),
+            &mut descriptor,
+        )
+    } != 0
+    {
+        return Err(Error("runtime_file_permissions_unavailable"));
+    }
+    let descriptor = Security(descriptor);
+    if descriptor.0.is_null()
+        || unsafe { IsValidSecurityDescriptor(descriptor.0) } == 0
+        || acl.is_null()
+        || unsafe { IsValidAcl(acl) } == 0
+        || !trusted_sid(&sid_text(owner)?, owner_sid)
+    {
+        return Err(Error("private_runtime_file_required"));
+    }
+    let mut info = ACL_SIZE_INFORMATION::default();
+    if unsafe {
+        GetAclInformation(
+            acl,
+            (&mut info as *mut ACL_SIZE_INFORMATION).cast(),
+            size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    } == 0
+    {
+        return Err(Error("runtime_file_permissions_unavailable"));
+    }
+    for index in 0..info.AceCount {
+        let mut raw = null_mut();
+        if unsafe { GetAce(acl, index, &mut raw) } == 0 || raw.is_null() {
+            return Err(Error("runtime_file_permissions_unavailable"));
+        }
+        let header = unsafe { &*raw.cast::<ACE_HEADER>() };
+        if header.AceFlags as u32 & INHERIT_ONLY_ACE != 0 {
+            continue;
+        }
+        if header.AceType as u32 == ACCESS_DENIED_ACE_TYPE {
+            continue;
+        }
+        let sid_start = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+        let sid_header = std::mem::offset_of!(SID, SubAuthority);
+        if header.AceType as u32 != ACCESS_ALLOWED_ACE_TYPE
+            || (header.AceSize as usize) < sid_start + sid_header
+        {
+            return Err(Error("runtime_file_permissions_unsupported"));
+        }
+        let ace = unsafe { &*raw.cast::<ACCESS_ALLOWED_ACE>() };
+        let sid: PSID = std::ptr::addr_of!(ace.SidStart).cast_mut().cast();
+        let sid_size = sid_header
+            + unsafe { (*sid.cast::<SID>()).SubAuthorityCount } as usize * size_of::<u32>();
+        if sid_size > header.AceSize as usize - sid_start
+            || unsafe { IsValidSid(sid) } == 0
+            || unsafe { GetLengthSid(sid) } as usize != sid_size
+        {
+            return Err(Error("runtime_file_owner_invalid"));
+        }
+        let sid = sid_text(sid)?;
+        if trusted_sid(&sid, owner_sid) {
+            continue;
+        }
+        // Standard read/execute rights are sufficient for shared immutable
+        // assets. Unknown rights and every mutation/ownership grant fail closed.
+        let read_only = FILE_GENERIC_READ | GENERIC_READ | GENERIC_EXECUTE | FILE_EXECUTE;
+        if ace.Mask != 0 && (private || ace.Mask & !read_only != 0) {
+            return Err(Error("private_runtime_file_required"));
+        }
+    }
+    Ok(())
+}
+
+fn trusted_sid(sid: &str, owner_sid: &str) -> bool {
+    sid == owner_sid || sid == "S-1-5-18"
+}
+
+fn sid_text(sid: PSID) -> Result<String> {
+    if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
+        return Err(Error("runtime_file_owner_invalid"));
+    }
+    let mut text = null_mut();
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 || text.is_null() {
+        return Err(Error("runtime_file_owner_invalid"));
+    }
+    let length = (0..256).find(|index| unsafe { *text.add(*index) == 0 });
+    let value = length.and_then(|length| {
+        String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) }).ok()
+    });
+    unsafe {
+        LocalFree(text.cast());
+    }
+    value.ok_or(Error("runtime_file_owner_invalid"))
+}
+
+fn virtual_disk(pinned: &Pinned, runtime_id: &str) -> Result<()> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(pinned.file.as_raw_handle(), &mut info) } == 0
+        || info.dwFileAttributes & (FILE_ATTRIBUTE_COMPRESSED | FILE_ATTRIBUTE_ENCRYPTED) != 0
+    {
+        return Err(Error("runtime_vhdx_required"));
+    }
+    let storage = VIRTUAL_STORAGE_TYPE {
+        DeviceId: VIRTUAL_STORAGE_TYPE_DEVICE_VHDX,
+        VendorId: VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT,
+    };
+    let parameters = OPEN_VIRTUAL_DISK_PARAMETERS {
+        Version: OPEN_VIRTUAL_DISK_VERSION_1,
+        Anonymous: OPEN_VIRTUAL_DISK_PARAMETERS_0 {
+            Version1: OPEN_VIRTUAL_DISK_PARAMETERS_0_0 { RWDepth: 0 },
+        },
+    };
+    let mut handle = null_mut();
+    if unsafe {
+        OpenVirtualDisk(
+            &storage,
+            wide(&pinned.path).as_ptr(),
+            VIRTUAL_DISK_ACCESS_GET_INFO,
+            OPEN_VIRTUAL_DISK_FLAG_NO_PARENTS,
+            &parameters,
+            &mut handle,
+        )
+    } != 0
+        || handle.is_null()
+    {
+        return Err(Error("runtime_vhdx_information_unavailable"));
+    }
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let size = disk_info(handle.as_raw_handle(), GET_VIRTUAL_DISK_INFO_SIZE)?;
+    let identifier = disk_info(handle.as_raw_handle(), GET_VIRTUAL_DISK_INFO_IDENTIFIER)?;
+    let subtype = disk_info(
+        handle.as_raw_handle(),
+        GET_VIRTUAL_DISK_INFO_PROVIDER_SUBTYPE,
+    )?;
+    let loaded = disk_info(handle.as_raw_handle(), GET_VIRTUAL_DISK_INFO_IS_LOADED)?;
+    let size = unsafe { size.Anonymous.Size };
+    let identifier = unsafe { identifier.Anonymous.Identifier };
+    let expected = u128::from_str_radix(runtime_id, 16)
+        .map_err(|_| Error("runtime_disk_identity_mismatch"))?;
+    let expected = windows_sys::core::GUID::from_u128(expected);
+    if identifier.data1 != expected.data1
+        || identifier.data2 != expected.data2
+        || identifier.data3 != expected.data3
+        || identifier.data4 != expected.data4
+    {
+        return Err(Error("runtime_disk_identity_mismatch"));
+    }
+    if !(4 * GIB..=MAX_DISK).contains(&size.VirtualSize)
+        || !matches!(size.SectorSize, 512 | 4096)
+        || size.VirtualSize % size.SectorSize as u64 != 0
+        || size.PhysicalSize < 1024 * 1024
+        || size.PhysicalSize > size.VirtualSize + GIB
+        || !matches!(unsafe { subtype.Anonymous.ProviderSubtype }, 2 | 3)
+        || unsafe { loaded.Anonymous.IsLoaded } != 0
+    {
+        return Err(Error("invalid_runtime_disk"));
+    }
+    pinned.verify()
+}
+
+fn disk_info(handle: HANDLE, version: i32) -> Result<GET_VIRTUAL_DISK_INFO> {
+    let mut info = GET_VIRTUAL_DISK_INFO {
+        Version: version,
+        ..Default::default()
+    };
+    let mut size = size_of::<GET_VIRTUAL_DISK_INFO>() as u32;
+    if unsafe { GetVirtualDiskInformation(handle, &mut size, &mut info, null_mut()) } != 0 {
+        return Err(Error("runtime_vhdx_information_unavailable"));
+    }
+    Ok(info)
+}
+
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(Some(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CONFIG_LIMIT, File, Identity, Pinned, Role, Security, open_raw, read_config, wide,
+    };
+    use serde_json::json;
+    use std::io::Write;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::PathBuf;
+    use std::ptr::{null, null_mut};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SE_FILE_OBJECT, SetSecurityInfo,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
+        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{READ_CONTROL, WRITE_DAC, WRITE_OWNER};
+
+    struct Area(PathBuf);
+    impl Area {
+        fn new() -> Self {
+            let mut bytes = [0; 16];
+            getrandom::getrandom(&mut bytes).unwrap();
+            let name: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+            let path = std::env::temp_dir().join(format!("oblivion-files-{name}"));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn path(&self, name: &str) -> String {
+            self.0.join(name).to_str().unwrap().to_owned()
+        }
+        fn file(&self, name: &str, bytes: &[u8], identity: &Identity, extra: &str) -> String {
+            let path = self.path(name);
+            File::create(&path).unwrap().write_all(bytes).unwrap();
+            acl(&path, identity, extra);
+            path
+        }
+    }
+    impl Drop for Area {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn acl(path: &str, identity: &Identity, extra: &str) {
+        let file = open_raw(path, READ_CONTROL | WRITE_DAC | WRITE_OWNER, false, false).unwrap();
+        let text = format!("O:{}{}{}", identity.sid(), identity.sddl(), extra);
+        let mut descriptor = null_mut();
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    wide(&text).as_ptr(),
+                    1,
+                    &mut descriptor,
+                    null_mut(),
+                )
+            },
+            0
+        );
+        let descriptor = Security(descriptor);
+        let mut owner = null_mut();
+        let mut acl = null_mut();
+        let mut present = 0;
+        let mut defaulted = 0;
+        assert_ne!(
+            unsafe { GetSecurityDescriptorOwner(descriptor.0, &mut owner, &mut defaulted) },
+            0
+        );
+        assert_ne!(
+            unsafe {
+                GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut acl, &mut defaulted)
+            },
+            0
+        );
+        assert_ne!(present, 0);
+        assert_eq!(
+            unsafe {
+                SetSecurityInfo(
+                    file.as_raw_handle(),
+                    SE_FILE_OBJECT,
+                    OWNER_SECURITY_INFORMATION
+                        | DACL_SECURITY_INFORMATION
+                        | PROTECTED_DACL_SECURITY_INFORMATION,
+                    owner,
+                    null_mut(),
+                    acl,
+                    null(),
+                )
+            },
+            0
+        );
+    }
+
+    #[test]
+    fn actual_acl_distinguishes_private_configuration_from_public_read_only_assets() {
+        let area = Area::new();
+        let identity = Identity::current().unwrap();
+        let path = area.file("PRIVATE_CANARY.json", b"{}", &identity, "(A;;GR;;;WD)");
+        assert!(Pinned::open(&path, Role::Asset, &identity).is_ok());
+        assert_eq!(
+            Pinned::open(&path, Role::Configuration, &identity)
+                .err()
+                .unwrap()
+                .0,
+            "private_runtime_file_required"
+        );
+        assert_eq!(
+            read_config(&path, &identity).err().unwrap().0,
+            "private_runtime_file_required"
+        );
+        acl(&path, &identity, "(A;;GW;;;WD)");
+        let error = Pinned::open(&path, Role::Asset, &identity).err().unwrap();
+        assert_eq!(error.0, "private_runtime_file_required");
+        assert!(!error.to_string().contains("PRIVATE_CANARY"));
+    }
+
+    #[test]
+    fn config_reader_uses_private_file_and_bounded_actual_content() {
+        let area = Area::new();
+        let identity = Identity::current().unwrap();
+        let id = "0123456789abcdef0123456789abcdef";
+        let bytes = serde_json::to_vec(&json!({"version":1,"backend":"hcs-hyperv","runtimeId":id,
+            "kernel":area.path("vmlinuz"),"initrd":area.path("initrd.img"),
+            "commandLine":format!("oblivion.runtime=1 oblivion.runtime-backend=hcs-hyperv oblivion.runtime-id={id}"),
+            "disks":[{"path":area.path("live.iso"),"readOnly":true},{"path":area.path("data.vhdx"),"readOnly":false}],
+            "cpuCount":2,"memoryMiB":2048,"controlPipe":format!(r"\\.\pipe\oblivion.{id}.control"),
+            "controlPort":4050,"network":false,"serialStdio":false})).unwrap();
+        let path = area.file("config.json", &bytes, &identity, "");
+        assert_eq!(read_config(&path, &identity).unwrap().runtime_id, id);
+        let large = area.file("large.json", &vec![b' '; CONFIG_LIMIT + 1], &identity, "");
+        assert_eq!(
+            read_config(&large, &identity).err().unwrap().0,
+            "invalid_runtime_configuration"
+        );
+    }
+
+    #[test]
+    fn pinned_asset_denies_writes_and_replacement_and_rejects_hard_link_aliases() {
+        let area = Area::new();
+        let identity = Identity::current().unwrap();
+        let path = area.file("kernel", b"kernel", &identity, "");
+        {
+            let pinned = Pinned::open(&path, Role::Asset, &identity).unwrap();
+            assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+            assert!(std::fs::rename(&path, area.path("renamed")).is_err());
+            assert!(std::fs::rename(&area.0, area.0.with_extension("moved")).is_err());
+            pinned.verify().unwrap();
+        }
+        std::fs::hard_link(&path, area.path("alias")).unwrap();
+        assert_eq!(
+            Pinned::open(&path, Role::Asset, &identity).err().unwrap().0,
+            "regular_runtime_asset_required"
+        );
+    }
+
+    #[test]
+    #[ignore = "Requires Windows Developer Mode or symlink privilege; no VM is started"]
+    fn real_leaf_and_parent_symlinks_are_rejected() {
+        let area = Area::new();
+        let identity = Identity::current().unwrap();
+        let path = area.file("kernel", b"kernel", &identity, "");
+        let link = area.path("link");
+        std::os::windows::fs::symlink_file(&path, &link).unwrap();
+        assert_eq!(
+            Pinned::open(&link, Role::Asset, &identity).err().unwrap().0,
+            "regular_runtime_asset_required"
+        );
+        std::fs::create_dir(area.path("actual")).unwrap();
+        let nested = area.file(r"actual\initrd", b"initrd", &identity, "");
+        std::os::windows::fs::symlink_dir(area.path("actual"), area.path("directory-link"))
+            .unwrap();
+        let _ = nested;
+        assert_eq!(
+            Pinned::open(&area.path(r"directory-link\initrd"), Role::Asset, &identity)
+                .err()
+                .unwrap()
+                .0,
+            "regular_runtime_asset_required"
+        );
+    }
+}

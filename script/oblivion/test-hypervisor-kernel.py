@@ -59,7 +59,7 @@ class KernelInventory(unittest.TestCase):
     def test_amd64_builtin_and_modular_hyperv_drivers_are_recorded(self):
         value = self.record('amd64', '6.12.115+deb13-amd64', modular=True)
         self.assertEqual(value, kernel.verify(self.root))
-        self.assertEqual(len(value['hyperv_guest_drivers']), 8)
+        self.assertEqual(len(value['hyperv_guest_drivers']), 10)
         self.assertTrue(all(driver['mode'] == 'm' and driver['sha256'] for driver in value['hyperv_guest_drivers']))
         output = subprocess.check_output([sys.executable, '-B', str(Path(__file__).with_name('hypervisor-kernel.py')),
                                           'initramfs-modules', str(self.root)], text=True)
@@ -68,9 +68,12 @@ class KernelInventory(unittest.TestCase):
     def test_disabled_hyperv_driver_fails_before_packing(self):
         value = self.record('amd64', '6.12.115+deb13-amd64')
         config = self.root / 'boot' / ('config-' + value['abi'])
-        config.write_text(config.read_text().replace('CONFIG_HYPERV_VSOCKETS=y', '# CONFIG_HYPERV_VSOCKETS is not set'))
-        with self.assertRaisesRegex(ValueError, 'hyperv_guest_driver_required:CONFIG_HYPERV_VSOCKETS'):
-            kernel.verify(self.root)
+        original = config.read_text()
+        for symbol in ('CONFIG_HYPERV_VSOCKETS', 'CONFIG_VIRTIO_CONSOLE', 'CONFIG_VIRTIO_MMIO'):
+            with self.subTest(symbol=symbol):
+                config.write_text(original.replace(symbol + '=y', '# ' + symbol + ' is not set'))
+                with self.assertRaisesRegex(ValueError, 'hyperv_guest_driver_required:' + symbol):
+                    kernel.verify(self.root)
 
     def test_missing_changed_and_duplicate_modular_drivers_are_rejected(self):
         value = self.record('amd64', '6.12.115+deb13-amd64', modular=True)

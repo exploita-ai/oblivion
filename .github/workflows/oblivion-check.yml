@@ -59,6 +59,29 @@ jobs:
           ghcr.io/gitleaks/gitleaks@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9
           detect --source=/repo --no-git --redact --config=/repo/.gitleaks.toml --exit-code=1
 
+  windows-backend:
+    name: HCS helper and private Windows I/O (no VM acceptance)
+    runs-on: windows-2022
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/oblivion-native-windows
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust compiler
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+      - name: Exercise native ACLs, private pipe peers, cancellation and lifetime
+        run: cargo test --locked --all-targets
+      - name: Link the actual HCS helper
+        run: cargo build --locked --bin oblivion-vm
+      - name: Record acceptance scope
+        run: |
+          'These tests exercise Windows kernel objects and portable HCS models. They do not create a VM or qualify Hyper-V permissions, bootstrap, nested KVM, networking, the frontend or installation.' >> $env:GITHUB_STEP_SUMMARY
+
   windows-manager:
     name: Windows x64 frontend (no VM backend)
     runs-on: windows-2022
@@ -177,6 +200,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 tests/managed-job.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/agent-channel.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/credential-delegation.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/native-runtime.py
       - name: Check native agent configuration preservation
         working-directory: packages/oblivion-host/guest/native-tools
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_configure
@@ -337,6 +361,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 tests/managed-job.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/agent-channel.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/credential-delegation.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/native-runtime.py
       - name: Compile the actual Apple helper
         working-directory: packages/oblivion-native
         run: swift build --configuration release
