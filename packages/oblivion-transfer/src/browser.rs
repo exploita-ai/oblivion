@@ -1,7 +1,11 @@
-use crate::{directory::Directory, require, validate_path};
+use crate::{require, validate_path};
+#[cfg(unix)]
+use crate::directory::Directory;
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::collections::BTreeSet;
 use std::io;
+#[cfg(unix)]
 use std::path::Path;
 
 #[derive(Deserialize, Serialize)]
@@ -86,6 +90,7 @@ impl Page {
 
 /// Runs in the guest. Directory descriptors pin each component; symlinks and
 /// special files are never followed. Only a bounded page of names is retained.
+#[cfg(unix)]
 pub fn list(root: &Path, request: &Request, documents: bool) -> io::Result<Page> {
     request.validate()?;
     if documents && request.path.is_empty() {

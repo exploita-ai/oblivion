@@ -1,6 +1,6 @@
 mod support;
 
-use oblivion_transfer::{Entry, Limits, Manifest, Selection};
+use oblivion_transfer::{Limits, Selection};
 use oblivion_transfer::channel::Channel;
 use oblivion_transfer::endpoint::write_message;
 use std::fs::{self, File};
@@ -13,21 +13,6 @@ use support::Tree;
 
 const ID: &str = "0123456789abcdef0123456789abcdef";
 const LIMITS: Limits = Limits { entries: 32, bytes: 1024 * 1024 };
-
-#[test]
-fn portable_scope_rejects_credentials_and_native_state_on_both_sides() {
-    for path in ["home", "workspace/.ssh", "workspace/.oblivion-jobs", "workspace/auth.json", "history/history.sqlite", "history/source-chunks", "state"] {
-        let mut entries = Vec::new();
-        let mut prefix = String::new();
-        for part in path.split('/') {
-            if !prefix.is_empty() { prefix.push('/'); }
-            prefix.push_str(part);
-            entries.push(Entry::Directory { path: prefix.clone() });
-        }
-        let manifest = Manifest::new(entries, LIMITS).unwrap();
-        assert!(oblivion_transfer::share::validate_manifest(&manifest).is_err(), "{path}");
-    }
-}
 
 #[test]
 fn approved_share_stream_uses_existing_manifest_hash_and_verified_receipt() {

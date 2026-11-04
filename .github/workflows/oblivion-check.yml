@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   portable-wire:
-    name: Portable private wire (Windows; no VM backend)
+    name: Portable wire and Files (Windows; no VM backend)
     runs-on: windows-2022
     timeout-minutes: 10
     defaults:
@@ -34,6 +34,11 @@ jobs:
         run: |
           cargo check --locked --lib --target x86_64-pc-windows-msvc
           cargo test --locked
+      - name: Compile and exercise portable Files validation and framing
+        working-directory: packages/oblivion-transfer
+        run: |
+          cargo check --locked --lib --target x86_64-pc-windows-msvc
+          cargo test --locked --lib
 
   secrets:
     name: Secret scan

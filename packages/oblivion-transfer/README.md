@@ -5,6 +5,13 @@ directories. Receives into a new private transaction, verifies SHA-256, syncs
 before publication, and never overwrites an existing transaction. No network,
 USB mounting, shell execution, logging or archive extraction in this library.
 
+Manifest validation, payload hashes, paginated directory metadata, copy control
+messages and Share content rules are platform independent. The Unix filesystem
+endpoints are separate from that shared protocol; they retain pinned descriptor
+identities and explicit publication. The same portable library compiles for the
+Windows MSVC target. This does not implement Windows file handles, ACLs,
+reparse-point rejection or a Windows runtime backend.
+
 The `oblivion-copy` endpoint uses an inherited private descriptor, a monotonic
 transport deadline, approval bound to the offered manifest and a verified
 receipt. Separate send/receive processes have been exercised through VM
@@ -70,6 +77,10 @@ From this directory:
 ```sh
 cargo test --locked
 cargo clippy --all-targets -- -D warnings
+
+# Portable library only; no Windows endpoints or VM backend
+cargo check --locked --lib --target x86_64-pc-windows-msvc
+cargo test --locked --lib
 ```
 
 The repository's `script/oblivion/Dockerfile.transfer` runs the same tests in
@@ -89,7 +100,7 @@ Tor transfer and current-image/physical-media qualification remain open in
 
 `share-send` consumes a locally approved planner manifest on FD4 and the private
 channel on FD3. Source aliases are limited to the portable roots and that
-request's canonical catalog. `share-receive` stages the same hash-checked
+request's generated native-history export index. `share-receive` stages the same hash-checked
 protocol in a private new Safe inbox. Known credential-store paths are rejected
 by one shared positive-root validator.
 
