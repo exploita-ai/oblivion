@@ -46,6 +46,7 @@ def prepare():
             while block := disk.read(4 * 1024**2):
                 if block.count(0) != len(block):
                     raise RuntimeError('runtime_disk_is_not_empty')
+                os.posix_fadvise(disk.fileno(), observed, len(block), os.POSIX_FADV_DONTNEED)
                 observed += len(block)
         if observed != size:
             raise RuntimeError('runtime_disk_size_changed')

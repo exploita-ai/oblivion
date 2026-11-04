@@ -115,6 +115,8 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
     private var signals: [DispatchSourceSignal] = []
     private var bridges: [UUID: StreamBridge] = [:]
     private var stopping = false
+    private let consolePipe: Pipe
+    private var serialTail = Data()
 
     init(config: RuntimeConfig) throws {
         try requireHost()
@@ -152,10 +154,12 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
             ethernet.attachment = VZNATNetworkDeviceAttachment()
             settings.networkDevices = [ethernet]
         }
+        let pipe = Pipe()
+        self.consolePipe = pipe
         let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
         serial.attachment = VZFileHandleSerialPortAttachment(
             fileHandleForReading: config.serialStdio ? .standardInput : FileHandle(forReadingAtPath: "/dev/null")!,
-            fileHandleForWriting: config.serialStdio ? .standardOutput : FileHandle(forWritingAtPath: "/dev/null")!
+            fileHandleForWriting: pipe.fileHandleForWriting
         )
         settings.serialPorts = [serial]
         try settings.validate()
@@ -163,6 +167,11 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
         self.machine = VZVirtualMachine(configuration: settings)
         super.init()
         machine.delegate = self
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let bytes = handle.availableData
+            guard !bytes.isEmpty else { return }
+            DispatchQueue.main.async { self?.observeSerial(bytes) }
+        }
     }
 
     func start() throws {
@@ -200,7 +209,32 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
         lock = Darwin.open(path + ".lock", O_RDWR | O_CREAT | O_NOFOLLOW, 0o600)
         guard lock >= 0, flock(lock, LOCK_EX | LOCK_NB) == 0 else { throw RuntimeError.lockFailed }
         // Leave stale sockets for explicit recovery. A live process may own the endpoint.
-        guard lstat(path, &info) != 0 && errno == ENOENT else { throw RuntimeError.socketInUse }
+        if lstat(path, &info) == 0 {
+            // The exclusive runtime lock excludes another Oblivion owner.
+            // Only an owned socket whose listener is gone may be recovered.
+            guard info.st_mode & S_IFMT == S_IFSOCK, info.st_uid == getuid() else {
+                throw RuntimeError.socketInUse
+            }
+            let probe = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+            guard probe >= 0 else { throw RuntimeError.socketFailed }
+            var address = sockaddr_un()
+            address.sun_family = sa_family_t(AF_UNIX)
+            _ = path.withCString { pointer in
+                withUnsafeMutablePointer(to: &address.sun_path) {
+                    $0.withMemoryRebound(to: CChar.self, capacity: 104) { strcpy($0, pointer) }
+                }
+            }
+            let connected = withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.connect(probe, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            let failure = errno
+            Darwin.close(probe)
+            guard connected != 0 && failure == ECONNREFUSED && unlink(path) == 0 else {
+                throw RuntimeError.socketInUse
+            }
+        } else if errno != ENOENT { throw RuntimeError.socketFailed }
         listener = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard listener >= 0 else { throw RuntimeError.socketFailed }
         var address = sockaddr_un()
@@ -263,6 +297,21 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
         }
     }
 
+    private func observeSerial(_ bytes: Data) {
+        if config.serialStdio { FileHandle.standardOutput.write(bytes) }
+        serialTail.append(bytes)
+        if serialTail.range(of: Data("Kernel panic - not syncing".utf8)) != nil {
+            guard !stopping else { return }
+            stopping = true
+            acceptSource?.cancel()
+            report("runtime_kernel_panic")
+            machine.stop { _ in self.finish(code: 1, event: "runtime_failed") }
+            return
+        }
+        // Detect markers split across chunks without retaining boot output.
+        if serialTail.count > 128 { serialTail.removeFirst(serialTail.count - 128) }
+    }
+
     private func stop() {
         guard !stopping else { return }
         stopping = true
@@ -287,6 +336,7 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
     }
 
     private func finish(code: Int32, event: String) -> Never {
+        consolePipe.fileHandleForReading.readabilityHandler = nil
         bridges.values.forEach { $0.close() }
         if listener >= 0 { Darwin.close(listener) }
         if ownsSocket { unlink(config.controlSocket) }

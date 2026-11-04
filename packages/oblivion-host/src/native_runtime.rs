@@ -2,19 +2,31 @@
 use crate::control::{self, Result};
 use serde_json::json;
 use std::fs::{self, OpenOptions};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn directory() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("OBLIVION_RUNTIME_DIRECTORY") {
+        return Ok(PathBuf::from(path));
+    }
     Ok(
         PathBuf::from(std::env::var_os("HOME").ok_or("home_unavailable")?)
             .join("Library/Application Support/Oblivion"),
     )
 }
 fn socket_directory() -> PathBuf {
-    PathBuf::from(format!("/tmp/oblivion-{}", unsafe { libc::getuid() }))
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    std::env::var_os("OBLIVION_RUNTIME_DIRECTORY").hash(&mut hash);
+    PathBuf::from(format!(
+        "/tmp/oblivion-{}-{:016x}",
+        unsafe { libc::getuid() },
+        hash.finish()
+    ))
 }
 fn private_directory(path: &Path) -> Result<()> {
     if !path.exists() {
@@ -119,42 +131,113 @@ pub fn ensure() -> Result<()> {
         );
     }
     private_directory(&root)?;
-    private_directory(&socket_directory())?;
-    let socket = socket_directory().join("runtime.sock");
+    let settings: serde_json::Value = serde_json::from_slice(&fs::read(&config)?)?;
+    let socket = PathBuf::from(
+        settings["controlSocket"]
+            .as_str()
+            .ok_or("invalid_runtime_configuration")?,
+    );
+    private_directory(socket.parent().ok_or("invalid_runtime_socket")?)?;
     // Set once at launcher startup, before any worker threads are created.
     unsafe {
         std::env::set_var("OBLIVION_CONTROL_SOCKET", &socket);
     }
-    if control::request("status", None, &[]).is_ok() {
+    let deadline = Instant::now() + Duration::from_secs(390);
+    if crate::remote_control::probe(&socket, Duration::from_secs(2)).is_ok() {
         return Ok(());
     }
-    let mut child = Command::new(helper()?)
-        .args(["run", "--config"])
-        .arg(config)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let started = Instant::now();
+    let mut startup_path = socket.as_os_str().to_os_string();
+    startup_path.push(".startup.lock");
+    let startup_lock = private_lock(Path::new(&startup_path))?;
+    let mut helper_path = socket.as_os_str().to_os_string();
+    helper_path.push(".lock");
+    let helper_lock = private_lock(Path::new(&helper_path))?;
+    let mut owns_startup = false;
+    let mut observed_owner = false;
+    let mut child: Option<std::process::Child> = None;
+    eprintln!("Preparing the protected runtime…");
     loop {
-        if child.try_wait()?.is_some() {
-            return Err(
-                "Runtime startup failed. Inspect oblivion-vm capabilities and the installed image."
-                    .into(),
-            );
+        if let Some(child) = child.as_mut() {
+            if child.try_wait()?.is_some() {
+                return Err("Runtime startup failed. Inspect oblivion-vm capabilities and the installed image.".into());
+            }
         }
-        if control::request("status", None, &[]).is_ok() {
+        if !owns_startup {
+            owns_startup = try_lock(&startup_lock)?;
+            observed_owner |= !owns_startup;
+        }
+        if owns_startup && child.is_none() {
+            if try_lock(&helper_lock)? {
+                if unsafe { libc::flock(helper_lock.as_raw_fd(), libc::LOCK_UN) } != 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                if observed_owner {
+                    return Err("The protected runtime stopped before its controller became ready. Retry to start it again.".into());
+                }
+                let mut command = Command::new(helper()?);
+                command
+                    .args(["run", "--config"])
+                    .arg(&config)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                // One launcher owns startup while the helper takes its lifetime
+                // lock and safely removes its own stale socket under that lock.
+                // Other launchers poll the same boot without creating a helper.
+                unsafe {
+                    command.pre_exec(|| {
+                        if libc::setsid() < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+                child = Some(command.spawn()?);
+            } else {
+                observed_owner = true;
+            }
+        }
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Runtime is still starting. Retry after its controller becomes ready.")?;
+        if crate::remote_control::probe(&socket, remaining.min(Duration::from_secs(2))).is_ok() {
             return Ok(());
         }
-        if started.elapsed() > Duration::from_secs(120) {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             // The live helper still owns its runtime lock and boot. A timeout
             // must not create a second runtime or discard its persistent disk.
             return Err(
                 "Runtime is still starting. Retry after its controller becomes ready.".into(),
             );
-        }
-        std::thread::sleep(Duration::from_millis(250));
+        };
+        std::thread::sleep(remaining.min(Duration::from_millis(250)));
     }
+}
+
+fn private_lock(path: &Path) -> Result<fs::File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.uid() != unsafe { libc::getuid() } || meta.mode() & 0o077 != 0 {
+        return Err("unsafe_runtime_lock".into());
+    }
+    Ok(file)
+}
+
+fn try_lock(file: &fs::File) -> Result<bool> {
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return Ok(false);
+    }
+    Err(error.into())
 }
 
 pub fn stop() -> Result<()> {
