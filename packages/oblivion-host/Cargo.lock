@@ -857,6 +857,7 @@ dependencies = [
  "oblivion-tor-state",
  "oblivion-transfer",
  "oblivion-transport",
+ "oblivion-wire",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -896,6 +897,13 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "zeroize",
+]
+
+[[package]]
+name = "oblivion-wire"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

@@ -1,6 +1,8 @@
 use crate::storage::{Error, Result, lock_named, require};
 use oblivion_host::channel::Channel;
 use oblivion_host::family::Capability;
+use oblivion_wire::control::{Operation, HEADER_LIMIT};
+use oblivion_wire::frame;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -784,87 +786,7 @@ fn rollback_agent_start(config: &Path, families: &Families, opening: &oblivion_h
     Err(Error("native_start_cleanup_required"))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum Operation {
-    FamilyPasswordPreview,
-    FamilyPasswordChange,
-    FamilyPasswordStatus,
-    FamilyPasswordRecover,
-    BackupExportBegin,
-    BackupImportBegin,
-    BackupAttach,
-    BackupImportFinish,
-    BackupStatus,
-    BackupCancel,
-    BackupDiscard,
-    InitGeneral,
-    SafeAccess,
-    OpenDocuments,
-    OpenChildDocuments,
-    OpenDocumentsEphemeral,
-    StartAgent,
-    ChildTaskStatus,
-    ChildTaskReview,
-    ChildTaskStart,
-    ChildTaskRetry,
-    ChildTaskCancel,
-    PinSafe,
-    AgentAttach,
-    FileAttach,
-    AgentRelease,
-    ShareAttach,
-    ShareRelease,
-    ShareExportCancel,
-    ShareExportBegin,
-    ShareExportLease,
-    ShareExportEnd,
-    ShareExportSourceOpen,
-    ShareImportBegin,
-    ShareImportOpen,
-    ShareImportAttach,
-    ShareImportFinish,
-    ShareImportCommit,
-    ShareImportAbort,
-    ShareImportDiscard,
-    ShareImportStatus,
-    ShutdownRuntime,
-    ShutdownIdle,
-    Browse,
-    Diagnostics,
-    DiscardGeneralPending,
-    DiscardSessionPending,
-    Unlock,
-    UnlockReadOnly,
-    EnterRam,
-    Create,
-    RenameSession,
-    SessionStorage,
-    Close,
-    CloseIdle,
-    ForceClose,
-    Lock,
-    Status,
-    Activity,
-    IdleSettings,
-    Debug,
-    Egress,
-    ProxyProfiles,
-    NetworkPolicy,
-    Transfers,
-    Onion,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Request {
-    operation: Operation,
-    session: Option<String>,
-    secret_len: u32,
-    expected_session: Option<String>,
-    #[serde(default)]
-    slot: oblivion_host::scope::Slot,
-}
+type Request = oblivion_wire::control::Request<oblivion_host::scope::Slot>;
 
 fn secret_limit(operation: &Operation) -> u32 {
     match operation {
@@ -877,14 +799,11 @@ fn secret_limit(operation: &Operation) -> u32 {
     }
 }
 
-#[derive(Serialize)]
 struct Response {
     ok: bool,
     output: String,
     error: Option<String>,
-    #[serde(skip)]
     console: Option<UnixStream>,
-    #[serde(skip)]
     lease: Option<ClientLease>,
 }
 
@@ -1017,7 +936,9 @@ fn serve_connection(mut stream: UnixStream, config: std::path::PathBuf, uid: u32
             }
         }
         // One request per connection; neither payloads nor errors are logged.
-        if let Ok(bytes) = serde_json::to_vec(&response) {
+        if let Ok(bytes) = serde_json::to_vec(&oblivion_wire::control::Response {
+            ok: response.ok, output: response.output.as_str(), error: response.error.as_deref(),
+        }) {
             let _ = channel.write_all(&bytes);
         }
 }
@@ -1040,16 +961,10 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         require(peer.assume_init().uid == uid, "unauthorized_peer")?;
     }
     let mut channel = Channel::new(stream, Duration::from_secs(10));
-    let mut size = [0; 4];
-    channel
-        .read_exact(&mut size)
-        .map_err(|_| Error("invalid_frame"))?;
-    let size = u32::from_be_bytes(size) as usize;
-    require((1..=1024).contains(&size), "invalid_frame_length")?;
-    let mut header = vec![0; size];
-    channel
-        .read_exact(&mut header)
-        .map_err(|_| Error("invalid_frame"))?;
+    let header = frame::read(&mut channel, 1..=HEADER_LIMIT).map_err(|error| match error {
+        frame::Error::InvalidLength => Error("invalid_frame_length"),
+        frame::Error::Io(_) => Error("invalid_frame"),
+    })?;
     let request: Request = serde_json::from_slice(&header).map_err(|_| Error("invalid_request"))?;
     require(!matches!(request.operation, Operation::FamilyPasswordPreview)
         || request.session.is_some() && request.session == request.expected_session, "expected_session_required")?;

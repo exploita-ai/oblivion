@@ -20,6 +20,7 @@ SCRIPT_INPUTS = (
     "native-bundle/host-sources.py", "display", "live-os",
 )
 PACKAGE_INPUTS = {
+    "oblivion-wire": ("Cargo.toml", "Cargo.lock", "src"),
     "oblivion-transfer": ("Cargo.toml", "Cargo.lock", "src"),
     "oblivion-share": ("Cargo.toml", "Cargo.lock", "src"),
     "oblivion-tor-state": ("Cargo.toml", "src"),

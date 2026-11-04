@@ -15,6 +15,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  portable-wire:
+    name: Portable private wire (Windows; no VM backend)
+    runs-on: windows-2022
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/oblivion-wire
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust compiler
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+      - name: Compile and exercise shared private wire bytes
+        run: |
+          cargo check --locked --lib --target x86_64-pc-windows-msvc
+          cargo test --locked
+
   secrets:
     name: Secret scan
     runs-on: ubuntu-24.04
@@ -103,6 +123,9 @@ jobs:
           cargo check --locked --lib --bins --features lab-emulation
           cargo test --locked --lib --bin oblivion --bin oblivion-storage
           cargo test --locked --test safe_admin --test delegation --test backup_cli --test managed --test terminal_screen --test workspace --test share_control --test channel
+      - name: Exercise the portable private wire
+        working-directory: packages/oblivion-wire
+        run: cargo test --locked
       - name: Verify native bundle pairing and distribution inventory
         run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
       - name: Exercise real local PTY and scoped control protocols
@@ -251,6 +274,9 @@ jobs:
       - name: Compile the actual Apple helper
         working-directory: packages/oblivion-native
         run: swift build --configuration release
+      - name: Exercise the portable private wire
+        working-directory: packages/oblivion-wire
+        run: cargo test --locked
       - name: Verify native bundle pairing and distribution inventory
         run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
       - name: Verify ciphertext-only personal copy streams

@@ -4,22 +4,14 @@
 
 use crate::channel::Channel;
 use crate::control::Result;
-use serde::Deserialize;
-use serde_json::json;
-use std::io::{Read, Write};
+use oblivion_wire::control::{NativeRequest, Operation, Request, Response, HEADER_LIMIT, RESPONSE_LIMIT};
+use oblivion_wire::frame;
+use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Response {
-    ok: bool,
-    output: String,
-    error: Option<String>,
-}
 
 pub fn request(
     path: &Path,
@@ -39,12 +31,25 @@ pub fn request(
     read_response(&stream, operation)
 }
 
+/// One total budget across connection, request transmission and response.
+/// The supervisor uses this after releasing its lifecycle registry lock.
+pub fn request_with_budget(
+    path: &Path,
+    operation: &str,
+    session: Option<&str>,
+    secret: &[u8],
+    expected: Option<&str>,
+    budget: Duration,
+) -> Result<String> {
+    let deadline = Instant::now() + budget;
+    let stream = connect(path, operation, session, secret, expected, budget)?;
+    read_response_with_budget(&stream, remaining(deadline)?)
+}
+
 /// A startup probe shares one short deadline across connection and response.
 /// Normal control operations retain their full operation-specific budgets.
 pub fn probe(path: &Path, budget: Duration) -> Result<String> {
-    let deadline = Instant::now() + budget;
-    let stream = connect(path, "status", None, &[], None, budget)?;
-    read_response_with_budget(&stream, remaining(deadline)?)
+    request_with_budget(path, "status", None, &[], None, budget)
 }
 
 pub fn attach(path: &Path, operation: &str, expected: &str) -> Result<(UnixStream, String)> {
@@ -116,20 +121,19 @@ fn connect(
             return Err("untrusted_runtime_peer".into());
         }
     }
-    let header = serde_json::to_vec(&json!({
-        "version": 1,
-        "operation": operation,
-        "session": session,
-        "secret_len": secret.len(),
-        "slot": crate::scope::current(),
-        "expected_session": expected,
-    }))?;
-    if header.len() > 1024 {
+    let request = Request {
+        operation: Operation::parse(operation)?,
+        session: session.map(str::to_owned),
+        secret_len: secret.len() as u32,
+        slot: crate::scope::current(),
+        expected_session: expected.map(str::to_owned),
+    };
+    let header = serde_json::to_vec(&NativeRequest::new(&request))?;
+    if header.len() > HEADER_LIMIT {
         return Err("header_too_large".into());
     }
     let mut channel = Channel::new(&stream, remaining(deadline)?);
-    channel.write_all(&(header.len() as u32).to_be_bytes())?;
-    channel.write_all(&header)?;
+    frame::write(&mut channel, &header, 1..=HEADER_LIMIT)?;
     channel.write_all(secret)?;
     Ok(stream)
 }
@@ -149,14 +153,12 @@ fn read_response(stream: &UnixStream, operation: &str) -> Result<String> {
 
 fn read_response_with_budget(stream: &UnixStream, budget: Duration) -> Result<String> {
     let mut channel = Channel::new(stream, budget);
-    let mut length = [0; 4];
-    channel.read_exact(&mut length)?;
-    let length = u32::from_be_bytes(length) as usize;
-    if !(1..=1024 * 1024).contains(&length) {
-        return Err("invalid_response_length".into());
-    }
-    let mut bytes = vec![0; length];
-    channel.read_exact(&mut bytes)?;
+    let bytes = frame::read(&mut channel, 1..=RESPONSE_LIMIT).map_err(|error| -> Box<dyn std::error::Error> {
+        match error {
+            frame::Error::InvalidLength => "invalid_response_length".into(),
+            frame::Error::Io(error) => error.into(),
+        }
+    })?;
     let response: Response = serde_json::from_slice(&bytes)?;
     if !response.ok {
         let error = response.error.filter(|value| {

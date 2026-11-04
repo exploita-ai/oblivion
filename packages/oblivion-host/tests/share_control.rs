@@ -164,3 +164,27 @@ print(json.dumps({operation:module.secret_limit(operation) for operation in ['fa
     assert_eq!(limits["family-password-change"], oblivion_host::family_rotation::CHANGE_LIMIT);
     for operation in ["family-password-recover", "unlock", "egress"] { assert_eq!(limits[operation], 4096); }
 }
+
+#[test]
+fn supervisor_request_expires_while_a_peer_keeps_trickling_a_response() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("budget.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let request = oblivion_wire::frame::read(&mut stream, 1..=oblivion_wire::control::HEADER_LIMIT).unwrap();
+        let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
+        assert_eq!(request["operation"], "shutdown-idle");
+        let response = br#"{"ok":true,"output":"done","error":null}"#;
+        for byte in (response.len() as u32).to_be_bytes().into_iter().chain(response.iter().copied()) {
+            if stream.write_all(&[byte]).is_err() { break; }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    });
+    let error = remote_control::request_with_budget(&path, "shutdown-idle", None, &[], None,
+        Duration::from_millis(75)).unwrap_err();
+    assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), std::io::ErrorKind::TimedOut);
+    server.join().unwrap();
+}

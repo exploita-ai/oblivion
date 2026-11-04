@@ -1,19 +1,11 @@
 use crate::channel::Channel;
-use serde::Deserialize;
-use serde_json::json;
+use oblivion_wire::control::{Operation, Request, Response, HEADER_LIMIT, RESPONSE_LIMIT};
+use oblivion_wire::frame;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Response {
-    ok: bool,
-    output: String,
-    error: Option<String>,
-}
 
 pub fn protect() -> Result<()> {
     unsafe {
@@ -82,11 +74,14 @@ fn connect_expected(
         }
     }
     let mut channel = Channel::new(&stream, Duration::from_secs(10));
-    let header = serde_json::to_vec(
-        &json!({"operation": operation, "session": session, "secret_len": secret.len(), "slot": crate::scope::current(), "expected_session": expected}),
-    )?;
-    channel.write_all(&(header.len() as u32).to_be_bytes())?;
-    channel.write_all(&header)?;
+    let header = serde_json::to_vec(&Request {
+        operation: Operation::parse(operation)?,
+        session: session.map(str::to_owned),
+        secret_len: secret.len() as u32,
+        slot: crate::scope::current(),
+        expected_session: expected.map(str::to_owned),
+    })?;
+    frame::write(&mut channel, &header, 1..=HEADER_LIMIT)?;
     channel.write_all(secret)?;
     if !matches!(operation, "agent-attach" | "file-attach" | "share-attach" | "share-import-attach" | "share-export-lease" | "backup-attach") {
         stream.shutdown(std::net::Shutdown::Write)?;
@@ -137,8 +132,8 @@ fn request_expected(
 
 fn response(channel: Channel<'_>) -> Result<String> {
     let mut bytes = Vec::new();
-    channel.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 1024 * 1024 {
+    channel.take(RESPONSE_LIMIT as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > RESPONSE_LIMIT {
         return Err("response_too_large".into());
     }
     let response: Response = serde_json::from_slice(&bytes)?;
