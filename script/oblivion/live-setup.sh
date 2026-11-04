@@ -12,7 +12,7 @@ chmod 0755 /usr/lib/oblivion/live-os/console.sh
 cp /usr/lib/oblivion/live-os/*.service /usr/lib/oblivion/live-os/*.path /etc/systemd/system/
 install -m 0644 /usr/lib/oblivion/live-os/display.conf /etc/systemd/system/oblivion-display.service.d/debian-keyboard.conf
 printf '{"version":1,"mode":"live-launcher"}\n' > /etc/oblivion/installation.json
-printf 'd /run/oblivion-live 0755 root root -\nd /run/oblivion-live/user 0700 1000 1000 -\n' > /etc/tmpfiles.d/oblivion-live.conf
+printf 'd /run/oblivion-live 0755 root root -\nd /run/oblivion-live/user 0700 1000 1000 -\nf /run/oblivion-keymap-applied 0644 1104 1104 -\n' > /etc/tmpfiles.d/oblivion-live.conf
 # No arbitrary device or pathname is accepted by this root-owned helper.
 printf 'oblivion-manager ALL=(root) NOPASSWD: /usr/lib/oblivion/live-storage.py review, /usr/lib/oblivion/live-storage.py prepare *\n' > /etc/sudoers.d/oblivion-live-storage
 chmod 0440 /etc/sudoers.d/oblivion-live-storage

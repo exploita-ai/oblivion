@@ -12,7 +12,7 @@ import time
 
 CONFIG = Path("/etc/default/keyboard")
 OUTPUT = Path("/run/oblivion-keymap.xkb")
-ACK = Path("/run/oblivion-display/keymap-applied")
+ACK = Path("/run/oblivion-keymap-applied")
 FIELDS = {"XKBMODEL": "pc105", "XKBLAYOUT": "us", "XKBVARIANT": "", "XKBOPTIONS": ""}
 
 
