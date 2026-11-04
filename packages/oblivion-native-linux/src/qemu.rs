@@ -27,7 +27,11 @@ pub fn arguments(config: &RuntimeConfig) -> Result<Vec<OsString>> {
         "-cpu",
         "host",
         "-machine",
-        "q35,vmport=off,mem-merge=off,dump-guest-core=off",
+        if cfg!(target_arch = "aarch64") {
+            "virt,virtualization=on,gic-version=3,mem-merge=off,dump-guest-core=off"
+        } else {
+            "q35,vmport=off,mem-merge=off,dump-guest-core=off"
+        },
         "-sandbox",
         "on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny",
     ]
@@ -67,7 +71,7 @@ pub fn arguments(config: &RuntimeConfig) -> Result<Vec<OsString>> {
         let options = json!({
             "driver":"raw", "node-name":format!("disk{index}"), "read-only":disk.read_only,
             "file":{
-                "driver":"file", "filename":disk.path, "locking":"on", "aio":"threads",
+                "driver": if std::fs::symlink_metadata(&disk.path).is_ok_and(|info| info.file_type().is_block_device()) { "host_device" } else { "file" }, "filename":disk.path, "locking":"on", "aio":"threads",
                 "cache":{"direct":!disk.read_only,"no-flush":false},
             },
         });

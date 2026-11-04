@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -111,11 +113,8 @@ impl RuntimeConfig {
         if signature[1..] != *b"CD001" {
             return Err(Error("runtime_iso_required"));
         }
-        let mut disk = private_file(&self.disks[1].path, true)?;
-        let size = disk
-            .metadata()
-            .map_err(|_| Error("runtime_disk_unavailable"))?
-            .len();
+        let mut disk = data_file(&self.disks[1].path, &self.runtime_id)?;
+        let size = data_size(&disk)?;
         if !(4 * 1024 * 1024 * 1024..=1024 * 1024 * 1024 * 1024).contains(&size) {
             return Err(Error("invalid_runtime_disk"));
         }
@@ -128,6 +127,119 @@ impl RuntimeConfig {
         disk_identity(&first, &self.runtime_id)?;
         Ok(disk)
     }
+}
+
+fn data_size(file: &File) -> Result<u64> {
+    let metadata = file
+        .metadata()
+        .map_err(|_| Error("runtime_disk_unavailable"))?;
+    #[cfg(target_os = "linux")]
+    if metadata.file_type().is_block_device() {
+        let mut size = 0_u64;
+        if unsafe { libc::ioctl(file.as_raw_fd(), 0x80081272_u64, &mut size) } != 0 {
+            return Err(Error("runtime_disk_size_unavailable"));
+        }
+        return Ok(size);
+    }
+    Ok(metadata.len())
+}
+
+fn data_file(path: &Path, runtime_id: &str) -> Result<File> {
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|_| Error("runtime_disk_unavailable"))?;
+    if metadata.is_file() {
+        return private_file(path, true);
+    }
+    #[cfg(target_os = "linux")]
+    if metadata.file_type().is_block_device() {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Authorization {
+            version: u8,
+            path: PathBuf,
+            runtime_id: String,
+            device_number: String,
+            bytes: u64,
+        }
+        let mut record = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open("/run/oblivion-live/storage.json")
+            .map_err(|_| Error("live_partition_not_authorized"))?;
+        let info = record
+            .metadata()
+            .map_err(|_| Error("live_partition_not_authorized"))?;
+        if !info.is_file()
+            || info.uid() != 0
+            || info.mode() & 0o022 != 0
+            || info.nlink() != 1
+            || info.len() > 4096
+        {
+            return Err(Error("live_partition_not_authorized"));
+        }
+        let mut bytes = Vec::new();
+        record
+            .read_to_end(&mut bytes)
+            .map_err(|_| Error("live_partition_not_authorized"))?;
+        let authorization: Authorization =
+            serde_json::from_slice(&bytes).map_err(|_| Error("live_partition_not_authorized"))?;
+        let number = format!(
+            "{}:{}",
+            libc::major(metadata.rdev()),
+            libc::minor(metadata.rdev())
+        );
+        if authorization.version != 1
+            || authorization.path != path
+            || authorization.runtime_id != runtime_id
+            || authorization.device_number != number
+            || !(4 * 1024_u64.pow(3)..=1024_u64.pow(4)).contains(&authorization.bytes)
+            || metadata.uid() != unsafe { libc::getuid() }
+            || metadata.mode() & 0o077 != 0
+            || !Path::new(&format!("/sys/dev/block/{number}/partition")).exists()
+        {
+            return Err(Error("live_partition_not_authorized"));
+        }
+        let mounts = std::fs::read_to_string("/proc/self/mountinfo")
+            .map_err(|_| Error("live_partition_observation_failed"))?;
+        if mounts
+            .lines()
+            .any(|line| line.split_whitespace().nth(2) == Some(number.as_str()))
+        {
+            return Err(Error("live_partition_already_mounted"));
+        }
+        let swaps = std::fs::read_to_string("/proc/swaps")
+            .map_err(|_| Error("live_partition_observation_failed"))?;
+        if swaps
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_whitespace().next())
+            .any(|source| {
+                std::fs::metadata(source).is_ok_and(|info| info.rdev() == metadata.rdev())
+            })
+        {
+            return Err(Error("live_partition_is_swap"));
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+            .map_err(|_| Error("live_partition_unavailable"))?;
+        let opened = file
+            .metadata()
+            .map_err(|_| Error("live_partition_unavailable"))?;
+        let mut size = 0_u64;
+        if opened.rdev() != metadata.rdev()
+            || !opened.file_type().is_block_device()
+            || unsafe { libc::ioctl(file.as_raw_fd(), 0x80081272_u64, &mut size) } != 0
+            || size != authorization.bytes
+        {
+            return Err(Error("live_partition_changed"));
+        }
+        return Ok(file);
+    }
+    let _ = runtime_id;
+    Err(Error("private_runtime_file_required"))
 }
 
 fn disk_identity(first: &[u8; 4096], identity: &str) -> Result<()> {

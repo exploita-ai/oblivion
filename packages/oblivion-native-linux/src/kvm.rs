@@ -14,10 +14,17 @@ pub struct Capabilities {
 }
 
 pub fn qemu() -> Option<&'static Path> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     {
         use std::os::unix::fs::MetadataExt;
-        let path = Path::new("/usr/bin/qemu-system-x86_64");
+        let path = Path::new(if cfg!(target_arch = "aarch64") {
+            "/usr/bin/qemu-system-aarch64"
+        } else {
+            "/usr/bin/qemu-system-x86_64"
+        });
         if path.metadata().is_ok_and(|info| {
             info.is_file()
                 && info.uid() == 0
@@ -39,9 +46,12 @@ pub fn capabilities() -> Capabilities {
         nested: false,
         vsock: false,
         supported: false,
-        reason: Some("linux_x86_64_required"),
+        reason: Some("linux_x86_64_or_aarch64_required"),
     };
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     {
         let (virtualization, nested) = probe();
         result.virtualization = virtualization;
@@ -54,13 +64,16 @@ pub fn capabilities() -> Capabilities {
         } else if !result.vsock {
             Some("vhost_vsock_unavailable")
         } else if qemu().is_none() {
-            Some("qemu_system_x86_64_required")
+            Some("qemu_system_required")
         } else {
             None
         };
         result.supported = result.reason.is_none();
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
     {
         let _ = &mut result;
     }
@@ -137,7 +150,43 @@ fn probe() -> (bool, bool) {
     )
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn probe() -> (bool, bool) {
+    use std::fs::OpenOptions;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+    let Ok(kvm) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open("/dev/kvm")
+    else {
+        return (false, false);
+    };
+    if !kvm
+        .metadata()
+        .is_ok_and(|info| info.file_type().is_char_device())
+        || unsafe { libc::ioctl(kvm.as_raw_fd(), 0xae00) } != 12
+    {
+        return (false, false);
+    }
+    let vm = unsafe { libc::ioctl(kvm.as_raw_fd(), 0xae01, 0) };
+    if vm < 0 {
+        return (false, false);
+    }
+    let vm = unsafe { OwnedFd::from_raw_fd(vm) };
+    // Linux UAPI KVM_CAP_ARM_EL2=240. Older kernels deliberately fail the
+    // capability check; there is no emulation or single-level fallback.
+    (
+        true,
+        unsafe { libc::ioctl(vm.as_raw_fd(), 0xae03, 240) } > 0,
+    )
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn vsock() -> bool {
     use std::fs::OpenOptions;
     use std::os::fd::{FromRawFd, OwnedFd};

@@ -1,14 +1,20 @@
 use crate::{Result, config::RuntimeConfig};
 
 pub fn run(config: RuntimeConfig) -> Result<()> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     {
         linux::run(config)
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
     {
         let _ = config;
-        Err(crate::Error("linux_x86_64_required"))
+        Err(crate::Error("linux_x86_64_or_aarch64_required"))
     }
 }
 
@@ -16,7 +22,10 @@ pub fn report(event: &str) {
     eprintln!("{}", serde_json::json!({"event":event}));
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 mod linux {
     use crate::{Error, Result, auth, bridge, config::RuntimeConfig, kvm, private, qemu};
     use std::fs;
@@ -107,7 +116,7 @@ mod linux {
         let _qmp_path = QmpPath(qmp_path.clone());
         let _auth_path = QmpPath(auth_path.clone());
         let _signals = Signals::install();
-        let mut command = Command::new(kvm::qemu().ok_or(Error("qemu_system_x86_64_required"))?);
+        let mut command = Command::new(kvm::qemu().ok_or(Error("qemu_system_required"))?);
         command
             .args(qemu::arguments(&config)?)
             .env_clear()
