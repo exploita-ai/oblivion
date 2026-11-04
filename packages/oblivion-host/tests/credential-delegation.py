@@ -97,6 +97,9 @@ class Delegation(unittest.TestCase):
             os.chmod(path / "opencode.db", 0o600)
             if Path("/proc/self/fd").exists():
                 self.assertEqual(self.export("opencode2"), {"kind": "opencode-key", "integration_id": "openai", "key": "fixture-selected", "model": "openai/gpt-fixture"})
+                self.assertEqual(self.export("opencode2", {"OPENAI_API_KEY": "fixture-selected"})["key"], "fixture-selected")
+                with self.assertRaisesRegex(delegation.Rejected, "ambiguous-auth"):
+                    self.export("opencode2", {"OPENAI_API_KEY": "fixture-different-native-env-key"})
                 db.execute("UPDATE credential SET value=? WHERE integration_id='openai'", (json.dumps({"type": "oauth", "refresh": "fixture-only"}),))
                 db.commit()
                 with self.assertRaisesRegex(delegation.Rejected, "unsupported-oauth"):
@@ -106,6 +109,17 @@ class Delegation(unittest.TestCase):
                 self.export("opencode2")
         finally:
             db.close()
+
+    def test_opencode_config_and_catalog_environment_never_fall_back_to_old_database(self):
+        expected_keys = {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENCODE_API_KEY", "XAI_API_KEY", "CEREBRAS_API_KEY", "ABLIT_KEY"}
+        self.assertTrue(expected_keys.issubset(delegation.AUTH_ENV["opencode2"]))
+        for name in delegation.OPENCODE_ROUTE_ENV:
+            for value in ("unqualified-fixture-override", ""):
+                with self.assertRaisesRegex(delegation.Rejected, "unsupported-routing"):
+                    self.export("opencode2", {name: value, "ABLIT_KEY": "fixture-current-env-key"})
+        self.write("config/opencode/opencode.json", {"model": "abliteration-ai/abliterated-model"})
+        with self.assertRaisesRegex(delegation.Rejected, "needs-auth"):
+            self.export("opencode2", {"ABLIT_KEY": "fixture-env-only-without-native-record"})
 
     def test_first_native_profile_initialization_preserves_offline_installed_identity(self):
         guest = Path(__file__).parents[1] / "guest"

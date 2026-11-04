@@ -26,9 +26,6 @@ import urllib.request
 
 LIMIT = 16384
 KINDS = {"codex-api-key": "codex", "codex-access-token": "codex", "claude-api-key": "claude", "claude-setup-token": "claude", "opencode-key": "opencode2"}
-AUTH_ENV = {"codex": ("CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"),
-            "claude": ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_PROFILE"),
-            "opencode2": ()}
 PROVIDERS = {"openai", "anthropic", "openrouter", "opencode", "xai", "cerebras", "abliteration-ai"}
 # Identity registrations from the official v2.0.1 models-dev snapshot. No
 # inference models are fabricated. This transient catalog exists only so a
@@ -42,6 +39,11 @@ IDENTITIES = {
     "cerebras": {"name": "Cerebras", "env": ["CEREBRAS_API_KEY"], "npm": "@ai-sdk/cerebras"},
     "abliteration-ai": {"name": "abliteration.ai", "env": ["ABLIT_KEY"], "npm": "@ai-sdk/openai-compatible", "api": "https://api.abliteration.ai/v1"},
 }
+OPENCODE_ROUTE_ENV = ("OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_MODELS_PATH", "OPENCODE_MODELS_URL",
+                      "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "OPENROUTER_BASE_URL", "OPENCODE_BASE_URL", "XAI_BASE_URL", "CEREBRAS_BASE_URL", "ABLIT_BASE_URL", "ABLITERATION_BASE_URL")
+AUTH_ENV = {"codex": ("CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"),
+            "claude": ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_PROFILE"),
+            "opencode2": tuple(name for identity in IDENTITIES.values() for name in identity["env"]) + OPENCODE_ROUTE_ENV}
 
 
 class Rejected(ValueError):
@@ -133,7 +135,7 @@ def environment(agent, vault):
     Multiple processes with different credentials are ambiguous; never choose
     an arbitrary account. No other process variables are returned or stored.
     """
-    selected = {key: os.environ[key] for key in AUTH_ENV[agent] if os.environ.get(key)}
+    selected = {key: os.environ[key] for key in AUTH_ENV[agent] if key in os.environ and (os.environ[key] or agent == "opencode2" and key in OPENCODE_ROUTE_ENV)}
     executable = Path("/usr/lib/oblivion/agents/bin") / agent
     if not executable.exists():
         return selected
@@ -156,7 +158,7 @@ def environment(agent, vault):
                 raise Rejected()
             for item in data.split(b"\0"):
                 key, separator, value = item.partition(b"=")
-                if separator and key.decode("ascii", "ignore") in AUTH_ENV[agent] and value:
+                if separator and key.decode("ascii", "ignore") in AUTH_ENV[agent] and (value or agent == "opencode2" and key.decode("ascii") in OPENCODE_ROUTE_ENV):
                     name = key.decode("ascii")
                     token = value.decode("utf-8")
                     if name in selected and selected[name] != token:
@@ -248,6 +250,10 @@ def export(vault, agent, *, auth_environment=None):
         if oauth:
             raise Rejected("unsupported-oauth")
         raise Rejected()
+    # Even an empty override is unqualified here: its loading semantics belong
+    # to the native client, not to the fixed default-profile adapter.
+    if any(name in env for name in OPENCODE_ROUTE_ENV):
+        raise Rejected("unsupported-routing")
     settings = read_json(vault, "config/opencode/opencode.json", private=False)
     model = settings.get("model")
     if isinstance(model, dict) and set(model) <= {"providerID", "model", "variant"}:
@@ -266,7 +272,10 @@ def export(vault, agent, *, auth_environment=None):
         raise Rejected("unsupported-oauth")
     if set(value) != {"type", "key"} or value["type"] != "key":
         raise Rejected("unsupported-routing")
-    return credential({"kind": "opencode-key", "integration_id": integration, "key": value["key"], "model": model})
+    result = credential({"kind": "opencode-key", "integration_id": integration, "key": value["key"], "model": model})
+    if any(env.get(name) and env[name] != result["key"] for name in IDENTITIES[integration]["env"]):
+        raise Rejected("ambiguous-auth")
+    return result
 
 
 def selected_opencode_credential(vault, integration):
