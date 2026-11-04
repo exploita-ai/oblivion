@@ -109,7 +109,7 @@ COPY packages/oblivion-manager/package.json /oblivion-manager/package.json
 COPY packages/theme/src/ /theme/src/
 COPY packages/tui-kit/src/ /tui-kit/src/
 COPY package.json bun.lock LICENSE NOTICE /workspace-inputs/
-COPY script/oblivion/Dockerfile.vm-lab script/oblivion/hypervisor-kernel.py script/oblivion/controller-setup.sh script/oblivion/controller-pack.sh script/oblivion/live-setup.sh script/oblivion/live-pack.sh script/oblivion/live-storage.py script/oblivion/live-grub.cfg script/oblivion/live-controller.json script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/session-identities.sh script/oblivion/pack-vm-assets.sh script/oblivion/host-firewall.nft script/oblivion/install-agents.py script/oblivion/install-agents.json script/oblivion/session-node.json script/oblivion/install-session-node.py script/oblivion/session-packages.txt script/oblivion/session-analysis.lock script/oblivion/session-analysis-licenses.json script/oblivion/install-session-analysis.py script/oblivion/onionshare-source.json script/oblivion/onionshare-requirements.lock script/oblivion/onionshare-licenses.json script/oblivion/install-onionshare.py script/oblivion/install-vbox-clipboard.py script/oblivion/vbox-clipboard.json /runtime-inputs/
+COPY script/oblivion/Dockerfile.vm-lab script/oblivion/hypervisor-kernel.py script/oblivion/hypervisor-qemu.py script/oblivion/controller-setup.sh script/oblivion/controller-pack.sh script/oblivion/live-setup.sh script/oblivion/live-pack.sh script/oblivion/live-storage.py script/oblivion/live-grub.cfg script/oblivion/live-controller.json script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/session-identities.sh script/oblivion/pack-vm-assets.sh script/oblivion/host-firewall.nft script/oblivion/install-agents.py script/oblivion/install-agents.json script/oblivion/session-node.json script/oblivion/install-session-node.py script/oblivion/session-packages.txt script/oblivion/session-analysis.lock script/oblivion/session-analysis-licenses.json script/oblivion/install-session-analysis.py script/oblivion/onionshare-source.json script/oblivion/onionshare-requirements.lock script/oblivion/onionshare-licenses.json script/oblivion/install-onionshare.py script/oblivion/install-vbox-clipboard.py script/oblivion/vbox-clipboard.json /runtime-inputs/
 COPY script/oblivion/display/ /runtime-inputs/display/
 COPY script/oblivion/live-os/ /runtime-inputs/live-os/
 COPY script/oblivion/native-bundle/host-sources.py /runtime-inputs/native-bundle/host-sources.py
@@ -597,13 +597,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends libarchive-tool
 
 FROM nested-hypervisor-os AS live-launcher
 ARG TARGETARCH
+COPY script/oblivion/hypervisor-qemu.py /tmp/hypervisor-qemu.py
 RUN sed -i 's/^Components: main$/Components: main non-free-firmware/' /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
     live-boot live-boot-initramfs-tools python3 fdisk sudo network-manager wpasupplicant \
-    $(if [ "$TARGETARCH" = arm64 ]; then printf qemu-system-arm; else printf qemu-system-x86; fi) \
     libwlroots-0.18 foot seatd fonts-dejavu-mono libxkbcommon-tools libpciaccess0 \
     console-setup-mini kbd tzdata xkb-data whiptail \
     firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211 firmware-mediatek \
+    && python3 -B /tmp/hypervisor-qemu.py install "$TARGETARCH" \
+    && rm /tmp/hypervisor-qemu.py \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=live-native-build /desktop/ /usr/lib/oblivion/desktop/
 COPY --from=compiler /bundle/oblivion-display /usr/bin/
@@ -628,7 +630,7 @@ RUN sh /tmp/display-setup && rm /tmp/display-setup
 FROM live-pack-tools AS live-iso-pack
 ARG OBLIVION_IMAGE_NAME=oblivion-development
 COPY --from=live-launcher / /host/
-COPY script/oblivion/live-* script/oblivion/hypervisor-kernel.py /sources/
+COPY script/oblivion/live-* script/oblivion/hypervisor-kernel.py script/oblivion/hypervisor-qemu.py /sources/
 COPY script/oblivion/live-os/ /sources/live-os/
 RUN OBLIVION_IMAGE_NAME="$OBLIVION_IMAGE_NAME" sh /sources/live-pack.sh
 

@@ -241,6 +241,7 @@ fn preflight_with(helper: &Path) -> Result<()> {
         return Err(if backend() == "qemu-kvm" {
             match value["reason"].as_str() {
                 Some("qemu_system_required") => "QEMU for this architecture is missing. Install qemu-system-x86 on amd64 or qemu-system-arm on arm64. The installer changes no system packages.",
+                Some("qemu_nested_version_required") => "ARM64 nested virtualization requires QEMU 10.1 or newer. No VM was started; the installer changes no system packages.",
                 Some("usable_kvm_required") => "No usable KVM access for this account. Have the administrator check hardware virtualization and /dev/kvm permissions; no VM was started.",
                 Some("nested_virtualization_unavailable") => "KVM does not expose usable nested VMX/SVM or ARM EL2. This host is not ready for the desktop runtime; no software-emulation fallback is used.",
                 Some("vhost_vsock_unavailable") => "The account lacks usable vhost-vsock access. Have the administrator check /dev/vhost-vsock and AF_VSOCK support; the installer changes no modules or permissions.",

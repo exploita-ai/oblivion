@@ -3,6 +3,7 @@
 set -eu
 mkdir -p /out /iso/live /iso/boot/grub
 python3 -B /sources/hypervisor-kernel.py verify /host --controller /host/usr/lib/oblivion/desktop/evidence/runtime/hypervisor-kernel.json > /out/hypervisor-kernel.json
+python3 -B /sources/hypervisor-qemu.py verify /host > /out/hypervisor-qemu.json
 cp /host/boot/vmlinuz-* /iso/live/vmlinuz
 cp /host/boot/initrd.img-* /iso/live/initrd.img
 python3 -B /sources/hypervisor-kernel.py grub /host /sources/live-grub.cfg --role outer-live > /iso/boot/grub/grub.cfg

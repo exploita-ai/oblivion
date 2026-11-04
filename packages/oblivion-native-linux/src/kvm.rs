@@ -63,10 +63,14 @@ pub fn capabilities() -> Capabilities {
             Some("nested_virtualization_unavailable")
         } else if !result.vsock {
             Some("vhost_vsock_unavailable")
-        } else if qemu().is_none() {
-            Some("qemu_system_required")
         } else {
-            None
+            match qemu() {
+                None => Some("qemu_system_required"),
+                Some(path) if !qemu_compatible(path, std::env::consts::ARCH) => {
+                    Some("qemu_nested_version_required")
+                }
+                Some(_) => None,
+            }
         };
         result.supported = result.reason.is_none();
     }
@@ -78,6 +82,186 @@ pub fn capabilities() -> Capabilities {
         let _ = &mut result;
     }
     result
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn qemu_compatible(path: &Path, architecture: &str) -> bool {
+    // KVM_CAP_ARM_EL2 reached Linux in 6.16, but its userspace vCPU flag was
+    // first wired by QEMU 10.1. The controller's EL1-only inner QEMU is separate.
+    architecture != "aarch64"
+        || qemu_version(
+            path,
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+        )
+        .is_some_and(|version| version >= (10, 1, 0))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn qemu_version(path: &Path, deadline: std::time::Instant) -> Option<(u32, u32, u32)> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::process::{Command, Stdio};
+
+    // The caller supplies only qemu()'s fixed, trusted root-owned executable.
+    // Even diagnostic output is bounded and cannot hold capabilities forever.
+    let mut child = Command::new(path)
+        .arg("--version")
+        .env_clear()
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let result = (|| {
+        let mut output = child.stdout.take()?;
+        let flags = unsafe { libc::fcntl(output.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0
+            || unsafe { libc::fcntl(output.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
+                < 0
+        {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        let mut ended = false;
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            let mut chunk = [0; 512];
+            match output.read(&mut chunk) {
+                Ok(0) => ended = true,
+                Ok(length) => {
+                    if bytes.len() + length > 4096 {
+                        return None;
+                    }
+                    bytes.extend_from_slice(&chunk[..length]);
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => return None,
+            }
+            if let Some(status) = child.try_wait().ok()? {
+                if !status.success() {
+                    return None;
+                }
+                if ended {
+                    let release = std::str::from_utf8(&bytes)
+                        .ok()?
+                        .strip_prefix("QEMU emulator version ")?
+                        .split_ascii_whitespace()
+                        .next()?;
+                    if !release
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || byte == b'.')
+                    {
+                        return None;
+                    }
+                    let mut numbers = release.split('.');
+                    let version = (
+                        numbers.next()?.parse().ok()?,
+                        numbers.next()?.parse().ok()?,
+                        numbers.next()?.parse().ok()?,
+                    );
+                    return numbers.next().is_none().then_some(version);
+                }
+            }
+            let mut ready = libc::pollfd {
+                fd: if ended { -1 } else { output.as_raw_fd() },
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let remaining = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis()
+                .min(20) as i32;
+            if unsafe { libc::poll(&mut ready, 1, remaining) } < 0
+                && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+            {
+                return None;
+            }
+        }
+    })();
+    if !matches!(child.try_wait(), Ok(Some(_))) {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{qemu_compatible, qemu_version};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    struct Executable(PathBuf);
+    impl Executable {
+        fn new(body: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "oblivion-qemu-version-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Executable {
+        fn drop(&mut self) {
+            fs::remove_file(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn arm64_policy_invokes_only_version_and_checks_the_actual_release() {
+        for (release, expected) in [
+            ("10.0.13", false),
+            ("10.1.0", true),
+            ("11.1.2", true),
+            ("10.1.0-rc0", false),
+            ("garbage", false),
+        ] {
+            let executable = Executable::new(&format!(
+                r#"
+[ "$#" -eq 1 ] && [ "$1" = --version ] && [ "$LC_ALL" = C ] && [ "${{HOME+x}}" != x ] || exit 23
+printf 'QEMU emulator version {release} (Debian fixture)\n'
+"#
+            ));
+            assert_eq!(
+                qemu_compatible(&executable.0, "aarch64"),
+                expected,
+                "{release}"
+            );
+        }
+        assert!(qemu_compatible(
+            std::path::Path::new("/nonexistent-do-not-invoke"),
+            "x86_64"
+        ));
+    }
+
+    #[test]
+    fn failed_oversized_and_stalled_version_processes_fail_closed() {
+        for body in [
+            r#"printf 'QEMU emulator version 11.1.2\n'; exit 1"#,
+            r#"printf 'QEMU emulator version 11.1.2\n'; printf '%4097s' ''"#,
+            "exec /bin/sleep 10",
+        ] {
+            let executable = Executable::new(body);
+            let started = Instant::now();
+            assert!(qemu_version(&executable.0, started + Duration::from_millis(100)).is_none());
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

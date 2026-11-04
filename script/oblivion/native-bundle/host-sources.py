@@ -8,7 +8,7 @@ import sys
 
 
 SCRIPT_INPUTS = (
-    "Dockerfile.vm-lab", "hypervisor-kernel.py", "controller-setup.sh", "controller-pack.sh", "live-setup.sh", "live-pack.sh", "live-storage.py", "live-grub.cfg",
+    "Dockerfile.vm-lab", "hypervisor-kernel.py", "hypervisor-qemu.py", "controller-setup.sh", "controller-pack.sh", "live-setup.sh", "live-pack.sh", "live-storage.py", "live-grub.cfg",
     "live-controller.json", "vm-common-setup.sh", "journald-forwarding.conf",
     "session-identities.sh", "pack-vm-assets.sh", "host-firewall.nft",
     "install-agents.py", "install-agents.json", "session-node.json",
