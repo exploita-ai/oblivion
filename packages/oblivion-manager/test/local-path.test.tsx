@@ -8,6 +8,7 @@ import { createSignal, Show } from "solid-js"
 import { testRender } from "@opentui/solid"
 import { LocalChooser, NativeFiles } from "../src/native-files"
 import { createFileTransfers } from "../src/native-file-transfers"
+import type { FileCopyRequest } from "../src/native-file-events"
 import { nativePreview, type NativeStatus } from "../src/native-control"
 
 async function files() {
@@ -144,8 +145,15 @@ test.each(["literal", "terminal-drop"])("an import %s path cannot mutate a Safe 
   const fixture = await files()
   const source = path.join(fixture.root, "$(touch literal-only).txt")
   const commands: string[][] = []
-  const runtime = nativePreview(() => {})
-  await runtime.run(["unlock"])
+  const base = nativePreview(() => {})
+  await base.run(["unlock"])
+  const copies: FileCopyRequest[] = []
+  let approvals = 0
+  const runtime = { ...base, files: { ...base.files, start(request: FileCopyRequest, event: Parameters<typeof base.files.start>[1]) {
+    copies.push(request)
+    const copy = base.files.start(request, event)
+    return { ...copy, approve: async (digest: string) => { approvals++; await copy.approve(digest) }, done: copy.done.then((result) => ({ ...result, code: 1 })) }
+  } } }
   const app = await testRender(() => <NativeFiles safe="0123456789abcdef0123456789abcdef" name="Research" runtime={runtime} run={async (args) => { commands.push(args); await runtime.run(args); return args[0] !== "files" }} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
   try {
     await app.renderOnce()
@@ -160,12 +168,15 @@ test.each(["literal", "terminal-drop"])("an import %s path cannot mutate a Safe 
     await app.mockInput.pressEnter()
     await visible(app, "Confirm import")
     expect(app.captureCharFrame()).toContain("$(touch literal-only).txt")
-    expect(commands).toHaveLength(0)
+    expect(commands).toEqual([["safe", "open", "0123456789abcdef0123456789abcdef"]])
+    expect(approvals).toBe(0)
+    expect(copies).toHaveLength(1)
     await app.mockInput.pressEnter()
     await visible(app, "Copy completed and verified")
+    expect(approvals).toBe(1)
     expect(commands[0]).toEqual(["safe", "open", "0123456789abcdef0123456789abcdef"])
-    expect(commands[1]?.slice(0, 7)).toEqual(["files", "import", "--safe", "0123456789abcdef0123456789abcdef", source, "--name", path.basename(source)])
-    expect(commands[1]?.slice(7)).toEqual(["--operation", expect.stringMatching(/^[a-f0-9]{32}$/), "--opening", "d".repeat(32)])
+    expect(copies[0]?.args.slice(0, 7)).toEqual(["files", "import", "--safe", "0123456789abcdef0123456789abcdef", source, "--name", path.basename(source)])
+    expect(copies[0]?.args.slice(7)).toEqual(["--operation", expect.stringMatching(/^[a-f0-9]{32}$/), "--opening", "d".repeat(32)])
     expect(app.captureCharFrame()).not.toContain("destination was not replaced")
   } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
 })
@@ -266,8 +277,6 @@ test.each(["unmounted", "stale-opening"])("copy preflight rejects %s before reco
     await app.mockInput.pressEnter()
     await visible(app, "Name the imported copy")
     await app.mockInput.pressEnter()
-    await app.mockInput.pressEnter()
-    await visible(app, "Confirm import")
     await app.mockInput.pressEnter()
     await entered.promise
     if (scenario === "unmounted") setMounted(false)

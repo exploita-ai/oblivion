@@ -2,7 +2,7 @@ import path from "node:path"
 import { lstat, readdir, stat } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import parse from "shell-quote/parse"
-import { createEffect, createSignal, on, onCleanup, onMount, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, on, onCleanup, onMount, Show } from "solid-js"
 import { useKeyboard, usePaste } from "@opentui/solid"
 import { z } from "zod"
 import { Menu } from "./menu"
@@ -14,6 +14,7 @@ import { FilePicker } from "./vendor/termcn/file-picker"
 import { theme } from "./theme"
 import type { NativeRuntime } from "./native-control"
 import { createFileTransfers, fileOutcome, type FileOutcome, type FileTransfer } from "./native-file-transfers"
+import type { FileReview, RunningFileCopy } from "./native-file-events"
 
 const unsafePathText = /[\p{Cc}\p{Bidi_Control}\p{Zl}\p{Zp}]/u
 
@@ -24,7 +25,7 @@ const directory = z.object({
 
 export function NativeFiles(props: { safe: string; name: string; opening?: string; blocked?: string; transfers?: ReturnType<typeof createFileTransfers>; runtime: NativeRuntime; run: (args: string[]) => Promise<boolean>; back: () => void }) {
   const transfers = props.transfers ?? createFileTransfers()
-  const [page, setPage] = createSignal<"menu" | "source" | "guest" | "destination" | "name" | "confirm" | "records" | "outcome" | "recover" | "discard">("menu")
+  const [page, setPage] = createSignal<"menu" | "source" | "guest" | "destination" | "name" | "transfer" | "records" | "outcome" | "recover" | "discard">("menu")
   const [selected, setSelected] = createSignal(0)
   const [operation, setOperation] = createSignal<"import" | "export">("import")
   const [source, setSource] = createSignal("")
@@ -35,10 +36,17 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
   const [observed, setObserved] = createSignal<FileOutcome>()
   const [confirmation, setConfirmation] = createSignal<FileOutcome>()
   const [working, setWorking] = createSignal(false)
+  const [copyStage, setCopyStage] = createSignal<"preparing" | "review" | "copying" | "finalizing" | "cancelling" | "reconciling">()
+  const [copyReview, setCopyReview] = createSignal<FileReview>()
+  const [copied, setCopied] = createSignal(0)
+  let running: RunningFileCopy | undefined
+  let decision: { requested: boolean } | undefined
+  let copyEpoch = 0
   let stopped = false
   const records = () => transfers.entries().filter((entry) => entry.safe === props.safe)
   const current = () => records().find((entry) => entry.id === transaction())
-  const generation = () => `${props.safe}/${props.opening ?? ""}`
+  const generation = createMemo(() => `${props.safe}/${props.opening ?? ""}`)
+  const availability = createMemo(() => props.blocked)
   const recoverable = () => !!current() && !props.blocked && observed()?.state === "ready" && observed()?.can_recover
   const discardable = () => !!current() && !props.blocked && ["ready", "incomplete"].includes(observed()?.state ?? "") && observed()?.can_discard
 
@@ -76,10 +84,42 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
     } catch { if (!stopped) setNotice("The Safe could not be opened. Keep the operation ID; no copy will be retried automatically.") }
   }
 
-  async function confirm() {
-    if (working() || props.blocked) return
+  async function finishCopy(copy: RunningFileCopy, entry: FileTransfer, approval: { requested: boolean }, epoch: number) {
+    let beforeApproval: "cancelled-before-copy" | "interrupted" | undefined
+    try {
+      const finished = (await copy.done).finished
+      if (!approval.requested && finished && finished.outcome !== "completed") beforeApproval = finished.outcome
+    }
+    catch {
+      try { await copy.cancel() }
+      catch { if (!stopped && epoch === copyEpoch) { setCopyStage("cancelling"); setNotice("Copy cleanup is not confirmed. No new copy can start; check the runtime before continuing.") }; return }
+      if (!stopped && epoch === copyEpoch) setNotice("The copy result was lost. Checking its recorded outcome; no copy will be retried automatically.")
+    }
+    if (running === copy) running = undefined
+    if (beforeApproval) transfers.forget(entry.id, entry.safe)
+    if (stopped || epoch !== copyEpoch) return
+    setCopyStage(undefined); setWorking(false)
+    if (beforeApproval) {
+      setTransaction(undefined); setObserved(undefined); setCopyReview(undefined); setSelected(0); setPage("menu")
+      setNotice(beforeApproval === "cancelled-before-copy" ? "Cancelled before copying. No file contents were copied." : "Preparation stopped before approval. Check the source and destination.")
+      return
+    }
+    setPage(current() ? "outcome" : "records")
+    await refresh()
+  }
+
+  async function cancelCopy() {
+    const copy = running
+    if (!copy) return
+    setCopyStage("cancelling")
+    try { await copy.cancel() }
+    catch { if (!stopped) setNotice("Copy cleanup is not confirmed. Inspect the recorded outcome before another attempt.") }
+  }
+
+  async function beginCopy() {
+    if (working() || copyStage() || props.blocked) return
     const safe = props.safe
-    setWorking(true)
+    setNotice(""); setWorking(true)
     try {
       if (!await props.run(["safe", "open", safe]) || stopped || props.safe !== safe) return
       const expected = generation()
@@ -89,16 +129,51 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       if (!state.app_open || !state.idle_lock.host || state.idle_lock.host.closing || !opened) { setNotice("The Safe is no longer available. Reopen it before copying."); return }
       if (props.opening && props.opening !== opened.nonce) { setNotice("The Safe opening changed. Refresh Files and review the copy again."); return }
       const entry: FileTransfer = { id: crypto.randomUUID().replaceAll("-", ""), safe, opening: opened.nonce, kind: operation(), source: source(), destination: operation() === "import" ? `workspace/${name()}` : destination() }
-      // Remember the operation before the CLI can mutate either destination.
       transfers.remember(entry)
-      setTransaction(entry.id); setObserved(undefined); setPage("outcome")
+      setTransaction(entry.id); setObserved(undefined); setCopyReview(undefined); setCopied(0); setCopyStage("preparing"); setPage("transfer")
       const args = entry.kind === "import"
         ? ["files", "import", "--safe", entry.safe, entry.source, "--name", name()]
         : ["files", "export", "--safe", entry.safe, entry.source, entry.destination]
-      try { await props.run([...args, "--operation", entry.id, "--opening", opened.nonce]) }
-      catch { /* A lost command result cannot prove whether publication happened. */ }
-    } catch { if (!stopped) setNotice("The copy could not be prepared. Check the runtime before confirming again.") }
-    finally { if (!stopped) { setWorking(false); if (page() === "outcome") await refresh() } }
+      const epoch = ++copyEpoch
+      const approval = { requested: false }
+      decision = approval
+      const copy = props.runtime.files.start({ args: [...args, "--operation", entry.id, "--opening", opened.nonce],
+        identity: { operation_id: entry.id, safe_id: entry.safe, opening: entry.opening }, direction: entry.kind,
+        name: entry.kind === "import" ? name() : path.basename(entry.source),
+      }, (event) => {
+        if (stopped || epoch !== copyEpoch) return
+        if (event.event === "review") { setCopyReview(event); setCopyStage("review") }
+        if (event.event === "progress") { setCopied(event.bytes); setCopyStage(event.phase) }
+        if (event.event === "finished") setCopyStage("reconciling")
+      })
+      running = copy
+      void finishCopy(copy, entry, approval, epoch)
+    } catch { if (!stopped) { setCopyStage(undefined); setNotice("The copy could not be prepared. Check the runtime before confirming again."); if (current()) { setPage("outcome"); } } }
+    finally { if (!stopped) setWorking(false) }
+  }
+
+  async function approveCopy() {
+    const copy = running
+    const review = copyReview()
+    const entry = current()
+    const epoch = copyEpoch
+    const approval = decision
+    if (!copy || !review || !entry || !approval || working() || props.blocked || copyStage() !== "review") return
+    let allowed = false
+    setWorking(true)
+    try {
+      const state = await props.runtime.status()
+      const opened = state.idle_lock.safes.find((safe) => safe.opening.safe_id === entry.safe && !safe.closing)?.opening
+      if (stopped || epoch !== copyEpoch || running !== copy) return
+      if (!state.app_open || !state.idle_lock.host || state.idle_lock.host.closing || !opened || opened.nonce !== entry.opening || props.opening && props.opening !== opened.nonce) { void cancelCopy(); return }
+      allowed = true
+    } catch { void cancelCopy() }
+    finally { if (!stopped && epoch === copyEpoch) setWorking(false) }
+    if (!allowed || stopped || epoch !== copyEpoch || running !== copy) return
+    setCopyStage("copying")
+    approval.requested = true
+    try { await copy.approve(review.summary.manifest_sha256) }
+    catch { await cancelCopy() }
   }
 
   async function prepare(action: "recover" | "discard") {
@@ -127,7 +202,8 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
   }
 
   function back() {
-    if (working()) return
+    if (page() === "transfer" && running) { void cancelCopy(); return }
+    if (working() || copyStage()) return
     if (page() === "menu") { props.back(); return }
     if (page() === "recover" || page() === "discard") { setConfirmation(undefined); setPage("outcome"); return }
     setPage("menu"); setSelected(0)
@@ -145,11 +221,27 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
     : "Outcome unknown · inspect before another copy"
   const description = () => { const entry = current(); return entry ? `${entry.kind === "import" ? "Import" : "Export"} · ${props.name}\nOperation ${entry.id}` : "Choose a recorded operation." }
 
-  createEffect(on(() => [props.safe, props.opening], () => { setObserved(undefined); setConfirmation(undefined); if (["recover", "discard"].includes(page())) setPage("outcome") }, { defer: true }))
-  createEffect(() => { if (transaction() && !current()) { setObserved(undefined); setConfirmation(undefined); setTransaction(undefined); setPage("records") } })
-  onCleanup(() => { stopped = true })
+  createEffect(on([generation, availability], () => {
+    setObserved(undefined); setConfirmation(undefined)
+    if (["recover", "discard"].includes(page())) setPage("outcome")
+    const copy = running
+    if (!copy) return
+    const entry = current()
+    const approval = decision
+    running = undefined
+    const epoch = ++copyEpoch
+    setCopyStage("cancelling")
+    void copy.cancel().catch(() => {}).then(async () => {
+      if (entry && approval) { await finishCopy(copy, entry, approval, epoch); return }
+      if (!stopped && epoch === copyEpoch) { setWorking(false); setCopyStage(undefined); setPage("records") }
+    })
+  }, { defer: true }))
+  createEffect(() => { if (transaction() && !current()) { setObserved(undefined); setConfirmation(undefined); setTransaction(undefined); setPage("records"); if (running) void cancelCopy() } })
+  onCleanup(() => { stopped = true; copyEpoch++; void running?.cancel().catch(() => {}) })
   useKeyboard((key) => {
-    if (key.defaultPrevented || working()) return
+    if (key.defaultPrevented) return
+    if (page() === "transfer" && key.name === "escape") { key.preventDefault(); void cancelCopy(); return }
+    if (working()) return
     if (key.name === "escape" && ["menu", "records", "outcome"].includes(page())) { key.preventDefault(); back(); return }
     if (page() !== "outcome") return
     if (key.name === "r") { key.preventDefault(); void refresh() }
@@ -169,7 +261,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       <scrollbox flexGrow={1} minHeight={0}><box flexDirection="column" gap={1}>
         <text fg={observed()?.state === "published" ? theme.feedback.success : theme.feedback.warning}>{label()}</text>
         <text fg={theme.text.muted}>{`From · ${current()?.source}\nTo · ${current()?.destination}`}</text>
-        <Show when={observed()?.receipt}>{(receipt) => <text fg={theme.text.muted}>{`${receipt().entries} entries · ${receipt().bytes.toLocaleString("en-US")} B\nSHA-256 ${receipt().manifest_sha256}`}</text>}</Show>
+        <Show when={observed()?.receipt}>{(receipt) => <text fg={theme.text.muted}>{`Manifest entries · ${receipt().entries} · ${receipt().bytes.toLocaleString("en-US")} B\nSHA-256 ${receipt().manifest_sha256}`}</text>}</Show>
         <Show when={observed()?.state === "published"}><text fg={theme.text.muted}>Recorded publication receipt. Later changes to destination files are not checked.</text></Show>
         <Show when={observed()?.source_opening && observed()?.source_opening !== observed()?.opening}><text fg={theme.feedback.info}>This copy belongs to an earlier opening. Its status was checked against the current Safe opening.</text></Show>
         <Show when={!observed() || observed()?.state === "unknown"}><text fg={theme.text.muted}>The copy may have reached its destination. Check recorded status and the destination before creating another operation.</text></Show>
@@ -188,17 +280,32 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
     }} cancel={back} submit={() => { void execute() }} /></Show>
     <Show when={page() === "source" || page() === "destination"}><LocalChooser directoryOnly={page() === "destination"} back={back} choose={(value) => {
       if (page() === "source") { setSource(value); setName(path.basename(value)); setPage("name"); return }
-      setDestination(value); setPage("confirm")
+      setDestination(value); void beginCopy()
     }} /></Show>
     <Show when={page() === "guest"}><GuestChooser safe={props.safe} runtime={props.runtime} back={back} choose={(value) => { setSource(value); setPage("destination") }} /></Show>
-    <Show when={page() === "name"}><FormView form={{ title: "Name the imported copy", description: `Source on this computer · ${source()}`, fields: [{ id: "name", label: "Workspace name", value: name(), validate: (value) => !value || unsafePathText.test(value) || value.includes("/") || value.includes("\\") || value === "." || value === ".." || Buffer.byteLength(value) > 255 ? "Choose a single file or folder name." : undefined }], submit: "Review copy", run: async () => {} }} cancel={back} submit={(values) => { setName(values.name); setPage("confirm") }} /></Show>
-    <Show when={page() === "confirm"}><FormView form={{ title: operation() === "import" ? "Confirm import" : "Confirm export",
-      description: operation() === "import" ? `From this computer · ${source()}\nTo Safe ${props.name} · workspace/${name()}` : `From Safe ${props.name} · ${source()}\nTo this computer · ${path.join(destination(), path.basename(source()))}`,
-      fields: [], submit: operation() === "import" ? "Import copy" : "Export copy", run: async () => {},
-    }} cancel={back} submit={() => { void confirm() }} /></Show>
+    <Show when={page() === "name"}><FormView form={{ title: "Name the imported copy", description: `Source on this computer · ${source()}`, fields: [{ id: "name", label: "Workspace name", value: name(), validate: (value) => !value || unsafePathText.test(value) || value.includes("/") || value.includes("\\") || value === "." || value === ".." || Buffer.byteLength(value) > 255 ? "Choose a single file or folder name." : undefined }], submit: "Review copy", run: async () => {} }} cancel={back} submit={(values) => { setName(values.name); void beginCopy() }} /></Show>
+    <Show when={page() === "transfer"}><PageHeader title={copyStage() === "review" ? operation() === "import" ? "Confirm import" : "Confirm export" : copyStage() === "copying" ? "Copying files" : copyStage() === "finalizing" ? "Finalizing copy" : copyStage() === "cancelling" ? "Cancelling copy" : "Preparing copy"} description={description()} />
+      <scrollbox flexGrow={1} minHeight={0}><box flexDirection="column" gap={1}>
+        <text fg={theme.text.muted}>{`From · ${current()?.source}\nTo · ${current()?.destination}`}</text>
+        <Show when={copyReview()}>{(review) => <>
+          <text fg={theme.text.base}>{`${review().summary.files.toLocaleString("en-US")} selected files · ${review().summary.directories.toLocaleString("en-US")} selected folders\n${review().summary.bytes.toLocaleString("en-US")} B total · ${review().summary.entries.toLocaleString("en-US")} manifest entries`}</text>
+          <text fg={theme.text.muted}>{`Manifest SHA-256\n${review().summary.manifest_sha256}`}</text>
+        </>}</Show>
+        <Show when={copyStage() === "review"}><text fg={theme.feedback.info}>These counts cover the recursive selection. File contents are not transferred until you approve this manifest.</text></Show>
+        <Show when={copyStage() === "review" && current()?.kind === "export"}><text fg={theme.text.muted}>Exported copies use the destination filesystem's protection.</text></Show>
+        <Show when={copyStage() === "copying" || copyStage() === "finalizing"}><text fg={theme.feedback.info}>{`${copied().toLocaleString("en-US")} B / ${copyReview()?.summary.bytes.toLocaleString("en-US") ?? "?"} B transferred`}</text></Show>
+        <Show when={copyStage() === "finalizing"}><text fg={theme.text.muted}>All payload bytes were sent. Verification and publication are still in progress.</text></Show>
+        <Show when={copyStage() === "cancelling" || copyStage() === "reconciling"}><text fg={theme.feedback.warning}>Waiting for the owned copy process and checking its recorded outcome. A destination may already have been published.</text></Show>
+      </box></scrollbox>
+      <ActionBar focused disabled={working() || ["cancelling", "reconciling"].includes(copyStage() ?? "")} actions={[
+        ...(copyStage() === "review" ? [{ title: "Approve copy", key: "Enter", run: () => { void approveCopy() } }] : []),
+        { title: "Cancel copy", key: "Esc", run: () => { void cancelCopy() } },
+      ]} />
+    </Show>
     <Show when={props.blocked && page() !== "outcome"}><text flexShrink={0} fg={theme.feedback.warning}>{props.blocked}</text></Show>
     <Show when={notice()}><text flexShrink={0} fg={theme.feedback.warning}>{notice()}</text></Show>
-    <Show when={working()}><BusyModal text={page() === "outcome" ? "Checking copy outcome" : "Preparing copy"} /></Show>
+    <Show when={working()}><BusyModal text={page() === "outcome" ? "Checking copy outcome" : "Checking Safe opening"} /></Show>
+    <Show when={copyStage() === "preparing"}><BusyModal text="Preparing recursive copy review" cancellable cancel={() => { void cancelCopy() }} /></Show>
   </box>
 }
 

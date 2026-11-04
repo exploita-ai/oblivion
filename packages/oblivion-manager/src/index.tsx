@@ -3,6 +3,7 @@ import { render } from "@opentui/solid"
 import { theme } from "./theme"
 import { createManagerClipboard } from "./clipboard"
 import { SafeManager } from "./safe-manager"
+import { createNativeFileClient } from "./native-file-process"
 import { Startup } from "./startup"
 import { nativeLauncher, nativeOverlay, nativePreview, readNativeJson, readNativeStatus, reportNativeActivity, statusReader, type NativeRuntime } from "./native-control"
 
@@ -35,12 +36,15 @@ async function launch(args: string[]) {
   }
 }
 
+const fileClient = createNativeFileClient(nativeLauncher())
 const runtime: NativeRuntime = demonstration ? nativePreview(exit) : {
+  files: fileClient,
   status: statusReader((initial) => readNativeStatus(nativeLauncher(), initial && !overlay ? 400_000 : 10_000)),
   query: (args) => readNativeJson(nativeLauncher(), args),
   activity: (input) => reportNativeActivity(nativeLauncher(), input),
   run: launch,
   async exit() {
+    await fileClient.close()
     if (overlay) { exit(); return }
     const result = await launch(process.env.OBLIVION_RUNTIME_MODE === "desktop" ? ["runtime", "stop"] : ["lock"])
     if (result !== 0) throw new Error("Oblivion could not lock cleanly. Check the runtime before exiting.")

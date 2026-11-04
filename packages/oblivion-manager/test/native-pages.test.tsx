@@ -4,6 +4,7 @@ import { SafeManager } from "../src/safe-manager"
 import { NativeNetwork, NativeNetworkIndicator } from "../src/native-network"
 import { NativeFiles } from "../src/native-files"
 import { nativePreview } from "../src/native-control"
+import type { FileCopyRequest } from "../src/native-file-events"
 
 test("network settings require an explicit offline open and target the selected Safe", async () => {
   const fixture = nativePreview(() => {})
@@ -83,7 +84,14 @@ test("file export reviews the Safe source and explicit local destination before 
   const fixture = nativePreview(() => {})
   await fixture.run(["unlock"])
   const commands: string[][] = []
-  const app = await testRender(() => <NativeFiles safe="0123456789abcdef0123456789abcdef" name="Research" runtime={fixture} run={async (args) => { commands.push(args); return await fixture.run(args) === 0 }} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true, exitOnCtrlC: false })
+  const copies: FileCopyRequest[] = []
+  let approvals = 0
+  const runtime = { ...fixture, files: { ...fixture.files, start(request: FileCopyRequest, event: Parameters<typeof fixture.files.start>[1]) {
+    copies.push(request)
+    const copy = fixture.files.start(request, event)
+    return { ...copy, approve: async (digest: string) => { approvals++; await copy.approve(digest) } }
+  } } }
+  const app = await testRender(() => <NativeFiles safe="0123456789abcdef0123456789abcdef" name="Research" runtime={runtime} run={async (args) => { commands.push(args); return await fixture.run(args) === 0 }} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true, exitOnCtrlC: false })
   async function visible(value: string) {
     const deadline = performance.now() + 2000
     while (performance.now() < deadline) {
@@ -105,11 +113,14 @@ test("file export reviews the Safe source and explicit local destination before 
     await visible("Choose destination directory")
     await app.mockInput.pressKey(".")
     await visible("Confirm export")
-    expect(commands).toHaveLength(1)
+    expect(commands).toHaveLength(2)
+    expect(copies).toHaveLength(1)
+    expect(approvals).toBe(0)
     expect(app.captureCharFrame()).toContain("workspace/project")
     await app.mockInput.pressEnter()
     await visible("Copy completed and verified.")
-    expect(commands.at(-1)?.slice(0, 6)).toEqual(["files", "export", "--safe", "0123456789abcdef0123456789abcdef", "workspace/project", process.cwd()])
-    expect(commands.at(-1)?.slice(6)).toEqual(["--operation", expect.stringMatching(/^[a-f0-9]{32}$/), "--opening", "d".repeat(32)])
+    expect(approvals).toBe(1)
+    expect(copies[0]?.args.slice(0, 6)).toEqual(["files", "export", "--safe", "0123456789abcdef0123456789abcdef", "workspace/project", process.cwd()])
+    expect(copies[0]?.args.slice(6)).toEqual(["--operation", expect.stringMatching(/^[a-f0-9]{32}$/), "--opening", "d".repeat(32)])
   } finally { await app.dispose() }
 })

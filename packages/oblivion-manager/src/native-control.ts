@@ -1,6 +1,7 @@
 import path from "node:path"
 import { z } from "zod"
 import type { FileOutcome } from "./native-file-transfers"
+import type { FileEvent, NativeFileClient, RunningFileCopy } from "./native-file-events"
 
 const opening = z.object({ slot: z.number().int().min(0).max(31), safe_id: z.string().regex(/^[a-f0-9]{32}$/), nonce: z.string().regex(/^[a-f0-9]{32}$/) })
 export const nativeActivity = z.object({ host: z.string().regex(/^[a-f0-9]{32}$/), safe: opening.nullable() })
@@ -57,6 +58,7 @@ export type NativeRuntime = {
   status: () => Promise<NativeStatus>
   run: (args: string[]) => Promise<number>
   query: (args: string[]) => Promise<unknown>
+  files: NativeFileClient
   activity: (input: z.infer<typeof nativeActivity>) => Promise<void>
   exit: () => Promise<void> | void
 }
@@ -114,6 +116,40 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
   const tasks = new Map<string, { attempts: number; request: string; state: "running" | "cancelled" }>()
   const copies = new Map<string, FileOutcome>()
   const passwordChanges: { transaction: string; family_id: string; members: { safe_id: string; title: string }[]; outcome: "complete" }[] = []
+  const pendingCopies = new Set<RunningFileCopy>()
+  const files: NativeFileClient = {
+    start(request, event) {
+      const review: Extract<FileEvent, { event: "review" }> = { event: "review", identity: request.identity, direction: request.direction, name: request.name,
+        summary: { manifest_sha256: "f".repeat(64), entries: 1, files: 1, directories: 0, bytes: 24 } }
+      const completion = Promise.withResolvers<{ code: number; finished?: Extract<FileEvent, { event: "finished" }> }>()
+      let approved = false
+      let stopped = false
+      const copy: RunningFileCopy = {
+        async approve(digest) {
+          if (stopped || approved || digest !== review.summary.manifest_sha256) throw new Error("Review the current preview copy first.")
+          approved = true
+          event({ event: "progress", identity: request.identity, phase: "copying", bytes: 24, total_bytes: 24 })
+          event({ event: "progress", identity: request.identity, phase: "finalizing", bytes: 24, total_bytes: 24 })
+          const receipt = { id: request.identity.operation_id, manifest_sha256: review.summary.manifest_sha256, entries: 1, bytes: 24 }
+          copies.set(receipt.id, { operation_id: receipt.id, safe_id: request.identity.safe_id, opening: request.identity.opening, source_opening: request.identity.opening,
+            state: "published", receipt, can_recover: false, can_discard: false })
+          const finished = { event: "finished" as const, identity: request.identity, outcome: "completed" as const, receipt }
+          event(finished); stopped = true; completion.resolve({ code: 0, finished }); pendingCopies.delete(copy)
+        },
+        async cancel() {
+          if (stopped) return
+          stopped = true
+          const finished = { event: "finished" as const, identity: request.identity, outcome: approved ? "interrupted" as const : "cancelled-before-copy" as const, receipt: null }
+          event(finished); completion.resolve({ code: 130, finished }); pendingCopies.delete(copy)
+        },
+        done: completion.promise,
+      }
+      pendingCopies.add(copy)
+      queueMicrotask(() => { if (!stopped) event(review) })
+      return copy
+    },
+    async close() { await Promise.all([...pendingCopies].map((copy) => copy.cancel())) },
+  }
   let current: NativeStatus = {
     app_open: false, app_mode: "locked",
     safe_access: { current: "open", saved: null, temporary: false },
@@ -129,6 +165,7 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
     ...initial,
   }
   return {
+    files,
     async activity() {},
     async status() { return current },
     async query(args) {
@@ -168,7 +205,7 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
       throw new Error("Preview data is unavailable for this operation.")
     },
     async run(args) {
-      if (args[0] === "files" && ["import", "export", "recover", "discard"].includes(args[1])) {
+      if (args[0] === "files" && ["recover", "discard"].includes(args[1])) {
         const operation = args[args.indexOf("--operation") + 1]
         const safe = args[args.indexOf("--safe") + 1]
         const nonce = args[args.indexOf("--opening") + 1]
@@ -199,6 +236,6 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
       if (args[0] === "safe" && args[1] === "open" && !current.open_sessions.some((opened) => opened.id === args[2])) current = { ...current, open_sessions: [...current.open_sessions, { slot: current.open_sessions.length, id: args[2], mode: "documents", recovery_required: false }], idle_lock: { ...current.idle_lock, safes: [...current.idle_lock.safes, { opening: { slot: current.open_sessions.length, safe_id: args[2], nonce: "d".repeat(32) }, remaining_seconds: 900, closing: false }] } }
       return 0
     },
-    exit,
+    exit() { if (!pendingCopies.size) { exit(); return }; return files.close().then(exit) },
   }
 }

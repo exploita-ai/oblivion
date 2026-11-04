@@ -1,0 +1,241 @@
+import { expect, test } from "bun:test"
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { createSignal, Show } from "solid-js"
+import { testRender } from "@opentui/solid"
+import { InputRenderable } from "@opentui/core"
+import { NativeFiles } from "../src/native-files"
+import { createFileTransfers } from "../src/native-file-transfers"
+import { nativePreview } from "../src/native-control"
+import type { FileCopyRequest, FileEvent, FileFinished, NativeFileClient } from "../src/native-file-events"
+
+const safe = "0123456789abcdef0123456789abcdef"
+const opening = "d".repeat(32)
+const digest = "f".repeat(64)
+
+async function fixture() {
+  const root = await mkdtemp(path.join(os.tmpdir(), "oblivion-copy-ui-"))
+  const source = path.join(root, "project")
+  await Promise.all([mkdir(path.join(source, "a"), { recursive: true }), mkdir(path.join(source, "b"), { recursive: true })])
+  await Promise.all([writeFile(path.join(source, "zero.txt"), ""), writeFile(path.join(source, "a/note.txt"), "note"), writeFile(path.join(source, "b/code.txt"), "12345678")])
+  const base = nativePreview(() => {})
+  await base.run(["unlock"])
+  const transfers = createFileTransfers()
+  const commands: string[][] = []
+  const queries: string[][] = []
+  const approvals: string[] = []
+  const requests: FileCopyRequest[] = []
+  const started = Promise.withResolvers<void>()
+  const approved = Promise.withResolvers<void>()
+  const completion = Promise.withResolvers<{ code: number; finished?: FileFinished }>()
+  const [nonce, setNonce] = createSignal<string | undefined>(opening)
+  const [blocked, setBlocked] = createSignal<string>()
+  let backendNonce = opening
+  let emit = (_event: FileEvent) => {}
+  let published = false
+  let cancelled = 0
+  let finished = false
+  let cleanupFailed = false
+  const request = () => { const value = requests[0]; if (!value) throw new Error("No copy started"); return value }
+  const receipt = () => ({ id: request().identity.operation_id, manifest_sha256: digest, entries: 6, bytes: 12 })
+  const files: NativeFileClient = {
+    start(input, event) {
+      requests.push(input); emit = event; started.resolve()
+      return {
+        async approve(hash) { approvals.push(hash); approved.resolve() },
+        async cancel() {
+          cancelled++
+          if (cleanupFailed) throw new Error("Cleanup not confirmed")
+          if (finished) return
+          finished = true
+          const event: FileFinished = { event: "finished", identity: input.identity, outcome: approvals.length ? "interrupted" : "cancelled-before-copy", receipt: null }
+          emit(event); completion.resolve({ code: 130, finished: event })
+        },
+        done: completion.promise,
+      }
+    },
+    async close() {},
+  }
+  const runtime = { ...base, files,
+    status: async () => { const state = await base.status(); return { ...state, idle_lock: { ...state.idle_lock, safes: state.idle_lock.safes.map((safe) => ({ ...safe, opening: { ...safe.opening, nonce: backendNonce } })) } } },
+    query: async (args: string[]) => { queries.push(args); return { operation_id: request().identity.operation_id, safe_id: safe, opening: backendNonce,
+      source_opening: published ? request().identity.opening : null, state: published ? "published" : "unknown", receipt: published ? receipt() : null, can_recover: false, can_discard: false } },
+  }
+  return { root, source, runtime, transfers, commands, queries, approvals, requests, started: started.promise, approved: approved.promise, nonce, blocked, setBlocked,
+    cancelled: () => cancelled,
+    backend(value: string) { backendNonce = value },
+    reopen(value: string) { backendNonce = value; setNonce(value) },
+    review() { emit({ event: "review", identity: request().identity, direction: "import", name: "project", summary: { manifest_sha256: digest, entries: 6, files: 3, directories: 3, bytes: 12 } }) },
+    progress(bytes: number, phase: "copying" | "finalizing" = "copying") { emit({ event: "progress", identity: request().identity, phase, bytes, total_bytes: 12 }) },
+    publish() { published = true },
+    failCleanup() { cleanupFailed = true; completion.reject(new Error("Lost protocol")) },
+    preparationFailed() { finished = true; const event: FileFinished = { event: "finished", identity: request().identity, outcome: "interrupted", receipt: null }; emit(event); completion.resolve({ code: 1, finished: event }) },
+    finish(proof = true) { finished = true; const event: FileFinished = { event: "finished", identity: request().identity, outcome: "completed", receipt: receipt() }; if (proof) emit(event); completion.resolve({ code: proof ? 0 : 1, finished: proof ? event : undefined }) },
+    run: async (args: string[]) => { commands.push(args); return await base.run(args) === 0 },
+  }
+}
+
+async function visible(app: Awaited<ReturnType<typeof testRender>>, text: string) {
+  const deadline = performance.now() + 2000
+  while (performance.now() < deadline) { await app.renderOnce(); if (app.captureCharFrame().includes(text)) return; await Bun.sleep(5) }
+  throw new Error(`Missing ${text}\n${app.captureCharFrame()}`)
+}
+
+async function prepare(app: Awaited<ReturnType<typeof testRender>>, state: Awaited<ReturnType<typeof fixture>>) {
+  await app.renderOnce()
+  await app.mockInput.pressEnter()
+  await visible(app, "Enter path")
+  await app.mockInput.pressKey("p")
+  await visible(app, "Enter local path")
+  expect(app.renderer.currentFocusedRenderable).toBeInstanceOf(InputRenderable)
+  await app.mockInput.pasteBracketedText(state.source)
+  await app.mockInput.pressEnter()
+  await app.mockInput.pressEnter()
+  await visible(app, "Review local path")
+  await app.mockInput.pressEnter()
+  await visible(app, "Name the imported copy")
+  await app.mockInput.pressEnter()
+  await app.mockInput.pressEnter()
+  await state.started
+  await visible(app, "Preparing recursive copy review")
+}
+
+test.each([[80, 24], [160, 50]])("recursive manifest approval and actual progress remain in the rendered Files page at %ix%i", async (width, height) => {
+  const state = await fixture()
+  const app = await testRender(() => <NativeFiles safe={safe} name="Research" opening={state.nonce()} transfers={state.transfers} runtime={state.runtime} run={state.run} back={() => {}} />, { width, height, kittyKeyboard: true })
+  try {
+    await prepare(app, state)
+    expect(state.approvals).toHaveLength(0)
+    expect(state.commands).toEqual([["safe", "open", safe]])
+    expect(state.transfers.entries()[0]?.id).toBe(state.requests[0]?.identity.operation_id)
+    state.review()
+    await visible(app, "Confirm import")
+    expect(app.captureCharFrame()).toContain("3 selected files")
+    expect(app.captureCharFrame()).toContain("3 selected folders")
+    expect(app.captureCharFrame()).toContain("12 B total")
+    expect(app.captureCharFrame()).toContain(digest)
+    expect(state.approvals).toHaveLength(0)
+    await app.mockInput.pressEnter()
+    await state.approved
+    state.progress(5)
+    await visible(app, "5 B / 12 B transferred")
+    expect(state.approvals).toEqual([digest])
+    state.progress(12, "finalizing")
+    await visible(app, "Finalizing copy")
+    expect(app.captureCharFrame()).not.toContain("Copy completed")
+    expect(app.captureCharFrame()).toContain("Cancel copy")
+    state.publish(); state.finish()
+    await visible(app, "Copy completed and verified.")
+    expect(state.queries.at(-1)).toContain(state.requests[0]!.identity.operation_id)
+    expect(state.commands.some((args) => args[0] === "files")).toBe(false)
+  } finally { state.finish(false); await app.dispose(); await rm(state.root, { recursive: true }) }
+})
+
+test.each(["preparing", "review"])("Cancel during %s uses the no-contents proof without looking up a nonexistent receiver", async (phase) => {
+  const state = await fixture()
+  const app = await testRender(() => <NativeFiles safe={safe} name="Research" opening={opening} transfers={state.transfers} runtime={state.runtime} run={state.run} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await prepare(app, state)
+    if (phase === "review") { state.review(); await visible(app, "Confirm import"); await app.mockInput.pressArrow("right"); await app.mockInput.pressEnter() }
+    else await app.mockInput.pressEscape()
+    await visible(app, "Cancelled before copying. No file contents were copied.")
+    expect(state.cancelled()).toBe(1)
+    expect(state.approvals).toHaveLength(0)
+    expect(state.queries).toHaveLength(0)
+    expect(state.transfers.entries()).toHaveLength(0)
+  } finally { await app.dispose(); await rm(state.root, { recursive: true }) }
+})
+
+test("cancellation after payload progress reconciles an already published destination", async () => {
+  const state = await fixture()
+  const app = await testRender(() => <NativeFiles safe={safe} name="Research" opening={opening} transfers={state.transfers} runtime={state.runtime} run={state.run} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await prepare(app, state); state.review(); await visible(app, "Confirm import")
+    await app.mockInput.pressEnter(); await state.approved
+    state.progress(12, "finalizing"); await visible(app, "Finalizing copy")
+    state.publish()
+    await app.mockInput.pressEscape()
+    await visible(app, "Copy completed and verified.")
+    expect(state.queries).toHaveLength(1)
+    expect(app.captureCharFrame()).not.toContain("No file contents were copied")
+    expect(state.transfers.entries()).toHaveLength(1)
+  } finally { await app.dispose(); await rm(state.root, { recursive: true }) }
+})
+
+test.each(["reopened", "stale-parent", "host-closing", "unmounted"])("%s cannot approve or leave its prepared copy running", async (scenario) => {
+  const state = await fixture()
+  const [mounted, setMounted] = createSignal(true)
+  const app = await testRender(() => <Show when={mounted()}><NativeFiles safe={safe} name="Research" opening={state.nonce()} blocked={state.blocked()} transfers={state.transfers} runtime={state.runtime} run={state.run} back={() => {}} /></Show>, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await prepare(app, state); state.review(); await visible(app, "Confirm import")
+    if (scenario === "reopened") state.reopen("b".repeat(32))
+    if (scenario === "stale-parent") { state.backend("b".repeat(32)); await app.mockInput.pressEnter() }
+    if (scenario === "host-closing") state.setBlocked("The host is closing and locking.")
+    if (scenario === "unmounted") setMounted(false)
+    await app.renderOnce()
+    expect(state.cancelled()).toBe(1)
+    expect(state.approvals).toHaveLength(0)
+  } finally { await app.dispose(); await rm(state.root, { recursive: true }) }
+})
+
+test("a missing finished event cannot turn process exit into verified completion", async () => {
+  const state = await fixture()
+  const app = await testRender(() => <NativeFiles safe={safe} name="Research" opening={opening} transfers={state.transfers} runtime={state.runtime} run={state.run} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await prepare(app, state); state.review(); await visible(app, "Confirm import")
+    await app.mockInput.pressEnter(); await state.approved
+    state.finish(false)
+    await visible(app, "Outcome unknown")
+    expect(app.captureCharFrame()).not.toContain("Copy completed and verified")
+    expect(state.queries).toHaveLength(1)
+  } finally { await app.dispose(); await rm(state.root, { recursive: true }) }
+})
+
+test("periodic parent refresh with an unchanged opening does not cancel a live copy", async () => {
+  const state = await fixture()
+  const [tick, setTick] = createSignal(0)
+  const app = await testRender(() => <NativeFiles safe={safe} name="Research" opening={(tick(), opening)} transfers={state.transfers} runtime={state.runtime} run={state.run} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await prepare(app, state); state.review(); await visible(app, "Confirm import")
+    setTick(1); await app.renderOnce()
+    expect(state.cancelled()).toBe(0)
+    await app.mockInput.pressEnter(); await state.approved
+    state.progress(5); await visible(app, "5 B / 12 B transferred")
+    setTick(2); await app.renderOnce()
+    expect(state.cancelled()).toBe(0)
+    expect(app.captureCharFrame()).toContain("5 B / 12 B transferred")
+    state.publish(); state.finish()
+    await visible(app, "Copy completed and verified.")
+  } finally { state.finish(false); await app.dispose(); await rm(state.root, { recursive: true }) }
+})
+
+test("unconfirmed child cleanup retains the operation and fences new copy actions", async () => {
+  const state = await fixture()
+  const app = await testRender(() => <NativeFiles safe={safe} name="Research" opening={opening} transfers={state.transfers} runtime={state.runtime} run={state.run} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await prepare(app, state); state.review(); await visible(app, "Confirm import")
+    await app.mockInput.pressEnter(); await state.approved
+    state.failCleanup()
+    await visible(app, "Copy cleanup is not confirmed")
+    expect(state.transfers.entries()).toHaveLength(1)
+    expect(state.queries).toHaveLength(0)
+    await app.mockInput.pressEnter()
+    expect(state.requests).toHaveLength(1)
+    expect(app.captureCharFrame()).not.toContain("Copy completed")
+  } finally { await app.dispose(); await rm(state.root, { recursive: true }) }
+})
+
+test("a validated preparation failure before approval does not imply a copied destination", async () => {
+  const state = await fixture()
+  const app = await testRender(() => <NativeFiles safe={safe} name="Research" opening={opening} transfers={state.transfers} runtime={state.runtime} run={state.run} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await prepare(app, state)
+    state.preparationFailed()
+    await visible(app, "Preparation stopped before approval")
+    expect(state.transfers.entries()).toHaveLength(0)
+    expect(state.queries).toHaveLength(0)
+    expect(state.approvals).toHaveLength(0)
+    expect(app.captureCharFrame()).not.toContain("destination may already contain")
+  } finally { await app.dispose(); await rm(state.root, { recursive: true }) }
+})

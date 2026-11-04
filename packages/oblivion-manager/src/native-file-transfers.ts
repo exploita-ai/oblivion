@@ -2,10 +2,11 @@ import { createSignal } from "solid-js"
 import { z } from "zod"
 
 const id = z.string().regex(/^[a-f0-9]{32}$/)
+export const fileReceipt = z.object({ id, manifest_sha256: z.string().regex(/^[a-f0-9]{64}$/), entries: z.number().int().min(1).max(16384), bytes: z.number().int().nonnegative().max(16 * 1024 ** 3) }).strict()
 export const fileOutcome = z.object({
   operation_id: id, safe_id: id, opening: id, source_opening: id.nullable(),
   state: z.enum(["unknown", "incomplete", "ready", "published", "discarded"]),
-  receipt: z.object({ id, manifest_sha256: z.string().regex(/^[a-f0-9]{64}$/), entries: z.number().int().min(1).max(16384), bytes: z.number().int().nonnegative().max(16 * 1024 ** 3) }).strict().nullable(),
+  receipt: fileReceipt.nullable(),
   can_recover: z.boolean(), can_discard: z.boolean(),
 }).strict().refine((value) => {
   if (value.receipt && value.receipt.id !== value.operation_id) return false
@@ -25,6 +26,7 @@ export function createFileTransfers() {
   return {
     entries,
     remember(entry: FileTransfer) { setEntries((before) => [entry, ...before.filter((value) => value.id !== entry.id || value.safe !== entry.safe)].slice(0, 32)) },
+    forget(id: string, safe: string) { setEntries((before) => before.filter((entry) => entry.id !== id || entry.safe !== safe)) },
     clear() { setEntries([]) },
   }
 }
