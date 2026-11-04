@@ -16,7 +16,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
     if state.recovery_required {
         return Err("Oblivion requires recovery before opening a Safe".into());
     }
-    let id = super::find_safe(&state, &args[1])?.ok_or("Safe not found")?;
+    let id = state.find_safe(&args[1])?.ok_or("Safe not found")?;
     let active = state
         .open_sessions
         .iter()
@@ -38,7 +38,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
             }
             "rename" if args.len() == 3 => {
                 oblivion_host::session_title::validate(&args[2])?;
-                if super::find_safe(&state, &args[2])?.is_some_and(|other| other != id) {
+                if state.find_safe(&args[2])?.is_some_and(|other| other != id) {
                     return Err("A Safe with this name already exists".into());
                 }
                 let payload = serde_json::to_vec(&json!({"id":id,"title":args[2]}))?;

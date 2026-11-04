@@ -4,4 +4,5 @@
 //! here. Callers authenticate peers and apply operation-specific secret budgets.
 pub mod agent;
 pub mod control;
+pub mod control_client;
 pub mod frame;

@@ -58,7 +58,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
         }
         Options::Export { safe, path } => {
             if state.recovery_required { return Err("Complete recovery before exporting a personal backup".into()); }
-            let id = super::find_safe(&state, safe)?.ok_or("Safe not found")?;
+            let id = state.find_safe(safe)?.ok_or("Safe not found")?;
             if !state.sessions.contains(&id) {
                 return Err("Personal backups require a persistent Safe".into());
             }

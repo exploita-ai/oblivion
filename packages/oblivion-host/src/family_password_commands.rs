@@ -56,7 +56,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
                 if direction == wire::Direction::Complete { wire::Outcome::Complete } else { wire::Outcome::RolledBack });
         }
         let (safe, confirmed) = match options { Options::Preview(safe) => (safe, None), Options::Change { safe, confirmed } => (safe, confirmed), _ => unreachable!() };
-        let id = super::find_safe(&state, safe)?.ok_or("Safe not found")?;
+        let id = state.find_safe(safe)?.ok_or("Safe not found")?;
         if !state.sessions.contains(&id) { return Err("Only persistent Safe families have a changeable human password".into()); }
         let plan: wire::Plan = serde_json::from_str(&control::request_for(&id, "family-password-preview", Some(&id), &[])?)?;
         plan.validate()?;

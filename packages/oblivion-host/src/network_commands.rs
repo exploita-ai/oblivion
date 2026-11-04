@@ -64,7 +64,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
     if !state.app_open {
         return Err("Unlock Oblivion before selecting a Safe".into());
     }
-    let id = super::find_safe(&state, safe.ok_or("Choose a Safe with --safe NAME")?)?
+    let id = state.find_safe(safe.ok_or("Choose a Safe with --safe NAME")?)?
         .ok_or("Safe not found")?;
     let opened = state
         .open_sessions

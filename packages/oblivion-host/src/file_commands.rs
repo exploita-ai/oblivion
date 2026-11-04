@@ -211,7 +211,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
         .transpose()?;
     let safe = safe.ok_or("Choose a Safe with --safe NAME")?;
     let state = super::status()?;
-    let id = super::find_safe(&state, safe)?.ok_or("Safe not found")?;
+    let id = state.find_safe(safe)?.ok_or("Safe not found")?;
     let opened = state
         .open_sessions
         .iter()

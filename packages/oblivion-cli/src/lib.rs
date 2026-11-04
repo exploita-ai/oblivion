@@ -1,6 +1,8 @@
-//! Portable frontend syntax, consumed by the native launcher.
+//! Shared frontend syntax and controller commands, consumed by the launcher.
 //!
-//! Parsing performs no I/O, login, prompts, runtime discovery or authorization.
-//! Names are validated by their domain owner before using the parsed request.
+//! Parsers perform no I/O. Controller commands use an injected authenticated
+//! platform adapter; runtime discovery, terminals and authorization stay there.
 pub mod proxy;
 pub mod run;
+
+pub mod controller;

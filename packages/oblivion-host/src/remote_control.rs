@@ -4,9 +4,8 @@
 
 use crate::channel::Channel;
 use crate::control::Result;
-use oblivion_wire::control::{NativeRequest, Operation, Request, Response, HEADER_LIMIT, RESPONSE_LIMIT};
-use oblivion_wire::frame;
-use std::io::Write;
+use oblivion_wire::control::{Operation, Request};
+use oblivion_wire::control_client::{self, Framing};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
@@ -16,6 +15,22 @@ use std::time::{Duration, Instant};
 pub fn request(
     path: &Path,
     operation: &str,
+    session: Option<&str>,
+    secret: &[u8],
+    expected: Option<&str>,
+) -> Result<String> {
+    request_operation(
+        path,
+        Operation::parse(operation)?,
+        session,
+        secret,
+        expected,
+    )
+}
+
+pub(crate) fn request_operation(
+    path: &Path,
+    operation: Operation,
     session: Option<&str>,
     secret: &[u8],
     expected: Option<&str>,
@@ -42,7 +57,14 @@ pub fn request_with_budget(
     budget: Duration,
 ) -> Result<String> {
     let deadline = Instant::now() + budget;
-    let stream = connect(path, operation, session, secret, expected, budget)?;
+    let stream = connect(
+        path,
+        Operation::parse(operation)?,
+        session,
+        secret,
+        expected,
+        budget,
+    )?;
     read_response_with_budget(&stream, remaining(deadline)?)
 }
 
@@ -56,14 +78,34 @@ pub fn attach(path: &Path, operation: &str, expected: &str) -> Result<(UnixStrea
     attach_scoped(path, operation, None, Some(expected))
 }
 
-pub fn attach_scoped(path: &Path, operation: &str, session: Option<&str>, expected: Option<&str>) -> Result<(UnixStream, String)> {
+pub fn attach_scoped(
+    path: &Path,
+    operation: &str,
+    session: Option<&str>,
+    expected: Option<&str>,
+) -> Result<(UnixStream, String)> {
     attach_scoped_with_secret(path, operation, session, expected, &[])
 }
 
-pub fn attach_scoped_with_secret(path: &Path, operation: &str, session: Option<&str>, expected: Option<&str>, secret: &[u8]) -> Result<(UnixStream, String)> {
-    if !matches!(operation, "agent-attach" | "file-attach" | "share-attach" | "share-import-attach" | "share-export-lease" | "backup-attach") {
+pub fn attach_scoped_with_secret(
+    path: &Path,
+    operation: &str,
+    session: Option<&str>,
+    expected: Option<&str>,
+    secret: &[u8],
+) -> Result<(UnixStream, String)> {
+    if !matches!(
+        operation,
+        "agent-attach"
+            | "file-attach"
+            | "share-attach"
+            | "share-import-attach"
+            | "share-export-lease"
+            | "backup-attach"
+    ) {
         return Err("invalid_attachment".into());
     }
+    let operation = Operation::parse(operation)?;
     let stream = connect(
         path,
         operation,
@@ -85,15 +127,22 @@ pub fn attach_scoped_with_secret(path: &Path, operation: &str, session: Option<&
 
 fn connect(
     path: &Path,
-    operation: &str,
+    operation: Operation,
     session: Option<&str>,
     secret: &[u8],
     expected: Option<&str>,
     budget: Duration,
 ) -> Result<UnixStream> {
     let deadline = Instant::now() + budget;
-    if secret.len() > if operation == "family-password-change" { crate::family_rotation::CHANGE_LIMIT }
-        else if operation == "share-import-begin" { oblivion_share::manifest::MAX_METADATA + 4096 } else { 4096 } {
+    if secret.len()
+        > if operation == Operation::FamilyPasswordChange {
+            crate::family_rotation::CHANGE_LIMIT
+        } else if operation == Operation::ShareImportBegin {
+            oblivion_share::manifest::MAX_METADATA + 4096
+        } else {
+            4096
+        }
+    {
         return Err("secret_too_large".into());
     }
     let metadata = std::fs::symlink_metadata(path)?;
@@ -126,28 +175,34 @@ fn connect(
         }
     }
     let request = Request {
-        operation: Operation::parse(operation)?,
+        operation,
         session: session.map(str::to_owned),
         secret_len: secret.len() as u32,
         slot: crate::scope::current(),
         expected_session: expected.map(str::to_owned),
     };
-    let header = serde_json::to_vec(&NativeRequest::new(&request))?;
-    if header.len() > HEADER_LIMIT {
-        return Err("header_too_large".into());
-    }
     let mut channel = Channel::new(&stream, remaining(deadline)?);
-    frame::write(&mut channel, &header, 1..=HEADER_LIMIT)?;
-    channel.write_all(secret)?;
+    control_client::write_request(&mut channel, &request, secret, Framing::Native)
+        .map_err(control_client::Error::into_boxed)?;
     Ok(stream)
 }
 
-fn read_response(stream: &UnixStream, operation: &str) -> Result<String> {
+fn read_response(stream: &UnixStream, operation: Operation) -> Result<String> {
     read_response_with_budget(
         stream,
-        Duration::from_secs(if operation == "session-storage" {
+        Duration::from_secs(if operation == Operation::SessionStorage {
             1800
-        } else if matches!(operation, "egress" | "proxy-profiles" | "start-agent" | "open-child-documents" | "backup-export-begin" | "backup-import-finish" | "family-password-change" | "family-password-recover") {
+        } else if matches!(
+            operation,
+            Operation::Egress
+                | Operation::ProxyProfiles
+                | Operation::StartAgent
+                | Operation::OpenChildDocuments
+                | Operation::BackupExportBegin
+                | Operation::BackupImportFinish
+                | Operation::FamilyPasswordChange
+                | Operation::FamilyPasswordRecover
+        ) {
             210
         } else {
             120
@@ -156,26 +211,8 @@ fn read_response(stream: &UnixStream, operation: &str) -> Result<String> {
 }
 
 fn read_response_with_budget(stream: &UnixStream, budget: Duration) -> Result<String> {
-    let mut channel = Channel::new(stream, budget);
-    let bytes = frame::read(&mut channel, 1..=RESPONSE_LIMIT).map_err(|error| -> Box<dyn std::error::Error> {
-        match error {
-            frame::Error::InvalidLength => "invalid_response_length".into(),
-            frame::Error::Io(error) => error.into(),
-        }
-    })?;
-    let response: Response = serde_json::from_slice(&bytes)?;
-    if !response.ok {
-        let error = response.error.filter(|value| {
-            value.len() <= 80
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-        });
-        return Err(error
-            .unwrap_or_else(|| "operation_rejected".to_owned())
-            .into());
-    }
-    Ok(response.output)
+    control_client::read_response(&mut Channel::new(stream, budget), Framing::Native)
+        .map_err(control_client::Error::into_boxed)
 }
 
 fn remaining(deadline: Instant) -> std::io::Result<Duration> {

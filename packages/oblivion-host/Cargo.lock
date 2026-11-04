@@ -964,6 +964,9 @@ name = "oblivion-cli"
 version = "0.1.0"
 dependencies = [
  "oblivion-transport",
+ "oblivion-wire",
+ "serde",
+ "serde_json",
  "zeroize",
 ]
 
@@ -1031,6 +1034,7 @@ name = "oblivion-wire"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]

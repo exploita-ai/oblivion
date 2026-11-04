@@ -25,7 +25,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
     if !state.app_open || state.recovery_required {
         return Err("Unlock Oblivion and complete recovery before reviewing a saved task".into());
     }
-    let id = crate::find_safe(&state, name)?.ok_or("Safe not found")?;
+    let id = state.find_safe(name)?.ok_or("Safe not found")?;
     let opened = state.open_sessions.iter().find(|safe| safe.id.as_deref() == Some(&id))
         .ok_or("Open this Safe with oblivion safe open before reviewing its saved task")?;
     scope::within(opened.slot, || {

@@ -203,7 +203,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
         return Err("Unlock writable encrypted storage before sharing Safes".into());
     }
     let selector = if let Some(name) = selector.1 {
-        let id = crate::find_safe(&state, name)?.ok_or("Safe not found")?;
+        let id = state.find_safe(name)?.ok_or("Safe not found")?;
         json!({"kind":if selector.0 == "--safe" { "safe" } else { "branch" },"safe_id":id})
     } else {
         json!({"kind":"all"})

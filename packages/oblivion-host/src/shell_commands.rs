@@ -13,7 +13,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
     if state.recovery_required {
         return Err("Oblivion requires recovery before opening a Safe".into());
     }
-    let id = super::find_safe(&state, name)?.ok_or("Safe not found")?;
+    let id = state.find_safe(name)?.ok_or("Safe not found")?;
     let active = state
         .open_sessions
         .iter()

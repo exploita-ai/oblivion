@@ -1,7 +1,9 @@
 use crate::channel::Channel;
-use oblivion_wire::control::{Operation, Request, Response, HEADER_LIMIT, RESPONSE_LIMIT};
-use oblivion_wire::frame;
-use std::io::{Read, Write};
+use oblivion_cli::controller::{Call, Controller};
+use oblivion_wire::control::{Operation, Request};
+use oblivion_wire::control_client::{self, Framing};
+#[cfg(target_os = "linux")]
+use std::io::Read;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
@@ -25,28 +27,31 @@ pub fn protect() -> Result<()> {
 }
 
 fn connect_expected(
-    operation: &str,
+    operation: Operation,
     session: Option<&str>,
     secret: &[u8],
     expected: Option<&str>,
 ) -> Result<UnixStream> {
     if secret.len()
-        > if operation == "family-password-change" { crate::family_rotation::CHANGE_LIMIT }
-        else if operation == "share-import-begin" { oblivion_share::manifest::MAX_METADATA + 4096 } else if matches!(
+        > if operation == Operation::FamilyPasswordChange {
+            crate::family_rotation::CHANGE_LIMIT
+        } else if operation == Operation::ShareImportBegin {
+            oblivion_share::manifest::MAX_METADATA + 4096
+        } else if matches!(
             operation,
-            "session-storage"
-                | "family-password-recover"
-                | "egress"
-                | "proxy-profiles"
-                | "network-policy"
-                | "transfers"
-                | "onion"
-                    | "safe-access"
-                | "browse"
-                | "share-export-source-open"
-                | "share-import-open"
-                | "share-import-finish"
-                | "backup-import-finish"
+            Operation::SessionStorage
+                | Operation::FamilyPasswordRecover
+                | Operation::Egress
+                | Operation::ProxyProfiles
+                | Operation::NetworkPolicy
+                | Operation::Transfers
+                | Operation::Onion
+                | Operation::SafeAccess
+                | Operation::Browse
+                | Operation::ShareExportSourceOpen
+                | Operation::ShareImportOpen
+                | Operation::ShareImportFinish
+                | Operation::BackupImportFinish
         ) {
             4096
         } else {
@@ -74,23 +79,91 @@ fn connect_expected(
         }
     }
     let mut channel = Channel::new(&stream, Duration::from_secs(10));
-    let header = serde_json::to_vec(&Request {
-        operation: Operation::parse(operation)?,
+    let request = Request {
+        operation,
         session: session.map(str::to_owned),
         secret_len: secret.len() as u32,
         slot: crate::scope::current(),
         expected_session: expected.map(str::to_owned),
-    })?;
-    frame::write(&mut channel, &header, 1..=HEADER_LIMIT)?;
-    channel.write_all(secret)?;
-    if !matches!(operation, "agent-attach" | "file-attach" | "share-attach" | "share-import-attach" | "share-export-lease" | "backup-attach") {
+    };
+    control_client::write_request(&mut channel, &request, secret, Framing::Local)
+        .map_err(control_client::Error::into_boxed)?;
+    if !matches!(
+        operation,
+        Operation::AgentAttach
+            | Operation::FileAttach
+            | Operation::ShareAttach
+            | Operation::ShareImportAttach
+            | Operation::ShareExportLease
+            | Operation::BackupAttach
+    ) {
         stream.shutdown(std::net::Shutdown::Write)?;
     }
     Ok(stream)
 }
 
+/// Real Unix controller adapter used by the shared frontend and existing CLI
+/// boundaries. Explicit remote construction also avoids global environment in
+/// integrations which already own the authenticated runtime endpoint.
+pub struct Client {
+    remote: Option<std::path::PathBuf>,
+}
+
+impl Client {
+    pub fn new() -> Self {
+        match std::env::var_os("OBLIVION_CONTROL_SOCKET") {
+            Some(path) => Self::remote(std::path::PathBuf::from(path)),
+            None => Self { remote: None },
+        }
+    }
+
+    pub fn remote(path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            remote: Some(path.into()),
+        }
+    }
+}
+
+impl Default for Client {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Controller for Client {
+    type Slot = crate::scope::Slot;
+
+    fn request(&mut self, call: Call<'_, Self::Slot>) -> Result<String> {
+        let request = || match self.remote.as_deref() {
+            Some(path) => crate::remote_control::request_operation(
+                path,
+                call.operation,
+                call.session,
+                call.secret,
+                call.expected_session,
+            ),
+            None => request_local(
+                call.operation,
+                call.session,
+                call.secret,
+                call.expected_session,
+            ),
+        };
+        match call.slot {
+            Some(slot) => crate::scope::within(slot, request),
+            None => request(),
+        }
+    }
+}
+
 pub fn request(operation: &str, session: Option<&str>, secret: &[u8]) -> Result<String> {
-    request_expected(operation, session, secret, None)
+    Client::new().request(Call {
+        operation: Operation::parse(operation)?,
+        slot: None,
+        session,
+        expected_session: None,
+        secret,
+    })
 }
 
 pub fn request_for(
@@ -99,54 +172,46 @@ pub fn request_for(
     session: Option<&str>,
     secret: &[u8],
 ) -> Result<String> {
-    request_expected(operation, session, secret, Some(expected))
+    Client::new().request(Call {
+        operation: Operation::parse(operation)?,
+        slot: None,
+        session,
+        expected_session: Some(expected),
+        secret,
+    })
 }
 
-fn request_expected(
-    operation: &str,
+fn request_local(
+    operation: Operation,
     session: Option<&str>,
     secret: &[u8],
     expected: Option<&str>,
 ) -> Result<String> {
-    if let Some(path) = std::env::var_os("OBLIVION_CONTROL_SOCKET") {
-        return crate::remote_control::request(
-            std::path::Path::new(&path),
-            operation,
-            session,
-            secret,
-            expected,
-        );
-    }
     let stream = connect_expected(operation, session, secret, expected)?;
-    response(Channel::new(
-        &stream,
-        Duration::from_secs(if operation == "session-storage" {
-            1800
-        } else if matches!(operation, "egress" | "proxy-profiles" | "start-agent" | "open-child-documents" | "backup-export-begin" | "backup-import-finish" | "family-password-change" | "family-password-recover") {
-            210
-        } else {
-            120
-        }),
-    ))
-}
-
-fn response(channel: Channel<'_>) -> Result<String> {
-    let mut bytes = Vec::new();
-    channel.take(RESPONSE_LIMIT as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > RESPONSE_LIMIT {
-        return Err("response_too_large".into());
-    }
-    let response: Response = serde_json::from_slice(&bytes)?;
-    if !response.ok {
-        // Protocol errors are static identifiers, never arbitrary guest text.
-        let error = response.error.filter(|value| {
-            value.len() <= 80 && value.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')
-        });
-        return Err(error
-            .unwrap_or_else(|| "operation_rejected".to_owned())
-            .into());
-    }
-    Ok(response.output)
+    control_client::read_response(
+        &mut Channel::new(
+            &stream,
+            Duration::from_secs(if operation == Operation::SessionStorage {
+                1800
+            } else if matches!(
+                operation,
+                Operation::Egress
+                    | Operation::ProxyProfiles
+                    | Operation::StartAgent
+                    | Operation::OpenChildDocuments
+                    | Operation::BackupExportBegin
+                    | Operation::BackupImportFinish
+                    | Operation::FamilyPasswordChange
+                    | Operation::FamilyPasswordRecover
+            ) {
+                210
+            } else {
+                120
+            }),
+        ),
+        Framing::Local,
+    )
+    .map_err(control_client::Error::into_boxed)
 }
 
 #[cfg(target_os = "linux")]
@@ -159,7 +224,12 @@ pub fn attach_export(id: &str) -> Result<(UnixStream, UnixStream, String)> {
 }
 
 pub fn attach_file(opening: &crate::autolock::Opening) -> Result<(UnixStream, UnixStream, String)> {
-    attach_scoped("file-attach", None, Some(&opening.safe_id), &serde_json::to_vec(opening)?)
+    attach_scoped(
+        "file-attach",
+        None,
+        Some(&opening.safe_id),
+        &serde_json::to_vec(opening)?,
+    )
 }
 
 pub fn attach_backup(transaction: &str) -> Result<(UnixStream, UnixStream, String)> {
@@ -167,19 +237,33 @@ pub fn attach_backup(transaction: &str) -> Result<(UnixStream, UnixStream, Strin
 }
 
 #[cfg(target_os = "linux")]
-fn attach_scoped(operation: &str, session: Option<&str>, expected: Option<&str>, secret: &[u8]) -> Result<(UnixStream, UnixStream, String)> {
+fn attach_scoped(
+    operation: &str,
+    session: Option<&str>,
+    expected: Option<&str>,
+    secret: &[u8],
+) -> Result<(UnixStream, UnixStream, String)> {
     if let Some(path) = std::env::var_os("OBLIVION_CONTROL_SOCKET") {
-        let (stream, client) = crate::remote_control::attach_scoped_with_secret(std::path::Path::new(&path), operation, session, expected, secret)?;
+        let (stream, client) = crate::remote_control::attach_scoped_with_secret(
+            std::path::Path::new(&path),
+            operation,
+            session,
+            expected,
+            secret,
+        )?;
         return Ok((stream.try_clone()?, stream, client));
     }
-    let stream = connect_expected(operation, session, secret, expected)?;
+    let stream = connect_expected(Operation::parse(operation)?, session, secret, expected)?;
     let channel = Channel::new(&stream, Duration::from_secs(120));
     let console = receive_descriptor(&stream, &channel)?;
     // The control connection owns the attachment until EOF, independently of
     // the passed stream. A vanished launcher releases only this client.
     let mut client = [0; 32];
     Channel::new(&stream, Duration::from_secs(10)).read_exact(&mut client)?;
-    if !client.iter().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)) {
+    if !client
+        .iter()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
         return Err("invalid_client_identifier".into());
     }
     Ok((console, stream, String::from_utf8(client.to_vec())?))
@@ -228,25 +312,23 @@ pub fn attach_client(operation: &str, expected: &str) -> Result<(UnixStream, Uni
 }
 
 #[cfg(not(target_os = "linux"))]
-fn attach_scoped(operation: &str, session: Option<&str>, expected: Option<&str>, secret: &[u8]) -> Result<(UnixStream, UnixStream, String)> {
+fn attach_scoped(
+    operation: &str,
+    session: Option<&str>,
+    expected: Option<&str>,
+    secret: &[u8],
+) -> Result<(UnixStream, UnixStream, String)> {
     let path = std::env::var_os("OBLIVION_CONTROL_SOCKET").ok_or("native_runtime_required")?;
-    let (stream, client) =
-        crate::remote_control::attach_scoped_with_secret(std::path::Path::new(&path), operation, session, expected, secret)?;
+    let (stream, client) = crate::remote_control::attach_scoped_with_secret(
+        std::path::Path::new(&path),
+        operation,
+        session,
+        expected,
+        secret,
+    )?;
     Ok((stream.try_clone()?, stream, client))
 }
 
 pub fn release_agent(client: &str, expected: &str) -> Result<()> {
-    if let Some(path) = std::env::var_os("OBLIVION_CONTROL_SOCKET") {
-        crate::remote_control::request(
-            std::path::Path::new(&path),
-            "agent-release",
-            Some(client),
-            &[],
-            Some(expected),
-        )?;
-        return Ok(());
-    }
-    let stream = connect_expected("agent-release", Some(client), &[], Some(expected))?;
-    response(Channel::new(&stream, Duration::from_secs(120)))?;
-    Ok(())
+    request_for(expected, "agent-release", Some(client), &[]).map(|_| ())
 }

@@ -1,7 +1,6 @@
+use oblivion_cli::controller::{self, AgentSafeState, AppMode, State};
 use oblivion_host::{agent, control, scope};
-use serde::Deserialize;
 use serde_json::json;
-use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -10,19 +9,19 @@ use std::process::Command;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
+mod backup_commands;
+mod child_task_commands;
+mod family_password_commands;
 mod file_commands;
 mod file_events;
-mod backup_commands;
-mod family_password_commands;
 mod idle_commands;
 mod init_commands;
-mod network_commands;
 mod native_overlay;
+mod network_commands;
 mod proxy_commands;
 mod safe_commands;
 mod share_commands;
 mod shell_commands;
-mod child_task_commands;
 
 const HELP: &str = "Oblivion — isolated, encrypted workspaces for coding agents
 
@@ -149,43 +148,10 @@ fn main() {
     }
 }
 
-#[derive(Deserialize)]
-struct Status {
-    app_open: bool,
-    app_mode: AppMode,
-    general_present: bool,
-    general_incomplete: bool,
-    general_bytes: u64,
-    recovery_required: bool,
-    sessions: Vec<String>,
-    session_titles: BTreeMap<String, String>,
-    open_sessions: Vec<Opened>,
-    agent_safes: Vec<AgentSafe>,
-}
-#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-enum AppMode { Locked, Persistent, ReadOnly, RamOnly }
-#[derive(Deserialize)]
-struct Opened {
-    slot: scope::Slot,
-    id: Option<String>,
-    mode: Option<String>,
-}
-#[derive(Deserialize)]
-struct AgentSafe {
-    id: String,
-    ephemeral: bool,
-    state: AgentSafeState,
-}
-#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-enum AgentSafeState { AwaitingStart, Failed, RecoveryRequired }
+type Status = State<scope::Slot>;
+
 fn status() -> control::Result<Status> {
-    Ok(serde_json::from_str(&control::request(
-        "status",
-        None,
-        &[],
-    )?)?)
+    controller::status(&mut control::Client::new())
 }
 
 fn run() -> control::Result<i32> {
@@ -213,7 +179,12 @@ fn run() -> control::Result<i32> {
     if args.len() == 1 && args[0] == "activity" {
         return oblivion_host::activity::forward_stdin();
     }
-    let launch_options = if args.first().is_some_and(|arg| arg == "run") { Some(options(&args[1..])?) } else { None };
+    let controller_command = controller::Command::parse(&args)?;
+    let launch_options = if args.first().is_some_and(|arg| arg == "run") {
+        Some(options(&args[1..])?)
+    } else {
+        None
+    };
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         if args.first().is_some_and(|arg| arg == "runtime") {
@@ -231,8 +202,12 @@ fn run() -> control::Result<i32> {
                     oblivion_host::native_runtime::update(std::path::Path::new(&args[2]))?
                 }
                 Some("start") if args.len() == 2 => oblivion_host::native_runtime::start()?,
-                Some("supervise") if args.len() == 3 => oblivion_host::native_runtime::supervise(&args[2])?,
-                Some("choose-storage") if args.len() == 2 => oblivion_host::native_runtime::choose_live_storage()?,
+                Some("supervise") if args.len() == 3 => {
+                    oblivion_host::native_runtime::supervise(&args[2])?
+                }
+                Some("choose-storage") if args.len() == 2 => {
+                    oblivion_host::native_runtime::choose_live_storage()?
+                }
                 Some("recover") if args.len() == 2 => oblivion_host::native_runtime::recover()?,
                 Some("stop") if args.len() == 2 => oblivion_host::native_runtime::stop()?,
                 Some("gc") if args.len() == 2 => oblivion_host::native_runtime::gc()?,
@@ -250,7 +225,9 @@ fn run() -> control::Result<i32> {
             Some("ephemeral") if args.len() == 1 => Some(true),
             Some("init" | "unlock") => Some(false),
             Some("run") => launch_options.as_ref().and_then(|parsed| {
-                if parsed.ephemeral { return Some(true); }
+                if parsed.ephemeral {
+                    return Some(true);
+                }
                 parsed.name.as_ref().map(|_| false)
             }),
             _ => None,
@@ -258,7 +235,7 @@ fn run() -> control::Result<i32> {
         oblivion_host::native_runtime::request_live_storage(storage)?;
         if args.is_empty() {
             oblivion_host::native_runtime::prepare_manager()?;
-        } else if args == ["status", "--json"] {
+        } else if matches!(&controller_command, Some(controller::Command::StatusJson)) {
             oblivion_host::native_runtime::ensure_status()?;
         } else {
             oblivion_host::native_runtime::ensure()?;
@@ -275,12 +252,15 @@ fn run() -> control::Result<i32> {
             .exec()
             .into());
     }
+    if let Some(command) = controller_command {
+        return controller::execute(
+            &mut control::Client::new(),
+            command,
+            &mut std::io::stdout().lock(),
+        );
+    }
     match args[0].as_str() {
         "settings" => idle_commands::run(&args[1..]),
-        "status" if args.len() == 2 && args[1] == "--json" => {
-            println!("{}", control::request("status", None, &[])?);
-            Ok(0)
-        }
         "init" => init_commands::run(&args[1..]),
         "unlock" if args.len() == 1 => {
             unlock(false)?;
@@ -292,52 +272,17 @@ fn run() -> control::Result<i32> {
         }
         "ephemeral" if args.len() == 1 => {
             let state = status()?;
-            if state.app_mode == AppMode::RamOnly { return Ok(0) }
-            if state.app_open { return Err("Lock Oblivion, then enter Ephemeral mode. Active work must close before changing storage modes.".into()) }
+            if state.app_mode == AppMode::RamOnly {
+                return Ok(0);
+            }
+            if state.app_open {
+                return Err("Lock Oblivion, then enter Ephemeral mode. Active work must close before changing storage modes.".into());
+            }
             control::request("enter-ram", None, &[])?;
             Ok(0)
         }
         "lock" if args.len() == 1 => {
             control::request("lock", None, &[])?;
-            Ok(0)
-        }
-        "safes" if args.len() == 1 => {
-            let state = status()?;
-            if !state.app_open {
-                return Err("Oblivion is locked. Run oblivion unlock.".into());
-            }
-            for id in safe_ids(&state) {
-                let name = state
-                    .session_titles
-                    .get(id)
-                    .map(String::as_str)
-                    .unwrap_or(id);
-                let mode = state
-                    .open_sessions
-                    .iter()
-                    .find(|opened| opened.id.as_ref() == Some(id))
-                    .and_then(|opened| opened.mode.as_deref())
-                    .unwrap_or_else(|| match state.agent_safes.iter().find(|safe| safe.id == *id).map(|safe| safe.state) {
-                        Some(AgentSafeState::AwaitingStart) => "awaiting-start",
-                        Some(AgentSafeState::Failed) => "creation-failed",
-                        Some(AgentSafeState::RecoveryRequired) => "recovery-required",
-                        None => "locked",
-                    });
-                println!("{name}\t{id}\t{mode}");
-            }
-            Ok(0)
-        }
-        "close" if args.len() == 2 => {
-            let state = status()?;
-            let id = find_safe(&state, &args[1])?.ok_or("Safe not found")?;
-            let opened = state
-                .open_sessions
-                .iter()
-                .find(|opened| opened.id.as_deref() == Some(&id))
-                .ok_or("Safe is already locked")?;
-            scope::within(opened.slot, || {
-                control::request_for(&id, "close", None, &[])
-            })?;
             Ok(0)
         }
         "run" => launch(launch_options.ok_or("run_options_missing")?),
@@ -355,7 +300,13 @@ fn run() -> control::Result<i32> {
 fn unlock(read_only: bool) -> control::Result<()> {
     let state = status()?;
     if state.app_open {
-        if state.app_mode != if read_only { AppMode::ReadOnly } else { AppMode::Persistent } {
+        if state.app_mode
+            != if read_only {
+                AppMode::ReadOnly
+            } else {
+                AppMode::Persistent
+            }
+        {
             return Err("Lock Oblivion before changing its storage mode".into());
         }
         return Ok(());
@@ -392,44 +343,17 @@ fn proxy(url: &str) -> control::Result<oblivion_transport::Transport> {
     resolve_proxy(oblivion_cli::proxy::parse(url)?)
 }
 
-fn resolve_proxy(request: oblivion_cli::proxy::Request) -> control::Result<oblivion_transport::Transport> {
+fn resolve_proxy(
+    request: oblivion_cli::proxy::Request,
+) -> control::Result<oblivion_transport::Transport> {
     match request {
         oblivion_cli::proxy::Request::Ready(transport) => Ok(transport),
-        oblivion_cli::proxy::Request::NeedsPassword(request) => Ok(request.complete(Zeroizing::new(
-            String::from_utf8(password("Proxy password", false)?.to_vec())?,
-        ))?),
+        oblivion_cli::proxy::Request::NeedsPassword(request) => {
+            Ok(request.complete(Zeroizing::new(String::from_utf8(
+                password("Proxy password", false)?.to_vec(),
+            )?))?)
+        }
     }
-}
-
-fn find_safe(state: &Status, name: &str) -> control::Result<Option<String>> {
-    let ids: std::collections::BTreeSet<_> = safe_ids(state).into_iter()
-        .filter(|id| {
-            id.as_str() == name
-                || state
-                    .session_titles
-                    .get(*id)
-                    .is_some_and(|title| title == name)
-        })
-        .collect();
-    match ids.len() {
-        0 => Ok(None),
-        1 => Ok(ids.first().map(|id| (*id).clone())),
-        _ => Err("Ambiguous Safe name. Use its full identifier.".into()),
-    }
-}
-
-fn safe_ids(state: &Status) -> std::collections::BTreeSet<&String> {
-    state
-        .sessions
-        .iter()
-        .chain(
-            state
-                .open_sessions
-                .iter()
-                .filter_map(|safe| safe.id.as_ref()),
-        )
-        .chain(state.agent_safes.iter().filter(|safe| safe.ephemeral).map(|safe| &safe.id))
-        .collect()
 }
 
 fn open_existing(state: &Status, id: &str) -> control::Result<()> {
@@ -441,7 +365,11 @@ fn open_existing(state: &Status, id: &str) -> control::Result<()> {
         control::request_for(id, "open-child-documents", Some(id), &[])?;
         return Ok(());
     }
-    control::request("open-documents", Some(id), &password("Safe password", false)?)?;
+    control::request(
+        "open-documents",
+        Some(id),
+        &password("Safe password", false)?,
+    )?;
     Ok(())
 }
 
@@ -481,7 +409,8 @@ fn start_agent(id: &str) -> control::Result<()> {
 fn launch(options: Options) -> control::Result<i32> {
     let initial = status()?;
     if !initial.app_open {
-        if options.ephemeral || std::env::var("OBLIVION_LIVE_STORAGE").as_deref() == Ok("ephemeral") {
+        if options.ephemeral || std::env::var("OBLIVION_LIVE_STORAGE").as_deref() == Ok("ephemeral")
+        {
             control::request("enter-ram", None, &[])?;
         } else {
             // An explicit new-Safe launch can guide first-run setup. An
@@ -497,7 +426,9 @@ fn launch(options: Options) -> control::Result<i32> {
         return Err("Oblivion requires recovery before opening a Safe".into());
     }
     if options.ephemeral && state.app_mode == AppMode::Persistent {
-        return Err("Lock Oblivion, then enter Ephemeral mode before creating a RAM-only Safe.".into());
+        return Err(
+            "Lock Oblivion, then enter Ephemeral mode before creating a RAM-only Safe.".into(),
+        );
     }
     if options.name.is_some() && state.app_mode != AppMode::Persistent {
         return Err("Named persistent Safes require persistent mode. Lock and unlock encrypted storage first.".into());
@@ -505,7 +436,7 @@ fn launch(options: Options) -> control::Result<i32> {
     let existing = options
         .safe
         .as_deref()
-        .map(|name| find_safe(&state, name))
+        .map(|name| state.find_safe(name))
         .transpose()?
         .flatten();
     if options.safe.is_some() && existing.is_none() {
@@ -514,7 +445,7 @@ fn launch(options: Options) -> control::Result<i32> {
     if options
         .name
         .as_deref()
-        .map(|name| find_safe(&state, name))
+        .map(|name| state.find_safe(name))
         .transpose()?
         .flatten()
         .is_some()
@@ -526,7 +457,10 @@ fn launch(options: Options) -> control::Result<i32> {
         .iter()
         .find(|opened| opened.id == existing && existing.is_some())
     {
-        if options.transport.is_some() || options.proxy_profile.is_some() || options.policy.is_some() {
+        if options.transport.is_some()
+            || options.proxy_profile.is_some()
+            || options.policy.is_some()
+        {
             return Err(
                 "Safe is active. Change its network through the trusted network controls.".into(),
             );
@@ -572,12 +506,20 @@ fn launch(options: Options) -> control::Result<i32> {
                 } else {
                     oblivion_host::egress::Command::Save { transport }
                 };
-                control::request("egress", None, &Zeroizing::new(serde_json::to_vec(&command)?))?;
+                control::request(
+                    "egress",
+                    None,
+                    &Zeroizing::new(serde_json::to_vec(&command)?),
+                )?;
             }
             if let Some(name) = &options.proxy_profile {
                 control::request_for(
-                    &id, "proxy-profiles", None,
-                    &serde_json::to_vec(&oblivion_host::proxy_profiles::Command::Select { name: name.clone() })?,
+                    &id,
+                    "proxy-profiles",
+                    None,
+                    &serde_json::to_vec(&oblivion_host::proxy_profiles::Command::Select {
+                        name: name.clone(),
+                    })?,
                 )?;
             }
             if let Some(policy) = options.policy {
@@ -603,7 +545,9 @@ fn launch(options: Options) -> control::Result<i32> {
         // The controller checks ownership under its lock before closing it.
         if result.is_err() {
             if let Err(error) = control::request_for(&id, "close-idle", None, &[]) {
-                if error.to_string() != "session_changed" { return Err(error); }
+                if error.to_string() != "session_changed" {
+                    return Err(error);
+                }
             }
         }
         result
@@ -633,7 +577,9 @@ fn password(label: &str, confirm: bool) -> control::Result<Zeroizing<Vec<u8>>> {
         let mut byte = [0];
         loop {
             tty.read_exact(&mut byte)?;
-            if let Some(activity) = activity.as_mut() { activity.touch(Instant::now()) }
+            if let Some(activity) = activity.as_mut() {
+                activity.touch(Instant::now())
+            }
             if byte[0] == b'\n' || byte[0] == b'\r' {
                 break;
             }
@@ -696,7 +642,11 @@ fn attach_command(id: &str, command: agent::Command<'_>) -> control::Result<i32>
     if tty && unsafe { libc::tcgetattr(0, &mut saved) } != 0 {
         return Err("Cannot read terminal settings".into());
     }
-    let activity = if tty { Some(oblivion_host::activity::Reporter::current_safe(id)?) } else { None };
+    let activity = if tty {
+        Some(oblivion_host::activity::Reporter::current_safe(id)?)
+    } else {
+        None
+    };
     command.write(&mut stream)?;
     if tty {
         let mut raw = saved;
@@ -802,13 +752,29 @@ mod tests {
         assert!(parse(&["--policy", "direct", "codex"]).is_err());
         assert!(parse(&["--tor", "-x", "socks5h://192.0.2.1:1080", "codex"]).is_err());
         assert!(parse(&["--proxy-profile", "Office", "--tor", "codex"]).is_err());
-        assert!(parse(&["--proxy-profile", "Office", "--proxy-profile", "Other", "codex"]).is_err());
+        assert!(
+            parse(&[
+                "--proxy-profile",
+                "Office",
+                "--proxy-profile",
+                "Other",
+                "codex"
+            ])
+            .is_err()
+        );
         assert!(parse(&["--proxy-profile", "../outside", "codex"]).is_err());
     }
 
     #[test]
     fn named_proxy_is_only_a_controller_reference() {
-        let result = parse(&["--proxy-profile", "Office", "codex", "--proxy-profile", "native-argument"]).unwrap();
+        let result = parse(&[
+            "--proxy-profile",
+            "Office",
+            "codex",
+            "--proxy-profile",
+            "native-argument",
+        ])
+        .unwrap();
         assert_eq!(result.proxy_profile.as_deref(), Some("Office"));
         assert!(result.transport.is_none());
         assert_eq!(result.argv, ["--proxy-profile", "native-argument"]);
@@ -822,12 +788,21 @@ mod tests {
             "sessions":[],"session_titles":{},"open_sessions":[],
             "agent_safes":[{"id":"a".repeat(32),"ephemeral":true,"state":"awaiting-start"},
                 {"id":"b".repeat(32),"ephemeral":false,"state":"awaiting-start"}],
-        })).unwrap();
-        assert_eq!(find_safe(&state, &"a".repeat(32)).unwrap().as_deref(), Some("a".repeat(32).as_str()));
-        assert!(find_safe(&state, &"b".repeat(32)).unwrap().is_none());
-        assert!(find_safe(&state, "missing").unwrap().is_none());
+        }))
+        .unwrap();
+        assert_eq!(
+            state.find_safe(&"a".repeat(32)).unwrap().as_deref(),
+            Some("a".repeat(32).as_str())
+        );
+        assert!(state.find_safe(&"b".repeat(32)).unwrap().is_none());
+        assert!(state.find_safe("missing").unwrap().is_none());
         state.agent_safes[0].state = AgentSafeState::Failed;
-        assert!(open_existing(&state, &"a".repeat(32)).unwrap_err().to_string().contains("not created successfully"));
+        assert!(
+            open_existing(&state, &"a".repeat(32))
+                .unwrap_err()
+                .to_string()
+                .contains("not created successfully")
+        );
         state.agent_safes[0].state = AgentSafeState::RecoveryRequired;
         assert!(open_existing(&state, &"a".repeat(32)).is_err());
     }
