@@ -47,6 +47,11 @@ jobs:
         run: |
           cargo check --locked --lib --target x86_64-pc-windows-msvc
           cargo test --locked
+      - name: Link and exercise the actual Windows command entrypoint without starting a VM
+        working-directory: packages/oblivion-cli
+        run: |
+          cargo build --locked --features windows-launcher --bin oblivion
+          cargo test --locked --features windows-launcher --test windows_entrypoint
 
   secrets:
     name: Secret scan
@@ -181,7 +186,7 @@ jobs:
           cargo check --locked --lib --bins
           cargo check --locked --lib --bins --features lab-emulation
           cargo test --locked --lib --bin oblivion --bin oblivion-storage
-          cargo test --locked --test frontend --test frontend_safes --test frontend_files --test frontend_settings --test frontend_family --test frontend_tasks --test frontend_backup --test safe_admin --test delegation --test backup_cli --test file_attachment --test managed --test terminal_screen --test workspace --test share_control --test channel
+          cargo test --locked --test frontend_command --test frontend --test frontend_safes --test frontend_files --test frontend_settings --test frontend_family --test frontend_tasks --test frontend_backup --test safe_admin --test delegation --test backup_cli --test file_attachment --test managed --test terminal_screen --test workspace --test share_control --test channel
       - name: Exercise the portable private wire
         working-directory: packages/oblivion-wire
         run: cargo test --locked
@@ -362,7 +367,7 @@ jobs:
         run: |
           cargo check --locked --lib --bin oblivion
           cargo test --locked --lib --bin oblivion
-          cargo test --locked --test frontend --test frontend_safes --test frontend_files --test frontend_settings --test frontend_family --test frontend_tasks --test frontend_backup --test managed --test delegation --test backup_cli --test file_attachment --test terminal_screen --test workspace --test share_control --test channel
+          cargo test --locked --test frontend_command --test frontend --test frontend_safes --test frontend_files --test frontend_settings --test frontend_family --test frontend_tasks --test frontend_backup --test managed --test delegation --test backup_cli --test file_attachment --test terminal_screen --test workspace --test share_control --test channel
           PYTHONDONTWRITEBYTECODE=1 python3 tests/file-channel.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/activity-client.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/native-overlay.py

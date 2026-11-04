@@ -8,6 +8,7 @@ use oblivion_wire::agent::{Command, Launch, Size};
 use oblivion_wire::control::{Operation, Request};
 use oblivion_wire::idle;
 use oblivion_wire::slot::Slot;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
@@ -137,6 +138,42 @@ impl Runtime {
 
     pub fn cancellation(&self) -> Cancellation {
         self.client.cancellation()
+    }
+
+    pub fn file_query<T: serde::de::DeserializeOwned>(
+        &mut self,
+        opening: &idle::Opening<Slot>,
+        request: &oblivion_transfer::native_files::Request,
+    ) -> Result<T> {
+        let (mut channel, client) = self.client.attach(Call {
+            operation: Operation::FileAttach,
+            slot: Some(opening.slot),
+            session: None,
+            expected_session: Some(&opening.safe_id),
+            secret: &serde_json::to_vec(opening).map_err(|_| "invalid_file_opening")?,
+        })?;
+        let result = (|| -> Result<T> {
+            channel.set_deadline(Instant::now() + Duration::from_secs(60))?;
+            oblivion_transfer::endpoint::write_message(&mut channel, request)?;
+            channel.flush()?;
+            Ok(oblivion_transfer::endpoint::read_message(
+                &mut channel,
+                8192,
+            )?)
+        })();
+        // Keep the attachment alive through release, even after malformed or
+        // truncated metadata. EOF alone is not proof of controller cleanup.
+        let released = self.client.request(Call {
+            operation: Operation::AgentRelease,
+            slot: Some(opening.slot),
+            session: Some(&client),
+            expected_session: Some(&opening.safe_id),
+            secret: &[],
+        });
+        let closed = channel.close();
+        released?;
+        closed?;
+        result
     }
 
     fn host_activity(&mut self) -> Result<Option<Activity>> {

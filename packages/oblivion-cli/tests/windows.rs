@@ -22,6 +22,20 @@ use windows_sys::Win32::System::Pipes::{
 
 const SAFE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+fn connect(pipe: &mut File) -> Value {
+    let connected = unsafe { ConnectNamedPipe(pipe.as_raw_handle(), null_mut()) } != 0;
+    assert!(connected || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED);
+    serde_json::from_slice(&frame::read(pipe, 1..=HEADER_LIMIT).unwrap()).unwrap()
+}
+fn disconnect(pipe: &mut File) {
+    match pipe.read(&mut [0]) {
+        Ok(0) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+        other => panic!("client did not release its pipe: {other:?}"),
+    }
+    assert_ne!(unsafe { DisconnectNamedPipe(pipe.as_raw_handle()) }, 0);
+}
+
 fn listener() -> (String, File) {
     let mut bytes = [0; 16];
     getrandom::getrandom(&mut bytes).unwrap();
@@ -147,19 +161,6 @@ fn runtime_attaches_native_argv_and_duplex_pipes_then_releases_the_exact_safe_cl
         );
         unsafe { (File::from_raw_handle(read), File::from_raw_handle(write)) }
     }
-    fn connect(pipe: &mut File) -> Value {
-        let connected = unsafe { ConnectNamedPipe(pipe.as_raw_handle(), null_mut()) } != 0;
-        assert!(connected || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED);
-        serde_json::from_slice(&frame::read(pipe, 1..=HEADER_LIMIT).unwrap()).unwrap()
-    }
-    fn disconnect(pipe: &mut File) {
-        match pipe.read(&mut [0]) {
-            Ok(0) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
-            other => panic!("client did not release its pipe: {other:?}"),
-        }
-        assert_ne!(unsafe { DisconnectNamedPipe(pipe.as_raw_handle()) }, 0);
-    }
 
     let (id, mut control) = listener();
     let mut release_channel = instance(&id, false);
@@ -255,5 +256,190 @@ fn runtime_attaches_native_argv_and_duplex_pipes_then_releases_the_exact_safe_cl
     let mut bytes = vec![];
     stderr.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes, b"diagnostic\n");
+    server.join().unwrap();
+}
+
+#[test]
+fn files_browser_uses_the_open_safe_slot_and_validates_its_guest_page() {
+    let (id, mut control) = listener();
+    let server = std::thread::spawn(move || {
+        let request = connect(&mut control);
+        assert_eq!(request["operation"], json!(Operation::Status));
+        assert_eq!(request["slot"], 0);
+        assert!(request["expected_session"].is_null());
+        frame::write(
+            &mut control,
+            &serde_json::to_vec(&json!({"ok":true,"output":state(4)})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        disconnect(&mut control);
+        let request = connect(&mut control);
+        assert_eq!(request["operation"], json!(Operation::Browse));
+        assert_eq!(request["slot"], 4);
+        assert_eq!(request["expected_session"], SAFE);
+        assert!(request["session"].is_null());
+        let mut secret = vec![0; request["secret_len"].as_u64().unwrap() as usize];
+        control.read_exact(&mut secret).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&secret).unwrap(),
+            json!({"path":"workspace/project","after":null,"limit":100})
+        );
+        let page = json!({"path":"workspace/project","entries":[{"name":"readme.txt","directory":false,"bytes":7}],"next":null,"skipped":0});
+        frame::write(
+            &mut control,
+            &serde_json::to_vec(&json!({"ok":true,"output":page.to_string()})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        disconnect(&mut control);
+    });
+    let mut runtime = oblivion_cli::windows::Runtime::new(&id).unwrap();
+    let command = oblivion_cli::files::parse(
+        &["list", "--safe", "GB", "workspace/project", "--json"].map(str::to_owned),
+    )
+    .unwrap()
+    .unwrap();
+    let mut output = vec![];
+    let mut diagnostics = vec![];
+    assert_eq!(
+        oblivion_cli::files::execute(&mut runtime, command, &mut output, &mut diagnostics).unwrap(),
+        0
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).unwrap(),
+        json!({"path":"workspace/project","entries":[{"name":"readme.txt","path":"workspace/project/readme.txt","kind":"file","bytes":7}],"next_cursor":null,"skipped":0})
+    );
+    assert!(diagnostics.is_empty());
+    server.join().unwrap();
+}
+
+#[test]
+fn guest_file_metadata_holds_the_exact_opening_lease_until_explicit_release_even_on_bad_reply() {
+    use oblivion_cli::files::Backend;
+    use oblivion_transfer::native_files::{Action, Direction, TransfersQuery};
+    use oblivion_wire::idle::Opening;
+    let (id, mut control) = listener();
+    let mut release = instance(&id, false);
+    let opening = Opening {
+        slot: 4.try_into().unwrap(),
+        safe_id: SAFE.into(),
+        nonce: "cccccccccccccccccccccccccccccccc".into(),
+    };
+    let expected_opening = serde_json::to_value(&opening).unwrap();
+    let server = std::thread::spawn(move || {
+        for action in ["transfers", "status", "recover", "discard", "malformed"] {
+            let request = connect(&mut control);
+            assert_eq!(request["operation"], json!(Operation::FileAttach));
+            assert_eq!(request["slot"], 4);
+            assert_eq!(request["expected_session"], SAFE);
+            assert!(request["session"].is_null());
+            let mut secret = vec![0; request["secret_len"].as_u64().unwrap() as usize];
+            control.read_exact(&mut secret).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&secret).unwrap(),
+                expected_opening
+            );
+            let client = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+            frame::write(
+                &mut control,
+                &serde_json::to_vec(&json!({"ok":true,"output":client})).unwrap(),
+                1..=RESPONSE_LIMIT,
+            )
+            .unwrap();
+            let metadata: Value =
+                serde_json::from_slice(&frame::read(&mut control, 1..=8192).unwrap()).unwrap();
+            let mut expected = json!({"operation":if action == "malformed" { "status" } else { action },"safe_id":SAFE,"opening":expected_opening["nonce"]});
+            if action == "transfers" {
+                expected["after"] = Value::Null;
+                expected["limit"] = json!(8);
+            } else {
+                expected["id"] = json!("dddddddddddddddddddddddddddddddd");
+            }
+            assert_eq!(metadata, expected);
+            let page = if action == "transfers" {
+                json!({"safe_id":SAFE,"opening":expected_opening["nonce"],"direction":"import","entries":[],"next_cursor":null,"skipped":0})
+            } else {
+                json!({"operation_id":"dddddddddddddddddddddddddddddddd","safe_id":SAFE,"opening":expected_opening["nonce"],"source_opening":null,"state":"unknown","receipt":null,"can_recover":false,"can_discard":false})
+            };
+            let reply = if action == "malformed" {
+                b"PRIVATE_CANARY invalid JSON".to_vec()
+            } else {
+                serde_json::to_vec(&page).unwrap()
+            };
+            frame::write(&mut control, &reply, 1..=8192).unwrap();
+            let request = connect(&mut release);
+            assert_eq!(request["operation"], json!(Operation::AgentRelease));
+            assert_eq!(request["slot"], 4);
+            assert_eq!(request["expected_session"], SAFE);
+            assert_eq!(request["session"], client);
+            assert_eq!(request["secret_len"], 0);
+            assert_ne!(
+                unsafe {
+                    PeekNamedPipe(
+                        control.as_raw_handle(),
+                        null_mut(),
+                        0,
+                        null_mut(),
+                        null_mut(),
+                        null_mut(),
+                    )
+                },
+                0
+            );
+            frame::write(
+                &mut release,
+                &serde_json::to_vec(&json!({"ok":true,"output":""})).unwrap(),
+                1..=RESPONSE_LIMIT,
+            )
+            .unwrap();
+            disconnect(&mut control);
+            disconnect(&mut release);
+        }
+    });
+    let mut runtime = oblivion_cli::windows::Runtime::new(&id).unwrap();
+    let page = runtime
+        .transfers(
+            &opening,
+            &TransfersQuery {
+                safe_id: SAFE.into(),
+                opening: opening.nonce.clone(),
+                direction: Direction::Import,
+                after: None,
+                limit: 8,
+            },
+            None,
+        )
+        .unwrap();
+    assert!(page.entries.is_empty());
+    for action in [Action::Status, Action::Recover, Action::Discard] {
+        let status = runtime
+            .manage(&opening, "dddddddddddddddddddddddddddddddd", action, None)
+            .unwrap();
+        status
+            .validate("dddddddddddddddddddddddddddddddd", SAFE, &opening.nonce)
+            .unwrap();
+    }
+    let error = runtime
+        .manage(
+            &opening,
+            "dddddddddddddddddddddddddddddddd",
+            Action::Status,
+            None,
+        )
+        .unwrap_err();
+    assert!(!format!("{error:?}").contains("PRIVATE_CANARY"));
+    let error = runtime
+        .manage(
+            &opening,
+            "dddddddddddddddddddddddddddddddd",
+            Action::Status,
+            Some("C:\\exports"),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "windows_filesystem_endpoint_not_implemented"
+    );
     server.join().unwrap();
 }

@@ -29,8 +29,8 @@ pub fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.len() == 1 && args[0] == "capabilities" {
         let observation = hcs::capabilities();
-        // Availability of the helper core is distinct from installed product
-        // support: the Windows frontend and installer are not wired yet.
+        // Availability of the helper core is distinct from product support:
+        // the installed path, privileges and actual nested boot need qualification.
         let document = match observation {
             Ok(capabilities) => serde_json::json!({
                 "backend":"hcs-hyperv", "experimental":true, "supported":false,

@@ -7,11 +7,11 @@ pub mod run;
 pub mod shell;
 pub mod storage;
 
-pub mod controller;
-pub mod command;
 pub mod activity;
 pub mod backup;
 pub mod child_task;
+pub mod command;
+pub mod controller;
 pub mod family_password;
 pub mod files;
 pub mod network;
@@ -20,5 +20,9 @@ pub mod safe;
 pub mod settings;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(windows)]
+pub mod windows_entrypoint;
+#[cfg(windows)]
+pub mod windows_files;
 #[cfg(windows)]
 pub mod windows_terminal;
