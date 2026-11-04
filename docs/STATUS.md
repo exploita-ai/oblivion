@@ -14,10 +14,12 @@ export, guest review, encrypted streams, fresh-volume import, atomic collection
 publication and explicit import recovery. These source statements do not imply
 that all end-to-end paths have passed in an installed candidate.
 
-The local chooser now accepts an explicitly pasted path or local file URL,
+The local chooser accepts an explicitly pasted path or local file URL,
 reviews its type and resolved location, and leaves the existing copy review
-in place. Nothing is imported by pasting. Whole-path quotes are supported;
-shell expansion and OS-native drag-and-drop APIs are not implemented.
+in place. Existing literal paths take precedence; a pinned MIT parser also
+accepts a single terminal-escaped path without executing a shell, expanding
+variables or globs. Nothing is imported by pasting. Actual terminal drop gestures
+and OS-native drag-and-drop APIs remain unqualified or unimplemented respectively.
 
 Cross-agent conversation sharing, synchronization, conversion and handoff are
 outside the 1.0 scope. Each agent owns its native chats and resume inside the
@@ -38,10 +40,15 @@ No automatic NTP service was enabled. See [Live controls](LIVE.md).
 
 Live controller initialization now overlaps the three-second, once-per-boot
 wordmark. Initial status requests share one operation and the startup budget;
-a cold-start failure stays visible until explicit retry. Verified cancellation
-and ownership cleanup after terminal loss during bootstrap remain open; no
-Cancel action is presented as working before that lifecycle is implemented.
-These source checks do not qualify USB reboot or nested virtualization.
+a cold-start failure stays visible until explicit retry. A shared runtime
+supervisor now tracks exact client process births and backend ownership, releases
+an abandoned startup, preserves a runtime adopted by another client and requests
+guarded idle shutdown only when no owners remain. Busy or uncertain shutdown
+does not become a successful stop; refused shutdown preserves live Share and
+family authority. Backend helpers terminate their owned VM when their inherited
+supervisor channel is lost. Real-process fixtures cover these source boundaries;
+installed bootstrap interruption, USB reboot and nested virtualization remain
+acceptance gates. No unimplemented Cancel action is presented.
 
 The agent chooser now separates Enter for a new conversation from C to
 continue that agent's latest conversation in its current workspace. A saved
@@ -118,13 +125,20 @@ this diagnostic result does not qualify Mac hardware acceleration. There is no
 production emulation fallback. Linux hardware acceptance and the Windows backend
 remain open.
 
+Portable CLI run/proxy parsing, private wire framing and Files validation now
+compile for Windows MSVC and are exercised in the Windows CI job. The shared
+amd64 controller build also verifies Hyper-V driver coverage in its kernel and
+initramfs. The Windows frontend, backend, bootstrap authentication, EFI boot and
+installer remain unimplemented or unqualified; see [Windows requirements](WINDOWS.md).
+
 Remaining release gates include real login and scoped child-credential delegation,
 chat persistence after cold restart,
 native resume for each agent,
 close during active jobs,
 family password rotation and independent restore, concurrent Tor/SOCKS5 failures,
 Share between two installed candidates, physical media, resource measurements,
-desktop installation/uninstall qualification, bootstrap terminal-loss cleanup and signed release provenance. Local inference is deferred until after
+desktop installation/uninstall qualification, installed bootstrap terminal-loss
+cleanup and signed release provenance. Local inference is deferred until after
 1.0. No independent security audit has been completed.
 
 CI builds current-source images as drafts. A successful check, build or checksum

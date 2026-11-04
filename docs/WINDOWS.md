@@ -128,19 +128,27 @@ of an air gap or of zero plaintext managed by Windows itself.
 The existing CLI cannot simply cross-compile by adding a Hyper-V executable.
 `launcher.rs` imports Unix process/FD APIs and uses POSIX signals and termios;
 `channel.rs`/`remote_control.rs` require Unix sockets; `native_runtime.rs` and
-`desktop_bundle.rs` depend on Unix filesystem ownership and locks. The transfer
-crate mixes portable manifests/framing with Unix filesystem operations. The
-manager builder and bundle platform table also omit Windows.
+`desktop_bundle.rs` depend on Unix filesystem ownership and locks. The manager
+builder and bundle platform table also omit Windows.
 
-Proposed split, without a second command implementation:
+The first shared boundaries are implemented and consumed by the existing
+launcher. `oblivion-cli` owns one run-option and proxy grammar, preserving opaque
+native arguments and returning a typed private-password request without doing
+terminal I/O. `oblivion-wire` owns bounded private controller/agent framing.
+`oblivion-transfer` separates manifests, payload verification, directory metadata,
+copy messages and Share selection rules from Unix filesystem endpoints. All
+three portable libraries compile for the Windows MSVC target; CI runs their
+portable tests on Windows. This does not provide a Windows frontend, trusted
+file handle implementation, ACL checks or a Hyper-V backend.
+
+Remaining split, without a second command implementation:
 
 1. Move the existing frontend commands/orchestration into a portable launcher
    boundary. Keep Linux controller services and storage code in the Linux host
    package, rather than linking them into every desktop executable.
-2. Reuse one versioned wire model and frame encoder/decoder for control, agent
-   argv, stdout/stderr, resize, Files, backup and Share. Separate the transfer
-   manifest/validation code from its OS filesystem endpoints. No protocol alias
-   or compatibility reader is needed for the unshipped 1.0.
+2. Connect the shared CLI, wire and transfer boundaries to Windows transports
+   and filesystem endpoints. Keep one command grammar and protocol rather than
+   adding platform-specific copies or compatibility readers.
 3. Supply concrete terminal, private IPC, filesystem-identity and runtime-backend
    adapters for Unix and Windows. Preserve opaque argument arrays; never feed
    agent arguments into a PowerShell command string. The three agent binaries

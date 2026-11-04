@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   portable-wire:
-    name: Portable wire and Files (Windows; no VM backend)
+    name: Portable CLI, wire and Files (Windows; no VM backend)
     runs-on: windows-2022
     timeout-minutes: 10
     defaults:
@@ -39,6 +39,11 @@ jobs:
         run: |
           cargo check --locked --lib --target x86_64-pc-windows-msvc
           cargo test --locked --lib
+      - name: Compile and exercise the shared run and proxy grammar
+        working-directory: packages/oblivion-cli
+        run: |
+          cargo check --locked --lib --target x86_64-pc-windows-msvc
+          cargo test --locked
 
   secrets:
     name: Secret scan
