@@ -720,6 +720,15 @@ pub fn main() -> Result<()> {
     oblivion_host::scope::within(slot, || execute(args, expected.as_deref()))
 }
 
+fn share_slot_allows_operation(op: &str, mode: MountMode) -> bool {
+    matches!(op, "status" | "share-release" | "share-export-cancel" | "share-export-cleanup" | "close" | "leave"
+        | "force-leave" | "lock" | "recover" | "idle-close" | "idle-lock" | "share-import-finish"
+        | "share-import-abort" | "share-import-discard" | "share-import-status")
+        // A persistent title is catalog metadata, not a write through this
+        // slot's maintenance VM. Temporary titles still belong to its opening.
+        || op == "rename-session" && mode == MountMode::ReadWrite
+}
+
 fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
     runtime()?;
     if scope::current().index() != 0 {
@@ -836,9 +845,8 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         crate::ipc::require_tool_owner()?;
     }
     if session_info()?.is_some_and(|entry| entry.1 == "share") {
-        require(matches!(op, "status" | "share-release" | "share-export-cancel" | "share-export-cleanup" | "close" | "leave"
-            | "force-leave" | "lock" | "recover" | "idle-close" | "idle-lock" | "share-import-finish"
-            | "share-import-abort" | "share-import-discard" | "share-import-status"), "safe_maintenance_active")?;
+        let mode = if op == "rename-session" { mount_mode()? } else { MountMode::Closed };
+        require(share_slot_allows_operation(op, mode), "safe_maintenance_active")?;
     }
     // A broken transfer record must not prevent teardown from revoking the
     // current grant. Admission guards apply to new work, not close/recovery.
@@ -4842,6 +4850,19 @@ impl Config {
 #[cfg(test)]
 mod share_metadata_tests {
     use super::*;
+
+    #[test]
+    fn share_maintenance_allows_only_persistent_catalog_rename_without_guest_access() {
+        assert!(share_slot_allows_operation("rename-session", MountMode::ReadWrite));
+        for mode in [MountMode::ReadOnly, MountMode::RamOnly, MountMode::Closed] {
+            assert!(!share_slot_allows_operation("rename-session", mode));
+            assert!(share_slot_allows_operation("close", mode));
+            assert!(share_slot_allows_operation("status", mode));
+        }
+        for op in ["enter-documents", "start-agent", "session-storage", "egress"] {
+            assert!(!share_slot_allows_operation(op, MountMode::ReadWrite));
+        }
+    }
 
     #[test]
     fn unresolved_imported_proxy_label_survives_only_until_transport_is_configured() {
