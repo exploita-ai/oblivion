@@ -6,3 +6,4 @@ pub mod agent;
 pub mod control;
 pub mod control_client;
 pub mod frame;
+pub mod session_title;

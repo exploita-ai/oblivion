@@ -25,6 +25,13 @@ pub enum Access {
     Offline,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Command {
+    pub mode: Access,
+    pub save: bool,
+}
+
 impl Access {
     pub fn parse(value: &str) -> Result<Self, &'static str> {
         match value {

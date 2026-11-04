@@ -1,4 +1,6 @@
+pub mod egress;
 pub mod policy;
+pub mod proxy_profiles;
 
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddrV4};

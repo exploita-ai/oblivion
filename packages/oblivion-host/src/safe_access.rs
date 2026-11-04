@@ -1,13 +1,7 @@
 //! Network access belongs to an individual Safe, independently of Debian settings.
 use oblivion_transport::policy::Access;
+pub use oblivion_transport::policy::Command;
 use serde::{Deserialize, Serialize};
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Command {
-    pub mode: Access,
-    pub save: bool,
-}
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -29,7 +23,7 @@ impl Status {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, Status};
+    use super::Status;
     use oblivion_transport::policy::Access;
 
     #[test]
@@ -41,17 +35,5 @@ mod tests {
         assert_eq!(status.current, Access::Offline);
         assert_eq!(status.saved, Some(Access::Strict));
         assert!(status.temporary);
-    }
-
-    #[test]
-    fn command_has_no_os_preferences_or_legacy_action_shape() {
-        assert!(serde_json::from_str::<Command>(r#"{"mode":"open","save":true}"#).is_ok());
-        for request in [
-            r#"{"action":"access","mode":"open","save":true}"#,
-            r#"{"mode":"open","save":true,"keyboard":"us"}"#,
-            r#"{"mode":"direct","save":false}"#,
-        ] {
-            assert!(serde_json::from_str::<Command>(request).is_err());
-        }
     }
 }
