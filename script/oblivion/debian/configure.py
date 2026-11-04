@@ -47,7 +47,7 @@ def configure(account):
             raise ValueError("reserved_service_identity_occupied")
     installation = Path("/etc/oblivion/installation.json")
     regular(installation)
-    if json.loads(installation.read_text()) != {"version": 1, "mode": "direct-controller"}:
+    if json.loads(installation.read_text()) != {"version": 1, "mode": "controller-runtime"}:
         raise ValueError("incompatible_installation_profile")
     config_path = Path("/etc/oblivion/controller.json")
     if config_path.exists() or config_path.is_symlink():

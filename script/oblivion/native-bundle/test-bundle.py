@@ -158,6 +158,15 @@ class DesktopBundle(unittest.TestCase):
             with self.subTest(version=version), self.assertRaisesRegex(ValueError, "development version"):
                 builder.assemble(args)
 
+    def test_linux_arm64_assembly_keeps_the_native_library_architecture(self):
+        args = self.prepared("linux-arm64")
+        builder.assemble(args)
+        manifest = json.loads((args.output / "bundle.json").read_text())
+        self.assertEqual(manifest["platform"], "linux-arm64")
+        self.assertEqual(manifest["backend"], "qemu-kvm")
+        self.assertTrue((args.output / "lib/manager/@opentui/core-linux-arm64/libopentui.so").is_file())
+        self.assertFalse((args.output / "lib/manager/@opentui/core-linux-x64/libopentui.so").exists())
+
     def test_preparation_rejects_checksum_mismatch(self):
         args = self.runtime()
         (args.runtime / "client-evidence.json").write_bytes(b"modified")

@@ -136,7 +136,7 @@ class PackageLifecycle(unittest.TestCase):
         run("dpkg", "--install", str(self.package), env=environment)
         self.assertEqual(config_path.read_bytes(), original)
         self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
-        self.assertEqual(json.loads(Path("/etc/oblivion/installation.json").read_text()), {"version": 1, "mode": "direct-controller"})
+        self.assertEqual(json.loads(Path("/etc/oblivion/installation.json").read_text()), {"version": 1, "mode": "controller-runtime"})
         runtime = Path("/run/oblivion-manager")
         self.assertEqual((runtime.stat().st_uid, stat.S_IMODE(runtime.stat().st_mode)), (1000, 0o700))
         output = run("runuser", "--user", "oblivion-fixture", "--", "/usr/bin/oblivion-manager", "--null").stdout

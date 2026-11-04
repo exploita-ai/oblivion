@@ -183,3 +183,17 @@ packages/oblivion-share/*
 !packages/oblivion-share/Cargo.lock
 !packages/oblivion-share/src/
 !packages/oblivion-share/src/**
+
+!script/oblivion/controller-*
+!script/oblivion/bundle-native.py
+!script/oblivion/desktop/
+!script/oblivion/desktop/**
+!docs/
+docs/*
+!docs/DESKTOP.md
+!packages/oblivion-native-linux/
+packages/oblivion-native-linux/*
+!packages/oblivion-native-linux/Cargo.toml
+!packages/oblivion-native-linux/Cargo.lock
+!packages/oblivion-native-linux/src/
+!packages/oblivion-native-linux/src/**

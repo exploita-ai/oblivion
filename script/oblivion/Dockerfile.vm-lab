@@ -97,7 +97,7 @@ COPY packages/oblivion-manager/package.json /oblivion-manager/package.json
 COPY packages/theme/src/ /theme/src/
 COPY packages/tui-kit/src/ /tui-kit/src/
 COPY package.json bun.lock LICENSE NOTICE /workspace-inputs/
-COPY script/oblivion/Dockerfile.vm-lab script/oblivion/live-setup.sh script/oblivion/live-pack.sh script/oblivion/live-grub.cfg script/oblivion/live-controller.json script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/session-identities.sh script/oblivion/pack-vm-assets.sh script/oblivion/host-firewall.nft script/oblivion/install-agents.py script/oblivion/install-agents.json script/oblivion/session-node.json script/oblivion/install-session-node.py script/oblivion/session-packages.txt script/oblivion/session-analysis.lock script/oblivion/session-analysis-licenses.json script/oblivion/install-session-analysis.py script/oblivion/onionshare-source.json script/oblivion/onionshare-requirements.lock script/oblivion/onionshare-licenses.json script/oblivion/install-onionshare.py script/oblivion/install-vbox-clipboard.py script/oblivion/vbox-clipboard.json /runtime-inputs/
+COPY script/oblivion/Dockerfile.vm-lab script/oblivion/controller-setup.sh script/oblivion/controller-pack.sh script/oblivion/live-setup.sh script/oblivion/live-pack.sh script/oblivion/live-storage.py script/oblivion/live-grub.cfg script/oblivion/live-controller.json script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/session-identities.sh script/oblivion/pack-vm-assets.sh script/oblivion/host-firewall.nft script/oblivion/install-agents.py script/oblivion/install-agents.json script/oblivion/session-node.json script/oblivion/install-session-node.py script/oblivion/session-packages.txt script/oblivion/session-analysis.lock script/oblivion/session-analysis-licenses.json script/oblivion/install-session-analysis.py script/oblivion/onionshare-source.json script/oblivion/onionshare-requirements.lock script/oblivion/onionshare-licenses.json script/oblivion/install-onionshare.py script/oblivion/install-vbox-clipboard.py script/oblivion/vbox-clipboard.json /runtime-inputs/
 COPY script/oblivion/display/ /runtime-inputs/display/
 COPY script/oblivion/native-bundle/host-sources.py /runtime-inputs/native-bundle/host-sources.py
 COPY script/oblivion/native-bundle/host-sources.py /host-sources.py
@@ -438,8 +438,8 @@ COPY script/oblivion/vm-onion-recipient.py /usr/lib/oblivion/vm-onion-recipient.
 USER 1000:1000
 ENTRYPOINT ["/usr/bin/python3", "-B", "/usr/lib/oblivion/vm-onion-recipient.py"]
 
-# Diagnostics exist only in this separate laboratory image.
-FROM os AS live-host-base
+# Private Debian controller; never installed as the outer Live OS.
+FROM os AS controller-host
 ARG TARGETARCH
 ARG OBLIVION_HOST_KERNEL_VERSION=""
 # Native Mac qualification can select an official Debian backports kernel.
@@ -458,18 +458,9 @@ RUN case "$TARGETARCH" in arm64|amd64) ;; *) exit 1;; esac \
     live-boot live-boot-initramfs-tools cryptsetup-bin dmsetup fdisk \
     $(if [ "$TARGETARCH" = arm64 ]; then printf qemu-system-arm; else printf qemu-system-x86; fi) \
     python3 network-manager wpasupplicant iproute2 nftables console-setup-mini kbd tzdata xkb-data \
-    libwlroots-0.18 foot seatd fonts-dejavu-mono libxkbcommon-tools libpciaccess0 \
     firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211 firmware-mediatek \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=compiler /bundle/oblivion /bundle/oblivion-storage /bundle/oblivion-control /bundle/oblivion-display /bundle/oblivion-copy /usr/bin/
-COPY --from=cage-build /out/oblivion-cage /usr/bin/
-COPY --from=cage-build /out/LICENSE /out/oblivion.patch /out/cage-source.sha256 /usr/share/doc/oblivion-display/
-COPY --from=clipboard-compiler /clipboard/target/release/oblivion-clipboard /usr/bin/
-COPY --from=clipboard-compiler /clipboard/LICENSE /clipboard/PROVENANCE.md /clipboard/upstream.json /clipboard/Cargo.lock /clipboard/sources.sha256 /usr/share/doc/oblivion-clipboard/
-COPY --from=clipboard-broker /out/usr/sbin/spice-vdagentd /usr/sbin/
-COPY --from=clipboard-broker /out/usr/share/doc/spice-vdagent/ /usr/share/doc/spice-vdagent/
-COPY --from=clipboard-broker /out/package.control /out/SHA256SUMS /usr/share/doc/spice-vdagent/
-COPY --from=vbox-clipboard /out/ /usr/lib/oblivion/virtualbox/
+COPY --from=compiler /bundle/oblivion-storage /bundle/oblivion-control /bundle/oblivion-copy /usr/bin/
 COPY ${MANAGER_BINARY} /usr/bin/oblivion-manager
 COPY ${MANAGER_ASSETS} /usr/lib/oblivion/manager/
 COPY packages/oblivion-host/host/*.service /etc/systemd/system/
@@ -477,19 +468,12 @@ COPY packages/oblivion-host/host/control-relay.py /usr/lib/oblivion/control-rela
 COPY packages/oblivion-host/host/runtime-prepare.py /usr/lib/oblivion/host/runtime-prepare.py
 COPY packages/oblivion-host/host/runtime-auth.py /usr/lib/oblivion/host/runtime-auth.py
 COPY packages/oblivion-host/host/oblivion-runtime-generator /usr/lib/systemd/system-generators/oblivion-runtime-generator
-COPY script/oblivion/live-setup.sh /tmp/live-setup
+COPY script/oblivion/controller-setup.sh /tmp/live-setup
 COPY script/oblivion/session-identities.sh /tmp/session-identities
 COPY script/oblivion/live-controller.json /etc/oblivion/controller.json
 COPY script/oblivion/host-firewall.nft /etc/oblivion/host-firewall.nft
 COPY packages/oblivion-gateway/guest/resolv.conf /etc/resolv.conf
 RUN sh /tmp/live-setup && sh /tmp/session-identities && rm /tmp/live-setup /tmp/session-identities
-COPY script/oblivion/display/*.service script/oblivion/display/*.socket script/oblivion/display/manager.conf script/oblivion/display/foot.ini script/oblivion/display/start.sh script/oblivion/display/70-oblivion-clipboard.rules /usr/lib/oblivion/display/
-COPY script/oblivion/display/install.sh /tmp/display-setup
-RUN sh /tmp/display-setup && rm /tmp/display-setup \
-    && LANG=C.UTF-8 foot --log-level=info --check-config --config=/etc/oblivion/foot.ini \
-    && test ! -x /usr/bin/Xwayland
-
-FROM live-host-base AS live-host
 
 FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS live-pack-tools
 ARG TARGETARCH
@@ -499,7 +483,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 FROM session-tools AS stack-session
 ARG TARGETARCH
 ARG OBLIVION_AGENTS="codex claude opencode2"
-COPY packages/oblivion-history/ /usr/lib/oblivion/history/
+COPY packages/oblivion-history/prepare.py /usr/lib/oblivion/history/prepare.py
+COPY packages/oblivion-history/oblivion_history/ /usr/lib/oblivion/history/oblivion_history/
 COPY packages/oblivion-tools/dist/server.mjs /usr/lib/oblivion/tools/server.mjs
 COPY packages/oblivion-host/guest/native-tools/codex.toml /etc/codex/config.toml
 COPY script/oblivion/install-agents.py script/oblivion/install-agents.json /build/agents/
@@ -562,7 +547,7 @@ COPY --from=debian-package-build /out/ /
 
 FROM live-pack-tools AS stack-pack
 ARG OBLIVION_IMAGE_NAME=oblivion-stack-development
-COPY --from=live-host / /host/
+COPY --from=controller-host / /host/
 COPY --from=stack-session / /session/
 COPY --from=gateway-system / /gateway/
 COPY --from=import-guest / /import/
@@ -571,8 +556,74 @@ COPY --from=onion-gateway-system / /onion-gateway/
 COPY --from=live-onion-file / /onion-file/
 COPY --from=compiler /bundle/sources.sha256 /sources/host-sources.sha256
 COPY --from=gateway-compiler /gateway-bundle/sources.sha256 /sources/gateway-sources.sha256
-COPY script/oblivion/live-* script/oblivion/pack-vm-assets.sh script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/Dockerfile.vm-lab /sources/
+COPY script/oblivion/controller-* script/oblivion/live-* script/oblivion/pack-vm-assets.sh script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/Dockerfile.vm-lab /sources/
+RUN OBLIVION_IMAGE_NAME="$OBLIVION_IMAGE_NAME" sh /sources/controller-pack.sh
+
+FROM scratch AS controller-runtime-artifacts
+COPY --from=stack-pack /out/ /
+
+
+# Compile the external Linux launcher against exactly the controller source
+# inventory above, then assemble the same bundle used by Linux desktop installs.
+FROM compiler AS live-native-build
+ARG TARGETARCH
+ARG MANAGER_BINARY=artifacts/oblivion-manager/bun-linux-x64/oblivion-manager
+ARG MANAGER_ASSETS=artifacts/oblivion-manager/bun-linux-x64/assets
+ARG MANAGER_LICENSES=artifacts/oblivion-manager/bun-linux-x64/licenses
+COPY --from=stack-pack /out/ /runtime-output/
+COPY packages/oblivion-native-linux/ /native-helper/
+COPY script/oblivion/bundle-native.py /script/oblivion/bundle-native.py
+COPY --from=compiler /runtime-inputs/ /script/oblivion/
+COPY docs/DESKTOP.md /docs/DESKTOP.md
+COPY script/oblivion/desktop/install.sh /script/oblivion/desktop/install.sh
+COPY ${MANAGER_BINARY} /native-manager/oblivion-manager
+COPY ${MANAGER_ASSETS} /native-manager/assets/
+COPY ${MANAGER_LICENSES} /oblivion-manager/node_modules/
+RUN apt-get update && apt-get install -y --no-install-recommends libarchive-tools && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /packages \
+    && ln -s /build /packages/oblivion-host \
+    && for package in oblivion-transfer oblivion-share oblivion-tor-state oblivion-transport oblivion-history oblivion-tools oblivion-gateway oblivion-onion oblivion-clipboard oblivion-manager theme tui-kit; do ln -s "/$package" "/packages/$package"; done \
+    && cp /workspace-inputs/* / \
+    && case "$TARGETARCH" in amd64) platform=linux-x86_64;; arm64) platform=linux-arm64;; *) exit 1;; esac \
+    && identity=$(python3 -B /script/oblivion/bundle-native.py prepare --runtime /runtime-output --platform "$platform" --output /prepared) \
+    && OBLIVION_DESKTOP_SOURCE_SHA256="$identity" OBLIVION_DESKTOP_PLATFORM="$platform" cargo build --locked --release --bin oblivion \
+    && cargo build --manifest-path /native-helper/Cargo.toml --locked --release \
+    && python3 -B /script/oblivion/bundle-native.py assemble --prepared /prepared --platform "$platform" --product-version '1.0.0~dev' --cli /build/target/release/oblivion --helper /native-helper/target/release/oblivion-vm --manager /native-manager/oblivion-manager --manager-assets /native-manager/assets --output /desktop
+
+FROM os AS live-launcher
+ARG TARGETARCH
+RUN sed -i 's/^Components: main$/Components: main non-free-firmware/' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    live-boot live-boot-initramfs-tools python3 fdisk sudo network-manager wpasupplicant \
+    $(if [ "$TARGETARCH" = arm64 ]; then printf qemu-system-arm; else printf qemu-system-x86; fi) \
+    libwlroots-0.18 foot seatd fonts-dejavu-mono libxkbcommon-tools libpciaccess0 \
+    console-setup-mini kbd tzdata xkb-data \
+    firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211 firmware-mediatek \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=live-native-build /desktop/ /usr/lib/oblivion/desktop/
+COPY --from=compiler /bundle/oblivion-display /usr/bin/
+COPY --from=cage-build /out/oblivion-cage /usr/bin/
+COPY --from=cage-build /out/LICENSE /out/oblivion.patch /out/cage-source.sha256 /usr/share/doc/oblivion-display/
+COPY --from=clipboard-compiler /clipboard/target/release/oblivion-clipboard /usr/bin/
+COPY --from=clipboard-compiler /clipboard/LICENSE /clipboard/PROVENANCE.md /clipboard/upstream.json /clipboard/Cargo.lock /clipboard/sources.sha256 /usr/share/doc/oblivion-clipboard/
+COPY --from=clipboard-broker /out/usr/sbin/spice-vdagentd /usr/sbin/
+COPY --from=clipboard-broker /out/usr/share/doc/spice-vdagent/ /usr/share/doc/spice-vdagent/
+COPY --from=clipboard-broker /out/package.control /out/SHA256SUMS /usr/share/doc/spice-vdagent/
+COPY --from=vbox-clipboard /out/ /usr/lib/oblivion/virtualbox/
+COPY script/oblivion/live-storage.py /usr/lib/oblivion/live-storage.py
+COPY script/oblivion/live-setup.sh /tmp/live-setup
+RUN chmod 0755 /usr/lib/oblivion/live-storage.py && sh /tmp/live-setup && rm /tmp/live-setup \
+    && ln -s /usr/lib/oblivion/desktop/bin/oblivion /usr/bin/oblivion
+COPY script/oblivion/display/*.service script/oblivion/display/*.socket script/oblivion/display/manager.conf script/oblivion/display/foot.ini script/oblivion/display/start.sh script/oblivion/display/70-oblivion-clipboard.rules /usr/lib/oblivion/display/
+COPY script/oblivion/display/install.sh /tmp/display-setup
+RUN sh /tmp/display-setup && rm /tmp/display-setup
+
+
+FROM live-pack-tools AS live-iso-pack
+ARG OBLIVION_IMAGE_NAME=oblivion-development
+COPY --from=live-launcher / /host/
+COPY script/oblivion/live-* /sources/
 RUN OBLIVION_IMAGE_NAME="$OBLIVION_IMAGE_NAME" sh /sources/live-pack.sh
 
-FROM scratch AS stack-runtime-iso
-COPY --from=stack-pack /out/ /
+FROM scratch AS live-iso-artifacts
+COPY --from=live-iso-pack /out/ /

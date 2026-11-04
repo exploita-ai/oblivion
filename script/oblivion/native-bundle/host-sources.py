@@ -8,7 +8,7 @@ import sys
 
 
 SCRIPT_INPUTS = (
-    "Dockerfile.vm-lab", "live-setup.sh", "live-pack.sh", "live-grub.cfg",
+    "Dockerfile.vm-lab", "controller-setup.sh", "controller-pack.sh", "live-setup.sh", "live-pack.sh", "live-storage.py", "live-grub.cfg",
     "live-controller.json", "vm-common-setup.sh", "journald-forwarding.conf",
     "session-identities.sh", "pack-vm-assets.sh", "host-firewall.nft",
     "install-agents.py", "install-agents.json", "session-node.json",
@@ -24,7 +24,7 @@ PACKAGE_INPUTS = {
     "oblivion-share": ("Cargo.toml", "Cargo.lock", "src"),
     "oblivion-tor-state": ("Cargo.toml", "src"),
     "oblivion-transport": ("Cargo.toml", "src"),
-    "oblivion-history": ("history.py", "oblivion_history"),
+    "oblivion-history": ("prepare.py", "oblivion_history"),
     "oblivion-tools": ("dist/server.mjs",),
     "oblivion-gateway": ("Cargo.toml", "Cargo.lock", ".cargo", "src", "guest"),
     "oblivion-onion": ("service.py", "guest", "LICENSE", "NOTICE"),

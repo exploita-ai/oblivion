@@ -1,13 +1,15 @@
 # Development Debian package
 
-Oblivion has a source path for an installable **development** Debian stack, in
-addition to the Live ISO. The package runs the controller directly on Debian;
-each Safe and its gateway remain isolated VMs. It does not create an outer
-desktop runtime VM or silently fall back to another installation mode.
+The development `.deb` installs the **private Debian controller component**.
+It belongs inside the headless controller VM, on desktop and Live alike. It
+contains Safe/gateway roles and controller services; it is not the native
+launcher package and does not turn the physical Debian host into a controller.
 
-Its target is the trusted Debian controller layer: a dedicated boot or a Debian
-runtime VM. Native desktop installers additionally supply the platform launcher
-and headless virtualization helper.
+Use the [native bundle](DESKTOP.md) on an ordinary Linux desktop. The Live image
+preinstalls that same launcher and virtualizer on its outer Debian OS, then
+starts the private controller VM. The controller package's installation marker
+is `controller-runtime`; the native launcher refuses it rather than adopting a
+local daemon. Controller startup also requires the private runtime boot flag.
 
 This is not a qualified public installer. Real KVM/hardware testing and review
 of every embedded client's redistribution terms remain release gates. Building
@@ -55,7 +57,8 @@ it does not certify the input's origin or guest bootability.
 
 ## Install and remove
 
-The initial target is a compatible Debian 13 system using systemd, a tmpfs
+The package target is the Debian 13 OS **inside a prepared controller VM**,
+booted with `oblivion.runtime=1`, using systemd, a tmpfs
 `/run`, cgroup v2 and working KVM for its architecture. Swap must already be
 disabled, including zram swap. The package refuses installation with active
 swap and never calls `swapoff` or changes system swap configuration. The
@@ -63,7 +66,6 @@ controller independently enforces this requirement at runtime.
 
 ```sh
 sudo apt install ./oblivion-stack_1.0.0~dev20261104_amd64.deb
-oblivion
 ```
 
 Debconf asks for one existing, non-root local account authorized to use the
@@ -109,7 +111,7 @@ The package owns these current paths only:
 | `/usr/lib/oblivion/vm/` | Session, gateway, import, export, onion-gateway, onion-file kernels/initrds/squashfs; confined QEMU root |
 | `/usr/lib/systemd/system/oblivion-*.service` | Eight explicitly allowlisted controller/recovery/owner units; no graphical, debug, clipboard, relay or OS-network services |
 | `/usr/lib/sysusers.d/oblivion.conf` | Fixed per-role service identities for slots 0–31; collision checked before creation |
-| `/etc/oblivion/installation.json` | Root-owned current-format `direct-controller` marker |
+| `/etc/oblivion/installation.json` | Root-owned current-format `controller-runtime` marker (private VM only) |
 | `/usr/share/oblivion/controller.template.json` | Non-secret controller defaults for initial configuration |
 | `/usr/lib/oblivion/debian/` | Configuration helper and dependency/unit declarations |
 | `/usr/share/doc/oblivion-stack/` | License notices, exact file manifest and build inventories |

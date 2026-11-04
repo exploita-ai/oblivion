@@ -17,6 +17,7 @@ REPO = Path(__file__).resolve().parents[2]
 PLATFORMS = {
     "darwin-arm64": ("arm64", "apple-vz", "@opentui/core-darwin-arm64/libopentui.dylib"),
     "linux-x86_64": ("amd64", "qemu-kvm", "@opentui/core-linux-x64/libopentui.so"),
+    "linux-arm64": ("arm64", "qemu-kvm", "@opentui/core-linux-arm64/libopentui.so"),
 }
 EVIDENCE = ("host-sources.sha256", "gateway-sources.sha256", "iso-sources.sha256",
             "runtime.sha256", "client-evidence.json", "host-packages.tsv",

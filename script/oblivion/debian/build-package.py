@@ -146,7 +146,7 @@ def build(source, architecture, version, output):
             install(HERE / name, root, "/usr/lib/oblivion/debian/" + name)
         for directory in ("etc/oblivion", "etc/tmpfiles.d", "usr/lib/sysusers.d", "usr/share/oblivion", "var/lib/oblivion"):
             (root / directory).mkdir(mode=0o700 if directory == "var/lib/oblivion" else 0o755, parents=True, exist_ok=True)
-        (root / "etc/oblivion/installation.json").write_text('{"version":1,"mode":"direct-controller"}\n')
+        (root / "etc/oblivion/installation.json").write_text('{"version":1,"mode":"controller-runtime"}\n')
         (root / "usr/share/oblivion/controller.template.json").write_text(json.dumps(config, indent=2) + "\n")
         module_spec = importlib.util.spec_from_file_location("package_configuration", HERE / "configure.py")
         module = importlib.util.module_from_spec(module_spec)

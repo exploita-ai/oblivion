@@ -11,9 +11,10 @@ case "$version" in *[!0-9A-Za-z.+:~-]*) echo 'Desktop version contains unsupport
 case "$(uname -s)-$(uname -m)" in
     Darwin-arm64) platform=darwin-arm64; manager=bun-darwin-arm64; arch=arm64 ;;
     Linux-x86_64) platform=linux-x86_64; manager=bun-linux-x64; arch=amd64 ;;
-    *) echo 'Build on Apple Silicon macOS or x86_64 Linux; cross compilation is not supported' >&2; exit 2 ;;
+    Linux-aarch64) platform=linux-arm64; manager=bun-linux-arm64; arch=arm64 ;;
+    *) echo 'Build on Apple Silicon macOS or x86_64/arm64 Linux; cross compilation is not supported' >&2; exit 2 ;;
 esac
-runtime=${OBLIVION_DESKTOP_RUNTIME:-artifacts/oblivion-stack-$arch}
+runtime=${OBLIVION_DESKTOP_RUNTIME:-artifacts/oblivion-runtime-$arch}
 output=${OBLIVION_DESKTOP_OUTPUT:-artifacts/oblivion-desktop-$platform/$version}
 case "$output" in /*) ;; *) output="$PWD/$output" ;; esac
 [ ! -e "$output" ] && [ ! -L "$output" ] || { echo 'Desktop output already exists' >&2; exit 2; }

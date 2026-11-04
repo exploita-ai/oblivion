@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the official-agent runtime consumed by the native headless launcher.
+# Build the outer Live launcher OS with the shared headless controller image.
 set -eu
 cd "$(dirname "$0")/../.."
 arch=${OBLIVION_ARCH:-arm64}
@@ -10,10 +10,15 @@ case "$arch" in
 esac
 bun run --cwd packages/oblivion-tools build
 bun run --cwd packages/oblivion-manager script/build.ts "--target=$manager"
+for name in @opentui/core @opentui/solid solid-js zod; do
+    mkdir -p "artifacts/oblivion-manager/$manager/licenses/$name"
+    cp "packages/oblivion-manager/node_modules/$name/LICENSE" "artifacts/oblivion-manager/$manager/licenses/$name/LICENSE"
+done
 docker buildx build --platform "linux/$arch" --file script/oblivion/Dockerfile.vm-lab \
-    --target stack-runtime-iso \
+    --target live-iso-artifacts \
     --build-arg "OBLIVION_IMAGE_NAME=${OBLIVION_IMAGE_NAME:-oblivion-development}" \
     --build-arg "OBLIVION_HOST_KERNEL_VERSION=${OBLIVION_HOST_KERNEL_VERSION:-}" \
     --build-arg "MANAGER_BINARY=artifacts/oblivion-manager/$manager/oblivion-manager" \
     --build-arg "MANAGER_ASSETS=artifacts/oblivion-manager/$manager/assets" \
+    --build-arg "MANAGER_LICENSES=artifacts/oblivion-manager/$manager/licenses" \
     --output "type=local,dest=artifacts/oblivion-stack-$arch" .

@@ -1,7 +1,8 @@
 # Native desktop development bundles
 
 These are development-only bundles for Apple Silicon macOS (`darwin-arm64`,
-Apple Virtualization.framework) and x86_64 Linux (`linux-x86_64`, QEMU/KVM).
+Apple Virtualization.framework), x86_64 Linux (`linux-x86_64`) and ARM64 Linux
+(`linux-arm64`, QEMU/KVM).
 They package the native launcher, VM helper, terminal manager, and a separately
 built matching Oblivion controller ISO. They are not release artifacts and do
 not establish support on real hardware.
@@ -14,18 +15,26 @@ tools. macOS also needs the Swift toolchain and `codesign`; Linux needs
 `bsdtar` from libarchive for build-time ISO extraction. The native build uses
 offline Cargo and never builds an ISO or downloads a runtime.
 
-First obtain a development ISO and all its evidence from the current source
-tree using the [image build workflow](DEVELOPMENT.md#build-a-development-image).
-The ISO architecture must be `arm64` for macOS or `amd64` for Linux. An older
-ISO is refused even when its checksums are internally consistent.
+First build the **private controller ISO** and its evidence from the current
+source tree. This is distinct from the outer bootable Live ISO:
+
+```sh
+OBLIVION_ARCH=arm64 sh script/oblivion/build-runtime.sh
+```
+
+Use `arm64` for Apple Silicon or ARM64 Linux and `amd64` for x86_64 Linux.
+An older controller ISO or the outer Live ISO is refused as bundle input even
+when its checksums are internally consistent. `build-stack.sh` builds the outer
+Live launcher OS with this same controller image embedded.
 
 ```sh
 OBLIVION_DESKTOP_VERSION=1.0.0~dev20261104 \
-OBLIVION_DESKTOP_RUNTIME=artifacts/oblivion-stack-arm64 \
+OBLIVION_DESKTOP_RUNTIME=artifacts/oblivion-runtime-arm64 \
 sh script/oblivion/build-native.sh
 ```
 
-On Linux use `artifacts/oblivion-stack-amd64`. The version must start with a
+On x86_64 Linux use `artifacts/oblivion-runtime-amd64`; ARM64 Linux uses
+`artifacts/oblivion-runtime-arm64`. The version must start with a
 digit, contain `~dev`, and be at most 64 characters using ASCII letters,
 digits, `.`, `+`, `:`, `~` or `-`. Output defaults to
 `artifacts/oblivion-desktop-PLATFORM/VERSION`; `OBLIVION_DESKTOP_OUTPUT` can
@@ -131,9 +140,8 @@ Linux guest CID, lock files, the original `storage.raw` directory and a private
 `uninstalled.json` receipt. The receipt prevents startup until a development
 bundle is installed again. Reinstalling recreates boot assets while reusing
 the same storage path and identity; it does not initialize or copy that disk.
-There is no data-purge option. Uninstall does not modify Debian's separately
-installed direct-controller stack, delete your shell configuration, or change
-host networking or system packages. If removal encounters an I/O error,
+There is no data-purge option. Uninstall does not delete your shell
+configuration or change host networking or system packages. If removal encounters an I/O error,
 inspect the retained files before retrying from the original bundle's
 `bin/oblivion runtime uninstall` command.
 
@@ -180,3 +188,39 @@ network/Tor behavior, agent/provider authentication, storage reopening,
 cross-UID vsock rejection, shutdown and update recovery still need their
 hardware acceptance matrix on both platforms. No fixture or successful local
 build should be reported as passing those gates.
+
+
+## Debian Live
+
+The Live OS runs the Linux launcher and headless QEMU/KVM helper. It never
+starts a second controller directly on the physical OS. First launch selects
+encrypted persistence on the boot USB or RAM-only mode **before** starting the
+controller VM. An explicit `oblivion ephemeral` or `oblivion run --ephemeral
+codex` selects the RAM backing directly; a flag after the agent name remains
+an opaque native agent argument.
+
+For persistence, review and confirm the boot USB, available data capacity and
+any required GPT backup relocation. Preparation creates only a new dedicated
+partition in unallocated trailing space. Existing partitions keep their starts
+and sizes; no unrelated disk is offered. The root helper authorizes that one
+partition, and the native helper checks its device identity and installation
+marker. Only the controller VM mounts it. The outer OS does not mount ext4,
+the general LUKS archive or a Safe filesystem.
+
+RAM-only mode uses a sparse file beneath `/run` and does not authorize or
+attach the persistent partition. To change the backing mode, close all work,
+run `oblivion runtime stop`, wait for shutdown, then run
+`oblivion runtime choose-storage`. The next invocation presents the choice
+again. Selecting an incompatible mode while a runtime is configured fails
+before starting or changing storage.
+
+Linux ARM64 requires a kernel exposing `KVM_CAP_ARM_EL2` and a QEMU version
+supporting nested EL2. Older kernels fail the capabilities check. There is no
+software-emulation or direct-controller fallback. Live inside another VM adds
+another nesting level and needs separate qualification.
+
+The source includes these paths and sparse-file partition tests. A complete
+Live build, physical USB preparation/reboots and the RAM-mode unchanged-disk
+acceptance test remain required before distribution. The boot wordmark still
+starts after runtime preparation; overlapping its three seconds with VM boot
+remains an open UI integration task.
