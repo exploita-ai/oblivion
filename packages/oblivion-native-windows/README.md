@@ -81,6 +81,17 @@ for that client close within a bounded deadline, rather than discarding unread
 pipe bytes with an early disconnect. Lost clients, failed authentication and
 failed cancellation do not leave a runtime accepting requests indefinitely.
 
+The same-user client in `client.rs` checks the actual pipe server's process and
+token SID before sending a Native request. It uses identification-only security
+quality of service and non-inherited handles. A successful attachment validates
+the client ID and retains the same pipe, including any already received stream
+bytes. The handshake deadline ends there; established attachments remain
+cancellable without expiring during long jobs or idle periods. RPC deadlines
+remain absolute. Failed cancellation keeps pending allocations alive until the
+kernel can no longer access them, while closing the owned pipe handle revokes
+the connection. A privileged service would need its own qualified identity
+contract; the client never accepts LocalSystem as an implicit fallback.
+
 Cleanup stops admission and workers and requests termination of the owned VM.
 Only an HCS `Stopped` observation permits a successful stop report. The compute
 system also uses `ShouldTerminateOnLastHandleClosed`; dropping a handle alone

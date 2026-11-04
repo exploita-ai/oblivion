@@ -2,7 +2,9 @@
 
 Implementation checkpoint: 4 November 2026. **The Windows product is not complete
 or qualified.** An experimental HCS helper core and owned HCN ICS network are
-implemented; frontend integration, installation and recovery remain open. The manager has a Windows x64 build target; its PE
+implemented. A same-user authenticated named-pipe client and shared CLI adapter
+are now present; complete frontend integration, installation and recovery remain
+open. The manager has a Windows x64 build target; its PE
 execution and complete installed path still need qualification. This is a proposal for phase 8 of the
 [roadmap](oblivion1.0-roadmap.md), rather than instructions for an available product.
 No Windows VM has been booted to qualify this source increment.
@@ -46,8 +48,13 @@ The [HCS helper source](../packages/oblivion-native-windows/README.md) now creat
 an owned compute system, provisions a private per-boot token and relays authenticated
 local control pipes over AF_HYPERV. Its typed configuration can prepare one
 owned network adapter, or omit networking entirely. `capabilities` reports observed HCS availability
-separately from product support, which remains false. This is not yet connected
-to an installed Windows CLI or manager.
+separately from product support, which remains false. The common CLI has a
+Windows transport adapter for this endpoint. The native Runtime supplies console
+passwords, guest terminal frames, pipe I/O, resize, signals and opening-scoped
+human activity to the common workflows. Runtime discovery, supervision and the
+command entrypoint are still required before it can serve an installed Windows
+CLI or manager. Its terminal keeps the control lease until explicit agent release;
+guest Exit alone must not race the controller's EOF cleanup.
 
 The helper pins trusted boot assets, a private VHDX and their parent directories,
 checks actual ACLs and file identities, and grants VM access only to that reviewed

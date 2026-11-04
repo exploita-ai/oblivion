@@ -261,6 +261,24 @@ Pipe peer/ACL behavior
 with the actual HCS worker, boot, inner KVM and the installed lifecycle remain
 Windows acceptance gates. See the [Windows backend](WINDOWS.md).
 
+Safe tasks, family password changes and personal-backup recovery now also use the
+portable frontend. Their DTOs have one Wire owner, with controller-specific slot
+aliases where required. Real Unix fixtures cover offline task review/start,
+family preview, backup reconciliation after a lost reply and explicit discard.
+Malformed grammar fails before runtime startup. Copy streaming remains in the
+Unix adapter; these commands do not provide Windows filesystem endpoints.
+
+The Windows same-user named-pipe client now implements the shared controller
+adapter and native Runtime hooks. It authenticates the server SID, supports
+bounded requests and cancellable duplex attachments, and uses the shared guest
+launch, frame decoder and terminal filter. Console passwords leave redirected
+stdin intact; pipes retain native bytes. Explicit release finishes before the
+attachment lease closes. Human activity uses the same classifier and
+opening-bound report as Unix, through a bounded worker. Real Windows fixtures
+cover these boundaries, including an isolated console subprocess; they have
+only been cross-compiled on this Mac. There is still no installed Windows
+entrypoint, runtime election/supervision or installer qualification.
+
 Remaining release gates include real login and scoped child-credential delegation,
 chat persistence after cold restart,
 native resume for each agent,

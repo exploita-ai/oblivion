@@ -69,6 +69,39 @@ approval and payload streaming for import/export remain in the Unix adapter;
 this extraction does not supply Windows filesystem endpoints. Invalid inspection
 syntax is rejected by the launcher before it starts the runtime.
 
+`safe task status/review/start/retry/cancel` uses the shared frontend and one
+Wire model with the controller. Reviewing a saved task does not start its agent
+or gateway. A start keeps the original creation-request identity through protected
+startup; uncertain admission is reconciled instead of silently creating a new
+attempt. The explicit review response and task use zeroizing storage. Human
+output escapes terminal controls; `--json` preserves the native structured view.
+
+`safe password` preview, change, status and recovery share the family DTOs and
+workflow too. A change requires the reviewed family digest and current host
+opening, private current/new passwords and a human confirmation. Completion and
+rollback remain explicit. These operations update wrappers, not data keys, and
+cannot revoke old copied headers or backups.
+
+The Windows controller adapter connects to the runtime's private named pipe and
+uses the same executors. Its cancellable requests have bounded exchange budgets;
+an accepted interactive attachment remains open until cancellation, EOF or a
+transport failure. The runtime supervisor must supply the trusted runtime ID.
+`windows::Runtime` supplies the actual console/pipe hooks: private password entry,
+native guest frames, resize, signals, exact redirected bytes and explicit agent
+release before closing its lease. Console presentation uses the same terminal
+filter and launch model as Unix. Only human input renews idle activity; bounded
+reports carry opening identities, never input content. Discovery, supervision,
+installation and the installed Windows command entrypoint remain unfinished.
+Real named-pipe, stdio and isolated-console fixtures are part of the Windows test
+target; cross-compilation on Mac does not execute them.
+
+Personal backup grammar and `status`, `finish` and `discard` use the common
+frontend. The native ciphertext copy engine consumes the same status and finish
+operations: a lost final reply is reconciled before another restore can run.
+Global reads use the maintenance slot; mutations keep the transaction's recorded
+slot. Secret decoding has static errors and zeroizing buffers. Windows local
+backup file endpoints remain to be implemented.
+
 SOCKS5 URLs accept the existing literal IPv4/port syntax and optional percent-
 encoded credentials. Both `socks5://` and `socks5h://` use the existing transport;
 no destination DNS lookup occurs here. A username without `:PASSWORD` returns a
