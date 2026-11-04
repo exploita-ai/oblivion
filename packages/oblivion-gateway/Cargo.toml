@@ -29,18 +29,11 @@ zeroize = { version = "1.9.1", features = ["serde"] }
 wreq = { version = "=6.0.0-rc.31", default-features = false, features = ["webpki-roots", "tokio-rt", "socks", "stream", "brotli", "gzip", "deflate", "zstd"] }
 wreq-util = { version = "=3.0.0-rc.14", default-features = false, features = ["emulation", "tokio-rt"] }
 
-[build-dependencies]
-serde_json = "1"
-
 [dev-dependencies]
 tokio = { version = "1", features = ["process"] }
 rcgen = { version = "0.13", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-
-[[bin]]
-name = "oblivion-api"
-path = "src/main.rs"
 
 [[bin]]
 name = "oblivion-gateway-control"

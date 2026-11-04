@@ -1,7 +1,6 @@
 use oblivion_transport::Transport;
 pub use oblivion_transport::policy::Tools;
-use oblivion_transport::policy::{Access, Action, Destination};
-use oblivion_transport::provider::Provider;
+use oblivion_transport::policy::{Action, Destination};
 use serde::Deserialize;
 use std::{
     io,
@@ -19,7 +18,6 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-const USER: &[u8] = b"oblivion-api";
 const TOOLS_USER: &[u8] = b"oblivion-tools";
 const WEB_USER: &[u8] = b"oblivion-web";
 const HANDSHAKE: Duration = Duration::from_secs(10);
@@ -27,17 +25,15 @@ const HANDSHAKE: Duration = Duration::from_secs(10);
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
-    #[serde(default)]
-    pub provider: Option<Provider>,
     pub transport: Transport,
     pub session_token: Zeroizing<String>,
     #[serde(default)]
     pub tools: Option<Tools>,
 }
 
-// One connector per grant. Tools admission requires explicit trusted
-// configuration; absent it, only the fixed API origin is available. This
-// loopback listener is never exposed to the session guest.
+// One connector per grant. Every destination requires the Safe policy; native
+// agents carry their own provider authentication through the opaque tunnel.
+// This loopback listener is never exposed to the Safe guest.
 pub struct Egress {
     credentials: Credentials,
     cancelled: CancellationToken,
@@ -123,9 +119,8 @@ impl Egress {
         let mut password = Zeroizing::new(vec![0; size]);
         client.read_exact(&mut password).await?;
         let tools = username.as_slice() == TOOLS_USER && self.credentials.tools.is_some();
-        let web = username.as_slice() == WEB_USER;
-        if (!tools && !web && username.as_slice() != USER)
-            || (username.as_slice() == USER && self.credentials.provider.is_none())
+        let web = username.as_slice() == WEB_USER && self.credentials.tools.is_some();
+        if (!tools && !web)
             || !bool::from(
                 password
                     .as_slice()
@@ -181,15 +176,6 @@ impl Egress {
                         .as_ref()
                         .is_some_and(|tools| tools.decision(destination) == Action::Allow)
             }
-            (Some(destination), false, false) => {
-                self.credentials.provider.is_some_and(|provider| host == provider.host())
-                    && port == 443
-                    && self.credentials.tools.as_ref().is_none_or(|tools| {
-                        tools.access != Access::Offline
-                            && tools.policy.matched(&tools.session, destination)
-                                != Some(Action::Deny)
-                    })
-            }
             _ => false,
         };
         // Ask stays closed until the user adds an allow rule in the host manager.
@@ -203,13 +189,7 @@ impl Egress {
         let mut upstream = TcpStream::connect(self.credentials.transport.endpoint()).await?;
         let authentication = match &self.credentials.transport {
             Transport::Tor {} => Some((
-                if tools {
-                    TOOLS_USER
-                } else if web {
-                    WEB_USER
-                } else {
-                    USER
-                },
+                if tools { TOOLS_USER } else { WEB_USER },
                 self.credentials.session_token.as_bytes(),
             )),
             Transport::Socks5 { authentication, .. } => authentication

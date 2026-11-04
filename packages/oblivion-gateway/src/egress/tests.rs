@@ -1,6 +1,7 @@
 use super::*;
 use crate::tools::ToolsProxy;
-use oblivion_transport::{Authentication, Metadata, provider::Provider};
+use oblivion_transport::{Authentication, Metadata};
+use oblivion_transport::policy::Access;
 use serde_json::{Value, json};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -10,16 +11,7 @@ const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const HOST: &[u8] = b"api.abliteration.ai";
 
 fn configuration(endpoint: SocketAddrV4, authenticated: bool) -> Credentials {
-    provider_configuration(Provider::AbliterationAi, endpoint, authenticated)
-}
-
-fn provider_configuration(
-    provider: Provider,
-    endpoint: SocketAddrV4,
-    authenticated: bool,
-) -> Credentials {
     Credentials {
-        provider: Some(provider),
         session_token: Zeroizing::new(TOKEN.into()),
         tools: None,
         transport: Transport::Socks5 {
@@ -40,25 +32,14 @@ async fn fixture(
     TcpListener,
     tokio::task::JoinHandle<io::Result<()>>,
 ) {
-    configured_fixture(authenticated, None).await
+    configured_fixture(authenticated, Some(tools(json!([
+        {"destination": "api.abliteration.ai", "port": 443, "action": "allow"}
+    ])))).await
 }
 
 async fn configured_fixture(
     authenticated: bool,
     tools: Option<Tools>,
-) -> (
-    Arc<Egress>,
-    TcpStream,
-    TcpListener,
-    tokio::task::JoinHandle<io::Result<()>>,
-) {
-    configured_provider_fixture(authenticated, tools, Some(Provider::AbliterationAi)).await
-}
-
-async fn configured_provider_fixture(
-    authenticated: bool,
-    tools: Option<Tools>,
-    provider: Option<Provider>,
 ) -> (
     Arc<Egress>,
     TcpStream,
@@ -74,9 +55,7 @@ async fn configured_provider_fixture(
     let egress = Arc::new(Egress {
         credentials: Credentials {
             tools,
-            provider,
-            ..provider_configuration(
-                provider.unwrap_or_default(),
+            ..configuration(
                 SocketAddrV4::new(Ipv4Addr::LOCALHOST, upstream.local_addr().unwrap().port()),
                 authenticated,
             )
@@ -88,41 +67,8 @@ async fn configured_provider_fixture(
     (egress, client, upstream, server)
 }
 
-#[tokio::test]
-async fn api_role_is_pinned_to_the_selected_provider_hostname() {
-    use futures_util::FutureExt;
-    timeout(Duration::from_secs(5), async {
-        for provider in [
-            Provider::AbliterationAi,
-            Provider::Refuseless,
-            Provider::Openrouter,
-        ] {
-            let (egress, mut client, upstream, server) =
-                configured_provider_fixture(false, None, Some(provider)).await;
-            assert_eq!(authenticate(&mut client, TOKEN.as_bytes()).await, [1, 0]);
-            request(&mut client, b"example.com", 443).await;
-            let mut reply = [0; 10];
-            client.read_exact(&mut reply).await.unwrap();
-            assert_eq!(reply[1], 2);
-            assert!(upstream.accept().now_or_never().is_none());
-            egress.revoke();
-            server.await.unwrap().unwrap();
-
-            let (egress, mut client, upstream, server) =
-                configured_provider_fixture(false, None, Some(provider)).await;
-            assert_eq!(authenticate(&mut client, TOKEN.as_bytes()).await, [1, 0]);
-            request(&mut client, provider.host().as_bytes(), 443).await;
-            let _ = upstream.accept().await.unwrap();
-            egress.revoke();
-            server.await.unwrap().unwrap();
-        }
-    })
-    .await
-    .unwrap();
-}
-
 async fn authenticate(client: &mut TcpStream, token: &[u8]) -> [u8; 2] {
-    authenticate_as(client, USER, token).await
+    authenticate_as(client, TOOLS_USER, token).await
 }
 
 async fn authenticate_as(client: &mut TcpStream, user: &[u8], token: &[u8]) -> [u8; 2] {
@@ -279,7 +225,7 @@ async fn local_admission_rejects_before_any_proxy_connection() {
                     request(&mut client, HOST, 80).await;
                 }
                 if denied == 3 {
-                    client.write_all(&[5, 1, 0, 1]).await.unwrap();
+                    client.write_all(&[5, 1, 0, 1, 127, 0, 0, 1, 1, 187]).await.unwrap();
                 }
                 if denied == 4 {
                     client.write_all(&[5, 3, 0, 3]).await.unwrap();
@@ -393,13 +339,13 @@ fn tools_configuration_validates_session_and_policy_at_the_private_boundary() {
     ] {
         assert!(
             serde_json::from_value::<Credentials>(json!({
-                "provider": "abliteration-ai", "transport": {"mode": "tor"}, "session_token": TOKEN, "tools": invalid,
+                "transport": {"mode": "tor"}, "session_token": TOKEN, "tools": invalid,
             }))
             .is_err()
         );
     }
     let credentials: Credentials = serde_json::from_value(json!({
-        "provider": "abliteration-ai", "transport": {"mode": "tor"}, "session_token": TOKEN,
+        "transport": {"mode": "tor"}, "session_token": TOKEN,
     }))
     .unwrap();
     assert!(credentials.tools.is_none());
@@ -525,31 +471,6 @@ async fn allowed_tools_relay_canonical_destinations_with_external_credentials_an
             }
         }
     }).await.unwrap();
-}
-
-#[tokio::test]
-async fn tools_rules_cannot_expand_the_api_role() {
-    use futures_util::FutureExt;
-    timeout(Duration::from_secs(5), async {
-        let (egress, mut client, upstream, server) = configured_fixture(
-            false,
-            Some(tools(json!([
-                {"destination": "example.com", "port": 443, "action": "allow"}
-            ]))),
-        )
-        .await;
-        assert_eq!(authenticate(&mut client, TOKEN.as_bytes()).await, [1, 0]);
-        request(&mut client, b"example.com", 443).await;
-        let mut reply = [0; 10];
-        client.read_exact(&mut reply).await.unwrap();
-        assert_eq!(reply[1], 2);
-        assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
-        assert!(upstream.accept().now_or_never().is_none());
-        egress.revoke();
-        server.await.unwrap().unwrap();
-    })
-    .await
-    .unwrap();
 }
 
 #[tokio::test]
@@ -721,11 +642,11 @@ async fn global_access_rejects_before_dns_or_upstream_connections() {
             (
                 Access::Open,
                 json!([{"destination":"api.abliteration.ai","port":443,"action":"deny"}]),
-                USER,
+                TOOLS_USER,
                 HOST,
                 443,
             ),
-            (Access::Offline, json!([]), USER, HOST, 443),
+            (Access::Offline, json!([]), TOOLS_USER, HOST, 443),
             (
                 Access::Offline,
                 json!([{"destination":"example.com","port":443,"action":"allow"}]),
@@ -767,7 +688,7 @@ async fn global_access_rejects_before_dns_or_upstream_connections() {
 }
 
 #[tokio::test]
-async fn global_open_allows_public_tcp_and_strict_keeps_the_provider_route() {
+async fn open_allows_public_tcp_without_a_privileged_provider_route() {
     timeout(Duration::from_secs(5), async {
         for (access, user, host, port) in [
             (Access::Open, TOOLS_USER, b"example.com".as_slice(), 1u16),
@@ -778,7 +699,6 @@ async fn global_open_allows_public_tcp_and_strict_keeps_the_provider_route() {
             (Access::Open, TOOLS_USER, b"example.com".as_slice(), 990),
             (Access::Open, TOOLS_USER, b"example.com".as_slice(), 49152),
             (Access::Open, TOOLS_USER, b"example.com".as_slice(), 65535),
-            (Access::Strict, USER, HOST, 443),
         ] {
             let (egress, mut client, upstream, server) = configured_fixture(
                 false,
@@ -890,23 +810,21 @@ async fn curl_passive_ftp_tunnels_control_and_data_through_open_egress() {
 }
 
 #[tokio::test]
-async fn tools_only_grant_rejects_provider_role_and_routes_tools_without_provider_credentials() {
+async fn grant_rejects_removed_provider_role_and_routes_native_agent_traffic() {
     use futures_util::FutureExt;
     timeout(Duration::from_secs(5), async {
-        let (egress, mut client, upstream, server) = configured_provider_fixture(
+        let (egress, mut client, upstream, server) = configured_fixture(
             false,
             Some(Tools { access: Access::Open, ..tools(json!([])) }),
-            None,
         ).await;
-        assert_eq!(authenticate(&mut client, TOKEN.as_bytes()).await, [1, 1]);
+        assert_eq!(authenticate_as(&mut client, b"oblivion-api", TOKEN.as_bytes()).await, [1, 1]);
         assert!(upstream.accept().now_or_never().is_none());
         egress.revoke();
         server.await.unwrap().unwrap();
 
-        let (egress, mut client, upstream, server) = configured_provider_fixture(
+        let (egress, mut client, upstream, server) = configured_fixture(
             false,
             Some(Tools { access: Access::Open, ..tools(json!([])) }),
-            None,
         ).await;
         assert_eq!(authenticate_as(&mut client, TOOLS_USER, TOKEN.as_bytes()).await, [1, 0]);
         let proxy = tokio::spawn(async move {

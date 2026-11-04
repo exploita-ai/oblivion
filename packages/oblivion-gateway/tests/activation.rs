@@ -60,10 +60,6 @@ impl Drop for Process {
     }
 }
 
-fn launch() -> (Process, UnixStream, SocketAddr) {
-    launch_binary(env!("CARGO_BIN_EXE_oblivion-api"))
-}
-
 fn launch_binary(binary: &str) -> (Process, UnixStream, SocketAddr) {
     let (control, inherited) = UnixStream::pair().unwrap();
     control
@@ -100,106 +96,12 @@ fn launch_binary(binary: &str) -> (Process, UnixStream, SocketAddr) {
     (Process(command.spawn().unwrap()), control, address)
 }
 
-fn ready(control: &mut UnixStream, process: &mut Process) {
-    let config = json!({"provider":"abliteration-ai","api_key":KEY,"session_token":TOKEN,"socks":"127.0.0.1:1"});
-    writeln!(control, "{config}").unwrap();
-    let mut line = String::new();
-    BufReader::new(control).read_line(&mut line).unwrap();
-    if line.is_empty() {
-        let output = process.finish();
-        panic!(
-            "startup failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    assert_eq!(line, "{\"ready\":true}\n");
-}
-
-fn request(address: SocketAddr, token: &str) -> String {
-    let mut socket = TcpStream::connect(address).unwrap();
-    socket
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    let body = r#"{"model":"abliterated-model","messages":[{"role":"user","content":"test"}],"stream":true}"#;
-    write!(socket, "POST /v1/chat/completions HTTP/1.1\r\nHost: gateway\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
-    let mut response = String::new();
-    socket.read_to_string(&mut response).unwrap();
-    assert!(!response.contains(KEY));
-    response
-}
-
-#[test]
-fn inherited_control_grants_once_and_eof_revokes_without_logs() {
-    let (mut process, mut control, address) = launch();
-    ready(&mut control, &mut process);
-    assert!(request(address, "invalid").starts_with("HTTP/1.1 401"));
-    // NO_PROXY=* and a competing HTTPS_PROXY must not bypass the closed SOCKS
-    // endpoint supplied by the controller. There is no DNS/direct fallback.
-    assert!(request(address, TOKEN).starts_with("HTTP/1.1 502"));
-    drop(control);
-    let output = process.finish();
-    assert!(output.status.success());
-    assert!(output.stdout.is_empty() && output.stderr.is_empty());
-    assert!(TcpStream::connect(address).is_err());
-}
-
-#[test]
-fn control_byte_and_sigterm_both_revoke_the_process() {
-    for signal in [false, true] {
-        let (mut process, mut control, address) = launch();
-        ready(&mut control, &mut process);
-        if signal {
-            assert_eq!(
-                unsafe { libc::kill(process.0.id() as i32, libc::SIGTERM) },
-                0
-            );
-        } else {
-            control.write_all(b"revoke").unwrap();
-        }
-        let output = process.finish();
-        assert!(output.status.success());
-        assert!(output.stdout.is_empty() && output.stderr.is_empty());
-        assert!(TcpStream::connect(address).is_err());
-    }
-}
-
-#[test]
-fn invalid_startup_has_no_credential_or_payload_diagnostics() {
-    for (field, value) in [
-        ("origin", json!("https://example.com")),
-        ("session_token", json!("short")),
-        ("socks", json!("192.0.2.1:9050")),
-        ("api_key", json!("secret\r\nInjected: header")),
-    ] {
-        let (mut process, mut control, _) = launch();
-        let mut config = json!({"provider":"abliteration-ai","api_key":KEY,"session_token":TOKEN,"socks":"127.0.0.1:1"});
-        config[field] = value;
-        writeln!(control, "{config}").unwrap();
-        let output = process.finish();
-        assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
-        assert_eq!(output.stderr, b"oblivion-api: service_failed\n");
-    }
-}
-
-#[test]
-fn missing_inherited_sockets_fail_before_runtime_allocates_descriptors() {
-    let output = Command::new(env!("CARGO_BIN_EXE_oblivion-api"))
-        .env_clear()
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    assert_eq!(output.stderr, b"oblivion-api: service_failed\n");
-}
-
 #[test]
 fn egress_private_configuration_and_revocation_do_not_log_secrets() {
     for revoke in [0, 1, 2] {
         let (mut process, mut control, address) =
             launch_binary(env!("CARGO_BIN_EXE_oblivion-egress"));
-        let config = json!({"provider":"abliteration-ai","transport":{"mode":"socks5","endpoint":"192.0.2.1:1080","authentication":{"username":"fixture-user","password":"fixture-proxy-secret"}},"session_token":TOKEN});
+        let config = json!({"transport":{"mode":"socks5","endpoint":"192.0.2.1:1080","authentication":{"username":"fixture-user","password":"fixture-proxy-secret"}},"session_token":TOKEN});
         writeln!(control, "{config}").unwrap();
         let mut line = String::new();
         BufReader::new(&mut control).read_line(&mut line).unwrap();
@@ -234,7 +136,7 @@ fn egress_private_configuration_and_revocation_do_not_log_secrets() {
 #[test]
 fn egress_invalid_configuration_and_missing_descriptors_fail_without_secrets() {
     let (mut process, mut control, _) = launch_binary(env!("CARGO_BIN_EXE_oblivion-egress"));
-    let config = json!({"provider":"abliteration-ai","transport":{"mode":"socks5","endpoint":"127.0.0.1:9050","authentication":{"username":"fixture-user","password":"fixture-proxy-secret"}},"session_token":TOKEN});
+    let config = json!({"transport":{"mode":"socks5","endpoint":"127.0.0.1:9050","authentication":{"username":"fixture-user","password":"fixture-proxy-secret"}},"session_token":TOKEN});
     writeln!(control, "{config}").unwrap();
     let output = process.finish();
     assert!(!output.status.success());
@@ -264,7 +166,7 @@ fn egress_reads_a_full_private_policy_and_denies_unknown_tools_without_logs() {
         })
         .collect::<Vec<_>>();
     let config = json!({
-        "provider": "abliteration-ai", "transport": {"mode": "tor"}, "session_token": TOKEN,
+        "transport": {"mode": "tor"}, "session_token": TOKEN,
         "tools": {"session": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "policy": {"version": 1, "rules": rules}},
     }).to_string();
     assert!(config.len() > 4096 && config.len() < 128 * 1024);

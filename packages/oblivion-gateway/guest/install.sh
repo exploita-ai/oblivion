@@ -10,8 +10,6 @@ groupmod -g 1200 debian-tor
 usermod -u 1200 -g 1200 debian-tor
 groupadd --gid 1201 oblivion-egress
 useradd --uid 1201 --gid 1201 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin oblivion-egress
-groupadd --gid 1300 oblivion-api
-useradd --uid 1300 --gid 1300 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin oblivion-api
 groupadd --gid 1301 oblivion-tools
 useradd --uid 1301 --gid 1301 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin oblivion-tools
 groupadd --gid 1302 oblivion-web
