@@ -1,12 +1,14 @@
 import path from "node:path"
-import { readdir, stat } from "node:fs/promises"
+import { lstat, readdir, stat } from "node:fs/promises"
+import { fileURLToPath } from "node:url"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
-import { useKeyboard } from "@opentui/solid"
+import { useKeyboard, usePaste } from "@opentui/solid"
 import { z } from "zod"
 import { Menu } from "./menu"
 import { FormView } from "./form"
 import { PageHeader } from "./page-header"
 import { BusyModal } from "./busy-modal"
+import { ActionBar } from "./action-bar"
 import { FilePicker } from "./vendor/termcn/file-picker"
 import { theme } from "./theme"
 import type { NativeRuntime } from "./native-control"
@@ -68,7 +70,32 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
   const [total, setTotal] = createSignal(0)
   const [error, setError] = createSignal("")
   const [working, setWorking] = createSignal(false)
+  const [view, setView] = createSignal<"browse" | "path" | "review">("browse")
+  const [entered, setEntered] = createSignal("")
+  const [candidate, setCandidate] = createSignal<{ path: string; directory: boolean; bytes: number }>()
   let stopped = false
+
+  function enterPath() { setError(""); setView("path") }
+  function cancelPath() { setCandidate(undefined); setError(""); setView("browse") }
+  function browseCandidate() { const value = candidate(); if (!value?.directory || working()) return; setView("browse"); void load(value.path) }
+  function useCandidate() { const value = candidate(); if (!value || working() || props.filesOnly && value.directory) return; props.choose(value.path) }
+
+  async function inspect(value: string) {
+    if (working()) return
+    setEntered(value)
+    setWorking(true)
+    setError("")
+    try {
+      const selected = localPath(value, current())
+      const info = await lstat(selected)
+      if (stopped) return
+      if (info.isSymbolicLink() || !info.isDirectory() && !info.isFile()) { setError("Choose a regular local file or directory. Symbolic links are not selectable."); return }
+      if (props.directoryOnly && !info.isDirectory()) { setError("This operation requires a directory. Choose a local folder."); return }
+      setCandidate({ path: selected, directory: info.isDirectory(), bytes: info.size })
+      setView("review")
+    } catch { if (!stopped) setError("Enter one existing local path or local file:// URL. Controls, remote authorities and multiple paths are not accepted.") }
+    finally { if (!stopped) setWorking(false) }
+  }
 
   function choose(index: number) {
     if (working()) return
@@ -91,26 +118,63 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
   }
   onMount(() => { void load(current()) })
   onCleanup(() => { stopped = true })
+  usePaste((event) => {
+    if (view() !== "path") return
+    if (!/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/.test(new TextDecoder().decode(event.bytes))) return
+    event.preventDefault()
+    setError("Paste one path without control characters or line breaks.")
+  })
   useKeyboard((key) => {
     if (key.defaultPrevented || working()) return
+    if (view() === "path") return
+    if (view() === "review") {
+      if (key.name === "b" && candidate()?.directory) { key.preventDefault(); browseCandidate() }
+      return
+    }
     if (key.name === "escape") { key.preventDefault(); props.back(); return }
+    if (key.name === "p") { key.preventDefault(); enterPath(); return }
     if (key.name === "backspace") { key.preventDefault(); void load(path.dirname(current())); return }
     if (key.name === "." && props.directoryOnly) { key.preventDefault(); props.choose(current()); return }
     if (key.name === "space") { key.preventDefault(); const entry = entries()[selected()]; if (entry && (!props.filesOnly || !entry.directory)) props.choose(path.join(current(), entry.name)); return }
     if (key.name === "pagedown" && offset() + 100 < total()) { key.preventDefault(); void load(current(), offset() + 100) }
     if (key.name === "pageup" && offset()) { key.preventDefault(); void load(current(), Math.max(0, offset() - 100)) }
   })
-  return <box flexGrow={1} minHeight={0}><Menu title={props.title ?? (props.directoryOnly ? "Choose destination directory" : "Choose a local file or folder")} description={`${current()}\n${props.filesOnly ? "Space chooses a file" : "Space chooses an entry"} · Enter opens folders · ${total()} entries`} selected={selected()} change={setSelected} focused disabled={working()}
+  return <box flexGrow={1} minHeight={0} flexDirection="column">
+    <Show when={view() === "path"}><FormView form={{ title: "Enter local path", description: "Paste one literal path or file:// URL. A terminal drop can paste a path here. Nothing is copied until you choose and review it.",
+      fields: [{ id: "path", label: "File or directory on this computer", value: entered(), validate: (value) => !value || /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/.test(value) ? "Enter one path without control characters or line breaks." : undefined }],
+      submit: "Inspect path", run: async () => {} }} cancel={cancelPath} submit={(values) => { void inspect(values.path) }} /></Show>
+    <Show when={view() === "review" && candidate()}><FormView form={{ title: "Review local path", description: `${candidate()?.path}\n${candidate()?.directory ? "Directory" : `Regular file · ${candidate()?.bytes.toLocaleString("en-US")} B`}\n${props.filesOnly && candidate()?.directory ? "This operation accepts files. Browse this folder to choose one." : "Choose this path to continue to the operation's review. No copy has started."}`,
+      fields: [], submit: props.filesOnly && candidate()?.directory ? "Browse folder" : candidate()?.directory ? "Choose folder" : "Choose file", run: async () => {} }} cancel={cancelPath} submit={() => { if (props.filesOnly && candidate()?.directory) { browseCandidate(); return }; useCandidate() }} /></Show>
+    <Show when={view() === "review" && candidate()?.directory && !props.filesOnly}><ActionBar actions={[{ title: "Browse folder", key: "B", disabled: working(), run: browseCandidate }]} /></Show>
+    <Show when={view() === "browse"}><Menu title={props.title ?? (props.directoryOnly ? "Choose destination directory" : "Choose a local file or folder")} description={`${current()}\n${props.filesOnly ? "Space chooses a file" : "Space chooses an entry"} · Enter opens folders · ${total()} entries`} selected={selected()} change={setSelected} focused disabled={working()}
     items={entries().map((entry, index) => ({ name: `${entry.name}${entry.directory ? "/" : ""}`, badge: entry.directory ? "Folder" : `${entry.bytes.toLocaleString("en-US")} B`, description: "", run: () => choose(index) }))}
     choose={choose}
     toolbar={[
+      { title: "Enter path", key: "P", run: enterPath },
       { title: "Parent", key: "Backspace", run: () => { void load(path.dirname(current())) } },
       ...(props.directoryOnly ? [{ title: "Use this folder", key: ".", run: () => props.choose(current()) }] : []),
       { title: "Previous", key: "PageUp", disabled: offset() === 0, run: () => { void load(current(), Math.max(0, offset() - 100)) } },
       { title: "Next", key: "PageDown", disabled: offset() + 100 >= total(), run: () => { void load(current(), offset() + 100) } },
     ]}
     empty={error() || (working() ? "Reading directory…" : "No selectable entries. Backspace opens the parent directory.")}
-    details={false} back={props.back} /><Show when={error()}><text flexShrink={0} fg={theme.feedback.warning}>{error()}</text></Show><Show when={working()}><BusyModal text="Reading folder" /></Show></box>
+    details={false} back={props.back} /></Show><Show when={error()}><text flexShrink={0} fg={theme.feedback.warning}>{error()}</text></Show><Show when={working()}><BusyModal text="Reading local path" /></Show></box>
+}
+
+function localPath(input: string, current: string) {
+  if (!input || /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/.test(input)) throw new Error("Invalid path")
+  const quoted = input.trim()
+  const value = quoted.startsWith("'") || quoted.startsWith('"')
+    ? quoted.endsWith(quoted[0]) && !quoted.slice(1, -1).includes(quoted[0]) ? quoted.slice(1, -1) : undefined
+    : input
+  if (!value) throw new Error("Enter one path")
+  if (/^file:/i.test(value)) {
+    const url = new URL(value)
+    if (url.hostname && url.hostname !== "localhost" || url.search || url.hash) throw new Error("Local URL required")
+    const decoded = fileURLToPath(url)
+    if (/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/.test(decoded)) throw new Error("Invalid path")
+    return decoded
+  }
+  return path.resolve(current, value)
 }
 
 function GuestChooser(props: { safe: string; runtime: NativeRuntime; choose: (value: string) => void; back: () => void }) {
