@@ -91,6 +91,7 @@ RUN python3 -B /build/install-vbox-clipboard.py "$TARGETARCH" /out
 
 FROM rust-toolchain AS compiler
 WORKDIR /build
+COPY packages/oblivion-cli/ /oblivion-cli/
 COPY packages/oblivion-wire/ /oblivion-wire/
 COPY packages/oblivion-tor-state/ /oblivion-tor-state/
 COPY packages/oblivion-transport/ /oblivion-transport/
@@ -586,7 +587,7 @@ COPY ${MANAGER_LICENSES} /oblivion-manager/node_modules/
 RUN apt-get update && apt-get install -y --no-install-recommends libarchive-tools && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /packages \
     && ln -s /build /packages/oblivion-host \
-    && for package in oblivion-wire oblivion-transfer oblivion-share oblivion-tor-state oblivion-transport oblivion-history oblivion-tools oblivion-gateway oblivion-onion oblivion-clipboard oblivion-manager theme tui-kit; do ln -s "/$package" "/packages/$package"; done \
+    && for package in oblivion-cli oblivion-wire oblivion-transfer oblivion-share oblivion-tor-state oblivion-transport oblivion-history oblivion-tools oblivion-gateway oblivion-onion oblivion-clipboard oblivion-manager theme tui-kit; do ln -s "/$package" "/packages/$package"; done \
     && cp /workspace-inputs/* / \
     && case "$TARGETARCH" in amd64) platform=linux-x86_64;; arm64) platform=linux-arm64;; *) exit 1;; esac \
     && identity=$(python3 -B /script/oblivion/bundle-native.py prepare --runtime /runtime-output --platform "$platform" --output /prepared) \

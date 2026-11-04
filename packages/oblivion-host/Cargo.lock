@@ -844,6 +844,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oblivion-cli"
+version = "0.1.0"
+dependencies = [
+ "oblivion-transport",
+ "zeroize",
+]
+
+[[package]]
 name = "oblivion-host"
 version = "0.1.0"
 dependencies = [
@@ -853,6 +861,7 @@ dependencies = [
  "getrandom",
  "hkdf",
  "libc",
+ "oblivion-cli",
  "oblivion-share",
  "oblivion-tor-state",
  "oblivion-transfer",

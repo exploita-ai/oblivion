@@ -362,154 +362,30 @@ fn unlock(read_only: bool) -> control::Result<()> {
     Ok(())
 }
 
-struct Options {
-    safe: Option<String>,
-    name: Option<String>,
-    ephemeral: bool,
-    transport: Option<oblivion_transport::Transport>,
-    proxy_profile: Option<String>,
-    policy: Option<&'static str>,
-    agent: String,
-    argv: Vec<String>,
-}
+type Options = oblivion_cli::run::Options<oblivion_transport::Transport>;
+
 fn options(args: &[String]) -> control::Result<Options> {
-    let mut result = Options {
-        safe: None,
-        name: None,
-        ephemeral: false,
-        transport: None,
-        proxy_profile: None,
-        policy: None,
-        agent: String::new(),
-        argv: vec![],
-    };
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--safe" => {
-                if result.safe.is_some() {
-                    return Err("Duplicate --safe".into());
-                }
-                result.safe = Some(args.next().ok_or("Missing Safe name")?.clone());
-            }
-            "--name" => {
-                if result.name.is_some() {
-                    return Err("Duplicate --name".into());
-                }
-                result.name = Some(args.next().ok_or("Missing Safe name")?.clone());
-            }
-            "--ephemeral" => result.ephemeral = true,
-            "--tor" => {
-                if result.transport.is_some() || result.proxy_profile.is_some() {
-                    return Err("Choose one transport".into());
-                }
-                result.transport = Some(oblivion_transport::Transport::Tor {});
-            }
-            "--proxy" | "-x" => {
-                if result.transport.is_some() || result.proxy_profile.is_some() {
-                    return Err("Choose one transport".into());
-                }
-                result.transport = Some(proxy(args.next().ok_or("Missing proxy URL")?)?);
-            }
-            "--proxy-profile" => {
-                if result.transport.is_some() || result.proxy_profile.is_some() {
-                    return Err("Choose one transport".into());
-                }
-                let name = args.next().ok_or("Missing proxy profile name")?;
-                oblivion_host::proxy_profiles::valid_name(name)?;
-                result.proxy_profile = Some(name.clone());
-            }
-            "--policy" => {
-                if result.policy.is_some() {
-                    return Err("Duplicate --policy".into());
-                }
-                result.policy = Some(match args.next().map(String::as_str) {
-                    Some("open-internet") => "open",
-                    Some("strict") => "strict",
-                    Some("offline") => "offline",
-                    _ => return Err("Policy must be open-internet, strict or offline".into()),
-                });
-            }
-            "codex" | "claude" | "opencode2" => {
-                result.agent = arg.clone();
-                result.argv = args.cloned().collect();
-                break;
-            }
-            _ => {
-                return Err("Expected an Oblivion option or an agent. Run oblivion --help.".into());
-            }
-        }
-    }
-    if result.agent.is_empty() {
-        return Err("Choose codex, claude or opencode2".into());
-    }
-    if (result.ephemeral && (result.safe.is_some() || result.name.is_some()))
-        || (result.safe.is_some() && result.name.is_some())
-    {
-        return Err("A named Safe and --ephemeral cannot be combined".into());
-    }
-    for name in result.safe.iter().chain(result.name.iter()) {
+    let parsed = oblivion_cli::run::parse(args)?;
+    for name in parsed.safe.iter().chain(parsed.name.iter()) {
         oblivion_host::session_title::validate(name)?;
     }
-    Ok(result)
+    if let Some(name) = &parsed.proxy_profile {
+        oblivion_host::proxy_profiles::valid_name(name)?;
+    }
+    parsed.resolve_transport(resolve_proxy)
 }
 
 fn proxy(url: &str) -> control::Result<oblivion_transport::Transport> {
-    use oblivion_transport::{Authentication, Transport};
-    let value = url
-        .strip_prefix("socks5h://")
-        .or_else(|| url.strip_prefix("socks5://"))
-        .ok_or("Expected socks5h://[USER:PASS@]IP:PORT")?;
-    let (endpoint, authentication) = match value.rsplit_once('@') {
-        None => (value, None),
-        Some((credentials, endpoint)) => {
-            let (user, pass) = match credentials.split_once(':') {
-                Some((user, pass)) => (decode(user)?, Zeroizing::new(decode(pass)?)),
-                None => (
-                    decode(credentials)?,
-                    Zeroizing::new(String::from_utf8(
-                        password("Proxy password", false)?.to_vec(),
-                    )?),
-                ),
-            };
-            (
-                endpoint,
-                Some(Authentication {
-                    username: Zeroizing::new(user),
-                    password: pass,
-                }),
-            )
-        }
-    };
-    let result = Transport::Socks5 {
-        endpoint: endpoint
-            .parse()
-            .map_err(|_| "Proxy endpoint must be an IPv4 address and port")?,
-        authentication,
-    };
-    result.validate()?;
-    Ok(result)
+    resolve_proxy(oblivion_cli::proxy::parse(url)?)
 }
-fn decode(value: &str) -> control::Result<String> {
-    let mut bytes = Vec::new();
-    let mut input = value.bytes();
-    while let Some(byte) = input.next() {
-        if byte != b'%' {
-            bytes.push(byte);
-            continue;
-        }
-        let digit = |byte: u8| {
-            (byte as char)
-                .to_digit(16)
-                .map(|n| n as u8)
-                .ok_or("Invalid proxy URL encoding")
-        };
-        bytes.push(
-            digit(input.next().ok_or("Invalid proxy URL encoding")?)? * 16
-                + digit(input.next().ok_or("Invalid proxy URL encoding")?)?,
-        );
+
+fn resolve_proxy(request: oblivion_cli::proxy::Request) -> control::Result<oblivion_transport::Transport> {
+    match request {
+        oblivion_cli::proxy::Request::Ready(transport) => Ok(transport),
+        oblivion_cli::proxy::Request::NeedsPassword(request) => Ok(request.complete(Zeroizing::new(
+            String::from_utf8(password("Proxy password", false)?.to_vec())?,
+        ))?),
     }
-    Ok(String::from_utf8(bytes)?)
 }
 
 fn find_safe(state: &Status, name: &str) -> control::Result<Option<String>> {
@@ -907,6 +783,9 @@ mod tests {
     fn conflicting_launch_options_are_rejected() {
         assert!(parse(&["--safe", "GB", "--ephemeral", "codex"]).is_err());
         assert!(parse(&["--safe", "GB", "--safe", "GB", "codex"]).is_err());
+        assert!(parse(&["--safe", "GB", "--name", "Other", "codex"]).is_err());
+        assert!(parse(&["--name", " GB", "codex"]).is_err());
+        assert!(parse(&["--safe", "GB\u{202e}", "codex"]).is_err());
         assert!(parse(&["--policy", "direct", "codex"]).is_err());
         assert!(parse(&["--tor", "-x", "socks5h://192.0.2.1:1080", "codex"]).is_err());
         assert!(parse(&["--proxy-profile", "Office", "--tor", "codex"]).is_err());
