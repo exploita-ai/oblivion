@@ -1,7 +1,8 @@
 # Windows native backend — feasibility and implementation proposal
 
-Research checkpoint: 4 November 2026. **The Windows backend, installer and manager
-bundle are not implemented or qualified.** This is a proposal for phase 8 of the
+Research checkpoint: 4 November 2026. **The Windows backend and installer are not
+implemented or qualified.** The manager has a Windows x64 build target; its PE
+execution and complete installed path still need qualification. This is a proposal for phase 8 of the
 [roadmap](oblivion1.0-roadmap.md), rather than instructions for an available product.
 No VM or Windows configuration was changed during this audit.
 
@@ -128,8 +129,17 @@ of an air gap or of zero plaintext managed by Windows itself.
 The existing CLI cannot simply cross-compile by adding a Hyper-V executable.
 `launcher.rs` imports Unix process/FD APIs and uses POSIX signals and termios;
 `channel.rs`/`remote_control.rs` require Unix sockets; `native_runtime.rs` and
-`desktop_bundle.rs` depend on Unix filesystem ownership and locks. The manager
-builder and bundle platform table also omit Windows.
+`desktop_bundle.rs` depend on Unix filesystem ownership and locks. The desktop
+bundle platform table still omits Windows.
+
+The manager builder now uses a target descriptor shared with launcher discovery.
+It selects `oblivion-manager.exe`, the sibling `oblivion.exe`, and the pinned
+OpenTUI Windows x64 DLL, while retaining the same manager entrypoint. The default
+target follows the actual builder host. The file picker receives an explicit
+parent path from its local/native or guest/POSIX caller, so it no longer rewrites
+Windows drive and UNC paths as guest paths. CI includes Windows target/picker
+fixtures and compilation of the frontend/DLL. These sources and test definitions
+do not establish an installed Windows runtime or a working Hyper-V backend.
 
 The first shared boundaries are implemented and consumed by the existing
 launcher. `oblivion-cli` owns one run-option and proxy grammar, preserving opaque
@@ -138,8 +148,17 @@ terminal I/O. `oblivion-wire` owns bounded private controller/agent framing.
 `oblivion-transfer` separates manifests, payload verification, directory metadata,
 copy messages and Share selection rules from Unix filesystem endpoints. All
 three portable libraries compile for the Windows MSVC target; CI runs their
-portable tests on Windows. This does not provide a Windows frontend, trusted
+portable tests on Windows. This does not provide a complete Windows launcher, trusted
 file handle implementation, ACL checks or a Hyper-V backend.
+
+The actual `status --json`, `safes` and `close NAME` frontend is now shared in
+`oblivion-cli`: one controller-state projection, Safe lookup, command parser and
+executor. The existing Unix launcher calls it through its authenticated adapter.
+Both Unix control paths consume the shared wire codec, retaining their distinct
+local/native framing, deadlines and attachment ownership. The shared code
+preserves raw JSON status and binds close requests to the observed slot and Safe
+ID. This is a migrated frontend slice, rather than a second Windows command
+implementation; the remaining orchestration and OS adapters are still open.
 
 Remaining split, without a second command implementation:
 

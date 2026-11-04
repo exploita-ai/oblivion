@@ -44,6 +44,8 @@ Launcher e packaging della Live ora preparano la VM controller separata e la par
 
 La grammatica di `run` e dei proxy è ora condivisa in `oblivion-cli`, separata da prompt e autorizzazione. `oblivion-wire` contiene il framing privato e `oblivion-transfer` separa manifest, metadati e verifica dei payload dagli endpoint filesystem Unix. Le tre librerie compilano per Windows MSVC; la CI include le rispettive prove portabili. La build del controller amd64 verifica anche driver e initramfs Hyper-V. Backend Windows, autenticazione di bootstrap, avvio EFI, adapter terminale/filesystem e installer restano da implementare o qualificare. [Percorso Windows](WINDOWS.md).
 
+Anche `status --json`, `safes` e `close NAME` ora usano un solo parser ed executor portabile con proiezione dello stato e risoluzione delle Safe condivise, consumato dal launcher Unix reale. I due adapter di controllo usano lo stesso codec request/response mantenendo autenticazione, deadline, framing locale/native e lease. Il manager dispone di target Windows x64 per eseguibile e DLL OpenTUI, con descrittore comune al builder e alla ricerca del launcher; il picker riceve il percorso padre dal chiamante locale o guest. Le fixture verificano questi confini e la CI aggiunge build/test frontend su Windows. Non sono ancora un backend Hyper-V, una CLI interamente portata o un’installazione Windows qualificata.
+
 ## 1. Vocabolario, distribuzioni e confini
 
 | Termine | Significato per la 1.0 |
@@ -218,6 +220,8 @@ Ridurre processi residenti e dimensionare i gateway prima di cambiare lo storage
 | Windows | Primo backend proposto: Hyper-V Generation 2 su Windows 11 x64 Pro/Enterprise. Le librerie condivise compilano per MSVC; il backend nativo manca. | Implementare e verificare bootstrap autenticato, virtualizzazione annidata, terminale/pipe, resize, file picker, identità dei dischi e spegnimento. La procedura VirtualBox della beta resta una guida per il laboratorio. |
 
 Rilevare incompatibilità e risorse insufficienti prima di creare dati persistenti. Pubblicare una matrice per combinazione di launcher, OS, architettura e hypervisor effettivamente provata. [Requisiti Apple](https://developer.apple.com/documentation/virtualization/vzgenericplatformconfiguration/isnestedvirtualizationsupported) · [Profili di test della beta](DEVELOPMENT.md#run-from-a-virtual-machine).
+
+**Hypervisor esterno ARM64.** Oltre al kernel con `KVM_CAP_ARM_EL2`, il launcher Linux richiede QEMU 10.1.0 o successivo prima di creare dati: il supporto userspace alla vCPU EL2 compare in quella release. La Live ARM64 seleziona quindi QEMU da Debian backports, conserva versione del pacchetto e hash del binario e li verifica durante il packing. QEMU interno al controller, che avvia Safe EL1, e selezione amd64 mantengono Debian stable. Questa correzione del sorgente non risolve il diverso hard-lockup Mac Apple-VZ e non sostituisce il boot completo su hardware. [Implementazione QEMU 10.1](https://github.com/qemu/qemu/blob/v10.1.0/target/arm/kvm.c).
 
 ## 9. Ordine dei lavori
 

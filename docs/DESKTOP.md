@@ -7,6 +7,11 @@ They package the native launcher, VM helper, terminal manager, and a separately
 built matching Oblivion controller ISO. They are not release artifacts and do
 not establish support on real hardware.
 
+Linux ARM64 additionally requires QEMU 10.1 or newer for its outer nested
+controller. The helper checks the trusted executable before runtime allocation;
+the ARM64 Live installs the appropriate Debian backports package automatically.
+The controller's inner QEMU runs EL1 guests and keeps the stable package.
+
 Native Files receiver recovery requires a filesystem UUID obtained from the
 opened descriptor. Linux desktop export therefore needs kernel 6.9 or newer and
 a filesystem supporting `FS_IOC_GETFSUUID`; macOS uses its volume UUID. An

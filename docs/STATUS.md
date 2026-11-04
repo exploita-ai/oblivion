@@ -82,6 +82,14 @@ creation. Debian NetworkManager, keyboard and time-zone dialogs are reachable
 on fixed virtual consoles; OS preferences remain in the volatile Live overlay.
 No automatic NTP service was enabled. See [Live controls](LIVE.md).
 
+The ARM64 outer Live now selects QEMU from Debian backports, records its package
+version and executable hash, and verifies that evidence before ISO packing.
+The native Linux helper requires QEMU 10.1 or newer on ARM64 before it can claim
+support or allocate runtime data. This closes a source mismatch: the selected
+EL2-capable kernel alone was insufficient with Debian stable QEMU 10.0. The inner
+EL1-only QEMU and amd64 selection remain stable. Process and policy fixtures
+cover the refusal and inventory; no new Live boot is qualified by this change.
+
 Live controller initialization now overlaps the three-second, once-per-boot
 wordmark. Initial status requests share one operation and the startup budget;
 a cold-start failure stays visible until explicit retry. A shared runtime
@@ -172,8 +180,24 @@ remain open.
 Portable CLI run/proxy parsing, private wire framing and Files validation now
 compile for Windows MSVC; the Windows CI job includes their portable tests. The shared
 amd64 controller build also verifies Hyper-V driver coverage in its kernel and
-initramfs. The Windows frontend, backend, bootstrap authentication, EFI boot and
+initramfs. Remaining Windows command orchestration, backend, bootstrap authentication, EFI boot and
 installer remain unimplemented or unqualified; see [Windows requirements](WINDOWS.md).
+
+The manager's target descriptor now drives both its builder and native launcher
+discovery, including Windows x64 `.exe` names and the pinned OpenTUI DLL. Local
+and guest file pickers supply their own parent paths instead of applying POSIX
+path rules to Windows drives. Target and production-picker fixtures pass on the
+development Mac. CI definitions compile and exercise that frontend on Windows;
+no Windows PE execution, installed bundle or Hyper-V qualification is claimed.
+
+`status --json`, `safes` and `close NAME` now run through the shared frontend
+parser/executor in `oblivion-cli`, with the same State/Safe lookup used by the
+other existing launcher commands. The authenticated Unix adapter remains the
+production transport. Both local and desktop control paths use one portable
+request/response codec while preserving their framing and lifetime boundaries.
+Malformed peer data produces static protocol/state errors instead of repeating
+payload fields. Actual Unix-socket fixtures cover the migrated commands; a
+Windows backend and the remaining portable command orchestration are still open.
 
 Remaining release gates include real login and scoped child-credential delegation,
 chat persistence after cold restart,
