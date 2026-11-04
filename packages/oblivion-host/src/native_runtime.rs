@@ -1,4 +1,7 @@
-//! Desktop runtime state contains public boot assets and an encrypted data disk.
+//! Native runtime state contains public boot assets and an encrypted data disk.
+#[cfg(target_os = "linux")]
+#[path = "live_runtime.rs"]
+mod live;
 use crate::control::{self, Result};
 use crate::desktop_bundle::{self, Binding, Bundle};
 use serde::{Deserialize, Serialize};
@@ -13,6 +16,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn directory() -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if mode()? == Mode::Live { return Ok(PathBuf::from("/run/oblivion-live/user/runtime")); }
     if let Some(path) = std::env::var_os("OBLIVION_RUNTIME_DIRECTORY") {
         return Ok(PathBuf::from(path));
     }
@@ -59,7 +64,7 @@ fn socket_directory() -> Result<PathBuf> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Desktop,
-    Direct,
+    Live,
 }
 
 pub fn mode() -> Result<Mode> {
@@ -103,10 +108,10 @@ fn installation(bytes: &[u8]) -> Result<Mode> {
         return Err("invalid_installation_profile".into());
     }
     let profile: Profile = serde_json::from_slice(bytes)?;
-    if profile.version != 1 || profile.mode != "direct-controller" {
+    if profile.version != 1 || profile.mode != "live-launcher" {
         return Err("invalid_installation_profile".into());
     }
-    Ok(Mode::Direct)
+    Ok(Mode::Live)
 }
 
 fn backend() -> &'static str {
@@ -232,11 +237,11 @@ fn preflight_with(helper: &Path) -> Result<()> {
     {
         return Err(if backend() == "qemu-kvm" {
             match value["reason"].as_str() {
-                Some("qemu_system_x86_64_required") => "QEMU is missing. On Debian install it with: sudo apt install qemu-system-x86. The installer changes no system packages.",
+                Some("qemu_system_required") => "QEMU for this architecture is missing. Install qemu-system-x86 on amd64 or qemu-system-arm on arm64. The installer changes no system packages.",
                 Some("usable_kvm_required") => "No usable KVM access for this account. Have the administrator check hardware virtualization and /dev/kvm permissions; no VM was started.",
-                Some("nested_virtualization_unavailable") => "KVM does not expose usable nested VMX/SVM. This host is not ready for the desktop runtime; no software-emulation fallback is used.",
+                Some("nested_virtualization_unavailable") => "KVM does not expose usable nested VMX/SVM or ARM EL2. This host is not ready for the desktop runtime; no software-emulation fallback is used.",
                 Some("vhost_vsock_unavailable") => "The account lacks usable vhost-vsock access. Have the administrator check /dev/vhost-vsock and AF_VSOCK support; the installer changes no modules or permissions.",
-                _ => "Linux runtime requires x86_64, usable nested KVM, vhost-vsock and QEMU. Run oblivion-vm capabilities.",
+                _ => "Linux runtime requires x86_64/arm64, usable nested KVM, vhost-vsock and QEMU. Run oblivion-vm capabilities.",
             }
         } else { "This Mac does not advertise the nested virtual machines required by Oblivion. Run oblivion-vm capabilities; hardware acceptance remains separate." }.into());
     }
@@ -337,9 +342,9 @@ fn verify_boot(settings: &Settings) -> Result<()> {
         .zip(&settings.bundle.boot)
     {
         let info = fs::symlink_metadata(path)?;
+        let live_asset = cfg!(target_os = "linux") && mode()? == Mode::Live && info.uid() == 0 && info.mode() & 0o022 == 0;
         if !info.is_file()
-            || info.uid() != unsafe { libc::getuid() }
-            || info.mode() & 0o077 != 0
+            || (!live_asset && (info.uid() != unsafe { libc::getuid() } || info.mode() & 0o077 != 0))
             || info.nlink() != 1
             || info.len() != expected.bytes
             || desktop_bundle::digest(path)? != expected.sha256
@@ -397,11 +402,8 @@ fn helper() -> Result<PathBuf> {
 }
 
 fn require_desktop() -> Result<()> {
-    if mode()? == Mode::Direct {
-        return Err(
-            "This installation uses the local controller; desktop runtime commands are unavailable"
-                .into(),
-        );
+    if mode()? == Mode::Live {
+        return Err("The Live image manages its immutable runtime. Desktop installation commands are unavailable.".into());
     }
     Ok(())
 }
@@ -1340,10 +1342,10 @@ fn write_record(root: &Path, name: &str, value: &impl Serialize) -> Result<()> {
 fn prepare_connection() -> Result<Settings> {
     let root = directory()?;
     let path = root.join("runtime.json");
+    #[cfg(target_os = "linux")]
+    if mode()? == Mode::Live { live::prepare(&root, &path)?; }
     if !path.is_file() {
-        return Err(
-            "Install the matching development desktop bundle before starting Oblivion".into(),
-        );
+        return Err("Install the matching development desktop bundle before starting Oblivion".into());
     }
     private_directory(&root)?;
     let settings = Settings::read(&path)?;
@@ -1365,19 +1367,32 @@ fn prepare_connection() -> Result<Settings> {
     Ok(settings)
 }
 
+pub fn request_live_storage(ephemeral: Option<bool>) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if mode()? == Mode::Live {
+        unsafe {
+            match ephemeral {
+                Some(true) => std::env::set_var("OBLIVION_LIVE_STORAGE_REQUEST", "ephemeral"),
+                Some(false) => std::env::set_var("OBLIVION_LIVE_STORAGE_REQUEST", "persistent"),
+                None => std::env::remove_var("OBLIVION_LIVE_STORAGE_REQUEST"),
+            }
+        }
+    }
+    let _ = ephemeral;
+    Ok(())
+}
+
+pub fn choose_live_storage() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if mode()? == Mode::Live { return live::reset(); }
+    Err("Storage-mode selection is available only on Debian Live".into())
+}
+
 pub fn start() -> Result<()> {
-    require_desktop()?;
     ensure()
 }
 
 pub fn ensure() -> Result<()> {
-    if mode()? == Mode::Direct {
-        unsafe {
-            std::env::set_var("OBLIVION_RUNTIME_MODE", "direct");
-            std::env::remove_var("OBLIVION_CONTROL_SOCKET");
-        }
-        return Ok(());
-    }
     let settings = prepare_connection()?;
     let bundle = Bundle::current()?;
     if bundle.id() != settings.bundle.bundle_id || bundle.source() != settings.bundle.source_sha256
@@ -1407,7 +1422,7 @@ pub fn ensure() -> Result<()> {
     let socket = &settings.control_socket;
     let deadline = Instant::now() + Duration::from_secs(390);
     if crate::remote_control::probe(socket, Duration::from_secs(2)).is_ok() {
-        return Ok(());
+        return ready();
     }
     let startup_lock = private_lock(&sidecar(socket, ".startup.lock"))?;
     let helper_lock = private_lock(&sidecar(socket, ".lock"))?;
@@ -1483,7 +1498,7 @@ pub fn ensure() -> Result<()> {
             .checked_duration_since(Instant::now())
             .ok_or("Runtime is still starting. Retry after its controller becomes ready.")?;
         if crate::remote_control::probe(socket, remaining.min(Duration::from_secs(2))).is_ok() {
-            return Ok(());
+            return ready();
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return Err(
@@ -1494,6 +1509,12 @@ pub fn ensure() -> Result<()> {
     }
 }
 
+fn ready() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if mode()? == Mode::Live { live::activate_ram()?; }
+    Ok(())
+}
+
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
@@ -1502,7 +1523,6 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
 
 /// Explicitly recover sockets only after all owners and listeners have gone.
 pub fn recover() -> Result<()> {
-    require_desktop()?;
     let settings = prepare_connection()?;
     let startup = private_lock(&sidecar(&settings.control_socket, ".startup.lock"))?;
     let running = private_lock(&sidecar(&settings.control_socket, ".lock"))?;
@@ -1584,7 +1604,6 @@ fn try_lock(file: &fs::File) -> Result<bool> {
 }
 
 pub fn stop() -> Result<()> {
-    require_desktop()?;
     prepare_connection()?;
     control::request("lock", None, &[])?;
     control::request("shutdown-runtime", None, &[])?;
@@ -1998,14 +2017,15 @@ mod tests {
     #[test]
     fn installation_profile_is_explicit_and_exact() {
         assert!(matches!(
-            installation(br#"{"version":1,"mode":"direct-controller"}"#),
-            Ok(Mode::Direct)
+            installation(br#"{"version":1,"mode":"live-launcher"}"#),
+            Ok(Mode::Live)
         ));
         for invalid in [
-            br#"{"version":0,"mode":"direct-controller"}"#.as_slice(),
+            br#"{"version":0,"mode":"live-launcher"}"#.as_slice(),
+            br#"{"version":1,"mode":"controller-runtime"}"#.as_slice(),
             br#"{"version":1,"mode":"desktop"}"#.as_slice(),
-            br#"{"version":1,"mode":"direct-controller","fallback":true}"#.as_slice(),
-            br#"{"mode":"direct-controller"}"#.as_slice(),
+            br#"{"version":1,"mode":"live-launcher","fallback":true}"#.as_slice(),
+            br#"{"mode":"live-launcher"}"#.as_slice(),
         ] {
             assert!(installation(invalid).is_err());
         }

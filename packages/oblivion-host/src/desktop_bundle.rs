@@ -86,6 +86,8 @@ pub(crate) fn platform() -> &'static str {
     return "darwin-arm64";
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     return "linux-x86_64";
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    return "linux-arm64";
     #[allow(unreachable_code)]
     "unsupported"
 }
@@ -129,7 +131,7 @@ impl Bundle {
         expected_platform: &str,
         runtime: bool,
     ) -> Result<Self> {
-        if !root.is_absolute() || !matches!(expected_platform, "darwin-arm64" | "linux-x86_64") {
+        if !root.is_absolute() || !matches!(expected_platform, "darwin-arm64" | "linux-x86_64" | "linux-arm64") {
             return Err("unsupported_desktop_bundle_platform".into());
         }
         let root = root.canonicalize()?;
@@ -206,6 +208,8 @@ impl Bundle {
         }
         let native = if expected_platform == "darwin-arm64" {
             "lib/manager/@opentui/core-darwin-arm64/libopentui.dylib"
+        } else if expected_platform == "linux-arm64" {
+            "lib/manager/@opentui/core-linux-arm64/libopentui.so"
         } else {
             "lib/manager/@opentui/core-linux-x64/libopentui.so"
         };
@@ -346,7 +350,7 @@ fn open(path: &Path) -> Result<fs::File> {
 }
 
 fn owned(metadata: &fs::Metadata, directory: bool) -> Result<()> {
-    if metadata.uid() != unsafe { libc::getuid() }
+    if (metadata.uid() != unsafe { libc::getuid() } && metadata.uid() != 0)
         || metadata.mode() & 0o022 != 0
         || if directory {
             !metadata.is_dir()

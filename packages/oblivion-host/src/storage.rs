@@ -1438,22 +1438,6 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             trusted_file(&persistent_safe_path(&command.id)?)?;
             write_session_title(&command.id, &command.title)
         }
-        "claim-intro" => {
-            runtime()?;
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(format!("{RUN}/intro-shown"))
-            {
-                Ok(_) => println!("true"),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    println!("false")
-                }
-                Err(_) => return Err(Error("intro_marker_failed")),
-            }
-            Ok(())
-        }
         "enter-documents" | "enter-documents-ephemeral" => {
             let vm = config.vm.as_ref().ok_or(Error("vm_not_configured"))?;
             vm.validate()?;

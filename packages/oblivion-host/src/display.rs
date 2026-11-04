@@ -15,7 +15,7 @@ pub fn run() -> Result<()> {
     protect()?;
     match std::env::args().nth(1).as_deref() {
         Some("--client") if unsafe { libc::geteuid() } == DISPLAY_UID => client(),
-        Some("--manager") if unsafe { libc::geteuid() } == MANAGER_UID => manager(),
+        Some("--launcher") if unsafe { libc::geteuid() } == MANAGER_UID => manager(),
         _ => Err("invalid_display_role".into()),
     }
 }
@@ -61,7 +61,7 @@ fn manager() -> Result<()> {
     socket.set_read_timeout(Some(Duration::from_secs(5)))?;
     let tty = receive_terminal(&socket, DISPLAY_UID)?;
     socket.set_read_timeout(None)?;
-    let mut command = Command::new("/usr/bin/oblivion-manager");
+    let mut command = Command::new("/usr/lib/oblivion/desktop/bin/oblivion");
     command
         .env_remove("LISTEN_PID")
         .env_remove("LISTEN_FDS")

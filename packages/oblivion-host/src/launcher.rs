@@ -33,7 +33,6 @@ const HELP: &str = "Oblivion — isolated, encrypted workspaces for coding agent
   oblivion ephemeral               Enter RAM-only mode
   oblivion safes                   List Safes
   oblivion status --json           Read controller state
-  oblivion intro --json            Claim the direct runtime's boot wordmark
   oblivion run [OPTIONS] AGENT [AGENT_ARGUMENTS...]
   oblivion shell --safe SAFE        Open the Safe's tmux workspace
   oblivion shell --safe SAFE --policy offline
@@ -58,6 +57,7 @@ Desktop runtime bundles
   oblivion runtime update BUNDLE
   oblivion runtime deploy BUNDLE
   oblivion runtime start|stop|recover
+  oblivion runtime choose-storage  Choose Live backing after stopping its VM
   oblivion runtime gc              Remove stopped, verified old software
   oblivion runtime uninstall       Remove desktop software; keep encrypted data
 
@@ -206,6 +206,7 @@ fn run() -> control::Result<i32> {
     if args.len() == 1 && args[0] == "activity" {
         return oblivion_host::activity::forward_stdin();
     }
+    let launch_options = if args.first().is_some_and(|arg| arg == "run") { Some(options(&args[1..])?) } else { None };
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         if args.first().is_some_and(|arg| arg == "runtime") {
@@ -223,6 +224,7 @@ fn run() -> control::Result<i32> {
                     oblivion_host::native_runtime::update(std::path::Path::new(&args[2]))?
                 }
                 Some("start") if args.len() == 2 => oblivion_host::native_runtime::start()?,
+                Some("choose-storage") if args.len() == 2 => oblivion_host::native_runtime::choose_live_storage()?,
                 Some("recover") if args.len() == 2 => oblivion_host::native_runtime::recover()?,
                 Some("stop") if args.len() == 2 => oblivion_host::native_runtime::stop()?,
                 Some("gc") if args.len() == 2 => oblivion_host::native_runtime::gc()?,
@@ -235,9 +237,17 @@ fn run() -> control::Result<i32> {
             }
             return Ok(0);
         }
-        if oblivion_host::native_runtime::mode()? == oblivion_host::native_runtime::Mode::Desktop {
-            oblivion_host::desktop_bundle::prepare_environment()?;
-        }
+        oblivion_host::desktop_bundle::prepare_environment()?;
+        let storage = match args.first().map(String::as_str) {
+            Some("ephemeral") if args.len() == 1 => Some(true),
+            Some("init" | "unlock") => Some(false),
+            Some("run") => launch_options.as_ref().and_then(|parsed| {
+                if parsed.ephemeral { return Some(true); }
+                parsed.name.as_ref().map(|_| false)
+            }),
+            _ => None,
+        };
+        oblivion_host::native_runtime::request_live_storage(storage)?;
         oblivion_host::native_runtime::ensure()?;
     }
     if args.is_empty() {
@@ -255,10 +265,6 @@ fn run() -> control::Result<i32> {
         "settings" => idle_commands::run(&args[1..]),
         "status" if args.len() == 2 && args[1] == "--json" => {
             println!("{}", control::request("status", None, &[])?);
-            Ok(0)
-        }
-        "intro" if args.len() == 2 && args[1] == "--json" => {
-            println!("{}", control::request("claim-intro", None, &[])?);
             Ok(0)
         }
         "init" => init_commands::run(&args[1..]),
@@ -320,7 +326,7 @@ fn run() -> control::Result<i32> {
             })?;
             Ok(0)
         }
-        "run" => launch(&args[1..]),
+        "run" => launch(launch_options.ok_or("run_options_missing")?),
         "shell" => shell_commands::run(&args[1..]),
         "files" => file_commands::run(&args[1..]),
         "backup" => backup_commands::run(&args[1..]),
@@ -582,11 +588,10 @@ fn start_agent(id: &str) -> control::Result<()> {
     }
 }
 
-fn launch(args: &[String]) -> control::Result<i32> {
-    let options = options(args)?;
+fn launch(options: Options) -> control::Result<i32> {
     let initial = status()?;
     if !initial.app_open {
-        if options.ephemeral {
+        if options.ephemeral || std::env::var("OBLIVION_LIVE_STORAGE").as_deref() == Ok("ephemeral") {
             control::request("enter-ram", None, &[])?;
         } else {
             // An explicit new-Safe launch can guide first-run setup. An
