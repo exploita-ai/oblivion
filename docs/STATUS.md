@@ -22,16 +22,20 @@ public status and portable Share data. The CLI and manager now provide explicit
 offline task review, start/reconciliation, confirmed retry and cancellation,
 plus current managed-job identifiers and outcomes. Plaintext is fetched only for
 review, escaped for display and cleared on Back, error, lock or opening change.
-Native-client access sends no saved task. Creation-triggered startup and
-credential-only delegation remain in implementation; supported credential
-forms and independent task-journal restore still require qualification.
+Native-client access sends no saved task. Creation-triggered startup now has a
+credential-only delegation path for the supported native credential forms,
+offline installation and a bounded gateway startup before task admission.
+Ordinary OAuth caches are not cloned; unsupported or missing login leaves a
+needs-auth observation. Installed-VM and real-provider qualification remain open.
 
 The immutable SafeAdmin checkpoint now stores child provenance, the sealed task
 and attempts inside the encrypted volume. Raw restore authenticates the volume
 password/token and task context without requiring the mother, preserves original
 identity/family/key and publishes through the current transaction with Offline
-policy. The native personal-backup CLI is still in implementation; an actual
-VM backup/restore round trip remains an acceptance gate.
+policy. The native personal-backup CLI provides full-volume export/import,
+explicit finish after a wrong password, metadata-only status and discard.
+Lock revokes copy workers before releasing the archive. An actual VM
+backup/restore round trip remains an acceptance gate.
 
 The footer now shows a fresh Safe-scoped policy beside Network. Policy and
 Tor/SOCKS5 observations bind to the host opening and the exact Safe ID, slot and
@@ -39,6 +43,12 @@ opening nonce, and expire after ten seconds. A locked, closing or reopened Safe
 cannot inherit a previous positive route mark. Physical host-link status can
 still appear on the welcome screen. Renderer fixtures cover these boundaries
 at narrow and wide sizes; real gateway fault-injection acceptance remains open.
+
+Development desktop bundles pair the CLI, manager and helper with a verified,
+source-matching controller image and boot files. Stopped-runtime updates preserve
+the private disk identity and reject mismatched assets. Actual installation,
+update, uninstall and signed-distribution qualification remain open; unsigned
+checksums are not release provenance. See [desktop bundles](DESKTOP.md).
 
 The development Debian package reuses the Live immutable role assets. Real dpkg
 install/remove/purge/reinstall fixtures preserve configuration and data, and
@@ -64,8 +74,8 @@ Remaining release gates include real login and scoped child-credential delegatio
 chat persistence after cold restart,
 interactive cross-agent resume and author admission, close during active jobs,
 family password rotation and independent restore, concurrent Tor/SOCKS5 failures,
-Share between two installed candidates, physical media, resource measurements, desktop
-packaging and signed release provenance. Local inference is deferred until after
+Share between two installed candidates, physical media, resource measurements,
+desktop installation/uninstall qualification and signed release provenance. Local inference is deferred until after
 1.0. No independent security audit has been completed.
 
 CI builds current-source images as drafts. A successful check, build or checksum

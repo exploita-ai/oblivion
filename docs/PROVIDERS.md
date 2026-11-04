@@ -10,15 +10,34 @@ refresh tokens, client databases and API keys saved by the client live inside
 that Safe's encrypted volume. Two agents in the same Safe can access data
 permitted by that guest's user account; different Safes have separate filesystems.
 
-The intended agent-created-child flow starts already authenticated when the
-controller can authorize a supported credential-only delegation from the parent.
-This is still in implementation. Candidate forms are API keys,
-`CodexAccessToken` and `ClaudeSetupToken`, subject to the pinned client's supported
-flow and qualification. The mechanism must not copy a whole home, agent profile,
-conversation store or cache, nor import the desktop's login. Native login remains
-a fallback when delegation is unavailable. General managed-OAuth portability,
-refresh-token reuse and identical account behavior across clients are not
-promised.
+Agent-created children have a controller-managed startup path. It exports only
+the requested client's supported credential from the parent, seals it to the
+family, child and creation request while booting, installs it in the child's
+native store while offline, then starts the saved task. Parent authority is
+checked throughout. Missing, ambiguous or unsupported authentication leaves the
+task waiting for authentication; it does not start anonymously. No whole home,
+agent profile, conversation store, cache or desktop login is copied.
+
+| Client | Credential-only adapters in the current source | Explicit limits |
+| --- | --- | --- |
+| Codex | OpenAI API key or a separately provisioned Codex Access Token | Ordinary ChatGPT OAuth caches are not cloned. Access Tokens represent a ChatGPT Business/Enterprise workspace; they are not Platform API keys. Custom routing is rejected by this adapter. |
+| Claude Code | Anthropic API key or a separately provisioned `claude setup-token` credential | Ordinary `/login` refresh caches are not cloned. Mixed identities, custom routing and authentication helpers need a separate supported adapter. |
+| OpenCode 2 | Selected active API key for a supported built-in integration, including `abliteration-ai`, with an explicit model | OAuth, custom provider routing, ambiguous selection and provider-specific forms are not delegated. Installation uses the pinned native key-connect API on private loopback without provider access. |
+
+These adapters cover known default native profiles. Per-launch routing/settings
+overrides, native project configuration and unqualified provider plugins are
+refused rather than treated as equivalent to a default provider. This limits
+credential delegation; ordinary `oblivion run` still forwards native arguments.
+
+These are source adapters, not a qualification of real-provider login, expiry
+or account policy. Subscription delegation may require one-time provisioning
+before children can start without another login. See the official
+[Codex Access Token](https://learn.chatgpt.com/docs/enterprise/access-tokens),
+[Codex concurrent-authentication limits](https://learn.chatgpt.com/docs/auth/ci-cd-auth)
+and [Claude long-lived token](https://code.claude.com/docs/en/authentication#generate-a-long-lived-token)
+documentation. No subscription is silently replaced with API billing. Native
+login remains the fallback; universal managed-OAuth delegation is still an open
+requirement.
 
 Delegation does not make a provider account anonymous or narrow its permissions.
 Expiry, refresh, logout and simultaneous parent/child use require real-provider

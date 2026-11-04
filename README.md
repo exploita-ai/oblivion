@@ -84,6 +84,7 @@ Headless Debian controller VM       Direct Debian controller
 | **Agent tools** | Scoped MCP operations for Safe status, child-Safe creation, managed chat jobs and Tor rotation. |
 | **Portable history** | A canonical catalog and adapters for the three native resume stores. Provider-specific records have explicit portability limits. |
 | **Share** | Export one Safe, a family branch or all Safes to a separate passphrase-encrypted package. Import into new offline volumes after full verification. |
+| **Personal backup** | [Copy the complete closed encrypted volume](docs/BACKUPS.md) through a revocable private stream. Restore the original identity using its original password; native credentials may be included. |
 
 These are source capabilities with different levels of verification. Component
 checks do not establish that the complete installed product is ready for
@@ -91,13 +92,16 @@ sensitive use. See the roadmap for the exact remaining VM and hardware gates.
 
 Agent-created Safes are marked in the manager. Their inspector separates parent,
 requested client, storage and creation record from the actual VM and managed-job
-state. Open the saved task offline, review its text, then explicitly start it.
+state. Creation can delegate the requested client's supported credential and
+start the saved task in the child's own VM. Missing or unsupported login leaves
+an explicit authentication requirement. The inspector also supports offline
+review and manual start or recovery of a saved task.
 An uncertain submission is reconciled with the same request; a new attempt
 requires a confirmed failure or cancellation and an explicit retry. Back leaves
-the job active; inactivity locking still stops work. Creation-triggered startup
-and credential-only delegation are still in implementation. The intended child
-flow is already authenticated when a supported credential can be delegated;
-native login remains a fallback. See [provider limits](docs/PROVIDERS.md).
+the job active; inactivity locking still stops work. Startup observations are
+separate from actual guest job outcomes. Native login remains a fallback where
+credential-only delegation is unavailable. This path still needs installed-VM
+and real-provider qualification. See [provider limits](docs/PROVIDERS.md).
 
 ## Networking
 

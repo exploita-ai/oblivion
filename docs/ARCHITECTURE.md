@@ -113,15 +113,21 @@ picker, process-death and per-chat author admission remain acceptance work.
 See the [history adapter](../packages/oblivion-history/README.md).
 
 Scoped MCP operations authenticate their calling VM and opening. A task can
-create a closed child Safe with provenance and a password inherited through the
+create a child Safe with provenance and a password inherited through the
 family credential design; it cannot choose another Safe's authority, filesystem
-or credentials. The intended automatic-child path includes scoped delegation of
+or unrelated credentials. The automatic-child path includes scoped delegation of
 only the requested agent's supported provider credential, not its whole home,
-profile, history or caches. This work remains in implementation, with API keys,
-`CodexAccessToken` and `ClaudeSetupToken` as candidate forms to qualify. Universal
-managed OAuth reuse or refresh is not promised. The controller must authorize
+profile, history or caches. API keys, separately provisioned Codex Access Tokens
+and Claude setup-tokens have source adapters; installed-VM/provider qualification
+remains open. Ordinary managed OAuth refresh caches are not cloned. The controller authorizes
 the transfer; task text, public status and MCP responses never carry the secret.
-Native login is the fallback when a credential cannot be delegated. Managed
+Native login is the fallback when a credential cannot be delegated. The startup
+thread carries metadata and a sealed credential while booting, installs it in
+the offline child, then starts the protected agent VM and admits the immutable
+task using its stable request ID. Every transition rechecks the parent opening,
+VM owner and branch. Failure cleans only the owned child opening/branch;
+unfinished cleanup remains explicit. Startup cleanup preserves RAM volumes
+until branch/host locking, and normal inactivity locking still stops work. Managed
 chat jobs use bounded output, timeouts and controller
 cleanup ownership. They do not weaken native permission prompts silently.
 
