@@ -19,22 +19,19 @@ reviews its type and resolved location, and leaves the existing copy review
 in place. Nothing is imported by pasting. Whole-path quotes are supported;
 shell expansion and OS-native drag-and-drop APIs are not implemented.
 
-Claude now has process-bound prompt admission through its mandatory managed
-hook, with canonical-chat checks, stale-projection denial and a same-boot
-restart fence. Pinned native offline fixtures exercise resume conflicts and
-hook failures. This does not cover every native mutation: `/compact` and
-interactive picker behavior remain outside its prompt coverage. The chosen
-1.0 contract keeps different chats concurrent and requires a managed handoff
-for the same chat after verified writer shutdown. Universal interception of
-manual native commands and plugins is outside that contract.
-See [history and admission](HISTORY.md).
+Cross-agent conversation sharing, synchronization, conversion and handoff are
+outside the 1.0 scope. Each agent owns its native chats and resume inside the
+Safe. The existing canonical adapters and Claude admission hook are experimental
+source, not release requirements or promises. They still need removal or
+isolation from the candidate runtime; this documentation change does not
+perform that cleanup. Retained technical evidence is in [HISTORY](HISTORY.md).
 
 The agent chooser now separates Enter for a new conversation from C to
 continue that agent's latest conversation in its current workspace. A saved
 task with an observed native chat ID offers a reviewed native resume after
 rechecking the exact task, job cleanup and Safe opening. It sends no task
-again. Native pickers and arguments retain their own behavior; this does not
-implement the remaining same-chat cross-agent handoff and backend lifecycle guard.
+again. Native pickers and arguments retain their own behavior. Task resume uses the
+same agent; backend shutdown and native persistence still require qualification.
 
 Agent-created Safes have an explicit review screen. Closed RAM children resolve
 to their existing volume and require their live parent's family authority; they
@@ -106,7 +103,8 @@ remain open.
 
 Remaining release gates include real login and scoped child-credential delegation,
 chat persistence after cold restart,
-interactive cross-agent resume and verified handoff, close during active jobs,
+native resume for each agent, removal of excluded shared-history prototypes,
+close during active jobs,
 family password rotation and independent restore, concurrent Tor/SOCKS5 failures,
 Share between two installed candidates, physical media, resource measurements,
 desktop installation/uninstall qualification and signed release provenance. Local inference is deferred until after

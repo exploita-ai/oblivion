@@ -32,8 +32,8 @@ oblivion
 ```
 
 **Oblivion 1.0 is in development. These examples describe the current source,
-not a released desktop installer.** Native VM qualification and the complete
-cross-agent persistence workflow are unfinished. Published
+not a released desktop installer.** Native VM qualification and native chat
+persistence after restart remain unfinished acceptance gates. Published
 [0.x releases](https://github.com/exploita-ai/oblivion/releases) contain the
 previous Live-only product and its modified OpenCode client. They do not contain
 this launcher. The [roadmap](docs/oblivion1.0-roadmap.md) records implementation
@@ -82,10 +82,13 @@ Headless Debian controller VM       Direct Debian controller
 | **Explicit file copies** | Local selection, guest browser, reviewed manifests and verified hashes through private streams. No shared host folders. |
 | **Inactivity locking** | Human input renews the timer; generated output and background tasks do not. Locking stops active work. |
 | **Agent tools** | Scoped MCP operations for Safe status, child-Safe creation, managed chat jobs and Tor rotation. |
-| **Portable history** | A canonical catalog and adapters for the three native resume stores. Provider-specific records have explicit portability limits. |
+| **Native conversations** | Each agent keeps its own chats and native resume inside the Safe. Cross-agent history conversion and synchronization are outside the 1.0 scope. |
 | **Share** | Export one Safe, a family branch or all Safes to a separate passphrase-encrypted package. Import into new offline volumes after full verification. |
 | **Personal backup** | [Copy the complete closed encrypted volume](docs/BACKUPS.md) through a revocable private stream. Restore the original identity using its original password; native credentials may be included. |
 | **Family passwords** | [Review and change one local family's password](docs/PASSWORDS.md), with explicit recovery after interruption. Existing backup passwords and data keys are unchanged. |
+
+The development tree still contains shared-history experiments. Removing them
+from the 1.0 runtime is planned work; this scope change does not disable code.
 
 These are source capabilities with different levels of verification. Component
 checks do not establish that the complete installed product is ready for

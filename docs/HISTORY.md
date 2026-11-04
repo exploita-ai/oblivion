@@ -1,4 +1,11 @@
-# Native history and conversation admission
+# Shared-history prototype — outside the 1.0 scope
+
+Cross-agent conversation sharing, conversion, synchronization and handoff have
+been set aside. Oblivion 1.0 keeps each agent's native conversations and resume
+inside its Safe. This document records existing experimental source and prior
+research; it does not define a 1.0 product contract or acceptance gate.
+Removing or disabling the prototype in runtime images remains separate code
+work. The documentation update does not perform that removal.
 
 Safes retain one encrypted conversation catalog and separate native histories
 for Codex, Claude Code and OpenCode. The catalog maps their native IDs to a
@@ -42,33 +49,13 @@ does not become a canonical user message in the tested cases. This is not a
 boundary against a user deliberately modifying the Safe's root-owned policy
 with its own sudo access.
 
-## Managed handoff contract for 1.0
-
-Different conversations and agents may run concurrently inside one Safe.
-Moving the same conversation to another agent is a managed handoff: verify
-that the previous client and its backend writers stopped, reconcile saved
-history, update the inactive target profile, resolve its native ID, then open
-that ID in the official client. The saved task is not submitted again.
-
-The first version requires the destination profile to be inactive during
-projection. A busy profile or uncertain backend lifetime blocks the handoff
-until work finishes or explicit recovery succeeds. Other conversations are
-not automatically stopped. These lifecycle and continuation steps remain
-under implementation and qualification.
-
-Native arguments, pickers and plugins stay available. Universal exclusion of
-all manual same-chat mutations is outside this 1.0 contract. The supported
-handoff must report its actual busy/recovery state rather than claim that a
-closed terminal proves an idle backend.
-
-## Admission coverage and remaining work
+## Recorded prototype coverage and limitations
 
 This is prompt admission, **not a complete single-author guarantee**. Claude's
 native `/compact` command bypasses `UserPromptSubmit`; even a denied
 `PreCompact` writes local command transcript rows in the pinned version.
 Interactive picker mutations, background continuations and other native
-mutation paths remain outside that coverage. The 1.0 handoff contract above
-does not claim universal interception of those paths.
+mutation paths remain outside that experimental coverage.
 
 Codex and OpenCode prompt admission is not integrated. Codex's pinned hook
 execution errors fail open and its shared backend does not expose the
@@ -93,6 +80,8 @@ cross-agent handoff require actual backend shutdown or retained authority.
 
 Focused Linux socket/process tests and offline tests with the actual pinned
 Claude binary pass without a provider or model call. Safe-wide shutdown,
-power loss and verified cross-agent handoff still require qualification.
+power loss and verified cross-agent handoff were not qualified by those tests.
+The cross-agent work is excluded from 1.0; native persistence and Safe shutdown
+remain product acceptance gates.
 Implementation and fixture commands are in
 [the history package](../packages/oblivion-history/README.md).
