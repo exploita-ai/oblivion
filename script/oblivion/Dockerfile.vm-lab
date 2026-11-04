@@ -597,7 +597,7 @@ RUN sed -i 's/^Components: main$/Components: main non-free-firmware/' /etc/apt/s
     live-boot live-boot-initramfs-tools python3 fdisk sudo network-manager wpasupplicant \
     $(if [ "$TARGETARCH" = arm64 ]; then printf qemu-system-arm; else printf qemu-system-x86; fi) \
     libwlroots-0.18 foot seatd fonts-dejavu-mono libxkbcommon-tools libpciaccess0 \
-    console-setup-mini kbd tzdata xkb-data \
+    console-setup-mini kbd tzdata xkb-data whiptail \
     firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211 firmware-mediatek \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=live-native-build /desktop/ /usr/lib/oblivion/desktop/
@@ -611,6 +611,7 @@ COPY --from=clipboard-broker /out/usr/share/doc/spice-vdagent/ /usr/share/doc/sp
 COPY --from=clipboard-broker /out/package.control /out/SHA256SUMS /usr/share/doc/spice-vdagent/
 COPY --from=vbox-clipboard /out/ /usr/lib/oblivion/virtualbox/
 COPY script/oblivion/live-storage.py /usr/lib/oblivion/live-storage.py
+COPY script/oblivion/live-os/ /usr/lib/oblivion/live-os/
 COPY script/oblivion/live-setup.sh /tmp/live-setup
 RUN chmod 0755 /usr/lib/oblivion/live-storage.py && sh /tmp/live-setup && rm /tmp/live-setup \
     && ln -s /usr/lib/oblivion/desktop/bin/oblivion /usr/bin/oblivion

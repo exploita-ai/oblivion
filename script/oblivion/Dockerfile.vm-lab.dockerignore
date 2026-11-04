@@ -197,3 +197,6 @@ packages/oblivion-native-linux/*
 !packages/oblivion-native-linux/Cargo.lock
 !packages/oblivion-native-linux/src/
 !packages/oblivion-native-linux/src/**
+
+!script/oblivion/live-os/
+!script/oblivion/live-os/**

@@ -4,7 +4,13 @@ set -eu
 groupadd --gid 1000 oblivion-manager
 useradd --uid 1000 --gid 1000 --no-create-home --home-dir /run/oblivion-live/user --shell /bin/sh oblivion-manager
 passwd -l root
-mkdir -p /etc/oblivion /etc/tmpfiles.d /etc/sudoers.d /etc/modules-load.d
+mkdir -p /etc/oblivion /etc/tmpfiles.d /etc/sudoers.d /etc/modules-load.d /etc/systemd/system/oblivion-display.service.d
+# live-boot already provides a RAM-backed root overlay. Preserve the installed
+# dpkg/debconf database in /var so Debian's own configuration dialogs work.
+printf 'tmpfs /tmp tmpfs nosuid,nodev,mode=1777,size=64M 0 0\n' > /etc/fstab
+chmod 0755 /usr/lib/oblivion/live-os/console.sh
+cp /usr/lib/oblivion/live-os/*.service /usr/lib/oblivion/live-os/*.path /etc/systemd/system/
+install -m 0644 /usr/lib/oblivion/live-os/display.conf /etc/systemd/system/oblivion-display.service.d/debian-keyboard.conf
 printf '{"version":1,"mode":"live-launcher"}\n' > /etc/oblivion/installation.json
 printf 'd /run/oblivion-live 0755 root root -\nd /run/oblivion-live/user 0700 1000 1000 -\n' > /etc/tmpfiles.d/oblivion-live.conf
 # No arbitrary device or pathname is accepted by this root-owned helper.
@@ -74,6 +80,7 @@ printf 'kvm\nvhost_vsock\nvsock\n' > /etc/modules-load.d/oblivion-live.conf
 printf 'MODULES=most\nCOMPRESS=gzip\nRESUME=none\n' > /etc/initramfs-tools/conf.d/oblivion
 printf 'squashfs\noverlay\next4\niso9660\nloop\nvirtio_gpu\nvirtio_console\nxhci_pci\nusb_storage\nusbhid\n' > /etc/initramfs-tools/modules
 update-initramfs -u -k all
-systemctl enable oblivion-manager.service NetworkManager.service oblivion-network-console.service
+systemctl enable oblivion-manager.service NetworkManager.service oblivion-network-console.service \
+    oblivion-os-keyboard-console.service oblivion-os-timezone-console.service oblivion-live-keymap.path
 systemctl mask NetworkManager-wait-online.service e2scrub_reap.service e2scrub_all.timer dpkg-db-backup.timer dpkg-db-backup.service
 ln -sf /usr/lib/systemd/system/multi-user.target /etc/systemd/system/default.target

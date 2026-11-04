@@ -1,0 +1,22 @@
+[Unit]
+Description=Apply Debian keyboard preferences to the live terminal
+After=systemd-tmpfiles-setup.service
+Before=oblivion-display.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I -B /usr/lib/oblivion/live-os/keymap.py
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ReadWritePaths=/run
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+LimitCORE=0
+MemorySwapMax=0
