@@ -1,4 +1,4 @@
-"""Linux guest fixture: real tmux, wrappers and history RPC; no model calls.
+"""Linux guest fixture: real tmux and native wrappers; no model calls.
 
 Run in an isolated container with the guest files staged at their production
 paths, UID1000, tmpfs /vault and synthetic native executables. A real VM remains
@@ -17,13 +17,11 @@ import unittest
 class Workspace(unittest.TestCase):
     def setUp(self):
         self.server = None
-        self.watcher = None
 
     def tearDown(self):
-        for process in (self.server, self.watcher):
-            if process:
-                process.terminate()
-                process.wait(timeout=5)
+        if self.server:
+            self.server.terminate()
+            self.server.wait(timeout=5)
 
     def wait_socket(self, path, process):
         deadline = time.monotonic() + 5
@@ -34,9 +32,6 @@ class Workspace(unittest.TestCase):
             time.sleep(0.02)
 
     def test_native_wrapper_preserves_argv_cwd_and_status(self):
-        environment = dict(os.environ, HOME="/vault/home", XDG_CONFIG_HOME="/vault/config", XDG_DATA_HOME="/vault/state", XDG_STATE_HOME="/vault/state", XDG_CACHE_HOME="/tmp/oblivion-cache", PATH="/usr/lib/oblivion/agents/bin:/usr/bin:/bin")
-        self.watcher = subprocess.Popen(["/usr/bin/python3", "-B", "/usr/lib/oblivion/history/history.py", "watch", "--home", "/vault/home", "--workspace", "/vault/workspace", "--state", "/vault/home/.oblivion-history", "--sync-socket", "/run/oblivion-history/sync.sock"], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.wait_socket("/run/oblivion-history/sync.sock", self.watcher)
         arguments = ["--resume", "space ; $HOME", "", "à", "--"]
         result = subprocess.run(["/usr/bin/codex", *arguments], cwd="/vault/workspace/project", env={"PATH":"/usr/bin:/bin"}, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 23, result.stderr)
@@ -46,6 +41,10 @@ class Workspace(unittest.TestCase):
         self.assertEqual(report["home"], "/vault/home")
         self.assertEqual(report["config"], "/vault/config")
         self.assertEqual(report["telemetry"], "true")
+        self.assertEqual(report["state"], "/vault/state")
+        self.assertEqual(report["cache"], "/tmp/oblivion-cache")
+        self.assertFalse(Path("/vault/home/.oblivion-history").exists())
+        self.assertFalse(Path("/run/oblivion-history").exists())
 
     def test_foreground_tmux_server_and_independent_shell_panes(self):
         self.server = subprocess.Popen(["/usr/lib/oblivion/guest/workspace-server.sh"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -5,6 +5,13 @@ home, state and configuration directories. Each profile disables optional
 telemetry and seeds native configuration only when that file is absent. Agent
 arguments are passed unchanged. Existing configuration remains user-owned.
 
+The wrapper then executes the official binary directly. Each client owns its
+native conversations in the encrypted Safe; there is no shared chat catalog,
+history watcher, prompt-admission hook or cross-agent replication. Separate
+clients in the same Safe share files, while native resume IDs remain scoped
+to the agent that created them. Agent and Workspace services retain their
+systemd cgroups so closing the Safe can stop their processes and backends.
+
 Codex defaults disable analytics, feedback and each log, metrics and trace
 exporter. Explicit OTLP exporters otherwise work independently of the analytics
 switch. [Codex configuration reference](https://developers.openai.com/codex/config-reference/).

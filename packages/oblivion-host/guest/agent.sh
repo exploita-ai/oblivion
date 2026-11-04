@@ -13,11 +13,5 @@ if [ ! -x "/usr/lib/oblivion/agents/bin/$agent" ]; then
     exit 127
 fi
 . "/usr/lib/oblivion/guest/agent-profiles/$agent.sh"
-# Synchronization runs in the watcher's isolated network namespace. Its shared
-# profile lease allows multiple native processes without concurrent rewrites.
-exec /usr/bin/python3 -B /usr/lib/oblivion/history/history.py hold \
-    --home /vault/home --workspace /vault/workspace \
-    --state /vault/home/.oblivion-history \
-    --sync-socket /run/oblivion-history/sync.sock \
-    --author-socket /run/oblivion-author/author.sock \
-    --group-signals --agent "$agent" -- "/usr/lib/oblivion/agents/bin/$agent" "$@"
+# The native process owns its own history. No wrapper rewrites or mirrors it.
+exec "/usr/lib/oblivion/agents/bin/$agent" "$@"

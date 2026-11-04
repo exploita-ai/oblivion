@@ -7,11 +7,6 @@ cp /usr/lib/oblivion/guest/oblivion-agent@.service /etc/systemd/system/
 cp /usr/lib/oblivion/guest/oblivion-workspace.service /etc/systemd/system/
 cp /usr/lib/oblivion/guest/shell-profile.sh /etc/profile.d/oblivion-safe.sh
 chmod 0644 /etc/profile.d/oblivion-safe.sh
-cp /usr/lib/oblivion/guest/oblivion-history.service /etc/systemd/system/
-cp /usr/lib/oblivion/guest/oblivion-author.service /etc/systemd/system/
-mkdir -p /etc/claude-code
-cp /usr/lib/oblivion/guest/claude-managed-settings.json /etc/claude-code/managed-settings.json
-chmod 0644 /etc/claude-code/managed-settings.json
 cp /usr/lib/oblivion/guest/oblivion-safe-tools.service /etc/systemd/system/
 cp /usr/lib/oblivion/guest/oblivion-file@.service /etc/systemd/system/
 cp /usr/lib/oblivion/guest/oblivion-safe-admin@.service /etc/systemd/system/
@@ -57,4 +52,4 @@ visudo -cf /etc/sudoers
 cp /usr/lib/oblivion/guest/apt-session.conf /etc/apt/apt.conf.d/90oblivion-session
 sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources
 update-initramfs -u -k all
-systemctl enable oblivion-history.service oblivion-author.service oblivion-vault.service oblivion-documents-ready.service oblivion-resize.service
+systemctl enable oblivion-vault.service oblivion-documents-ready.service oblivion-resize.service

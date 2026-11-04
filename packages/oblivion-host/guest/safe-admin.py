@@ -18,10 +18,6 @@ import sqlite3
 import struct
 import sys
 import time
-import uuid
-
-sys.path.insert(0, "/usr/lib/oblivion/history")
-from oblivion_history.admin import catalog_state
 
 READY = b"OBSA1\n"
 REQUEST_LIMIT = 32768
@@ -55,20 +51,16 @@ def safe_id(value):
     return isinstance(value, str) and re.fullmatch(r"[a-f0-9]{32}", value) is not None
 
 
-def chat_id(value):
-    return isinstance(value, str) and len(value) == 36 and str(uuid.UUID(value)) == value
-
-
 def safe_text(value, maximum):
     return isinstance(value, str) and len(value) <= maximum and all(char.isprintable() for char in value)
 
 
 def metadata(value):
-    if not isinstance(value, dict) or set(value) != {"format", "version", "safe_id", "title", "history_version", "origin"}:
+    if not isinstance(value, dict) or set(value) != {"format", "version", "safe_id", "title", "origin"}:
         raise Rejected("invalid-metadata")
-    if type(value["version"]) is not int or type(value["history_version"]) is not int:
+    if type(value["version"]) is not int:
         raise Rejected("invalid-metadata")
-    if value["version"] != 1 or value["history_version"] != 1:
+    if value["version"] != 1:
         raise Rejected("unsupported-version")
     if value["format"] != "oblivion-safe" or not safe_id(value["safe_id"]):
         raise Rejected("invalid-metadata")
@@ -159,39 +151,7 @@ def request(value):
     if command.get("operation") == "checkpoint" and set(command) == {"operation", "metadata"}:
         metadata(command["metadata"])
         return command
-    if command.get("operation") == "archive-state" and set(command) <= {"operation", "cursor"}:
-        if command.get("cursor") is None or chat_id(command["cursor"]):
-            return {"operation": "archive-state", "cursor": command.get("cursor")}
     raise ValueError("invalid_safe_admin_request")
-
-
-def archive_state(directory, cursor):
-    try:
-        value = catalog_state(directory, cursor)
-    except (OSError, ValueError, sqlite3.Error):
-        raise Rejected("invalid-catalog") from None
-    if not isinstance(value, dict) or set(value) != {"history_version", "consistency", "entries", "next", "pending"}:
-        raise Rejected("invalid-catalog")
-    if type(value["history_version"]) is not int or value["history_version"] != 1 or value["consistency"] not in ("catalog-sqlite-ok", "catalog-empty"):
-        raise Rejected("invalid-catalog")
-    if not isinstance(value["entries"], list) or len(value["entries"]) > 50:
-        raise Rejected("invalid-catalog")
-    def agents(items):
-        return isinstance(items, list) and len(items) <= 3 and all(isinstance(item, str) and item in AGENTS for item in items) and len(set(items)) == len(items)
-    if not agents(value["pending"]):
-        raise Rejected("invalid-catalog")
-    previous = cursor or ""
-    for entry in value["entries"]:
-        if not isinstance(entry, dict) or set(entry) != {"chat_id", "title", "updated", "agents"}:
-            raise Rejected("invalid-catalog")
-        if not chat_id(entry["chat_id"]) or entry["chat_id"] <= previous or not safe_text(entry["title"], 240) or type(entry["updated"]) is not int or not 0 <= entry["updated"] <= 2**64 - 1 or not agents(entry["agents"]):
-            raise Rejected("invalid-catalog")
-        previous = entry["chat_id"]
-    if value["next"] is not None and (len(value["entries"]) != 50 or value["next"] != previous):
-        raise Rejected("invalid-catalog")
-    if value["consistency"] == "catalog-empty" and (value["entries"] or value["next"] is not None or value["pending"]):
-        raise Rejected("invalid-catalog")
-    return value
 
 
 @contextlib.contextmanager
@@ -336,9 +296,6 @@ def execute(value, *, vault=Path("/vault"), owner):
     if operation == "diagnostics":
         return write_diagnostics(vault, command["report"], owner)
     try:
-        current = archive_state(vault / "home/.oblivion-history", command.get("cursor"))
-        if operation == "archive-state":
-            return {"result": "archive-state", "state": current}
         if operation == "inspect":
             with metadata_directory(vault) as target:
                 return {"result": "metadata", "metadata": read_metadata(target)}
