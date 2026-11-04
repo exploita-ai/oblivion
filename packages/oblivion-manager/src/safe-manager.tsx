@@ -403,6 +403,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
         safe={safe() ? { id: safe()!, name: safeTitle(), persistent: state()?.sessions.includes(safe()!) ?? false, closed: !active().some((entry) => entry.id === safe()) } : undefined}
         run={(args) => execute(args, undefined, false)} back={() => section("settings")} /></Show>
       <Show when={page() === "share" && sharing()} keyed>{(selection) => <NativeShare
+        opening={state()?.idle_lock.host?.nonce}
         selection={selection.operation === "import" ? selection : selection.scope === "all" ? { ...selection, count: state()?.sessions.length ?? 0, closed: !active().length }
           : { ...selection, closed: !active().some((safe) => safe.id === selection.safe), branch: selection.branch ? { count: branchMembers(selection.safe).length, closed: !active().some((safe) => branchMembers(selection.safe).includes(safe.id!)) } : undefined }}
         run={(args) => execute(args, undefined, false)} back={() => section("safes")} />}</Show>
