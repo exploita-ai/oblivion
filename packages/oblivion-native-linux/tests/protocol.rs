@@ -7,6 +7,8 @@ use oblivion_native_linux::{
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -186,6 +188,44 @@ fn local_disconnect_releases_the_guest_connection_lease() {
     drop(client);
     assert_eq!(server.read(&mut [0; 1]).unwrap(), 0);
     worker.join().unwrap().unwrap();
+}
+
+// The production backend runs on Linux; this fixture exercises its hangup
+// notification while socket data is still queued behind backpressure.
+#[cfg(target_os = "linux")]
+#[test]
+fn stalled_bridge_releases_its_lease_without_waiting_for_the_guest_to_read() {
+    let (mut client, local) = UnixStream::pair().unwrap();
+    let (guest, _server) = UnixStream::pair().unwrap();
+    for (stream, bytes) in [(&client, 256 * 1024_i32), (&guest, 4096_i32)] {
+        assert_eq!(unsafe { libc::setsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_SNDBUF,
+            (&bytes as *const i32).cast(), std::mem::size_of::<i32>() as libc::socklen_t) }, 0);
+    }
+    client.set_nonblocking(true).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let cancelled = stop.clone();
+    let (finished, observed) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let result = bridge::duplex(local, guest, cancelled);
+        let _ = finished.send(());
+        result
+    });
+    let bytes = vec![0x5a; 1024 * 1024];
+    let mut written = 0;
+    while written < bytes.len() {
+        match client.write(&bytes[written..]) {
+            Ok(0) => break,
+            Ok(length) => written += length,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("{error}"),
+        }
+    }
+    drop(client);
+    let released = observed.recv_timeout(Duration::from_secs(2));
+    stop.store(true, Ordering::Relaxed);
+    worker.join().unwrap().unwrap();
+    assert!(written > 65536, "fixture did not fill the outbound buffer");
+    assert!(released.is_ok(), "a disconnected client retained its guest lease");
 }
 
 #[test]

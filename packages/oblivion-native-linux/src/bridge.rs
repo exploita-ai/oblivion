@@ -101,7 +101,9 @@ pub fn duplex(mut local: UnixStream, mut guest: UnixStream, stop: Arc<AtomicBool
                 (0, &mut local, &mut to_guest),
                 (1, &mut guest, &mut to_local),
             ] {
-                if polls[index].revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                if polls[index].revents & (libc::POLLERR | libc::POLLNVAL) != 0
+                    || index == 0 && polls[index].revents & libc::POLLHUP != 0
+                {
                     return Ok(());
                 }
                 if polls[index].revents & (libc::POLLIN | libc::POLLHUP) == 0 {
