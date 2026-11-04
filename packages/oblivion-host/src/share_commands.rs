@@ -576,7 +576,11 @@ fn show_review(title: &str, review: &Review, manifest: &Manifest) -> control::Re
     for warning in &review.warnings {
         eprintln!(
             "  {}: {} · {}",
-            warning.reason,
+            if warning.reason == "native_history_dependency_included" {
+                "Required saved context from a parent conversation"
+            } else {
+                warning.reason.as_str()
+            },
             warning
                 .path
                 .as_deref()
@@ -638,8 +642,11 @@ fn validate_review(review: &mut Review, request: &str) -> io::Result<Manifest> {
                 | "unsupported_entry_excluded"
                 | "potential_secret"
                 | "partial_content_scan"
+                | "native_history_dependency_included"
         ) || warning.path.is_some() == warning.chat_id.is_some()
             || warning.default_excluded.is_some_and(|value| !value)
+            || warning.reason == "native_history_dependency_included"
+                && (warning.chat_id.is_none() || !warning.included || warning.default_excluded.is_some())
         {
             return Err(io::Error::other("invalid_share_warning"));
         }
@@ -751,6 +758,18 @@ finally: plan.close()
                 )
                 .is_err()
             );
+            let mut dependency: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            dependency["warnings"][0] = json!({
+                "reason": "native_history_dependency_included",
+                "chat_id": "11111111-1111-4111-8111-111111111111",
+                "included": true,
+            });
+            assert!(validate_review(&mut serde_json::from_value(dependency.clone()).unwrap(), &"1".repeat(32)).is_ok());
+            for invalid in [json!({"included": false}), json!({"default_excluded": true}), json!({"chat_id": null, "path": "workspace/project"})] {
+                let mut value = dependency.clone();
+                value["warnings"][0].as_object_mut().unwrap().extend(invalid.as_object().unwrap().clone());
+                assert!(validate_review(&mut serde_json::from_value(value).unwrap(), &"1".repeat(32)).is_err());
+            }
         })();
         std::fs::remove_dir_all(&root).unwrap();
         result
