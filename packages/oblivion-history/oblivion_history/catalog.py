@@ -71,10 +71,10 @@ PRAGMA user_version=1;
 
 
 class Catalog:
-    def __init__(self, directory):
+    def __init__(self, directory, *, timeout=10):
         self.directory = Path(directory)
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.directory / "history.sqlite", timeout=10)
+        self.db = sqlite3.connect(self.directory / "history.sqlite", timeout=timeout)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA secure_delete=ON")
@@ -89,10 +89,43 @@ class Catalog:
         self.db.close()
 
     @contextmanager
-    def exclusive(self):
+    def exclusive(self, *, blocking=True):
         with open(self.directory / "sync.lock", "a+b") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
             yield
+
+    def author_identity(self, agent, native_id, cwd, owned):
+        """Resolve admission through the canonical mapping, never a caller ID.
+
+        The caller holds the nonblocking catalog lock. An already running
+        profile cannot receive a foreign projection; deny its stale context
+        rather than silently accepting an older copy of the conversation.
+        """
+        row = self.db.execute(
+            "SELECT chat_id FROM native WHERE agent=? AND native_id=?",
+            (agent, native_id),
+        ).fetchone()
+        if row and self.db.execute(
+            "SELECT 1 FROM deleted_chat WHERE chat_id=?", (row[0],)
+        ).fetchone():
+            raise ValueError("author_chat_deleted")
+        if agent in self.pending():
+            raise ValueError("author_history_recovery_required")
+        if row:
+            chat_id = row[0]
+            if chat_id not in owned and not self.projection_current(agent, native_id, chat_id):
+                raise ValueError("author_history_stale_reopen")
+            return chat_id
+        chat_id = str(uuid.uuid4())
+        now = time.time_ns() // 1_000_000
+        with self.db:
+            self.db.execute("INSERT INTO chat VALUES(?,?,?,?,?)", (chat_id, cwd, "Untitled", now, now))
+            self.db.execute(
+                "INSERT INTO native(agent,native_id,chat_id) VALUES(?,?,?)",
+                (agent, native_id, chat_id),
+            )
+        self.mark_projection(agent, native_id, chat_id)
+        return chat_id
 
     def ingest(self, snapshot):
         mapping = self.db.execute(
@@ -188,7 +221,7 @@ class Catalog:
     def chats(self):
         result = []
         for row in self.db.execute(
-            "SELECT * FROM chat WHERE id NOT IN (SELECT chat_id FROM deleted_chat) ORDER BY created,id"
+            "SELECT * FROM chat WHERE id NOT IN (SELECT chat_id FROM deleted_chat) AND EXISTS (SELECT 1 FROM item WHERE chat_id=chat.id) ORDER BY created,id"
         ):
             items = [
                 Item(

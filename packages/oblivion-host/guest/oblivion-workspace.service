@@ -3,8 +3,8 @@ Description=Safe-local tmux workspace
 ConditionKernelCommandLine=oblivion.native=1
 ConditionKernelCommandLine=!oblivion.share=1
 ConditionKernelCommandLine=!oblivion.resize=1
-Requires=oblivion-vault.service oblivion-history.service
-After=oblivion-vault.service oblivion-history.service
+Requires=oblivion-vault.service oblivion-history.service oblivion-author.service
+After=oblivion-vault.service oblivion-history.service oblivion-author.service
 RequiresMountsFor=/vault
 
 [Service]

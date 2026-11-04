@@ -1,7 +1,7 @@
 [Unit]
 Description=Official agent attached to a protected Safe
-Requires=oblivion-vault.service oblivion-history.service
-After=oblivion-vault.service oblivion-session-network.service oblivion-history.service
+Requires=oblivion-vault.service oblivion-history.service oblivion-author.service
+After=oblivion-vault.service oblivion-session-network.service oblivion-history.service oblivion-author.service
 BindsTo=dev-%i.device
 After=dev-%i.device
 

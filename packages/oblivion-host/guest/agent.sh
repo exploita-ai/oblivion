@@ -19,4 +19,5 @@ exec /usr/bin/python3 -B /usr/lib/oblivion/history/history.py hold \
     --home /vault/home --workspace /vault/workspace \
     --state /vault/home/.oblivion-history \
     --sync-socket /run/oblivion-history/sync.sock \
+    --author-socket /run/oblivion-author/author.sock \
     --group-signals --agent "$agent" -- "/usr/lib/oblivion/agents/bin/$agent" "$@"
