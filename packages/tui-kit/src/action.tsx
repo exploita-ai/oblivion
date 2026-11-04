@@ -1,6 +1,6 @@
 import { createSignal, Show } from "solid-js"
 import type { RGBA } from "@opentui/core"
-import type { ResolvedTheme } from "@opencode/theme/tui"
+import type { ResolvedTheme } from "@oblivion/theme/tui"
 
 export type Action = { title: string; key?: string; disabled?: boolean; color?: RGBA; onTrigger?: () => void }
 

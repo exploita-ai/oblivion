@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test"
 import { testRender } from "@opentui/solid"
 import { createSignal } from "solid-js"
-import { parseThemeDocument, resolveThemeDocument } from "@opencode/theme/tui"
-import { oblivion } from "@opencode/theme/tui/themes"
+import { parseThemeDocument, resolveThemeDocument } from "@oblivion/theme/tui"
+import { oblivion } from "@oblivion/theme/tui/themes"
 import { ActionItem, SelectList } from "../src"
 
 const theme = resolveThemeDocument(parseThemeDocument(oblivion), "dark")

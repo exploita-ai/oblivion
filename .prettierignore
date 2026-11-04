@@ -1,2 +1,3 @@
-packages/client/src/generated/
-packages/client/src/generated-effect/
+**/node_modules/
+**/dist/
+artifacts/

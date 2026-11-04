@@ -1,6 +1,6 @@
 import { Show } from "solid-js"
 import { useTerminalDimensions } from "@opentui/solid"
-import { ActionItem, SelectList } from "@opencode/tui-kit"
+import { ActionItem, SelectList } from "@oblivion/tui-kit"
 import { palette, theme } from "./theme"
 import { ActionBar, type PageAction } from "./action-bar"
 import { PageHeader } from "./page-header"

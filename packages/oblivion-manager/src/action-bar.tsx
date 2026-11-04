@@ -1,6 +1,6 @@
 import { createSignal, For } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
-import { ActionItem } from "@opencode/tui-kit"
+import { ActionItem } from "@oblivion/tui-kit"
 import { palette } from "./theme"
 
 export type PageAction = { title: string; key: string; disabled?: boolean; run: () => void }
@@ -19,7 +19,7 @@ export function ActionBar(props: { actions: PageAction[]; focused?: boolean; dis
       if (action && !action.disabled) action.run()
     }
   })
-  return <box flexDirection="row" gap={2} flexShrink={0}>
+  return <box flexDirection="row" flexWrap="wrap" columnGap={2} rowGap={1} flexShrink={0}>
     <For each={props.actions}>{(action, index) => <ActionItem theme={palette} modern flush variant="secondary" focused={props.focused && selected() === index()}
       action={{ title: action.title, key: action.key, disabled: props.disabled || action.disabled, onTrigger: () => { props.activate?.(); setSelected(index()); action.run() } }} />}</For>
   </box>

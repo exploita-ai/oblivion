@@ -87,3 +87,28 @@ test("new named Safe and confirmed global lock stay distinct from agent argument
     expect(app.captureCharFrame()).toContain("Unlock Oblivion")
   } finally { await app.dispose() }
 })
+
+test.each([[80, 24], [160, 50]])("Workspace opens a shell separately from the three-agent picker at %ix%i", async (width, height) => {
+  const fixture = nativePreview(() => {})
+  await fixture.run(["unlock"])
+  const commands: string[][] = []
+  const initial = await fixture.status()
+  const app = await testRender(() => <SafeManager initial={initial} runtime={{ ...fixture, run: async (args) => {
+    commands.push(args)
+    return fixture.run(args)
+  } }} />, { width, height, kittyKeyboard: true, exitOnCtrlC: false })
+  try {
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Workspace")
+    await app.mockInput.pressKey("w")
+    await app.renderOnce()
+    expect(commands).toEqual([["shell", "--safe", initial.sessions[0]]])
+    await app.mockInput.pressEnter()
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Choose an agent")
+    expect(app.captureCharFrame()).toContain("Codex")
+    expect(app.captureCharFrame()).toContain("Claude")
+    expect(app.captureCharFrame()).toContain("OpenCode 2")
+    expect(app.captureCharFrame()).not.toContain("Workspace")
+  } finally { await app.dispose() }
+})

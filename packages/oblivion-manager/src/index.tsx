@@ -3,9 +3,11 @@ import { render } from "@opentui/solid"
 import { theme } from "./theme"
 import { createManagerClipboard } from "./clipboard"
 import { SafeManager } from "./safe-manager"
-import { nativeLauncher, nativePreview, readNativeStatus, type NativeRuntime } from "./native-control"
+import { Startup } from "./startup"
+import { nativeLauncher, nativeOverlay, nativePreview, readNativeJson, readNativeStatus, reportNativeActivity, type NativeRuntime } from "./native-control"
 
 const demonstration = process.argv.includes("--preview")
+const overlay = nativeOverlay(process.argv.slice(2))
 // A cold Linux virtual console may still interpret output as an 8-bit charset.
 // Select UTF-8 before OpenTUI draws its borders or accepts non-ASCII input.
 if (process.env.TERM === "linux") process.stdout.write("\u001b%G")
@@ -32,11 +34,17 @@ async function launch(args: string[]) {
 
 const runtime: NativeRuntime = demonstration ? nativePreview(exit) : {
   status: () => readNativeStatus(nativeLauncher()),
+  query: (args) => readNativeJson(nativeLauncher(), args),
+  activity: (input) => reportNativeActivity(nativeLauncher(), input),
   run: launch,
   async exit() {
-    const result = await launch(process.platform === "darwin" ? ["runtime", "stop"] : ["lock"])
+    if (overlay) { exit(); return }
+    const result = await launch(process.env.OBLIVION_RUNTIME_MODE === "desktop" ? ["runtime", "stop"] : ["lock"])
     if (result !== 0) throw new Error("Oblivion could not lock cleanly. Check the runtime before exiting.")
     exit()
   },
 }
-await render(() => <SafeManager runtime={runtime} preview={demonstration} />, renderer)
+const direct = !demonstration && !overlay && process.platform === "linux" && process.env.OBLIVION_RUNTIME_MODE !== "desktop"
+const initial = direct ? runtime.status().then((state) => ({ state, received: performance.now() }), () => undefined) : undefined
+const intro = direct && await readNativeJson(nativeLauncher(), ["intro", "--json"]).then((value) => value === true, () => false)
+await render(() => intro ? <Startup runtime={runtime} initial={initial!} /> : <SafeManager runtime={runtime} preview={demonstration} overlay={overlay} />, renderer)

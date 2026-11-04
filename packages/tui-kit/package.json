@@ -1,6 +1,6 @@
 {
-  "name": "@opencode/tui-kit",
-  "version": "2.1.4",
+  "name": "@oblivion/tui-kit",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -14,7 +14,7 @@
     "typecheck:tsc": "tsc --noEmit"
   },
   "dependencies": {
-    "@opencode/theme": "workspace:*",
+    "@oblivion/theme": "workspace:*",
     "@opentui/core": "catalog:",
     "@opentui/solid": "catalog:",
     "solid-js": "catalog:"

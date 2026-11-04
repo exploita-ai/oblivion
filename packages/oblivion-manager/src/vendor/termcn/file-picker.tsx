@@ -3,7 +3,7 @@
 import { useKeyboard } from "@opentui/solid"
 import { createMemo, createSignal, Show } from "solid-js"
 import { palette, theme } from "../../theme"
-import { SelectList } from "@opencode/tui-kit"
+import { SelectList } from "@oblivion/tui-kit"
 
 export type FileEntry = { name: string; path: string; directory: boolean; bytes: number }
 

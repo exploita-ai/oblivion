@@ -16,6 +16,9 @@ const result = await Bun.build({
   define: target.includes("linux") ? { "process.env.OPENTUI_LIBC": '"glibc"' } : {},
 })
 if (!result.success) throw new Error(result.logs.map(String).join("\n"))
+for (const file of ["LICENSE", "NOTICE"]) {
+  await Bun.write(path.join(path.dirname(output), "assets/licenses/oblivion", file), Bun.file(path.resolve(import.meta.dir, "../../..", file)))
+}
 for (const file of ["LICENSE", "PROVENANCE.md"]) {
   await Bun.write(path.join(path.dirname(output), "assets/licenses/termcn", file), Bun.file(path.resolve(import.meta.dir, "../src/vendor/termcn", file)))
 }

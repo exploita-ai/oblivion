@@ -1,7 +1,7 @@
 import { MouseButton, ScrollBoxRenderable } from "@opentui/core"
 import { useKeyboard } from "@opentui/solid"
 import { createEffect, createSignal, For, onCleanup } from "solid-js"
-import type { ResolvedTheme } from "@opencode/theme/tui"
+import type { ResolvedTheme } from "@oblivion/theme/tui"
 import { SelectRow } from "./select-row"
 import { moveSelection, reconcileSelection, revealSelectionOffset } from "./select-controller"
 

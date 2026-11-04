@@ -16,8 +16,8 @@
     "@opentui/solid": "catalog:",
     "solid-js": "catalog:",
     "zod": "catalog:",
-    "@opencode/tui-kit": "workspace:*",
-    "@opencode/theme": "workspace:*"
+    "@oblivion/tui-kit": "workspace:*",
+    "@oblivion/theme": "workspace:*"
   },
   "devDependencies": {
     "@tsconfig/bun": "catalog:",

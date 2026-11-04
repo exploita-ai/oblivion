@@ -1,6 +1,6 @@
 import { RGBA, TextAttributes } from "@opentui/core"
 import { createMemo, Show, type JSX } from "solid-js"
-import type { ResolvedTheme } from "@opencode/theme/tui"
+import type { ResolvedTheme } from "@oblivion/theme/tui"
 
 // The production OpenCode row; callers own filtering, focus and actions.
 export function SelectRow(props: {
