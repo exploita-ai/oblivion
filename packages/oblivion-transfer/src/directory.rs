@@ -1,4 +1,4 @@
-use crate::{invalid, require};
+use crate::{MAX_ENTRIES, invalid, require};
 use std::ffi::{CStr, CString};
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -222,7 +222,7 @@ impl Directory {
     pub fn remove_directory(&self, name: &str) -> io::Result<()> {
         let directory = self.directory(name)?;
         // This tree is receiver-created in a private root, never an arbitrary source.
-        for child in directory.names(4096)? {
+        for child in directory.names(MAX_ENTRIES)? {
             if directory.source(&child)?.metadata()?.is_dir() {
                 directory.remove_directory(&child)?;
                 continue;
@@ -272,6 +272,23 @@ fn component(name: &str) -> io::Result<CString> {
 #[cfg(test)]
 mod tests {
     use super::Directory;
+
+    #[test]
+    fn private_cleanup_supports_every_valid_transfer_directory() {
+        let root = std::env::temp_dir().join(format!("oblivion-cleanup-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&root).unwrap();
+        let directory = Directory::open(&root).unwrap();
+        let pending = directory.create_directory("pending").unwrap();
+        for index in 0..4097 {
+            pending.create_file(&format!("file-{index}")).unwrap();
+        }
+        directory.create_file("keep").unwrap();
+        directory.remove_directory("pending").unwrap();
+        assert!(!root.join("pending").exists());
+        assert!(root.join("keep").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn exclusive_move_cannot_replace_an_existing_empty_directory() {
