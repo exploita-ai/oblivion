@@ -1,7 +1,9 @@
 #!/bin/sh
 set -eu
 mkdir -p /out /iso/live /iso/boot/grub /host/usr/lib/oblivion/vm/qemu-root
-python3 -B /sources/hypervisor-kernel.py verify /host > /out/hypervisor-kernel.json
+set -- /host/boot/initrd.img-*
+test "$#" = 1
+python3 -B /sources/hypervisor-kernel.py verify /host --initrd "$1" > /out/hypervisor-kernel.json
 cp /host/boot/vmlinuz-* /iso/live/vmlinuz
 cp /host/boot/initrd.img-* /iso/live/initrd.img
 sh /sources/pack-vm-assets.sh /host / /out

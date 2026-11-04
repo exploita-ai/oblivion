@@ -472,16 +472,17 @@ COPY packages/oblivion-host/host/runtime-prepare.py /usr/lib/oblivion/host/runti
 COPY packages/oblivion-host/host/runtime-auth.py /usr/lib/oblivion/host/runtime-auth.py
 COPY packages/oblivion-host/host/oblivion-runtime-generator /usr/lib/systemd/system-generators/oblivion-runtime-generator
 COPY script/oblivion/controller-setup.sh /tmp/live-setup
+COPY script/oblivion/hypervisor-kernel.py /tmp/hypervisor-kernel.py
 COPY script/oblivion/session-identities.sh /tmp/session-identities
 COPY script/oblivion/live-controller.json /etc/oblivion/controller.json
 COPY script/oblivion/host-firewall.nft /etc/oblivion/host-firewall.nft
 COPY packages/oblivion-gateway/guest/resolv.conf /etc/resolv.conf
-RUN sh /tmp/live-setup && sh /tmp/session-identities && rm /tmp/live-setup /tmp/session-identities
+RUN sh /tmp/live-setup && sh /tmp/session-identities && rm /tmp/live-setup /tmp/session-identities /tmp/hypervisor-kernel.py
 
 FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS live-pack-tools
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    squashfs-tools $(if [ "$TARGETARCH" = arm64 ]; then printf grub-efi-arm64-bin; else printf 'grub-pc-bin grub-efi-amd64-bin'; fi) grub-common xorriso mtools python3 \
+    squashfs-tools $(if [ "$TARGETARCH" = arm64 ]; then printf grub-efi-arm64-bin; else printf 'grub-pc-bin grub-efi-amd64-bin'; fi) grub-common xorriso mtools python3 initramfs-tools-core \
     && rm -rf /var/lib/apt/lists/*
 FROM session-tools AS stack-session
 ARG TARGETARCH

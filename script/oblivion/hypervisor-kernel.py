@@ -16,6 +16,16 @@ import sys
 
 RECORD = Path('usr/share/oblivion/build/hypervisor-kernel.json')
 SOURCE = 'https://deb.debian.org/debian'
+HYPERV_DRIVERS = (
+    ('CONFIG_HYPERV', 'hv_vmbus'),
+    ('CONFIG_SCSI', 'scsi_mod'),
+    ('CONFIG_HYPERV_STORAGE', 'hv_storvsc'),
+    ('CONFIG_BLK_DEV_SD', 'sd_mod'),
+    ('CONFIG_BLK_DEV_SR', 'sr_mod'),
+    ('CONFIG_HYPERV_NET', 'hv_netvsc'),
+    ('CONFIG_VSOCKETS', 'vsock'),
+    ('CONFIG_HYPERV_VSOCKETS', 'hv_sock'),
+)
 
 
 def run(*args):
@@ -37,7 +47,40 @@ def digest(path):
     return value.hexdigest()
 
 
-def verify(root, controller=None):
+def guest_drivers(root, architecture, abi):
+    if architecture != 'amd64':
+        return []
+    config = (root / 'boot' / ('config-' + abi)).read_text()
+    directory = root / 'lib/modules' / abi
+    result = []
+    for symbol, module in HYPERV_DRIVERS:
+        selected = re.search(r'^' + symbol + r'=(y|m)$', config, re.M)
+        if not selected:
+            raise ValueError('hyperv_guest_driver_required:' + symbol)
+        path = None
+        if selected[1] == 'm':
+            matches = [path for path in directory.rglob(module + '.ko*')
+                       if path.name in (module + '.ko', module + '.ko.xz', module + '.ko.zst', module + '.ko.gz')]
+            if len(matches) != 1 or matches[0].is_symlink() or not matches[0].is_file() or matches[0].stat().st_size == 0:
+                raise ValueError('hyperv_guest_module_required:' + module)
+            path = matches[0]
+        result.append({'config': symbol, 'mode': selected[1], 'module': module,
+                       'path': path.relative_to(root).as_posix() if path else None,
+                       'sha256': digest(path) if path else None})
+    return result
+
+
+def initramfs_inventory(record, entries):
+    # Debian archives may place modules below /usr/lib on merged-/usr roots.
+    paths = {entry.removeprefix('./').removeprefix('/').removeprefix('usr/') for entry in entries}
+    required = [driver['path'] for driver in record['hyperv_guest_drivers'] if driver['mode'] == 'm']
+    for path in required:
+        if path not in paths:
+            raise ValueError('hyperv_initramfs_module_missing:' + Path(path).name)
+    return required
+
+
+def verify(root, controller=None, initrd=None):
     record = json.loads((root / RECORD).read_text())
     if record['version'] != 1 or record['architecture'] not in ('amd64', 'arm64'):
         raise ValueError('invalid_hypervisor_kernel_record')
@@ -53,10 +96,17 @@ def verify(root, controller=None):
     arguments = {'outer-live': ['kvm-arm.mode=nested'] if record['architecture'] == 'arm64' else [], 'controller': []}
     if record['boot_arguments'] != arguments:
         raise ValueError('hypervisor_kernel_boot_mode_changed')
+    if record['hyperv_guest_drivers'] != guest_drivers(root, record['architecture'], record['abi']):
+        raise ValueError('hyperv_guest_driver_inventory_changed')
     if controller:
         expected = json.loads(controller.read_text())
-        if any(record[key] != expected[key] for key in ('architecture', 'abi', 'kernel_package', 'kernel_version', 'kernel_sha256')):
+        if any(record[key] != expected[key] for key in ('architecture', 'abi', 'kernel_package', 'kernel_version', 'kernel_sha256', 'hyperv_guest_drivers')):
             raise ValueError('live_and_controller_kernel_differ')
+    if initrd:
+        if initrd.is_symlink() or not initrd.is_file():
+            raise ValueError('hypervisor_initramfs_required')
+        record['initramfs'] = {'sha256': digest(initrd),
+                              'hyperv_modules': initramfs_inventory(record, run('lsinitramfs', str(initrd)).splitlines())}
     return record
 
 
@@ -102,6 +152,7 @@ def install(architecture, requested):
                                      'kernel_package': image, 'kernel_version': version,
                                      'abi': abi, 'kernel_sha256': digest(boot[0]),
                                      'arm64_minimum_kernel': '6.16',
+                                     'hyperv_guest_drivers': guest_drivers(Path('/'), architecture, abi),
                                      'boot_arguments': {'outer-live': ['kvm-arm.mode=nested'] if architecture == 'arm64' else [], 'controller': []}}, sort_keys=True, indent=2) + '\n')
     verify(Path('/'))
 
@@ -124,6 +175,9 @@ def main():
     check = commands.add_parser('verify')
     check.add_argument('root', type=Path)
     check.add_argument('--controller', type=Path)
+    check.add_argument('--initrd', type=Path)
+    modules = commands.add_parser('initramfs-modules')
+    modules.add_argument('root', type=Path)
     boot = commands.add_parser('grub')
     boot.add_argument('root', type=Path)
     boot.add_argument('template', type=Path)
@@ -135,7 +189,12 @@ def main():
     if args.operation == 'grub':
         print(grub(args.root, args.template, args.role), end='')
         return
-    print(json.dumps(verify(args.root, args.controller), sort_keys=True))
+    if args.operation == 'initramfs-modules':
+        for driver in verify(args.root)['hyperv_guest_drivers']:
+            if driver['mode'] == 'm':
+                print(driver['module'])
+        return
+    print(json.dumps(verify(args.root, args.controller, args.initrd), sort_keys=True))
 
 
 if __name__ == '__main__':

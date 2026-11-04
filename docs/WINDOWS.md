@@ -68,10 +68,27 @@ control listener. Socket registration requires administrative setup; retain the
 per-boot authentication and opening nonces, since a transport address alone is
 not application authorization. [Hyper-V sockets](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/make-integration-service).
 
-Concrete changes required by our source:
+Driver groundwork is implemented in the shared controller build sources. On
+amd64, kernel selection now requires Hyper-V VMBus, synthetic SCSI storage,
+disk/CD-ROM, networking and vsock support, either built in or present as actual
+modules. The controller explicitly adds modular drivers to its initramfs while
+retaining VirtIO. Packing checks the finished archive for every required module
+from the selected ABI; `hypervisor-kernel.json` records driver modes, module
+checksums and the initramfs checksum. ARM64 is unchanged by this Windows x64
+contract. The checks use the upstream names, including `hv_vmbus`, `hv_storvsc`,
+`hv_netvsc` and `hv_sock`.
+[VMBus](https://github.com/torvalds/linux/blob/v6.12/drivers/hv/Makefile),
+[storage](https://github.com/torvalds/linux/blob/v6.12/drivers/scsi/Makefile),
+[network](https://github.com/torvalds/linux/blob/v6.12/drivers/net/hyperv/Makefile),
+[vsock](https://github.com/torvalds/linux/blob/v6.12/net/vmw_vsock/Kconfig).
 
-- Add Hyper-V VMBus, storage, network and vsock driver coverage to the **same**
-  controller kernel/initrd. Current explicit initramfs modules assume VirtIO.
+Focused source fixtures cover built-in/module configurations, missing or changed
+drivers and a small Debian initramfs archive. No controller image or Hyper-V VM
+has been built or booted to qualify this increment. Driver coverage introduces
+no Hyper-V runtime backend, authentication alternative or firmware policy.
+
+Concrete changes still required by our source:
+
 - Qualify Generation 2 EFI boot and its VM-local Secure Boot policy. The present
   bundle's direct-kernel paths do not prove the ISO boots in Hyper-V firmware.
 - Replace assumptions about VirtIO block names with validated runtime disk
