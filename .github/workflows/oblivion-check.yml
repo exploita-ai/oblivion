@@ -87,7 +87,7 @@ jobs:
           rustup toolchain install 1.88.0 --profile minimal
           rustup default 1.88.0
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake make g++ perl libclang-dev python3
+          sudo apt-get install -y --no-install-recommends cmake make g++ perl libclang-dev python3 zstd
       - name: Cache Rust dependencies and build outputs
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -123,7 +123,7 @@ jobs:
         run: |
           docker build --tag oblivion-native-guest-fixture - <<'DOCKERFILE'
           FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
-          RUN apt-get update && apt-get install -y --no-install-recommends python3 tmux bash util-linux cryptsetup \
+          RUN apt-get update && apt-get install -y --no-install-recommends python3 tmux bash util-linux cryptsetup zstd \
               && rm -rf /var/lib/apt/lists/*
           DOCKERFILE
       - name: Exercise actual tmux panes and native agent wrappers offline
@@ -184,9 +184,13 @@ jobs:
           done
       - name: Verify development Debian package install and data-preserving removal
         run: sh script/oblivion/test-deb.sh
-      - name: Check portable history without native credentials
+      - name: Check native per-agent Share without source credentials
         working-directory: packages/oblivion-history
-        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
+        run: |
+          for suite in test_portable.py test_prepare.py test_share_plan.py test_share_channel.py; do
+            test -f "tests/$suite"
+          done
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Compile and test the Linux desktop helper
         working-directory: packages/oblivion-native-linux
         run: |
@@ -231,6 +235,8 @@ jobs:
         run: |
           rustup toolchain install 1.88.0 --profile minimal
           rustup default 1.88.0
+      - name: Install the native rollout decompressor
+        run: brew install zstd
       - name: Compile and test the desktop launcher
         working-directory: packages/oblivion-host
         run: |
@@ -250,9 +256,13 @@ jobs:
       - name: Verify ciphertext-only personal copy streams
         working-directory: packages/oblivion-transfer
         run: cargo test --locked --test personal_copy
-      - name: Check portable history without native credentials
+      - name: Check native per-agent Share without source credentials
         working-directory: packages/oblivion-history
-        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
+        run: |
+          for suite in test_portable.py test_prepare.py test_share_plan.py test_share_channel.py; do
+            test -f "tests/$suite"
+          done
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Verify the portable Share container in release mode
         working-directory: packages/oblivion-share
         run: cargo test --locked --release --test container
