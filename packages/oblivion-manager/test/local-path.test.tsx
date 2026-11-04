@@ -4,9 +4,10 @@ import os from "node:os"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { InputRenderable } from "@opentui/core"
+import { createSignal, Show } from "solid-js"
 import { testRender } from "@opentui/solid"
 import { LocalChooser, NativeFiles } from "../src/native-files"
-import { nativePreview } from "../src/native-control"
+import { nativePreview, type NativeStatus } from "../src/native-control"
 
 async function files() {
   const root = await mkdtemp(path.join(os.tmpdir(), "oblivion-path-"))
@@ -142,7 +143,9 @@ test.each(["literal", "terminal-drop"])("an import %s path cannot mutate a Safe 
   const fixture = await files()
   const source = path.join(fixture.root, "$(touch literal-only).txt")
   const commands: string[][] = []
-  const app = await testRender(() => <NativeFiles safe="0123456789abcdef0123456789abcdef" name="Research" runtime={nativePreview(() => {})} run={async (args) => { commands.push(args); return true }} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
+  const runtime = nativePreview(() => {})
+  await runtime.run(["unlock"])
+  const app = await testRender(() => <NativeFiles safe="0123456789abcdef0123456789abcdef" name="Research" runtime={runtime} run={async (args) => { commands.push(args); await runtime.run(args); return args[0] !== "files" }} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
   try {
     await app.renderOnce()
     await app.mockInput.pressEnter()
@@ -159,7 +162,10 @@ test.each(["literal", "terminal-drop"])("an import %s path cannot mutate a Safe 
     expect(commands).toHaveLength(0)
     await app.mockInput.pressEnter()
     await visible(app, "Copy completed and verified")
-    expect(commands).toEqual([["safe", "open", "0123456789abcdef0123456789abcdef"], ["files", "import", "--safe", "0123456789abcdef0123456789abcdef", source, "--name", path.basename(source)]])
+    expect(commands[0]).toEqual(["safe", "open", "0123456789abcdef0123456789abcdef"])
+    expect(commands[1]?.slice(0, 7)).toEqual(["files", "import", "--safe", "0123456789abcdef0123456789abcdef", source, "--name", path.basename(source)])
+    expect(commands[1]?.slice(7)).toEqual(["--operation", expect.stringMatching(/^[a-f0-9]{32}$/), "--opening", "d".repeat(32)])
+    expect(app.captureCharFrame()).not.toContain("destination was not replaced")
   } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
 })
 
@@ -237,4 +243,36 @@ test.each(["\n", "\r", "\x1b", "\x00", "\u202e", "\u2066", "\u200e", "\u061c", "
     expect(app.captureCharFrame()).not.toContain("Review local path")
     expect(chosen).toHaveLength(0)
   } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
+})
+
+test("leaving Files while opening status is pending cannot start a hidden copy", async () => {
+  const fixture = await files()
+  const base = nativePreview(() => {})
+  await base.run(["unlock"])
+  const commands: string[][] = []
+  const entered = Promise.withResolvers<void>()
+  const returned = Promise.withResolvers<void>()
+  const gate = Promise.withResolvers<NativeStatus>()
+  const [mounted, setMounted] = createSignal(true)
+  const runtime = { ...base, status: async () => { entered.resolve(); const value = await gate.promise; returned.resolve(); return value } }
+  const app = await testRender(() => <Show when={mounted()}><NativeFiles safe="0123456789abcdef0123456789abcdef" name="Research" runtime={runtime} run={async (args) => { commands.push(args); return await base.run(args) === 0 }} back={() => {}} /></Show>, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await app.renderOnce()
+    await app.mockInput.pressEnter()
+    await enter(app, fixture.file)
+    await visible(app, "Review local path")
+    await app.mockInput.pressEnter()
+    await visible(app, "Name the imported copy")
+    await app.mockInput.pressEnter()
+    await app.mockInput.pressEnter()
+    await visible(app, "Confirm import")
+    await app.mockInput.pressEnter()
+    await entered.promise
+    setMounted(false)
+    await app.renderOnce()
+    gate.resolve(await base.status())
+    await returned.promise
+    await app.renderOnce()
+    expect(commands).toEqual([["safe", "open", "0123456789abcdef0123456789abcdef"]])
+  } finally { gate.resolve(await base.status()); await app.dispose(); await rm(fixture.root, { recursive: true }) }
 })

@@ -1,5 +1,6 @@
 import path from "node:path"
 import { z } from "zod"
+import type { FileOutcome } from "./native-file-transfers"
 
 const opening = z.object({ slot: z.number().int().min(0).max(31), safe_id: z.string().regex(/^[a-f0-9]{32}$/), nonce: z.string().regex(/^[a-f0-9]{32}$/) })
 export const nativeActivity = z.object({ host: z.string().regex(/^[a-f0-9]{32}$/), safe: opening.nullable() })
@@ -111,6 +112,7 @@ export async function reportNativeActivity(launcher: string, input: z.infer<type
 export function nativePreview(exit: () => void, initial: Partial<NativeStatus> = {}): NativeRuntime {
   const ids = ["0123456789abcdef0123456789abcdef", "abcdef0123456789abcdef0123456789"]
   const tasks = new Map<string, { attempts: number; request: string; state: "running" | "cancelled" }>()
+  const copies = new Map<string, FileOutcome>()
   const passwordChanges: { transaction: string; family_id: string; members: { safe_id: string; title: string }[]; outcome: "complete" }[] = []
   let current: NativeStatus = {
     app_open: false, app_mode: "locked",
@@ -150,6 +152,15 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
       if (args[0] === "share" && args[1] === "imports") return []
       if (args[0] === "backup" && args[1] === "status") return { transactions: [] }
       if (args[0] === "network") return { ...current, network_status: { label: "NOT STARTED", direct_blocked: false, host_link: "STATUS UNKNOWN", age_ms: 0 }, safe_access: { current: "open", saved: null, temporary: false } }
+      if (args[0] === "files" && args[1] === "status") {
+        const safe = args[args.indexOf("--safe") + 1]
+        const operation = args[args.indexOf("--operation") + 1]
+        const nonce = args[args.indexOf("--opening") + 1]
+        if (!current.idle_lock.safes.some((entry) => entry.opening.safe_id === safe && entry.opening.nonce === nonce && !entry.closing)) throw new Error("Open the preview Safe before inspecting a copy.")
+        const previous = copies.get(operation)
+        return { operation_id: operation, safe_id: safe, opening: nonce, source_opening: previous?.source_opening ?? null,
+          state: previous?.state ?? "unknown", receipt: previous?.receipt ?? null, can_recover: previous?.state === "ready", can_discard: previous?.state === "ready" || previous?.state === "incomplete" }
+      }
       if (args[0] === "files" && args[1] === "list") {
         const selected = args.find((value) => value === "workspace" || value === "imports" || value.startsWith("workspace/") || value.startsWith("imports/")) ?? ""
         return { path: selected, next_cursor: null, skipped: 0, entries: selected ? selected === "workspace" ? [{ name: "project", path: "workspace/project", kind: "directory", bytes: 0 }] : [] : ["workspace", "imports"].map((name) => ({ name, path: name, kind: "directory", bytes: 0 })) }
@@ -157,6 +168,15 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
       throw new Error("Preview data is unavailable for this operation.")
     },
     async run(args) {
+      if (args[0] === "files" && ["import", "export", "recover", "discard"].includes(args[1])) {
+        const operation = args[args.indexOf("--operation") + 1]
+        const safe = args[args.indexOf("--safe") + 1]
+        const nonce = args[args.indexOf("--opening") + 1]
+        if (!current.idle_lock.safes.some((entry) => entry.opening.safe_id === safe && entry.opening.nonce === nonce && !entry.closing)) return 1
+        copies.set(operation, { operation_id: operation, safe_id: safe, opening: nonce, source_opening: copies.get(operation)?.source_opening ?? nonce,
+          state: args[1] === "discard" ? "discarded" : "published", can_recover: false, can_discard: false,
+          receipt: args[1] === "discard" ? null : { id: operation, manifest_sha256: "f".repeat(64), entries: 1, bytes: 24 } })
+      }
       if (args[0] === "safe" && args[1] === "password") {
         const id = args[2]
         if (!current.idle_lock.host || current.app_mode !== "persistent" || !current.sessions.includes(id)

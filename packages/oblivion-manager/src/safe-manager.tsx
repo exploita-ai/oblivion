@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
 import { useKeyboard, usePaste, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { ActionItem } from "@oblivion/tui-kit"
 import { ActionBar } from "./action-bar"
@@ -9,6 +9,7 @@ import { palette, theme } from "./theme"
 import { capacity, nativeStatus, type NativeOverlay, type NativeRuntime, type NativeStatus } from "./native-control"
 import { NativeNetwork, NativeNetworkIndicator, NativeSystem, scopedNetworkObservation, type NetworkObservation } from "./native-network"
 import { NativeFiles } from "./native-files"
+import { createFileTransfers } from "./native-file-transfers"
 import { NativeIdle } from "./native-idle"
 import { NativeStorage, storageUnavailable } from "./native-storage"
 import { NativeShare, type ShareSelection } from "./native-share"
@@ -28,6 +29,7 @@ const agents = [
 export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeStatus; initialReceived?: number; initialError?: string; preview?: boolean; overlay?: NativeOverlay; liveStorage?: "persistent" | "ephemeral" }) {
   const size = useTerminalDimensions()
   const clock = useRenderer().clock
+  const fileTransfers = createFileTransfers()
   const [state, setState] = createSignal(props.initial)
   const [error, setError] = createSignal(props.initialError ?? "")
   const [notice, setNotice] = createSignal("")
@@ -47,6 +49,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
   const [ephemeral, setEphemeral] = createSignal(false)
   const [quitAfterLock, setQuitAfterLock] = createSignal(false)
   const active = () => state()?.open_sessions.filter((safe) => safe.id) ?? []
+  createEffect(() => { if (state()?.app_open === false) fileTransfers.clear() })
   const safeRows = createMemo(() => {
     const ids = Array.from(new Set([...(state()?.app_mode !== "persistent" ? [] : state()?.sessions ?? []),
       ...(state()?.app_open ? state()?.agent_safes.filter((entry) => entry.ephemeral || state()?.app_mode === "persistent").map((entry) => entry.id) ?? [] : []),
@@ -416,7 +419,8 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
       }} /></Show>
       <Show when={props.overlay && state() && !selectedOpen()}><text fg={theme.feedback.warning}>This Safe is no longer open. Return to the agent terminal to continue.</text></Show>
       <Show when={page() === "network" && (!props.overlay || selectedOpen()) && safe()} keyed>{(id) => <NativeNetwork safe={id} name={safeTitle()} open={active().some((opened) => opened.id === id)} runtime={props.runtime} run={async (args) => await execute(args, undefined, false) === 0} observed={setObserved} back={() => props.overlay ? void leave() : section("settings")} />}</Show>
-      <Show when={page() === "files" && (!props.overlay || selectedOpen()) && safe()} keyed>{(id) => <NativeFiles safe={id} name={safeTitle()} runtime={props.runtime} run={async (args) => await execute(args, undefined, false) === 0} back={() => props.overlay ? void leave() : section("safes")} />}</Show>
+      <Show when={page() === "files" && (!props.overlay || selectedOpen()) && safe()} keyed>{(id) => <NativeFiles safe={id} name={safeTitle()} transfers={fileTransfers} opening={state()?.idle_lock.safes.find((safe) => safe.opening.safe_id === id)?.opening.nonce}
+        blocked={hostClosing() || safeClosing(id) ? "This Safe is closing and locking." : error() || undefined} runtime={props.runtime} run={async (args) => await execute(args, undefined, false) === 0} back={() => props.overlay ? void leave() : section("safes")} />}</Show>
       <Show when={page() === "rename" || page() === "grow"}><FormView form={{ title: page() === "rename" ? "Rename Safe" : "Increase storage", description: safeTitle(), fields: [{ id: "value", label: page() === "rename" ? "Safe name" : "New total capacity (MiB)", value: page() === "rename" ? safeTitle() : String(Math.max(2048, Math.ceil((state()?.session_sizes?.[safe()!] ?? 0) / 1024 ** 2) + 1024)), validate: (value) => page() === "rename" ? !value.trim() || value.trim() !== value ? "Enter a name without leading or trailing spaces." : undefined : !/^\d+$/.test(value) || Number(value) < 512 ? "Enter a capacity of at least 512 MiB." : undefined }], submit: page() === "rename" ? "Rename" : "Increase storage", run: async () => {} }} cancel={() => section("settings")} submit={(values) => { void execute(["safe", page() === "rename" ? "rename" : "grow", safe()!, values.value]) }} /></Show>
       <Show when={["safes", "settings", "name", "agents", "lock"].includes(page())}>
       <Show when={page() === "name"} fallback={<Menu title={page() === "settings" ? "Settings" : page() === "lock" ? "Close and lock" : page() === "agents" ? "Choose an agent" : state()?.app_open ? "Your Safes" : "Welcome to Oblivion"}

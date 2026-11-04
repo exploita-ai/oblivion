@@ -81,8 +81,9 @@ test("SOCKS5 configuration leaves password entry to the native terminal", async 
 
 test("file export reviews the Safe source and explicit local destination before copying", async () => {
   const fixture = nativePreview(() => {})
+  await fixture.run(["unlock"])
   const commands: string[][] = []
-  const app = await testRender(() => <NativeFiles safe="0123456789abcdef0123456789abcdef" name="Research" runtime={fixture} run={async (args) => { commands.push(args); return true }} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true, exitOnCtrlC: false })
+  const app = await testRender(() => <NativeFiles safe="0123456789abcdef0123456789abcdef" name="Research" runtime={fixture} run={async (args) => { commands.push(args); return await fixture.run(args) === 0 }} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true, exitOnCtrlC: false })
   async function visible(value: string) {
     const deadline = performance.now() + 2000
     while (performance.now() < deadline) {
@@ -108,6 +109,7 @@ test("file export reviews the Safe source and explicit local destination before 
     expect(app.captureCharFrame()).toContain("workspace/project")
     await app.mockInput.pressEnter()
     await visible("Copy completed and verified.")
-    expect(commands.at(-1)).toEqual(["files", "export", "--safe", "0123456789abcdef0123456789abcdef", "workspace/project", process.cwd()])
+    expect(commands.at(-1)?.slice(0, 6)).toEqual(["files", "export", "--safe", "0123456789abcdef0123456789abcdef", "workspace/project", process.cwd()])
+    expect(commands.at(-1)?.slice(6)).toEqual(["--operation", expect.stringMatching(/^[a-f0-9]{32}$/), "--opening", "d".repeat(32)])
   } finally { await app.dispose() }
 })
