@@ -87,6 +87,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       if (stopped || expected !== generation()) return
       const opened = state.idle_lock.safes.find((entry) => entry.opening.safe_id === safe && !entry.closing)?.opening
       if (!state.app_open || !state.idle_lock.host || state.idle_lock.host.closing || !opened) { setNotice("The Safe is no longer available. Reopen it before copying."); return }
+      if (props.opening && props.opening !== opened.nonce) { setNotice("The Safe opening changed. Refresh Files and review the copy again."); return }
       const entry: FileTransfer = { id: crypto.randomUUID().replaceAll("-", ""), safe, opening: opened.nonce, kind: operation(), source: source(), destination: operation() === "import" ? `workspace/${name()}` : destination() }
       // Remember the operation before the CLI can mutate either destination.
       transfers.remember(entry)

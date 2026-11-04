@@ -7,6 +7,7 @@ import { InputRenderable } from "@opentui/core"
 import { createSignal, Show } from "solid-js"
 import { testRender } from "@opentui/solid"
 import { LocalChooser, NativeFiles } from "../src/native-files"
+import { createFileTransfers } from "../src/native-file-transfers"
 import { nativePreview, type NativeStatus } from "../src/native-control"
 
 async function files() {
@@ -245,7 +246,7 @@ test.each(["\n", "\r", "\x1b", "\x00", "\u202e", "\u2066", "\u200e", "\u061c", "
   } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
 })
 
-test("leaving Files while opening status is pending cannot start a hidden copy", async () => {
+test.each(["unmounted", "stale-opening"])("copy preflight rejects %s before recording or starting a copy", async (scenario) => {
   const fixture = await files()
   const base = nativePreview(() => {})
   await base.run(["unlock"])
@@ -254,8 +255,9 @@ test("leaving Files while opening status is pending cannot start a hidden copy",
   const returned = Promise.withResolvers<void>()
   const gate = Promise.withResolvers<NativeStatus>()
   const [mounted, setMounted] = createSignal(true)
+  const transfers = createFileTransfers()
   const runtime = { ...base, status: async () => { entered.resolve(); const value = await gate.promise; returned.resolve(); return value } }
-  const app = await testRender(() => <Show when={mounted()}><NativeFiles safe="0123456789abcdef0123456789abcdef" name="Research" runtime={runtime} run={async (args) => { commands.push(args); return await base.run(args) === 0 }} back={() => {}} /></Show>, { width: 80, height: 24, kittyKeyboard: true })
+  const app = await testRender(() => <Show when={mounted()}><NativeFiles safe="0123456789abcdef0123456789abcdef" name="Research" opening={"d".repeat(32)} transfers={transfers} runtime={runtime} run={async (args) => { commands.push(args); return await base.run(args) === 0 }} back={() => {}} /></Show>, { width: 80, height: 24, kittyKeyboard: true })
   try {
     await app.renderOnce()
     await app.mockInput.pressEnter()
@@ -268,11 +270,14 @@ test("leaving Files while opening status is pending cannot start a hidden copy",
     await visible(app, "Confirm import")
     await app.mockInput.pressEnter()
     await entered.promise
-    setMounted(false)
+    if (scenario === "unmounted") setMounted(false)
     await app.renderOnce()
-    gate.resolve(await base.status())
+    const state = await base.status()
+    gate.resolve(scenario === "stale-opening" ? { ...state, idle_lock: { ...state.idle_lock, safes: state.idle_lock.safes.map((entry) => ({ ...entry, opening: { ...entry.opening, nonce: "b".repeat(32) } })) } } : state)
     await returned.promise
     await app.renderOnce()
+    if (scenario === "stale-opening") await visible(app, "The Safe opening changed")
     expect(commands).toEqual([["safe", "open", "0123456789abcdef0123456789abcdef"]])
+    expect(transfers.entries()).toHaveLength(0)
   } finally { gate.resolve(await base.status()); await app.dispose(); await rm(fixture.root, { recursive: true }) }
 })
