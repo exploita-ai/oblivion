@@ -88,6 +88,8 @@ pub fn parse(args: &[String]) -> Result<Options<proxy::Request>, &'static str> {
     {
         return Err("A named Safe and --ephemeral cannot be combined");
     }
+    for name in result.safe.iter().chain(result.name.iter()) { oblivion_wire::session_title::validate(name)?; }
+    if let Some(name) = &result.proxy_profile { oblivion_transport::proxy_profiles::valid_name(name)?; }
     Ok(result)
 }
 
@@ -110,3 +112,7 @@ impl<T> Options<T> {
         })
     }
 }
+
+#[path = "run_runtime.rs"]
+mod runtime;
+pub use runtime::{Context, Notice, Runtime, cleanup, execute, free_slot, open_existing, start_agent, unlock};

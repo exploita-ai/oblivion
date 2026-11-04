@@ -17,7 +17,7 @@ pub struct Call<'a, S> {
 }
 
 pub trait Controller {
-    type Slot: Copy + DeserializeOwned;
+    type Slot: Copy + Eq + DeserializeOwned;
     fn request(&mut self, call: Call<'_, Self::Slot>) -> Result<String>;
 }
 
@@ -108,9 +108,16 @@ impl<S> State<S> {
 }
 
 pub fn status<C: Controller>(controller: &mut C) -> Result<State<C::Slot>> {
+    status_at(controller, None)
+}
+
+pub fn status_at<C: Controller>(
+    controller: &mut C,
+    slot: Option<C::Slot>,
+) -> Result<State<C::Slot>> {
     let output = controller.request(Call {
         operation: Operation::Status,
-        slot: None,
+        slot,
         session: None,
         expected_session: None,
         secret: &[],

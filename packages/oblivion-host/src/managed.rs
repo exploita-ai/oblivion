@@ -101,10 +101,7 @@ pub enum Rejection {
 }
 
 pub fn id(value: &str) -> bool {
-    value.len() == 32
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    oblivion_wire::control::valid_id(value)
 }
 
 fn native_id(agent: &str, value: &str) -> bool {

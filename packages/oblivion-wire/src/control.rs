@@ -124,3 +124,11 @@ pub struct Response<S = String> {
     pub output: S,
     pub error: Option<S>,
 }
+
+/// Controller, Safe and client identities use the current opaque lower-hex128 format.
+pub fn valid_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}

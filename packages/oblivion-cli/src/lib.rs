@@ -4,5 +4,6 @@
 //! platform adapter; runtime discovery, terminals and authorization stay there.
 pub mod proxy;
 pub mod run;
+pub mod shell;
 
 pub mod controller;

@@ -1,11 +1,14 @@
 use oblivion_cli::controller::{self, Command};
+use oblivion_cli::{run, shell};
 use oblivion_host::{control, scope};
 use oblivion_wire::control::{HEADER_LIMIT, Operation, RESPONSE_LIMIT, Request, Response};
 use oblivion_wire::frame;
+use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 const SAFE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 struct Fixture {
@@ -33,7 +36,31 @@ impl Drop for Fixture {
         std::fs::remove_dir_all(&self.directory).unwrap();
     }
 }
+fn accept(listener: &UnixListener) -> UnixStream {
+    listener.set_nonblocking(true).unwrap();
+    let started = Instant::now();
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && started.elapsed() < Duration::from_secs(3) =>
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => panic!("frontend connection failed: {error}"),
+        }
+    }
+}
 fn read(stream: &mut UnixStream) -> Request<scope::Slot> {
+    let (request, secret) = receive(stream);
+    assert!(secret.is_empty());
+    request
+}
+fn receive(stream: &mut UnixStream) -> (Request<scope::Slot>, Zeroizing<Vec<u8>>) {
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
@@ -44,8 +71,10 @@ fn read(stream: &mut UnixStream) -> Request<scope::Slot> {
         Some(serde_json::json!(1))
     );
     let request: Request<scope::Slot> = serde_json::from_value(header).unwrap();
-    assert_eq!(request.secret_len, 0);
-    request
+    assert!(request.secret_len <= 4096);
+    let mut secret = Zeroizing::new(vec![0; request.secret_len as usize]);
+    stream.read_exact(&mut secret).unwrap();
+    (request, secret)
 }
 fn reply(stream: &mut UnixStream, output: &str, error: Option<&str>) {
     frame::write(
@@ -68,6 +97,393 @@ fn state() -> serde_json::Value {
         "open_sessions":[{"slot":4,"id":SAFE,"mode":"documents"}],
         "agent_safes":[],"platform_details":{"preserve_this_field":true}
     })
+}
+
+// Only terminal interaction and time are substituted. Controller requests use
+// the production Unix adapter, codec, socket authentication and slot scoping.
+struct RunTerminal {
+    controller: control::Client,
+    prompts: Vec<&'static str>,
+    initialization: usize,
+    now: Duration,
+    notices: Vec<String>,
+    attached: Vec<(u8, String, String, Vec<String>)>,
+    fail_attach: bool,
+}
+impl RunTerminal {
+    fn new(path: &std::path::Path) -> Self {
+        Self {
+            controller: control::Client::remote(path),
+            prompts: vec![],
+            initialization: 0,
+            now: Duration::ZERO,
+            notices: vec![],
+            attached: vec![],
+            fail_attach: false,
+        }
+    }
+}
+impl controller::Controller for RunTerminal {
+    type Slot = scope::Slot;
+    fn request(&mut self, call: controller::Call<'_, Self::Slot>) -> controller::Result<String> {
+        self.controller.request(call)
+    }
+}
+impl run::Runtime for RunTerminal {
+    type Mark = Duration;
+    fn slots(&self) -> Vec<scope::Slot> {
+        (0..scope::LIMIT)
+            .map(|index| scope::Slot::try_from(index).unwrap())
+            .collect()
+    }
+    fn password(&mut self, label: &'static str) -> controller::Result<Zeroizing<Vec<u8>>> {
+        self.prompts.push(label);
+        Ok(Zeroizing::new(b"SYNTHETIC_PASSWORD_CANARY".to_vec()))
+    }
+    fn new_password(&mut self, label: &'static str) -> controller::Result<Zeroizing<Vec<u8>>> {
+        self.password(label)
+    }
+    fn initialize_archive(&mut self) -> controller::Result<()> {
+        self.initialization += 1;
+        Ok(())
+    }
+    fn now(&self) -> Self::Mark {
+        self.now
+    }
+    fn elapsed(&self, mark: &Self::Mark) -> Duration {
+        self.now - *mark
+    }
+    fn wait(&mut self, duration: Duration) -> controller::Result<()> {
+        self.now += duration;
+        Ok(())
+    }
+    fn notice(&mut self, notice: run::Notice<'_>) -> controller::Result<()> {
+        self.notices.push(match notice {
+            run::Notice::WaitingForConnection => "waiting".into(),
+            run::Notice::SafeOpened(id) => format!("opened {id}"),
+        });
+        Ok(())
+    }
+    fn attach(
+        &mut self,
+        slot: scope::Slot,
+        id: &str,
+        agent: &str,
+        argv: &[String],
+    ) -> controller::Result<i32> {
+        scope::within(slot, || {
+            self.attached.push((
+                scope::current().index(),
+                id.into(),
+                agent.into(),
+                argv.to_vec(),
+            ));
+        });
+        if self.fail_attach {
+            return Err("attachment_failed".into());
+        }
+        Ok(19)
+    }
+    fn attach_workspace(&mut self, slot: scope::Slot, id: &str) -> controller::Result<i32> {
+        self.attach(slot, id, "workspace", &[])
+    }
+}
+fn run_options(args: &[&str]) -> run::Options<oblivion_transport::Transport> {
+    run::parse(&args.iter().map(|arg| (*arg).into()).collect::<Vec<_>>())
+        .unwrap()
+        .resolve_transport(|request| match request {
+            oblivion_cli::proxy::Request::Ready(transport) => Ok(transport),
+            oblivion_cli::proxy::Request::NeedsPassword(_) => Err("Unexpected proxy prompt"),
+        })
+        .unwrap()
+}
+
+#[test]
+fn shared_run_reuses_an_active_safe_preserves_argv_and_waits_only_for_its_gateway() {
+    let (fixture, listener) = Fixture::new();
+    let server = std::thread::spawn(move || {
+        let mut attempts = 0;
+        loop {
+            let mut stream = accept(&listener);
+            let request = read(&mut stream);
+            match request.operation {
+                Operation::Status => reply(&mut stream, &state().to_string(), None),
+                Operation::StartAgent => {
+                    assert_eq!(request.slot.index(), 4);
+                    assert_eq!(request.expected_session.as_deref(), Some(SAFE));
+                    assert!(request.session.is_none());
+                    attempts += 1;
+                    if attempts < 3 {
+                        reply(&mut stream, "", Some("gateway_not_ready"));
+                        continue;
+                    }
+                    reply(&mut stream, "", None);
+                    break;
+                }
+                operation => panic!("Unexpected operation: {operation:?}"),
+            }
+        }
+    });
+    let mut terminal = RunTerminal::new(&fixture.path);
+    let options = run_options(&[
+        "--safe",
+        "GB",
+        "codex",
+        "resume",
+        "native-id",
+        "",
+        "$(literal)",
+    ]);
+    assert_eq!(
+        run::execute(
+            &mut terminal,
+            options,
+            run::Context {
+                prefer_ephemeral: false
+            }
+        )
+        .unwrap(),
+        19
+    );
+    assert_eq!(terminal.now, Duration::from_secs(1));
+    assert_eq!(terminal.notices, ["waiting"]);
+    assert!(terminal.prompts.is_empty());
+    assert_eq!(terminal.initialization, 0);
+    assert_eq!(
+        terminal.attached,
+        [(
+            4,
+            SAFE.into(),
+            "codex".into(),
+            vec![
+                "resume".into(),
+                "native-id".into(),
+                "".into(),
+                "$(literal)".into()
+            ]
+        )]
+    );
+    assert_eq!(scope::current().index(), 0);
+    server.join().unwrap();
+}
+
+#[test]
+fn shared_run_fences_transport_configuration_and_cleanup_to_the_opened_safe() {
+    let (fixture, listener) = Fixture::new();
+    let server = std::thread::spawn(move || {
+        let mut opened = false;
+        loop {
+            let mut stream = accept(&listener);
+            let (request, secret) = receive(&mut stream);
+            match request.operation {
+                Operation::Status => {
+                    let mut source = state();
+                    source["open_sessions"] = serde_json::json!([]);
+                    reply(&mut stream, &source.to_string(), None);
+                }
+                Operation::OpenDocuments => {
+                    assert!(!opened);
+                    assert_eq!(request.slot.index(), 0);
+                    assert_eq!(request.session.as_deref(), Some(SAFE));
+                    assert!(request.expected_session.is_none());
+                    assert_eq!(secret.as_slice(), b"SYNTHETIC_PASSWORD_CANARY");
+                    opened = true;
+                    reply(&mut stream, "", None);
+                }
+                Operation::Egress => {
+                    assert!(opened);
+                    assert_eq!(request.slot.index(), 0);
+                    assert_eq!(request.expected_session.as_deref(), Some(SAFE));
+                    assert!(request.session.is_none());
+                    assert_eq!(
+                        serde_json::from_slice::<serde_json::Value>(&secret).unwrap(),
+                        serde_json::json!({"action":"save","transport":{"mode":"tor"}})
+                    );
+                    reply(&mut stream, "", Some("session_changed"));
+                }
+                Operation::CloseIdle => {
+                    assert_eq!(request.slot.index(), 0);
+                    assert_eq!(request.expected_session.as_deref(), Some(SAFE));
+                    assert!(request.session.is_none());
+                    assert!(secret.is_empty());
+                    reply(&mut stream, "", Some("session_changed"));
+                    break;
+                }
+                operation => panic!("Unexpected operation: {operation:?}"),
+            }
+        }
+    });
+    let mut terminal = RunTerminal::new(&fixture.path);
+    let error = run::execute(
+        &mut terminal,
+        run_options(&["--safe", "GB", "--tor", "codex"]),
+        run::Context {
+            prefer_ephemeral: false,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), "session_changed");
+    assert_eq!(terminal.prompts, ["Safe password"]);
+    assert!(terminal.attached.is_empty());
+    assert_eq!(scope::current().index(), 0);
+    server.join().unwrap();
+}
+
+#[test]
+fn shared_run_reopens_ram_children_without_allocating_a_replacement_and_reports_failed_cleanup() {
+    let (fixture, listener) = Fixture::new();
+    let server = std::thread::spawn(move || {
+        let mut opened = false;
+        loop {
+            let mut stream = accept(&listener);
+            let request = read(&mut stream);
+            match request.operation {
+                Operation::Status => {
+                    let mut source = state();
+                    source["app_mode"] = serde_json::json!("ram-only");
+                    source["sessions"] = serde_json::json!([]);
+                    source["open_sessions"] = serde_json::json!([]);
+                    source["agent_safes"] =
+                        serde_json::json!([{"id":SAFE,"ephemeral":true,"state":"awaiting-start"}]);
+                    reply(&mut stream, &source.to_string(), None);
+                }
+                Operation::OpenChildDocuments => {
+                    assert!(!opened);
+                    assert_eq!(request.slot.index(), 0);
+                    assert_eq!(request.session.as_deref(), Some(SAFE));
+                    assert_eq!(request.expected_session.as_deref(), Some(SAFE));
+                    opened = true;
+                    reply(&mut stream, "", None);
+                }
+                Operation::StartAgent => {
+                    assert!(opened);
+                    assert_eq!(request.slot.index(), 0);
+                    assert_eq!(request.expected_session.as_deref(), Some(SAFE));
+                    reply(&mut stream, "", None);
+                }
+                Operation::CloseIdle => {
+                    assert!(opened);
+                    assert_eq!(request.slot.index(), 0);
+                    assert_eq!(request.expected_session.as_deref(), Some(SAFE));
+                    reply(&mut stream, "", Some("cleanup_failed"));
+                    break;
+                }
+                operation => panic!("Unexpected operation: {operation:?}"),
+            }
+        }
+    });
+    let mut terminal = RunTerminal::new(&fixture.path);
+    terminal.fail_attach = true;
+    let error = run::execute(
+        &mut terminal,
+        run_options(&["--safe", SAFE, "claude"]),
+        run::Context {
+            prefer_ephemeral: false,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), "cleanup_failed");
+    assert!(terminal.prompts.is_empty());
+    assert_eq!(terminal.initialization, 0);
+    assert_eq!(terminal.attached.len(), 1);
+    assert_eq!(scope::current().index(), 0);
+    server.join().unwrap();
+}
+
+#[test]
+fn shared_run_rejects_a_malformed_created_identifier_before_any_followup_request() {
+    let (fixture, listener) = Fixture::new();
+    let server = std::thread::spawn(move || {
+        loop {
+            let mut stream = accept(&listener);
+            let (request, secret) = receive(&mut stream);
+            match request.operation {
+                Operation::Status => reply(&mut stream, &state().to_string(), None),
+                Operation::Create => {
+                    assert_eq!(secret.as_slice(), b"SYNTHETIC_PASSWORD_CANARY");
+                    reply(&mut stream, "PRIVATE_ID_CANARY", None);
+                    break;
+                }
+                operation => panic!("Unexpected operation: {operation:?}"),
+            }
+        }
+    });
+    let mut terminal = RunTerminal::new(&fixture.path);
+    let error = run::execute(
+        &mut terminal,
+        run_options(&["codex"]),
+        run::Context {
+            prefer_ephemeral: false,
+        },
+    )
+    .unwrap_err();
+    assert!(!format!("{error:?}").contains("CANARY"));
+    assert!(terminal.attached.is_empty());
+    assert_eq!(terminal.prompts, ["New Safe password"]);
+    assert!(terminal.notices.is_empty());
+    server.join().unwrap();
+}
+
+#[test]
+fn shared_workspace_sets_only_the_selected_safe_policy_before_scoped_attachment() {
+    let (fixture, listener) = Fixture::new();
+    let server = std::thread::spawn(move || {
+        loop {
+            let mut stream = accept(&listener);
+            let (request, secret) = receive(&mut stream);
+            match request.operation {
+                Operation::Status => reply(&mut stream, &state().to_string(), None),
+                Operation::SafeAccess => {
+                    assert_eq!(request.slot.index(), 4);
+                    assert_eq!(request.expected_session.as_deref(), Some(SAFE));
+                    assert!(request.session.is_none());
+                    assert_eq!(
+                        serde_json::from_slice::<serde_json::Value>(&secret).unwrap(),
+                        serde_json::json!({"mode":"offline","save":true})
+                    );
+                    reply(&mut stream, "", None);
+                }
+                Operation::StartAgent => {
+                    assert_eq!(request.slot.index(), 4);
+                    assert_eq!(request.expected_session.as_deref(), Some(SAFE));
+                    assert!(secret.is_empty());
+                    reply(&mut stream, "", None);
+                    break;
+                }
+                operation => panic!("Unexpected operation: {operation:?}"),
+            }
+        }
+    });
+    let mut terminal = RunTerminal::new(&fixture.path);
+    let options = shell::parse(&["--safe", "GB", "--policy", "offline"].map(String::from)).unwrap();
+    assert_eq!(shell::execute(&mut terminal, options, true).unwrap(), 19);
+    assert!(terminal.prompts.is_empty());
+    assert_eq!(
+        terminal.attached,
+        [(4, SAFE.into(), "workspace".into(), vec![])]
+    );
+    assert_eq!(scope::current().index(), 0);
+    server.join().unwrap();
+}
+
+#[test]
+fn shared_workspace_rejects_pipes_before_any_controller_or_password_request() {
+    let (fixture, listener) = Fixture::new();
+    let mut terminal = RunTerminal::new(&fixture.path);
+    let options = shell::parse(&["--safe", "GB"].map(String::from)).unwrap();
+    assert_eq!(
+        shell::execute(&mut terminal, options, false)
+            .unwrap_err()
+            .to_string(),
+        "Workspace requires an interactive terminal"
+    );
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert!(terminal.prompts.is_empty());
+    assert!(terminal.attached.is_empty());
 }
 
 #[test]
@@ -273,6 +689,34 @@ fn the_compiled_launcher_uses_shared_metadata_grammar_before_runtime_start() {
         assert_eq!(
             String::from_utf8(output.stderr).unwrap(),
             "Oblivion: Use oblivion status --json, safes, or close NAME\n"
+        );
+    }
+}
+
+#[test]
+fn the_compiled_launcher_checks_shared_workspace_syntax_before_booting_a_runtime() {
+    for (args, error) in [
+        (vec!["shell"], "Choose an existing Safe with --safe NAME"),
+        (
+            vec!["shell", "--safe", "GB", "--policy", "direct"],
+            "Policy must be open-internet, strict or offline",
+        ),
+        (
+            vec!["shell", "--safe", "GB", "codex"],
+            "Use oblivion shell --safe SAFE [--policy open-internet|strict|offline]",
+        ),
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_oblivion"))
+            .args(args)
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!("Oblivion: {error}\n")
         );
     }
 }
