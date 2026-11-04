@@ -173,8 +173,9 @@ In the manager, open **Files → Import**, then press **P** for **Enter path**.
 Paste a local path or `file://` URL, inspect it and choose it before confirming
 the copy. Terminals that paste a path on drop can use the same field. This is
 an explicit local selection, with no shared folder or virtual exchange disk.
-Literal paths and a single surrounding quote pair are accepted; shell escapes
-and environment-variable expansion are not interpreted.
+Existing literal paths take precedence. A single surrounding quote pair or a
+terminal-escaped path is also accepted, without running a shell or expanding
+environment variables, globs or multiple selections.
 
 When choosing an agent in an existing Safe, **Enter** starts a new conversation
 and **C** continues that agent's latest conversation for its current workspace.
@@ -234,7 +235,7 @@ Local inference is deferred until after 1.0.
 | **Debian controller package, amd64 / arm64** | Development `.deb` source and package lifecycle fixtures implemented for the trusted controller layer. Real-role and hardware acceptance remain open. |
 | **Linux desktop, x86_64** | Native headless QEMU/KVM helper implemented; actual hardware acceptance remains open. |
 | **macOS, Apple Silicon** | Native Virtualization.framework helper implemented. Inner Safe KVM boots currently fail in qualification on the test Mac; not a supported release yet. |
-| **Windows** | Planned; no qualified native backend or installer yet. |
+| **Windows** | Shared CLI/wire/Files foundations and controller driver coverage implemented; native backend and installer remain missing. See [Windows](docs/WINDOWS.md). |
 
 Hardware virtualization is required. There is no automatic software-emulation
 fallback. Emulator-only development tests do not qualify a platform.
