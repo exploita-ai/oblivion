@@ -10,7 +10,7 @@ case "$arch" in
 esac
 bun run --cwd packages/oblivion-tools build
 bun run --cwd packages/oblivion-manager script/build.ts "--target=$manager"
-for name in @opentui/core @opentui/solid solid-js zod; do
+for name in @opentui/core @opentui/solid solid-js zod shell-quote; do
     mkdir -p "artifacts/oblivion-manager/$manager/licenses/$name"
     cp "packages/oblivion-manager/node_modules/$name/LICENSE" "artifacts/oblivion-manager/$manager/licenses/$name/LICENSE"
 done

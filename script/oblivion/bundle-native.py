@@ -24,7 +24,7 @@ EVIDENCE = ("host-sources.sha256", "gateway-sources.sha256", "iso-sources.sha256
             "session-packages.tsv", "gateway-packages.tsv", "import-packages.tsv",
             "export-packages.tsv", "onion-gateway-packages.tsv", "onion-file-packages.tsv",
             "qemu-packages.tsv")
-MANAGER_LICENSES = ("@opentui/core", "@opentui/solid", "solid-js", "zod")
+MANAGER_LICENSES = ("@opentui/core", "@opentui/solid", "solid-js", "zod", "shell-quote")
 
 
 def digest(path):

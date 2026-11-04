@@ -1,6 +1,7 @@
 import path from "node:path"
 import { lstat, readdir, stat } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
+import parse from "shell-quote/parse"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
 import { useKeyboard, usePaste } from "@opentui/solid"
 import { z } from "zod"
@@ -12,6 +13,8 @@ import { ActionBar } from "./action-bar"
 import { FilePicker } from "./vendor/termcn/file-picker"
 import { theme } from "./theme"
 import type { NativeRuntime } from "./native-control"
+
+const unsafePathText = /[\p{Cc}\p{Bidi_Control}\p{Zl}\p{Zp}]/u
 
 const directory = z.object({
   path: z.string(), entries: z.array(z.object({ name: z.string(), path: z.string(), kind: z.enum(["directory", "file"]), bytes: z.number().nonnegative() })),
@@ -86,12 +89,12 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
     setWorking(true)
     setError("")
     try {
-      const selected = localPath(value, current())
-      const info = await lstat(selected)
+      const selected = await localPath(value, current())
+      const info = selected.info
       if (stopped) return
       if (info.isSymbolicLink() || !info.isDirectory() && !info.isFile()) { setError("Choose a regular local file or directory. Symbolic links are not selectable."); return }
       if (props.directoryOnly && !info.isDirectory()) { setError("This operation requires a directory. Choose a local folder."); return }
-      setCandidate({ path: selected, directory: info.isDirectory(), bytes: info.size })
+      setCandidate({ path: selected.path, directory: info.isDirectory(), bytes: info.size })
       setView("review")
     } catch { if (!stopped) setError("Enter one existing local path or local file:// URL. Controls, remote authorities and multiple paths are not accepted.") }
     finally { if (!stopped) setWorking(false) }
@@ -109,7 +112,7 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
     if (working()) return
     setWorking(true)
     try {
-      const available = (await readdir(next, { withFileTypes: true })).filter((item) => (item.isDirectory() || !props.directoryOnly && item.isFile()) && !/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/.test(item.name)).sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
+      const available = (await readdir(next, { withFileTypes: true })).filter((item) => (item.isDirectory() || !props.directoryOnly && item.isFile()) && !unsafePathText.test(item.name)).sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
       const page = await Promise.all(available.slice(start, start + 100).map(async (item) => ({ name: item.name, directory: item.isDirectory(), bytes: item.isFile() ? (await stat(path.join(next, item.name))).size : 0 })))
       if (stopped) return
       setCurrent(next); setEntries(page); setOffset(start); setTotal(available.length); setSelected(0); setError("")
@@ -120,7 +123,7 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
   onCleanup(() => { stopped = true })
   usePaste((event) => {
     if (view() !== "path") return
-    if (!/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/.test(new TextDecoder().decode(event.bytes))) return
+    if (!unsafePathText.test(new TextDecoder().decode(event.bytes))) return
     event.preventDefault()
     setError("Paste one path without control characters or line breaks.")
   })
@@ -140,8 +143,8 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
     if (key.name === "pageup" && offset()) { key.preventDefault(); void load(current(), Math.max(0, offset() - 100)) }
   })
   return <box flexGrow={1} minHeight={0} flexDirection="column">
-    <Show when={view() === "path"}><FormView form={{ title: "Enter local path", description: "Paste one literal path or file:// URL. A terminal drop can paste a path here. Nothing is copied until you choose and review it.",
-      fields: [{ id: "path", label: "File or directory on this computer", value: entered(), validate: (value) => !value || /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/.test(value) ? "Enter one path without control characters or line breaks." : undefined }],
+    <Show when={view() === "path"}><FormView form={{ title: "Enter local path", description: "Paste one path, local file:// URL or terminal-dropped path. POSIX quoting is accepted without shell expansion. Nothing is copied until you choose and review it.",
+      fields: [{ id: "path", label: "File or directory on this computer", value: entered(), validate: (value) => !value || unsafePathText.test(value) ? "Enter one path without control characters or line breaks." : undefined }],
       submit: "Inspect path", run: async () => {} }} cancel={cancelPath} submit={(values) => { void inspect(values.path) }} /></Show>
     <Show when={view() === "review" && candidate()}><FormView form={{ title: "Review local path", description: `${candidate()?.path}\n${candidate()?.directory ? "Directory" : `Regular file · ${candidate()?.bytes.toLocaleString("en-US")} B`}\n${props.filesOnly && candidate()?.directory ? "This operation accepts files. Browse this folder to choose one." : "Choose this path to continue to the operation's review. No copy has started."}`,
       fields: [], submit: props.filesOnly && candidate()?.directory ? "Browse folder" : candidate()?.directory ? "Choose folder" : "Choose file", run: async () => {} }} cancel={cancelPath} submit={() => { if (props.filesOnly && candidate()?.directory) { browseCandidate(); return }; useCandidate() }} /></Show>
@@ -160,21 +163,38 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
     details={false} back={props.back} /></Show><Show when={error()}><text flexShrink={0} fg={theme.feedback.warning}>{error()}</text></Show><Show when={working()}><BusyModal text="Reading local path" /></Show></box>
 }
 
-function localPath(input: string, current: string) {
-  if (!input || /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/.test(input)) throw new Error("Invalid path")
-  const quoted = input.trim()
-  const value = quoted.startsWith("'") || quoted.startsWith('"')
-    ? quoted.endsWith(quoted[0]) && !quoted.slice(1, -1).includes(quoted[0]) ? quoted.slice(1, -1) : undefined
-    : input
-  if (!value) throw new Error("Enter one path")
+async function localPath(input: string, current: string) {
+  if (!input || unsafePathText.test(input)) throw new Error("Invalid path")
+  // A real native filename wins over terminal escaping, including literal
+  // backslashes, quotes, spaces and $. Only absence permits interpretation.
+  const literal = path.resolve(current, input)
+  const info = await lstat(literal).catch((error: unknown) => {
+    if (error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR" || error.code === "ENAMETOOLONG")) return
+    throw error
+  })
+  if (info) return { path: literal, info }
+  const spelling = input.trim()
+  const value = /^file:/i.test(spelling) ? spelling : terminalPath(spelling)
   if (/^file:/i.test(value)) {
     const url = new URL(value)
     if (url.hostname && url.hostname !== "localhost" || url.search || url.hash) throw new Error("Local URL required")
     const decoded = fileURLToPath(url)
-    if (/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/.test(decoded)) throw new Error("Invalid path")
-    return decoded
+    if (unsafePathText.test(decoded)) throw new Error("Invalid path")
+    return { path: decoded, info: await lstat(decoded) }
   }
-  return path.resolve(current, value)
+  const resolved = path.resolve(current, value)
+  return { path: resolved, info: await lstat(resolved) }
+}
+
+function terminalPath(input: string) {
+  // shell-quote intentionally tolerates incomplete quotes. Restrict its input
+  // to one complete POSIX word, then delegate decoding to the maintained parser.
+  // Expansion, commands, comments and unquoted glob syntax are not this field.
+  if (!/^(?:[^ '"\\$`|&;()<>*?#{}~]|\\[^\n]|'[^']*'|"(?:[^"\\$`]|\\[^\n])*")+ *$/.test(input)) throw new Error("Enter one complete path")
+  const words = parse(input, () => { throw new Error("Shell expansion is not supported") })
+  if (words.length !== 1 || typeof words[0] !== "string" || !words[0]) throw new Error("Enter one path")
+  if (unsafePathText.test(words[0])) throw new Error("Invalid path")
+  return words[0]
 }
 
 function GuestChooser(props: { safe: string; runtime: NativeRuntime; choose: (value: string) => void; back: () => void }) {

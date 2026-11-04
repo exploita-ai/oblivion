@@ -15,7 +15,10 @@ The original copyright and license notices remain in LICENSE and retained
 source files. The manager also uses selected Termcn-derived components; their
 license and provenance are stored with that source and included in its build
 assets. Clipboard and display components have their own adjacent license and
-provenance records.
+provenance records. The trusted local path picker uses shell-quote 1.12.0
+(MIT, copyright 2013 James Halliday), from https://github.com/ljharb/shell-quote,
+to decode one POSIX-quoted path without executing a shell or expanding variables.
+Its original license is included in manager build assets and runtime bundles.
 
 Oblivion 1.0 runs pinned, unmodified official agent executables. It no longer
 ships an Oblivion fork of the coding agent. Their original notices and terms

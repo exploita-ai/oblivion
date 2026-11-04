@@ -12,12 +12,13 @@
     "typecheck:tsc": "tsc -b"
   },
   "dependencies": {
+    "@oblivion/theme": "workspace:*",
+    "@oblivion/tui-kit": "workspace:*",
     "@opentui/core": "catalog:",
     "@opentui/solid": "catalog:",
+    "shell-quote": "1.12.0",
     "solid-js": "catalog:",
-    "zod": "catalog:",
-    "@oblivion/tui-kit": "workspace:*",
-    "@oblivion/theme": "workspace:*"
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@tsconfig/bun": "catalog:",

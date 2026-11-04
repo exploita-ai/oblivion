@@ -98,7 +98,7 @@ test("directory-only path review offers explicit choose or browse actions", asyn
   } finally { await destination.dispose(); await rm(fixture.root, { recursive: true }) }
 })
 
-test.each(["missing", "symlink", "directory-only", "remote-url", "multiple", "decoded-control"])("path inspection rejects %s without choosing or copying", async (scenario) => {
+test.each(["missing", "symlink", "directory-only", "remote-url", "multiple", "decoded-control", "decoded-bidi", "decoded-line"])("path inspection rejects %s without choosing or copying", async (scenario) => {
   const fixture = await files()
   const chosen: string[] = []
   const value = scenario === "missing" ? path.join(fixture.root, "missing.txt")
@@ -106,7 +106,7 @@ test.each(["missing", "symlink", "directory-only", "remote-url", "multiple", "de
     : scenario === "directory-only" ? fixture.file
     : scenario === "remote-url" ? "file://remote.invalid/tmp/Notes.txt"
     : scenario === "multiple" ? `'${fixture.file}' '${fixture.folder}'`
-    : `${pathToFileURL(fixture.file).href}%0A`
+    : `${pathToFileURL(fixture.file).href}${scenario === "decoded-bidi" ? "%E2%80%AE" : scenario === "decoded-line" ? "%E2%80%A8" : "%0A"}`
   const app = await testRender(() => <LocalChooser directoryOnly={scenario === "directory-only"} initialDirectory={fixture.root} choose={(selected) => chosen.push(selected)} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
   try {
     await enter(app, value)
@@ -138,7 +138,7 @@ test("multi-line paste is rejected and cancelling path entry preserves the brows
   } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
 })
 
-test("an import path is literal and cannot mutate a Safe before the existing transfer review", async () => {
+test.each(["literal", "terminal-drop"])("an import %s path cannot mutate a Safe before the existing transfer review", async (spelling) => {
   const fixture = await files()
   const source = path.join(fixture.root, "$(touch literal-only).txt")
   const commands: string[][] = []
@@ -146,7 +146,7 @@ test("an import path is literal and cannot mutate a Safe before the existing tra
   try {
     await app.renderOnce()
     await app.mockInput.pressEnter()
-    await enter(app, source)
+    await enter(app, spelling === "literal" ? source : `${fixture.root}/\\$\\(touch\\ literal-only\\).txt `)
     await visible(app, "Review local path")
     expect(commands).toHaveLength(0)
     await app.mockInput.pressEnter()
@@ -160,5 +160,81 @@ test("an import path is literal and cannot mutate a Safe before the existing tra
     await app.mockInput.pressEnter()
     await visible(app, "Copy completed and verified")
     expect(commands).toEqual([["safe", "open", "0123456789abcdef0123456789abcdef"], ["files", "import", "--safe", "0123456789abcdef0123456789abcdef", source, "--name", path.basename(source)]])
+  } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
+})
+
+test.each([[80, 24], [160, 50]])("terminal-escaped dropped paths keep Unicode and require a choice at %ix%i", async (width, height) => {
+  const fixture = await files()
+  const chosen: string[] = []
+  const app = await testRender(() => <LocalChooser directoryOnly={false} initialDirectory={fixture.root} choose={(value) => chosen.push(value)} back={() => {}} />, { width, height, kittyKeyboard: true })
+  try {
+    await enter(app, `${fixture.root}/Notes\\ città\\ with\\ spaces.txt `)
+    await visible(app, "Review local path")
+    expect(app.captureCharFrame().replace(/\s+/g, " ")).toContain("Notes città with spaces.txt")
+    expect(chosen).toHaveLength(0)
+    await app.mockInput.pressEnter()
+    expect(chosen).toEqual([fixture.file])
+  } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
+})
+
+test.each(["escaped", "single-quoted", "double-quoted", "raw-backslash", "raw-quotes", "raw-whitespace", "long-escaped"])("native path inspection preserves %s filenames", async (spelling) => {
+  const fixture = await files()
+  const filename = spelling === "raw-backslash" ? "literal\\ name.txt" : spelling === "raw-quotes" ? `literal'"$name.txt` : spelling === "raw-whitespace" ? " leading trailing " : spelling === "long-escaped" ? "report" + " ".repeat(130) + ".txt" : "Plans d'Italia $5.txt"
+  const target = path.join(fixture.root, filename)
+  await writeFile(target, "selected literal file")
+  // Both spellings exist: a raw native backslash must remain authoritative,
+  // rather than silently choosing the unescaped filename.
+  await writeFile(path.join(fixture.root, "literal name.txt"), "not selected")
+  const value = spelling === "escaped" ? `${fixture.root}/Plans\\ d\\'Italia\\ \\$5.txt`
+    : spelling === "single-quoted" ? `'${fixture.root}/Plans d'\\''Italia $5.txt' `
+    : spelling === "double-quoted" ? `"${fixture.root}/Plans d'Italia \\$5.txt"`
+    : spelling === "long-escaped" ? target.replaceAll(" ", "\\ ")
+    : target
+  const chosen: string[] = []
+  const app = await testRender(() => <LocalChooser directoryOnly={false} initialDirectory={fixture.root} choose={(value) => chosen.push(value)} back={() => {}} />, { width: 160, height: 50, kittyKeyboard: true })
+  try {
+    await enter(app, value)
+    await visible(app, "Review local path")
+    expect(chosen).toHaveLength(0)
+    if (spelling !== "long-escaped") expect(app.captureCharFrame()).toContain(target)
+    await app.mockInput.pressEnter()
+    expect(chosen).toEqual([target])
+  } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
+})
+
+test.each(["two-drops", "command", "environment", "home", "glob", "unclosed-quote", "trailing-escape", "substitution"])("terminal path spelling rejects %s without a selection", async (scenario) => {
+  const fixture = await files()
+  const source = `${fixture.root}/Notes\\ città\\ with\\ spaces.txt`
+  const value = scenario === "two-drops" ? `${source} ${fixture.root}/Project\\ città`
+    : scenario === "command" ? `${source}; pwd`
+    : scenario === "environment" ? "$HOME"
+    : scenario === "home" ? "~"
+    : scenario === "glob" ? `${fixture.root}/Notes*.txt`
+    : scenario === "unclosed-quote" ? `'${fixture.file}`
+    : scenario === "trailing-escape" ? `${source}\\`
+    : `${fixture.root}/$(touch injected-file)`
+  const chosen: string[] = []
+  const app = await testRender(() => <LocalChooser directoryOnly={false} initialDirectory={fixture.root} choose={(value) => chosen.push(value)} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await enter(app, value)
+    await visible(app, "Enter one existing local path")
+    expect(app.captureCharFrame()).not.toContain("Review local path")
+    expect(chosen).toHaveLength(0)
+    expect(await Bun.file(path.join(fixture.root, "injected-file")).exists()).toBe(false)
+  } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
+})
+
+test.each(["\n", "\r", "\x1b", "\x00", "\u202e", "\u2066", "\u200e", "\u061c", "\u2028", "\u2029"])("terminal paste rejects forbidden character %j", async (character) => {
+  const fixture = await files()
+  const chosen: string[] = []
+  const app = await testRender(() => <LocalChooser directoryOnly={false} initialDirectory={fixture.root} choose={(value) => chosen.push(value)} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await visible(app, "Enter path")
+    await app.mockInput.pressKey("p")
+    await visible(app, "Enter local path")
+    await app.mockInput.pasteBracketedText(fixture.file + character)
+    await visible(app, "Paste one path without control characters")
+    expect(app.captureCharFrame()).not.toContain("Review local path")
+    expect(chosen).toHaveLength(0)
   } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
 })
