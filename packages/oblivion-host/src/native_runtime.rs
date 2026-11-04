@@ -1342,10 +1342,8 @@ fn write_record(root: &Path, name: &str, value: &impl Serialize) -> Result<()> {
 fn prepare_connection() -> Result<Settings> {
     let root = directory()?;
     let path = root.join("runtime.json");
-    #[cfg(target_os = "linux")]
-    if mode()? == Mode::Live { live::prepare(&root, &path)?; }
     if !path.is_file() {
-        return Err("Install the matching development desktop bundle before starting Oblivion".into());
+        return Err(if mode()? == Mode::Live { "The Live runtime has not been prepared. Run oblivion to choose its storage mode." } else { "Install the matching development desktop bundle before starting Oblivion" }.into());
     }
     private_directory(&root)?;
     let settings = Settings::read(&path)?;
@@ -1393,6 +1391,11 @@ pub fn start() -> Result<()> {
 }
 
 pub fn ensure() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if mode()? == Mode::Live {
+        let root = directory()?;
+        live::prepare(&root, &root.join("runtime.json"))?;
+    }
     let settings = prepare_connection()?;
     let bundle = Bundle::current()?;
     if bundle.id() != settings.bundle.bundle_id || bundle.source() != settings.bundle.source_sha256
