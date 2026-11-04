@@ -1,6 +1,7 @@
 //! Resident monotonic idle policy. Only authenticated frontend activity resets it.
 use crate::storage::{Error, Result, require};
 use oblivion_host::autolock::{Activity, Lock, Opening, Preferences, Tracker};
+use oblivion_wire::idle::Storage;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -60,17 +61,11 @@ pub(crate) struct Snapshot {
     pub writable: bool,
 }
 
-#[derive(Serialize)]
-pub(crate) struct Status {
-    #[serde(flatten)]
-    pub(crate) state: oblivion_host::autolock::Status,
-    storage: &'static str,
-    writable: bool,
-}
+pub(crate) type Status = oblivion_wire::idle::View<oblivion_host::scope::Slot>;
 
 struct State {
     tracker: Tracker,
-    storage: &'static str,
+    storage: Storage,
     writable: bool,
     error: Option<&'static str>,
 }
@@ -82,7 +77,7 @@ impl Controller {
     pub(crate) fn new() -> Result<Self> {
         Ok(Self(Arc::new(Mutex::new(State {
             tracker: Tracker::new(Preferences::default()).map_err(Error)?,
-            storage: "defaults", writable: false, error: None,
+            storage: Storage::Defaults, writable: false, error: None,
         }))))
     }
 
@@ -128,7 +123,7 @@ impl Controller {
             Err(error) => {
                 state.error = Some(error.0);
                 // An unreadable preference never silently disables protection.
-                (Preferences::default(), "defaults")
+                (Preferences::default(), Storage::Defaults)
             }
         };
         state.tracker.configure(preferences).map_err(Error)?;
@@ -190,9 +185,9 @@ impl Controller {
     }
 }
 
-fn read_preferences(general_open: bool) -> Result<(Preferences, &'static str)> {
-    for (path, origin) in [(Path::new(RUN).join("app-settings.json"), "ram-only"), (PathBuf::from(SAVED), "saved-encrypted")] {
-        if origin == "saved-encrypted" && !general_open { continue }
+fn read_preferences(general_open: bool) -> Result<(Preferences, Storage)> {
+    for (path, origin) in [(Path::new(RUN).join("app-settings.json"), Storage::RamOnly), (PathBuf::from(SAVED), Storage::SavedEncrypted)] {
+        if origin == Storage::SavedEncrypted && !general_open { continue }
         if !path.try_exists().map_err(|_| Error("idle_preferences_unavailable"))? { continue }
         let mut bytes = Vec::new();
         crate::storage::trusted_file(&path)?.take(1025).read_to_end(&mut bytes)
@@ -202,7 +197,7 @@ fn read_preferences(general_open: bool) -> Result<(Preferences, &'static str)> {
         preferences.validate().map_err(Error)?;
         return Ok((preferences, origin));
     }
-    Ok((Preferences::default(), "defaults"))
+    Ok((Preferences::default(), Storage::Defaults))
 }
 
 fn write_preferences(path: &Path, preferences: Preferences) -> Result<()> {
@@ -305,7 +300,7 @@ mod tests {
         let preferences = Preferences { version: 1, safe_minutes: 3, host_minutes: 7 };
         write_preferences(&path, preferences).unwrap_or_else(|error| panic!("{}", error.0));
         assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
-        assert_eq!(read_preferences(false).unwrap_or_else(|error| panic!("{}", error.0)), (preferences, "ram-only"));
+        assert_eq!(read_preferences(false).unwrap_or_else(|error| panic!("{}", error.0)), (preferences, Storage::RamOnly));
         assert!(!path.with_extension("json.pending").exists());
         let controller = Controller::new().unwrap_or_else(|error| panic!("{}", error.0));
         let nonce = "11111111111111111111111111111111";
@@ -328,6 +323,6 @@ mod tests {
         clear_fence(&target).unwrap_or_else(|error| panic!("{}", error.0));
         assert!(!fenced(&target).unwrap_or_else(|error| panic!("{}", error.0)));
         clear_temporary().unwrap_or_else(|error| panic!("{}", error.0));
-        assert_eq!(read_preferences(false).unwrap_or_else(|error| panic!("{}", error.0)), (Preferences::default(), "defaults"));
+        assert_eq!(read_preferences(false).unwrap_or_else(|error| panic!("{}", error.0)), (Preferences::default(), Storage::Defaults));
     }
 }

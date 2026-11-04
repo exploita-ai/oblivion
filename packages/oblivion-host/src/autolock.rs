@@ -1,44 +1,12 @@
 //! Idle deadlines depend exclusively on trusted human activity. Callers supply
 //! monotonic instants; status polls, model output and guest traffic have no hook.
 use crate::scope::Slot;
-use serde::{Deserialize, Serialize};
+pub use oblivion_wire::idle::{HostStatus, Preferences};
+pub type Opening = oblivion_wire::idle::Opening<Slot>;
+pub type Activity = oblivion_wire::idle::Activity<Slot>;
+pub type Status = oblivion_wire::idle::Status<Slot>;
+pub type SafeStatus = oblivion_wire::idle::SafeStatus<Slot>;
 use std::time::{Duration, Instant};
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Preferences {
-    pub version: u8,
-    pub safe_minutes: u16,
-    pub host_minutes: u16,
-}
-
-impl Default for Preferences {
-    fn default() -> Self { Self { version: 1, safe_minutes: 15, host_minutes: 30 } }
-}
-
-impl Preferences {
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if self.version != 1 || self.safe_minutes > 1440 || self.host_minutes > 1440 {
-            return Err("invalid_idle_preferences");
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Opening {
-    pub slot: Slot,
-    pub safe_id: String,
-    pub nonce: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Activity {
-    pub host: String,
-    pub safe: Option<Opening>,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Lock {
@@ -75,28 +43,6 @@ pub struct Tracker {
     host: Option<(String, Clock)>,
     safes: Vec<(Opening, Clock)>,
     last_error: Option<&'static str>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct Status {
-    pub preferences: Preferences,
-    pub host: Option<HostStatus>,
-    pub safes: Vec<SafeStatus>,
-    pub last_error: Option<String>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct HostStatus {
-    pub nonce: String,
-    pub remaining_seconds: Option<u64>,
-    pub closing: bool,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct SafeStatus {
-    pub opening: Opening,
-    pub remaining_seconds: Option<u64>,
-    pub closing: bool,
 }
 
 impl Tracker {
