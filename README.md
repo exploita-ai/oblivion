@@ -202,10 +202,15 @@ bounded event/approval channel and does not accept that bypass.
 a copy, including a lost final reply. It can finish publication of a verified
 copy without copying its source again, or discard only private incomplete
 staging. Published output is kept. The latest 32 operation references stay in the
-manager's RAM; the CLI prints each operation ID before copying, so keep that ID
-for inspection after closing the manager.
+manager's RAM with their source details. After restarting the manager, **In this
+Safe** lists the import records still held by the receiver. **Choose export
+folder** reads export records only inside the directory you select again; no
+global list of destination paths is saved. Select a record to check its current
+outcome before recovery or discard. Listing alone never starts a copy.
 
 ```sh
+oblivion files transfers --safe research --json
+oblivion files transfers --safe research --destination ./exports --json
 oblivion files status --safe research --operation COPY_ID --json
 oblivion files recover --safe research --operation COPY_ID
 oblivion files discard --safe research --operation COPY_ID

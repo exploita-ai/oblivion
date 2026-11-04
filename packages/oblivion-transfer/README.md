@@ -78,11 +78,28 @@ staging; exports keep them in `.oblivion-transfers` inside the explicitly chosen
 destination. No absolute host source path is saved in that durable context. The manager keeps
 only its latest 32 operation references in RAM, clearing them when Oblivion locks.
 
+`files transfers` enumerates the receiver's operation references after the
+manager restarts. It scans only the selected Safe inbox or explicitly chosen
+export directory, with ordered pages of at most eight references. Foreign or
+invalid records are omitted; an unsafe or busy root is an error. The list grants
+no recovery capability, and selecting a record still requires fresh status.
+
 `files status`, `files recover` and `files discard` select that exact operation
 and Safe. Export inspection additionally requires the original destination.
 Current Safe opening and destination directory identity are rechecked. A lost
 acknowledgment or cleanup error cannot prove that publication failed, so callers
 query the receiver instead of starting a second copy automatically.
+
+Durable target/publication identity consists of a filesystem UUID and inode.
+It survives reassignment of a Linux loop or device-mapper number; the live
+publication still checks current device identities through pinned descriptors.
+Linux uses `FS_IOC_GETFSUUID` (kernel 6.9 or newer); macOS uses the volume UUID
+from `fgetattrlist`. A filesystem without this facility is rejected before new
+receiver records, with no fallback to a transient device number. UUID identity
+is not cryptographic authentication against a cloned volume. Safe authorization,
+private staging, pinned handles and manifest verification remain required.
+See the [Linux UAPI](https://github.com/torvalds/linux/blob/v6.9/include/uapi/linux/fs.h)
+and [Apple attribute interface](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/getattrlist.2).
 
 Recovery revalidates the complete private tree against the approved manifest,
 including unexpected files, before publishing through pinned directory handles.

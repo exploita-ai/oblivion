@@ -29,7 +29,20 @@ without recopying; discard preserves published output and later user edits.
 Records bind the Safe and destination identity, and file attachment checks the
 current opening and lock fences under the controller lock. The manager's latest
 32 references stay in RAM; durable context is only in encrypted Safe staging or
-the selected export destination.
+the selected export destination. Receiver inventory now restores access to those
+operation references after a manager restart. Import inventory stays inside the
+Safe; export inventory requires choosing its destination directory again. It
+returns bounded metadata, then requires fresh status before recovery or discard.
+It stores no new desktop history of source or destination paths.
+
+Persistent receiver identity now uses a filesystem UUID and inode instead of a
+mount's device number. A real isolated Linux fixture remounts the same ext4 data
+on another loop device, recovers its pending publication and preserves later
+edits after another remount. Current-device checks and pinned descriptors remain
+in use during a live publication. Linux uses the descriptor-based UUID operation
+available since kernel 6.9; macOS uses its volume UUID. Unsupported filesystems
+fail before new receiver records are created. This does not replace the remaining
+whole-VM, USB and native-chat restart acceptance gates.
 
 Native copies now prepare one actual manifest before confirmation, retaining
 the selected source or offered guest data and pinned destination through review.

@@ -7,6 +7,13 @@ They package the native launcher, VM helper, terminal manager, and a separately
 built matching Oblivion controller ISO. They are not release artifacts and do
 not establish support on real hardware.
 
+Native Files receiver recovery requires a filesystem UUID obtained from the
+opened descriptor. Linux desktop export therefore needs kernel 6.9 or newer and
+a filesystem supporting `FS_IOC_GETFSUUID`; macOS uses its volume UUID. An
+unsupported destination is refused before copy approval, rather than recording
+a device number that may change after restart. Local import sources do not use
+this requirement; their receiver is inside the current Debian Safe image.
+
 ## Build
 
 Build on the matching host platform. Install the Bun version pinned in root
