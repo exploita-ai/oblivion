@@ -1,5 +1,5 @@
-import path from "node:path"
 import { z } from "zod"
+import { managerLauncherPath, systemManagerTarget } from "./manager-target"
 import type { FileOutcome } from "./native-file-transfers"
 import type { FileEvent, NativeFileClient, RunningFileCopy } from "./native-file-events"
 
@@ -68,7 +68,7 @@ export function capacity(bytes: number) {
 }
 
 export function nativeLauncher() {
-  return process.env.OBLIVION_LAUNCHER ?? path.join(path.dirname(process.execPath), "oblivion")
+  return process.env.OBLIVION_LAUNCHER ?? managerLauncherPath(process.execPath, systemManagerTarget())
 }
 
 export function nativeOverlay(args: string[]): NativeOverlay | undefined {

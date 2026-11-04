@@ -438,6 +438,7 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
   const [candidate, setCandidate] = createSignal<{ path: string; directory: boolean; bytes: number }>()
   let stopped = false
 
+  function parentDir() { const parent = path.dirname(current()); return parent === current() ? null : parent }
   function enterPath() { setError(""); setView("path") }
   function cancelPath() { setCandidate(undefined); setError(""); setView("browse") }
   function browseCandidate() { const value = candidate(); if (!value?.directory || working()) return; setView("browse"); void load(value.path) }
@@ -525,7 +526,7 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
       fields: [], submit: props.filesOnly && candidate()?.directory ? "Browse folder" : candidate()?.directory ? "Choose folder" : "Choose file", run: async () => {} }} cancel={cancelPath} submit={() => { if (props.filesOnly && candidate()?.directory) { browseCandidate(); return }; useCandidate() }} /></Show>
     <Show when={view() === "review" && candidate()?.directory && !props.filesOnly}><ActionBar actions={[{ title: "Browse folder", key: "B", disabled: working(), run: browseCandidate }]} /></Show>
     <Show when={view() === "browse" && props.selection}><PageHeader title="Choose local files" description="Select files or folders across directories and pages. Enter opens folders; Space adds or removes an item." />
-      <FilePicker currentDir={current()} entries={entries().map((entry) => ({ ...entry, path: path.join(current(), entry.name) }))} selected={props.selection!.paths} focused busy={working()}
+      <FilePicker currentDir={current()} parentDir={parentDir()} entries={entries().map((entry) => ({ ...entry, path: path.join(current(), entry.name) }))} selected={props.selection!.paths} focused busy={working()}
         next={offset() + 100 < total()} previous={offset() > 0} onNavigate={(next) => { void load(next) }} onChange={updateSelection}
         onNext={() => { void load(current(), offset() + 100) }} onPrevious={() => { void load(current(), Math.max(0, offset() - 100)) }} onBack={props.back} />
       <ActionBar actions={[
@@ -590,6 +591,7 @@ export function GuestChooser(props: { safe: string; runtime: NativeRuntime; sele
   const [error, setError] = createSignal("")
   const [basket, setBasket] = createSignal(false)
   let stopped = false
+  function parentDir() { if (!page().path) return null; const parent = path.posix.dirname(page().path); return parent === "." ? "" : parent }
   async function load(path: string, history: string[] = []) {
     if (working()) return
     setWorking(true)
@@ -609,7 +611,7 @@ export function GuestChooser(props: { safe: string; runtime: NativeRuntime; sele
   return <box flexGrow={1} minHeight={0} flexDirection="column" gap={1}>
     <Show when={basket()}><SelectionBasket selection={props.selection} back={() => setBasket(false)} /></Show>
     <Show when={!basket()}><PageHeader title="Choose Safe files" description="Select files or folders across workspace and imports. Space selects; continue when your selection is ready." />
-    <FilePicker currentDir={page().path} entries={page().entries.map((entry) => ({ ...entry, directory: entry.kind === "directory" }))} selected={props.selection.paths} focused busy={working()}
+    <FilePicker currentDir={`/${page().path}`} parentDir={parentDir()} entries={page().entries.map((entry) => ({ ...entry, directory: entry.kind === "directory" }))} selected={props.selection.paths} focused busy={working()}
       next={!!page().next_cursor} previous={!!cursors().length} onNavigate={(path) => { void load(path) }} onChange={(paths) => { const error = selectionError(paths); if (error) { setError(error); return }; props.selection.change(paths); setError("") }}
       onNext={() => { const cursor = page().next_cursor; if (cursor) void load(page().path, [...cursors(), cursor]) }}
       onPrevious={() => { void load(page().path, cursors().slice(0, -1)) }} onBack={props.back} />

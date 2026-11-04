@@ -1,19 +1,21 @@
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
 import path from "node:path"
+import { managerTarget, systemManagerTarget } from "../src/manager-target"
 
 if (`bun@${Bun.version}` !== (await Bun.file(path.resolve(import.meta.dir, "../../../package.json")).json()).packageManager) {
   throw new Error("Use the Bun version pinned by the repository to build the manager")
 }
-const target = process.argv.find((value) => value.startsWith("--target="))?.slice(9) ?? "bun-darwin-arm64"
-if (!["bun-darwin-arm64", "bun-linux-arm64", "bun-linux-x64"].includes(target)) throw new Error("Unsupported manager target")
+const selected = process.argv.find((value) => value.startsWith("--target="))?.slice(9)
+const descriptor = selected === undefined ? systemManagerTarget() : managerTarget(selected)
 const output = process.argv.find((value) => value.startsWith("--output="))?.slice(9)
-  ?? path.resolve(import.meta.dir, "../../..", "artifacts/oblivion-manager", target, "oblivion-manager")
+  ?? path.resolve(import.meta.dir, "../../..", "artifacts/oblivion-manager", descriptor.target, descriptor.executable)
+if (descriptor.platform === "win32" && !output.endsWith(".exe")) throw new Error("Windows manager output must end in .exe")
 const result = await Bun.build({
   entrypoints: [path.resolve(import.meta.dir, "../src/index.tsx")],
   plugins: [createSolidTransformPlugin()],
   target: "bun", format: "esm", minify: true,
-  compile: { target: target as Bun.Build.CompileTarget, outfile: output, autoloadBunfig: false, autoloadDotenv: false, autoloadPackageJson: false, autoloadTsconfig: false },
-  define: target.includes("linux") ? { "process.env.OPENTUI_LIBC": '"glibc"' } : {},
+  compile: { target: descriptor.target, outfile: output, autoloadBunfig: false, autoloadDotenv: false, autoloadPackageJson: false, autoloadTsconfig: false },
+  define: descriptor.platform === "linux" ? { "process.env.OPENTUI_LIBC": '"glibc"' } : {},
 })
 if (!result.success) throw new Error(result.logs.map(String).join("\n"))
 for (const file of ["LICENSE", "NOTICE"]) {
@@ -26,12 +28,8 @@ await Bun.write(
   path.join(path.dirname(output), "assets/licenses/shell-quote/LICENSE"),
   Bun.file(path.join(path.dirname(Bun.resolveSync("shell-quote/package.json", import.meta.dir)), "LICENSE")),
 )
-if (target.includes("linux") || target === "bun-darwin-arm64") {
-  const native = `@opentui/core-${target.slice(4)}`
-  const library = target.includes("linux") ? "libopentui.so" : "libopentui.dylib"
-  await Bun.write(
-    path.join(path.dirname(output), "assets", native, library),
-    Bun.file(path.join(path.dirname(Bun.resolveSync(native, import.meta.resolve("@opentui/core"))), library)),
-  )
-}
+await Bun.write(
+  path.join(path.dirname(output), "assets", descriptor.nativePackage, descriptor.nativeLibrary),
+  Bun.file(path.join(path.dirname(Bun.resolveSync(descriptor.nativePackage, import.meta.resolve("@opentui/core"))), descriptor.nativeLibrary)),
+)
 console.log(output)
