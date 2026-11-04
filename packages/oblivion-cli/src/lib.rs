@@ -10,3 +10,5 @@ pub mod storage;
 pub mod controller;
 pub mod network;
 pub mod proxy_profiles;
+pub mod safe;
+pub mod settings;

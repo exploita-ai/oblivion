@@ -204,6 +204,20 @@ fn run() -> control::Result<i32> {
     } else {
         None
     };
+    let settings_command = if args.first().is_some_and(|arg| arg == "settings") {
+        Some(oblivion_cli::settings::parse(&args[1..])?)
+    } else {
+        None
+    };
+    let safe_command = if args.first().is_some_and(|arg| arg == "safe")
+        && !args
+            .get(1)
+            .is_some_and(|arg| matches!(arg.as_str(), "password" | "task"))
+    {
+        Some(oblivion_cli::safe::parse(&args[1..])?)
+    } else {
+        None
+    };
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         if args.first().is_some_and(|arg| arg == "runtime") {
@@ -282,7 +296,7 @@ fn run() -> control::Result<i32> {
         return oblivion_cli::storage::execute(&mut UnixRuntime::new(), command);
     }
     match args[0].as_str() {
-        "settings" => idle_commands::run(&args[1..]),
+        "settings" => idle_commands::run(settings_command.ok_or("settings_command_missing")?),
         "run" => oblivion_cli::run::execute(
             &mut UnixRuntime::new(),
             launch_options.ok_or("run_options_missing")?,
@@ -295,19 +309,17 @@ fn run() -> control::Result<i32> {
         "files" => file_commands::run(&args[1..]),
         "backup" => backup_commands::run(&args[1..]),
         "share" => share_commands::run(&args[1..]),
-        "safe" => safe_commands::run(&args[1..]),
+        "safe" if args.get(1).is_some_and(|arg| arg == "password") => {
+            family_password_commands::run(&args[2..])
+        }
+        "safe" if args.get(1).is_some_and(|arg| arg == "task") => {
+            child_task_commands::run(&args[2..])
+        }
+        "safe" => safe_commands::run(safe_command.ok_or("safe_command_missing")?),
         "network" => network_commands::run(network_command.ok_or("network_command_missing")?),
         "proxy" => proxy_commands::run(proxy_command.ok_or("proxy_command_missing")?),
         _ => Err("Unknown command. Run oblivion --help.".into()),
     }
-}
-
-fn unlock(read_only: bool) -> control::Result<()> {
-    oblivion_cli::storage::execute(
-        &mut UnixRuntime::new(),
-        oblivion_cli::storage::Command::Unlock { read_only },
-    )
-    .map(|_| ())
 }
 
 type Options = oblivion_cli::run::Options<oblivion_transport::Transport>;
@@ -415,10 +427,6 @@ impl oblivion_cli::run::Runtime for UnixRuntime {
     fn attach_workspace(&mut self, slot: scope::Slot, id: &str) -> control::Result<i32> {
         scope::within(slot, || attach_workspace(id))
     }
-}
-
-fn open_existing(state: &Status, id: &str) -> control::Result<()> {
-    oblivion_cli::run::open_existing(&mut UnixRuntime::new(), state, scope::current(), id)
 }
 
 fn free_slot(state: &Status) -> control::Result<scope::Slot> {
@@ -673,13 +681,26 @@ mod tests {
         assert!(state.find_safe("missing").unwrap().is_none());
         state.agent_safes[0].state = AgentSafeState::Failed;
         assert!(
-            open_existing(&state, &"a".repeat(32))
-                .unwrap_err()
-                .to_string()
-                .contains("not created successfully")
+            oblivion_cli::run::open_existing(
+                &mut UnixRuntime::new(),
+                &state,
+                scope::current(),
+                &"a".repeat(32)
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("not created successfully")
         );
         state.agent_safes[0].state = AgentSafeState::RecoveryRequired;
-        assert!(open_existing(&state, &"a".repeat(32)).is_err());
+        assert!(
+            oblivion_cli::run::open_existing(
+                &mut UnixRuntime::new(),
+                &state,
+                scope::current(),
+                &"a".repeat(32)
+            )
+            .is_err()
+        );
     }
 
     #[test]

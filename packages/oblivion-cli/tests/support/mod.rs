@@ -6,7 +6,7 @@ use oblivion_cli::{
 };
 use oblivion_transport::Transport;
 use oblivion_wire::control::Operation;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -34,6 +34,7 @@ pub struct Runtime {
     pub slots: Vec<u8>,
     pub confirmation: bool,
     pub prompt_error: Option<&'static str>,
+    pub password_bytes: Option<Zeroizing<Vec<u8>>>,
     pub reject_notice: Option<&'static str>,
 }
 impl Runtime {
@@ -48,6 +49,7 @@ impl Runtime {
             slots: vec![0, 1],
             confirmation: false,
             prompt_error: None,
+            password_bytes: None,
             reject_notice: None,
         }
     }
@@ -80,7 +82,10 @@ impl run::Runtime for Runtime {
         if let Some(error) = self.prompt_error {
             return Err(error.into());
         }
-        Ok(Zeroizing::new(b"synthetic unlock password".to_vec()))
+        Ok(self
+            .password_bytes
+            .clone()
+            .unwrap_or_else(|| Zeroizing::new(b"synthetic unlock password".to_vec())))
     }
     fn new_password(&mut self, label: &'static str) -> Result<Zeroizing<Vec<u8>>> {
         self.events.push(format!("new-password:{label}"));
