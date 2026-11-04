@@ -61,3 +61,30 @@ fn profile_decoder_preserves_credential_payload_and_rejects_invalid_boundary_dat
         assert!(proxy_profiles::valid_name(name).is_err());
     }
 }
+
+#[test]
+fn profile_status_accepts_only_bounded_unique_public_socks_metadata() {
+    let source = br#"{"entries":[{"name":"Office","transport":{"mode":"socks5","endpoint":"192.0.2.5:1080","authenticated":true},"temporary":false}]}"#;
+    let status = proxy_profiles::Status::decode(source).unwrap();
+    assert_eq!(
+        serde_json::to_value(status).unwrap(),
+        serde_json::from_slice::<serde_json::Value>(source).unwrap()
+    );
+    let entry = serde_json::from_slice::<serde_json::Value>(source).unwrap()["entries"][0].clone();
+    for value in [
+        serde_json::json!({"entries":[entry.clone(),entry.clone()]}),
+        serde_json::json!({"entries":vec![entry;65]}),
+        serde_json::json!({"entries":[{"name":"Tor","transport":{"mode":"tor"},"temporary":true}]}),
+        serde_json::json!({"entries":[{"name":"Office","transport":{"mode":"socks5","endpoint":"127.0.0.1:1080","authenticated":true},"temporary":false}]}),
+        serde_json::json!({"entries":[{"name":"Office","transport":{"mode":"socks5","endpoint":"192.0.2.5:1080","authenticated":true,"PRIVATE_CANARY":true},"temporary":false}]}),
+    ] {
+        assert_eq!(
+            proxy_profiles::Status::decode(&serde_json::to_vec(&value).unwrap()).err(),
+            Some("invalid_proxy_profile_status")
+        );
+    }
+    assert_eq!(
+        proxy_profiles::Status::decode(&vec![b' '; 65537]).err(),
+        Some("invalid_proxy_profile_status")
+    );
+}

@@ -1,8 +1,8 @@
 //! Named SOCKS5 credentials stay in the controller. Safes receive snapshots.
 
-use oblivion_transport::{Metadata, Transport};
-pub use oblivion_transport::proxy_profiles::{Command, valid_name};
+use oblivion_transport::Transport;
 use oblivion_transport::proxy_profiles::valid_transport;
+pub use oblivion_transport::proxy_profiles::{Command, Info, Status, valid_name};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -20,20 +20,6 @@ struct Entry {
 pub struct Archive {
     version: u8,
     entries: Vec<Entry>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Info {
-    pub name: String,
-    pub transport: Metadata,
-    pub temporary: bool,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Status {
-    pub entries: Vec<Info>,
 }
 
 pub struct Registry {
