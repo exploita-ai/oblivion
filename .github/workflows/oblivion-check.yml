@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   portable-wire:
-    name: Portable CLI, wire and Files (Windows; no VM backend)
+    name: Portable frontend, wire and Files (Windows; no VM backend)
     runs-on: windows-2022
     timeout-minutes: 10
     defaults:
@@ -39,7 +39,7 @@ jobs:
         run: |
           cargo check --locked --lib --target x86_64-pc-windows-msvc
           cargo test --locked --lib
-      - name: Compile and exercise the shared run and proxy grammar
+      - name: Compile and exercise shared frontend commands, run and proxy grammar
         working-directory: packages/oblivion-cli
         run: |
           cargo check --locked --lib --target x86_64-pc-windows-msvc
@@ -58,6 +58,29 @@ jobs:
           docker run --rm -v "$GITHUB_WORKSPACE:/repo:ro"
           ghcr.io/gitleaks/gitleaks@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9
           detect --source=/repo --no-git --redact --config=/repo/.gitleaks.toml --exit-code=1
+
+  windows-manager:
+    name: Windows x64 frontend (no VM backend)
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - name: Check the shared frontend with the official TypeScript compiler
+        run: bun run --cwd packages/oblivion-manager typecheck:tsc
+      - name: Exercise target discovery and real picker components
+        working-directory: packages/oblivion-manager
+        run: bun test --timeout 30000 test/manager-target.test.ts test/file-picker.test.tsx
+      - name: Compile the actual manager and pinned OpenTUI DLL
+        run: |
+          bun run --cwd packages/oblivion-manager build --target=bun-windows-x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = 'artifacts/oblivion-manager/bun-windows-x64/oblivion-manager.exe'
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $binary))
+          if ($bytes.Length -lt 2 -or $bytes[0] -ne 77 -or $bytes[1] -ne 90) { throw 'Expected the current Windows PE frontend' }
+          if (-not (Test-Path 'artifacts/oblivion-manager/bun-windows-x64/assets/@opentui/core-win32-x64/opentui.dll' -PathType Leaf)) { throw 'Pinned OpenTUI DLL missing' }
 
   javascript:
     name: Manager and native tools (${{ matrix.arch }})
@@ -117,7 +140,7 @@ jobs:
           rustup toolchain install 1.88.0 --profile minimal
           rustup default 1.88.0
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake make g++ perl libclang-dev python3 zstd util-linux e2fsprogs
+          sudo apt-get install -y --no-install-recommends cmake make g++ perl libclang-dev python3 zstd util-linux e2fsprogs initramfs-tools-core cpio
       - name: Cache Rust dependencies and build outputs
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -132,12 +155,16 @@ jobs:
           cargo check --locked --lib --bins
           cargo check --locked --lib --bins --features lab-emulation
           cargo test --locked --lib --bin oblivion --bin oblivion-storage
-          cargo test --locked --test safe_admin --test delegation --test backup_cli --test file_attachment --test managed --test terminal_screen --test workspace --test share_control --test channel
+          cargo test --locked --test frontend --test safe_admin --test delegation --test backup_cli --test file_attachment --test managed --test terminal_screen --test workspace --test share_control --test channel
       - name: Exercise the portable private wire
         working-directory: packages/oblivion-wire
         run: cargo test --locked
       - name: Verify native bundle pairing and distribution inventory
         run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
+      - name: Verify outer hypervisor kernel and QEMU evidence
+        run: |
+          python3 -B script/oblivion/test-hypervisor-kernel.py
+          python3 -B script/oblivion/test-hypervisor-qemu.py
       - name: Exercise real local PTY and scoped control protocols
         working-directory: packages/oblivion-host
         run: |
@@ -294,7 +321,7 @@ jobs:
         run: |
           cargo check --locked --lib --bin oblivion
           cargo test --locked --lib --bin oblivion
-          cargo test --locked --test managed --test delegation --test backup_cli --test file_attachment --test terminal_screen --test workspace --test share_control --test channel
+          cargo test --locked --test frontend --test managed --test delegation --test backup_cli --test file_attachment --test terminal_screen --test workspace --test share_control --test channel
           PYTHONDONTWRITEBYTECODE=1 python3 tests/file-channel.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/activity-client.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/native-overlay.py
