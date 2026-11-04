@@ -1,311 +1,426 @@
-"""Selected canonical history, never native profiles, source snapshots or auth."""
+"""Credential-free transfers of each pinned agent's own native conversations.
 
-from contextlib import contextmanager
-import fcntl
+Nothing here synchronizes histories, converts tool names or executes a client.
+The UUID selection key is derived for this export; it is not a shared catalog.
+"""
+
+from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+import re
+import shutil
 import sqlite3
 import stat
-import time
 import uuid
 
-from .catalog import Catalog
-from .model import encode
-
-FORMAT = "oblivion-history-portable"
+FORMAT = "oblivion-native-histories"
 VERSION = 1
+VERSIONS = {"codex": "0.159.2", "claude": "2.1.302", "opencode2": "2.0.1"}
 MAX_CHATS = 2048
-MAX_ITEMS = 100000
 MAX_LINE = 16 * 1024 * 1024
 MAX_BYTES = 256 * 1024 * 1024
-KINDS = {"text", "image", "file", "tool_call", "tool_result"}
+MAX_RECORDS = 100000
+NAMESPACE = uuid.UUID("47a8d7ec-9838-4eac-b2fc-10f4c853822d")
+CODEX_TYPES = {"session_meta", "response_item", "turn_context", "event_msg", "compacted", "compaction"}
+OPENCODE_TYPES = {"agent-switched", "model-switched", "location-switched", "user", "synthetic", "system", "skill", "shell", "assistant", "compaction"}
+CLAUDE_TYPES = {"user", "assistant", "system", "progress", "summary", "custom-title", "agent-name", "agent-color", "file-history-snapshot", "queue-operation", "last-prompt", "pr-link", "saved_hook_context", "attribution-snapshot"}
+
+
+def encode(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def identifier(value):
     if not isinstance(value, str) or str(uuid.UUID(value)) != value:
-        raise ValueError("invalid_portable_chat_identity")
+        raise ValueError("invalid_native_chat_selection")
     return value
 
 
-def relative(value):
-    if not isinstance(value, str) or len(value.encode()) > 4096 or "\\" in value or any(ord(char) < 32 or 127 <= ord(char) < 160 for char in value):
-        raise ValueError("invalid_portable_workspace")
-    if value and (PurePosixPath(value).is_absolute() or any(part in ("", ".", "..") for part in value.split("/"))):
-        raise ValueError("invalid_portable_workspace")
-    return value
+def native_id(agent, value):
+    if agent not in VERSIONS or not isinstance(value, str):
+        raise ValueError("invalid_native_chat_identity")
+    if agent == "opencode2":
+        if not re.fullmatch(r"ses_[a-zA-Z0-9]{1,128}", value):
+            raise ValueError("invalid_native_chat_identity")
+        return value
+    return identifier(value)
 
 
-def timestamp(value):
-    if type(value) is not int or not 0 <= value <= 2**63 - 1:
-        raise ValueError("invalid_portable_timestamp")
-    return value
+def reference(agent, value):
+    return str(uuid.uuid5(NAMESPACE, agent + ":" + native_id(agent, value)))
 
 
-def text(value, maximum):
-    if not isinstance(value, str) or len(value.encode()) > maximum or "\0" in value:
-        raise ValueError("invalid_portable_text")
-    return value
-
-
-def body(kind, value):
-    fields = {
-        "text": ({"text"}, {"text"}), "image": ({"url"}, {"url"}),
-        "file": ({"mime", "data"}, {"mime", "data", "name"}),
-        "tool_call": ({"id", "name", "input"}, {"id", "name", "input"}),
-        "tool_result": ({"id", "content", "is_error"}, {"id", "content", "is_error"}),
-    }
-    if kind not in fields or not isinstance(value, dict) or not fields[kind][0] <= value.keys() <= fields[kind][1]:
-        raise ValueError("invalid_portable_item")
-    if kind == "text":
-        text(value["text"], MAX_LINE)
-    if kind == "image":
-        text(value["url"], MAX_LINE)
-        # URLs are retained as text. Share never resolves a path or fetches it.
-        if not value["url"].startswith(("data:image/", "https://", "http://")):
-            raise ValueError("invalid_portable_attachment")
-    if kind == "file":
-        text(value["mime"], 256)
-        text(value["data"], MAX_LINE)
-        if value.get("name") is not None:
-            text(value["name"], 4096)
-    if kind in ("tool_call", "tool_result"):
-        text(value["id"], 1024)
-    if kind == "tool_call":
-        text(value["name"], 256)
-    if kind == "tool_result" and (not isinstance(value["content"], (str, list)) or type(value["is_error"]) is not bool):
-        raise ValueError("invalid_portable_tool_result")
-    # Strict JSON disallows non-finite numbers and bounds nested data on import.
-    json.dumps(value, allow_nan=False)
-    return value
-
-
-@contextmanager
-def source_catalog(directory):
-    directory = Path(directory)
-    try:
-        info = directory.lstat()
-    except FileNotFoundError:
-        yield None
-        return
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
-        raise ValueError("history_catalog_unavailable")
-    held = []
-    database = None
-    try:
-        for name in ("sync.lock", "codex.active", "claude.active", "opencode2.active"):
-            try:
-                fd = os.open(directory / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-            except FileNotFoundError:
-                continue
-            held.append(fd)
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid() or info.st_mode & 0o077:
-                raise ValueError("history_catalog_unavailable")
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise ValueError("history_client_active") from None
-        path = directory / "history.sqlite"
+def scope(value, vault):
+    if not isinstance(value, str) or any(ord(char) < 32 for char in value):
+        raise ValueError("invalid_native_workspace")
+    for root in ("workspace", "imports"):
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        except FileNotFoundError:
-            yield None
-            return
-        with os.fdopen(fd, "rb") as source:
-            info = os.fstat(source.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid() or info.st_mode & 0o077 or source.read(16) != b"SQLite format 3\0":
-                raise ValueError("history_catalog_unavailable")
-            database = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=3)
-            database.row_factory = sqlite3.Row
-            database.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_LINE)
-            database.setlimit(sqlite3.SQLITE_LIMIT_ATTACHED, 0)
-            deadline = time.monotonic() + 60
-            database.set_progress_handler(lambda: time.monotonic() >= deadline, 10000)
-            database.execute("PRAGMA query_only=ON")
-            database.execute("PRAGMA trusted_schema=OFF")
-            database.execute("BEGIN")
-            if database.execute("PRAGMA user_version").fetchone()[0] != 1:
-                raise ValueError("unsupported_catalog_format")
-            if database.execute("PRAGMA quick_check(1)").fetchone()[0] != "ok":
-                raise ValueError("history_catalog_unavailable")
-            if database.execute("SELECT 1 FROM projection_intent LIMIT 1").fetchone() or database.execute("SELECT 1 FROM deletion_target WHERE completed=0 LIMIT 1").fetchone():
-                raise ValueError("history_recovery_required")
-            yield database
-    finally:
-        if database:
-            database.close()
-        for fd in held:
-            os.close(fd)
+            relative = Path(value).relative_to(Path(vault) / root)
+        except ValueError:
+            continue
+        if ".." in relative.parts or len(relative.parts) > 32:
+            break
+        return {"root": root, "path": relative.as_posix() if relative.parts else ""}
+    raise ValueError("invalid_native_workspace")
 
 
-def export_catalog(directory, workspace, chat_ids, destination, *, imports=None):
-    """Write one filtered JSONL file in private encrypted staging.
+def workspace(value, vault):
+    if not isinstance(value, dict) or set(value) != {"root", "path"} or value["root"] not in ("workspace", "imports") or not isinstance(value["path"], str):
+        raise ValueError("invalid_native_workspace")
+    parts = value["path"].split("/") if value["path"] else []
+    if len(parts) > 32 or any(not part or part in (".", "..") or "\\" in part or len(part.encode()) > 255 or any(ord(char) < 32 for char in part) for part in parts):
+        raise ValueError("invalid_native_workspace")
+    return str(Path(vault) / value["root"] / value["path"])
 
-    None selects all chats explicitly; [] selects none. No native executable,
-    source archive, provider reasoning or native identity is consulted.
-    """
+
+def open_file(path):
+    path = Path(path)
+    for parent in path.parents:
+        if parent.is_symlink():
+            raise ValueError("native_history_symlink")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_BYTES:
+        os.close(descriptor)
+        raise ValueError("invalid_native_history_file")
+    return os.fdopen(descriptor, "rb")
+
+
+def records(path, *, limit=MAX_RECORDS):
+    result = []
+    total = 0
+    with open_file(path) as source:
+        while True:
+            line = source.readline(MAX_LINE + 1)
+            if not line:
+                return result
+            total += len(line)
+            if len(line) > MAX_LINE or total > MAX_BYTES or len(result) >= limit or not line.endswith(b"\n"):
+                raise ValueError("native_history_incomplete_or_limit")
+            value = json.loads(line)
+            if not isinstance(value, dict):
+                raise ValueError("invalid_native_history_record")
+            result.append(value)
+
+
+def files(root, pattern):
+    root = Path(root)
+    if not root.exists():
+        return []
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("invalid_native_history_root")
+    selected = []
+    for parent, directories, names in os.walk(root, followlinks=False):
+        if any((Path(parent) / name).is_symlink() for name in directories):
+            raise ValueError("native_history_symlink")
+        for name in sorted(names):
+            if re.fullmatch(pattern, name):
+                selected.append(Path(parent) / name)
+                if len(selected) > MAX_CHATS:
+                    raise ValueError("native_chat_limit")
+    return sorted(selected)
+
+
+def chat(agent, value, cwd, title, payload, vault):
+    native_id(agent, value)
+    if isinstance(title, str) and len(title.encode()) > 16384:
+        raise ValueError("native_title_limit")
+    return {"id": reference(agent, value), "agent": agent, "native_id": value,
+            "agent_version": VERSIONS[agent], "cwd": scope(cwd, vault),
+            "title": title if isinstance(title, str) else "", "records": payload, "omitted": {}, "required_paths": []}
+
+
+def native_histories(vault):
+    """Read only allowed transcript locations; login/config/database blobs stay out."""
+    vault = Path(vault)
+    selected = []
+    total = 0
+    count = 0
+
+    def retain(entry):
+        nonlocal total, count
+        total += sum(len(encode(row).encode()) for row in entry["records"])
+        count += len(entry["records"])
+        if total > MAX_BYTES or count > MAX_RECORDS or len(selected) >= MAX_CHATS:
+            raise ValueError("native_history_limit")
+        selected.append(entry)
+
+    titles = {}
+    index = vault / "home/.codex/session_index.jsonl"
+    if index.exists():
+        for row in records(index):
+            if isinstance(row.get("id"), str) and isinstance(row.get("thread_name"), str):
+                titles[row["id"]] = row["thread_name"]
+    from .codex_native import collect
+    for entry in collect(vault, titles):
+        retain(entry)
+    from .claude_native import snapshot
+    for path in files(vault / "home/.claude/projects", r"[0-9a-f-]{36}\.jsonl"):
+        retain(snapshot(vault, path))
+    database = vault / "state/opencode/opencode.db"
+    if database.exists():
+        with open_file(database):
+            pass
+        connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("PRAGMA trusted_schema=OFF")
+            connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_LINE)
+            connection.execute("BEGIN")
+            for row in connection.execute("SELECT * FROM session_v2 ORDER BY id LIMIT ?", (MAX_CHATS + 1,)):
+                value = dict(row)
+                if value["version"] != VERSIONS["opencode2"]:
+                    raise ValueError("unsupported_opencode_format")
+                messages = []
+                unsettled = 0
+                for message in connection.execute("SELECT id,type,data FROM session_message WHERE session_id=? ORDER BY seq LIMIT ?", (value["id"], MAX_RECORDS + 1)):
+                    data = json.loads(message["data"])
+                    if not isinstance(data, dict) or "id" in data or "type" in data:
+                        raise ValueError("invalid_opencode_message")
+                    native = {"id": message["id"], "type": message["type"], **data}
+                    if not settled(native):
+                        unsettled += 1
+                        continue
+                    messages.append(native)
+                info = {"id": value["id"], "projectID": "global", "title": value["title"] or "",
+                        "cost": value["cost"], "tokens": {"input": value["tokens_input"], "output": value["tokens_output"], "reasoning": value["tokens_reasoning"], "cache": {"read": value["tokens_cache_read"], "write": value["tokens_cache_write"]}},
+                        "time": {"created": value["time_created"], "updated": value["time_updated"]},
+                        "location": {"directory": value["directory"]}}
+                for source, target in (("parent_id", "parentID"), ("agent", "agent"), ("idle_outcome", "outcome")):
+                    if value.get(source) is not None:
+                        info[target] = value[source]
+                if value.get("model"):
+                    info["model"] = json.loads(value["model"])
+                for source, target in (("time_idle", "idle"), ("time_viewed", "viewed"), ("time_archived", "archived")):
+                    if value.get(source) is not None:
+                        info["time"][target] = value[source]
+                entry = chat("opencode2", value["id"], value["directory"], value["title"], [{"info": info}, *messages], vault)
+                if unsettled:
+                    entry["omitted"]["opencode_unsettled_messages"] = unsettled
+                if value.get("fork_session_id"):
+                    entry["omitted"]["opencode_fork_provenance"] = 1
+                retain(entry)
+        finally:
+            connection.close()
+    for path in files(vault / "state/oblivion/native-imports/opencode2", r"ses_[a-zA-Z0-9]+\.json"):
+        with open_file(path) as source:
+            value = validate_opencode(json.loads(source.read(MAX_BYTES + 1)), path.stem)
+        if any(entry["agent"] == "opencode2" and entry["native_id"] == path.stem for entry in selected):
+            continue
+        retain(chat("opencode2", path.stem, value["info"]["location"]["directory"], value["info"]["title"], [{"info": value["info"]}, *value["messages"]], vault))
+    if len(selected) > MAX_CHATS or len({row["id"] for row in selected}) != len(selected):
+        raise ValueError("native_chat_limit_or_duplicate")
+    return sorted(selected, key=lambda row: row["id"])
+
+
+def export_histories(vault, chat_ids, destination):
     if chat_ids is not None and (not isinstance(chat_ids, list) or len(chat_ids) > MAX_CHATS or len(set(chat_ids)) != len(chat_ids)):
-        raise ValueError("invalid_portable_chat_selection")
+        raise ValueError("invalid_native_chat_selection")
     for value in chat_ids or []:
         identifier(value)
-    roots = {"workspace": Path(workspace)}
-    if imports is not None:
-        roots["imports"] = Path(imports)
-    report = {"chats": 0, "items": 0, "omitted": {}}
+    available = native_histories(vault)
+    selected = [row for row in available if chat_ids is None or row["id"] in chat_ids]
+    if chat_ids is not None and len(selected) != len(chat_ids):
+        raise ValueError("native_chat_missing")
+    opencode_ids = {entry["native_id"] for entry in selected if entry["agent"] == "opencode2"}
+    omitted = {"source_profile_configuration": len({entry["agent"] for entry in selected})}
+    for entry in selected:
+        for key, count in entry["omitted"].items():
+            omitted[key] = omitted.get(key, 0) + count
+        if entry["agent"] == "opencode2":
+            info = entry["records"][0]["info"]
+            if info.get("parentID") is not None and info["parentID"] not in opencode_ids:
+                info.pop("parentID")
+                omitted["opencode_unselected_parent"] = omitted.get("opencode_unselected_parent", 0) + 1
     total = 0
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-    descriptor = os.open(destination, flags, 0o600)
+    count = 0
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
-        with os.fdopen(descriptor, "wb") as output, source_catalog(directory) as database:
-            def write(record):
+        with os.fdopen(descriptor, "wb") as output:
+            def write(value):
                 nonlocal total
-                data = (encode(record) + "\n").encode()
+                data = (encode(value) + "\n").encode()
                 total += len(data)
                 if len(data) > MAX_LINE or total > MAX_BYTES:
-                    raise ValueError("portable_history_limit")
+                    raise ValueError("native_history_limit")
                 output.write(data)
-
-            write({"format": FORMAT, "version": VERSION})
-            rows = []
-            if database is not None and chat_ids is None:
-                rows = database.execute("SELECT * FROM chat WHERE id NOT IN (SELECT chat_id FROM deleted_chat) ORDER BY id LIMIT ?", (MAX_CHATS + 1,)).fetchall()
-            if database is not None and chat_ids:
-                rows = database.execute("SELECT * FROM chat WHERE id IN (" + ",".join("?" for _ in chat_ids) + ") AND id NOT IN (SELECT chat_id FROM deleted_chat) ORDER BY id", chat_ids).fetchall()
-            if len(rows) > MAX_CHATS:
-                raise ValueError("portable_chat_limit")
-            available = {row["id"] for row in rows}
-            if chat_ids is not None and not set(chat_ids) <= available:
-                raise ValueError("portable_chat_missing")
-            for chat in rows:
-                if chat_ids is not None and chat["id"] not in chat_ids:
-                    continue
-                identifier(chat["id"])
-                path = Path(chat["cwd"])
-                cwd = None
-                for scope, root in roots.items():
-                    if path == root or path.is_relative_to(root):
-                        cwd = {"scope": scope, "path": relative("" if path == root else path.relative_to(root).as_posix())}
-                        break
-                if cwd is None:
-                    raise ValueError("portable_workspace_outside_safe")
-                write({"type": "chat", "id": chat["id"], "cwd": cwd, "title": text(chat["title"], 4096),
-                       "created": timestamp(chat["created"]), "updated": timestamp(chat["updated"])})
-                report["chats"] += 1
-                ordinal = 0
-                calls, results = set(), set()
-                for item in database.execute("SELECT * FROM item WHERE chat_id=? ORDER BY ordinal", (chat["id"],)):
-                    if item["kind"] == "reasoning":
-                        report["omitted"]["provider_reasoning"] = report["omitted"].get("provider_reasoning", 0) + 1
-                        continue
-                    identifier(item["id"])
-                    value = body(item["kind"], json.loads(item["body"]))
-                    if item["role"] not in ("user", "assistant"):
-                        raise ValueError("invalid_portable_role")
-                    if item["kind"] == "tool_call":
-                        if value["id"] in calls:
-                            raise ValueError("invalid_portable_tool_pair")
-                        calls.add(value["id"])
-                    if item["kind"] == "tool_result":
-                        if value["id"] not in calls or value["id"] in results:
-                            raise ValueError("invalid_portable_tool_pair")
-                        results.add(value["id"])
-                    ordinal += 1
-                    report["items"] += 1
-                    if report["items"] > MAX_ITEMS:
-                        raise ValueError("portable_item_limit")
-                    write({"type": "item", "chat_id": chat["id"], "id": item["id"], "ordinal": ordinal,
-                           "kind": item["kind"], "role": item["role"], "body": value, "created": timestamp(item["created"])})
-                if calls != results:
-                    raise ValueError("invalid_portable_tool_pair")
-                for row in database.execute("SELECT kind,count(*) FROM native_fact WHERE chat_id=? GROUP BY kind", (chat["id"],)):
-                    kind = row[0] if row[0] in {"provider_reasoning", "compaction", "interrupted_tool", "unsettled_tool", "attachment", "tool_content"} else "native_records"
-                    report["omitted"][kind] = report["omitted"].get(kind, 0) + row[1]
+            write({"format": FORMAT, "version": VERSION, "agents": VERSIONS})
+            for entry in selected:
+                write({"kind": "chat", **{key: value for key, value in entry.items() if key not in ("records", "omitted", "required_prefixes")}})
+                for record in entry["records"]:
+                    count += 1
+                    if count > MAX_RECORDS:
+                        raise ValueError("native_history_limit")
+                    write({"kind": "record", "chat_id": entry["id"], "data": record})
             output.flush()
             os.fsync(output.fileno())
     except BaseException:
         Path(destination).unlink(missing_ok=True)
         raise
-    report["bytes"] = total
-    return report
+    return {"chats": len(selected), "records": count, "bytes": total, "omitted": omitted}
 
 
-def import_catalog(source, directory, workspace, *, imports=None):
-    """Populate a new Safe's empty canonical catalog. Never merge histories."""
-    directory = Path(directory)
-    if directory.exists() and any(directory.iterdir()):
-        raise ValueError("portable_catalog_destination_exists")
-    catalog = Catalog(directory)
-    roots = {"workspace": Path(workspace)}
-    if imports is not None:
-        roots["imports"] = Path(imports)
-    total = 0
-    chats, items, calls, results = {}, set(), {}, {}
+def read_archive(source, vault):
+    rows = records(source, limit=MAX_RECORDS + MAX_CHATS + 1)
+    if not rows or type(rows[0].get("version")) is not int or rows[0] != {"format": FORMAT, "version": VERSION, "agents": VERSIONS}:
+        raise ValueError("unsupported_native_archive")
+    chats = []
+    current = None
+    for row in rows[1:]:
+        if row.get("kind") == "chat":
+            if set(row) != {"kind", "id", "agent", "native_id", "agent_version", "cwd", "title", "required_paths"} or not isinstance(row["agent"], str) or row["agent"] not in VERSIONS or row["agent_version"] != VERSIONS[row["agent"]] or not isinstance(row["title"], str) or len(row["title"].encode()) > 16384:
+                raise ValueError("invalid_native_archive")
+            if row["id"] != reference(row["agent"], row["native_id"]) or any(value["id"] == row["id"] for value in chats):
+                raise ValueError("invalid_native_archive")
+            if not isinstance(row["required_paths"], list) or len(row["required_paths"]) > 4096:
+                raise ValueError("invalid_native_dependencies")
+            for required in row["required_paths"]:
+                if not isinstance(required, str) or "/" not in required:
+                    raise ValueError("invalid_native_dependencies")
+                root, relative = required.split("/", 1)
+                destination = Path(workspace({"root": root, "path": relative}, vault))
+                with open_file(destination):
+                    pass
+            current = {**row, "directory": workspace(row["cwd"], vault), "records": []}
+            chats.append(current)
+            if len(chats) > MAX_CHATS:
+                raise ValueError("native_chat_limit")
+            continue
+        if current is None or set(row) != {"kind", "chat_id", "data"} or row["kind"] != "record" or row["chat_id"] != current["id"] or not isinstance(row["data"], dict):
+            raise ValueError("invalid_native_archive")
+        current["records"].append(row["data"])
+    for entry in chats:
+        validate_chat(entry)
+    return chats
+
+
+def validate_chat(entry):
+    rows = entry["records"]
+    if not rows:
+        raise ValueError("empty_native_chat")
+    agent = entry["agent"]
+    value = entry["native_id"]
+    if agent == "codex":
+        from .artifacts import files
+        from .codex_native import validate
+        indexes = [row for row in rows if row.get("type") == "codex-index"]
+        if len(indexes) > 1:
+            raise ValueError("invalid_codex_index")
+        artifacts = files([row for row in rows if row.get("type") != "codex-index"])
+        available = validate(artifacts, value)
+        if indexes:
+            from . import codex_index
+            codex_index.validate(indexes[0])
+            selected = indexes[0]["thread"]
+            if selected["id"] != value or selected["rollout_path"] not in artifacts:
+                raise ValueError("invalid_codex_index")
+            physical = next((meta for artifact, _, meta in available.values() if artifact["path"] == selected["rollout_path"]), None)
+            if physical is None or physical["id"] != value:
+                raise ValueError("invalid_codex_index")
+        return
+    if agent == "claude":
+        from .artifacts import files
+        from .claude_native import validate
+        validate(files(rows), value)
+        return
+    transfer = {"info": rows[0].get("info"), "messages": rows[1:]}
+    validate_opencode(transfer, value)
+
+
+def settled(message):
+    if message["type"] == "assistant":
+        return isinstance(message.get("time"), dict) and "completed" in message["time"]
+    if message["type"] in ("shell", "compaction"):
+        return message.get("status") != "running"
+    return True
+
+
+def validate_opencode(value, expected=None):
+    if not isinstance(value, dict) or set(value) != {"info", "messages"} or not isinstance(value["info"], dict) or not isinstance(value["messages"], list) or len(value["messages"]) > MAX_RECORDS:
+        raise ValueError("invalid_opencode_transfer")
+    info = value["info"]
+    allowed = {"id", "projectID", "title", "cost", "tokens", "time", "location", "parentID", "agent", "model", "outcome"}
+    if not set(info) <= allowed or not {"id", "projectID", "title", "cost", "tokens", "time", "location"} <= set(info) or info["id"] != native_id("opencode2", info["id"]) or expected is not None and info["id"] != expected:
+        raise ValueError("invalid_opencode_transfer")
+    if not isinstance(info["location"], dict) or set(info["location"]) != {"directory"} or not isinstance(info["location"]["directory"], str):
+        raise ValueError("invalid_opencode_transfer")
+    identities = set()
+    for message in value["messages"]:
+        if not isinstance(message, dict) or not re.fullmatch(r"msg_[a-zA-Z0-9]{1,128}", message.get("id", "")) or message["id"] in identities or message.get("type") not in OPENCODE_TYPES:
+            raise ValueError("invalid_opencode_transfer")
+        identities.add(message["id"])
+    return value
+
+
+def write_private(path, data):
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(descriptor, "wb") as output:
+        output.write(data)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def import_histories(source, vault):
+    """Validate everything before publishing to a new Safe; never merge profiles."""
+    vault = Path(vault)
+    chats = read_archive(source, vault)
+    targets = [vault / "home/.codex", vault / "home/.claude", vault / "state/oblivion/native-imports"]
+    if any(path.exists() or path.is_symlink() for path in targets) or (vault / "state/opencode").exists():
+        raise ValueError("native_history_destination_exists")
+    stage = vault / "state/.oblivion-native-import"
+    stage.mkdir(mode=0o700)
     try:
-        with catalog.exclusive(), catalog.db, open(source, "rb") as input:
-            for line_number, line in enumerate(iter(lambda: input.readline(MAX_LINE + 1), b"")):
-                total += len(line)
-                if len(line) > MAX_LINE or total > MAX_BYTES or not line.endswith(b"\n"):
-                    raise ValueError("portable_history_limit")
-                value = json.loads(line, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("invalid_portable_json")))
-                if line_number == 0:
-                    if value != {"format": FORMAT, "version": VERSION} or type(value.get("version")) is not int:
-                        raise ValueError("unsupported_portable_history")
-                    continue
-                if not isinstance(value, dict):
-                    raise ValueError("invalid_portable_record")
-                if value.get("type") == "chat" and set(value) == {"type", "id", "cwd", "title", "created", "updated"}:
-                    chat = identifier(value["id"])
-                    if chat in chats or len(chats) >= MAX_CHATS:
-                        raise ValueError("duplicate_portable_chat")
-                    cwd = value["cwd"]
-                    if not isinstance(cwd, dict) or set(cwd) != {"scope", "path"} or cwd["scope"] not in roots:
-                        raise ValueError("invalid_portable_workspace")
-                    cwd = str(roots[cwd["scope"]] / relative(cwd["path"]))
-                    chats[chat] = 0
-                    calls[chat], results[chat] = set(), set()
-                    catalog.db.execute("INSERT INTO chat VALUES(?,?,?,?,?)", (chat, cwd, text(value["title"], 4096), timestamp(value["created"]), timestamp(value["updated"])))
-                    continue
-                if value.get("type") != "item" or set(value) != {"type", "chat_id", "id", "ordinal", "kind", "role", "body", "created"}:
-                    raise ValueError("invalid_portable_record")
-                chat = identifier(value["chat_id"])
-                item = identifier(value["id"])
-                if chat not in chats or item in items or len(items) >= MAX_ITEMS or type(value["ordinal"]) is not int or value["ordinal"] != chats[chat] + 1 or value["role"] not in ("user", "assistant"):
-                    raise ValueError("invalid_portable_item")
-                content = body(value["kind"], value["body"])
-                if value["kind"] == "tool_call":
-                    if content["id"] in calls[chat]:
-                        raise ValueError("invalid_portable_tool_pair")
-                    calls[chat].add(content["id"])
-                if value["kind"] == "tool_result":
-                    if content["id"] not in calls[chat] or content["id"] in results[chat]:
-                        raise ValueError("invalid_portable_tool_pair")
-                    results[chat].add(content["id"])
-                items.add(item)
-                chats[chat] += 1
-                catalog.db.execute("INSERT INTO item VALUES(?,?,?,?,?,?,?)", (item, chat, value["ordinal"], value["kind"], value["role"], encode(content), timestamp(value["created"])))
-            if total == 0 or any(calls[chat] != results[chat] for chat in chats):
-                raise ValueError("invalid_portable_tool_pair")
-            # A chat-only Share still needs its declared working directory.
-            # Create data directories from pinned roots; never follow a link.
-            for row in catalog.db.execute("SELECT cwd FROM chat"):
-                path = Path(row[0])
-                for root in roots.values():
-                    if not path.is_relative_to(root):
-                        continue
-                    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-                    try:
-                        for name in path.relative_to(root).parts:
-                            try:
-                                os.mkdir(name, mode=0o700, dir_fd=fd)
-                            except FileExistsError:
-                                pass
-                            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
-                            os.close(fd)
-                            fd = child
-                    finally:
-                        os.close(fd)
-                    break
+        indexes = []
+        codex_indexes = []
+        for entry in chats:
+            cwd = entry["directory"]
+            Path(cwd).mkdir(mode=0o700, parents=True, exist_ok=True)
+            rows = entry["records"]
+            if entry["agent"] == "codex":
+                from .artifacts import files
+                codex_indexes.extend(row for row in rows if row.get("type") == "codex-index")
+                restored = files([row for row in rows if row.get("type") != "codex-index"])
+                for relative, artifact in restored.items():
+                    target = stage / "codex" / relative
+                    if target.exists():
+                        previous = target.read_bytes()
+                        if previous.startswith(artifact["data"]):
+                            continue
+                        if not artifact["data"].startswith(previous):
+                            raise ValueError("native_artifact_conflict")
+                        target.unlink()
+                    write_private(target, artifact["data"])
+                    os.utime(target, ns=(artifact["mtime_ns"], artifact["mtime_ns"]))
+                indexes.append({"id": entry["native_id"], "thread_name": entry["title"], "updated_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")})
+            if entry["agent"] == "claude":
+                from .artifacts import files
+                for relative, artifact in files(rows).items():
+                    target = stage / "claude" / relative
+                    write_private(target, artifact["data"])
+                    os.utime(target, ns=(artifact["mtime_ns"], artifact["mtime_ns"]))
+            if entry["agent"] == "opencode2":
+                transfer = {"info": rows[0]["info"], "messages": rows[1:]}
+                transfer["info"]["location"] = {"directory": cwd}
+                write_private(stage / "native-imports/opencode2" / (entry["native_id"] + ".json"), encode(transfer).encode())
+        if codex_indexes:
+            from .codex_index import restore
+            # Restore into the unpublished staging Safe, then publish its pending native index.
+            (stage / "state").mkdir(mode=0o700)
+            restore(stage, codex_indexes)
+            pending = stage / "state/oblivion/native-imports/codex"
+            destination = stage / "native-imports/codex"
+            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.rename(pending, destination)
+        if indexes:
+            write_private(stage / "codex/session_index.jsonl", "".join(encode(row) + "\n" for row in indexes).encode())
+        for name, destination in (("codex", targets[0]), ("claude", targets[1]), ("native-imports", targets[2])):
+            if (stage / name).exists():
+                destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                os.rename(stage / name, destination)
+        os.sync()
     finally:
-        catalog.close()
-    return {"chats": len(chats), "items": len(items)}
+        shutil.rmtree(stage)
+    return {"chats": len(chats), "agents": sorted({entry["agent"] for entry in chats})}

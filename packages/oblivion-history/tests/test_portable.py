@@ -1,128 +1,146 @@
-import fcntl
 import json
-import os
 from pathlib import Path
-import sqlite3
 import tempfile
+import sqlite3
 import unittest
 import uuid
 
-from oblivion_history.catalog import Catalog
-from oblivion_history.model import Item, Snapshot, encode
-from oblivion_history.portable import export_catalog, import_catalog
-from oblivion_history.sync import allowed_cwd
+from native_fixture import vault, codex, claude, opencode
+from oblivion_history.portable import export_histories, import_histories, native_histories, records, encode, reference
 
 
-class PortableTests(unittest.TestCase):
-    def fixture(self, root):
-        state = root / "state"
-        chat, call, result = [str(uuid.uuid4()) for _ in range(3)]
-        catalog = Catalog(state)
-        with catalog.db:
-            catalog.db.execute("INSERT INTO chat VALUES(?,?,?,?,?)", (chat, "/vault/workspace/project", "Selected chat", 1, 3))
-            catalog.db.execute("INSERT INTO item VALUES(?,?,?,?,?,?,?)", (call, chat, 1, "tool_call", "assistant", encode({"id": "call-1", "name": "exec_command", "input": {"cmd": "printf hi"}}), 2))
-            catalog.db.execute("INSERT INTO item VALUES(?,?,?,?,?,?,?)", (result, chat, 2, "tool_result", "user", encode({"id": "call-1", "content": "hi", "is_error": False}), 3))
-            catalog.db.execute("INSERT INTO native VALUES(?,?,?,?,?,?)", ("codex", "SOURCE-NATIVE-IDENTITY", chat, "SOURCE-FINGERPRINT", "/vault/home/.codex/sessions/source", "Selected chat"))
-            catalog.db.execute("INSERT INTO native_fact VALUES(?,?,?,?,?,?,?,?)", (chat, "codex", "SOURCE-NATIVE-IDENTITY", "fact", "provider_reasoning", encode({"token": "SOURCE-FACT-SECRET"}), 2, 1))
-            catalog.db.execute("INSERT INTO source_chunk VALUES(?,?)", ("source", b"SOURCE-CREDENTIAL-CANARY"))
-        catalog.close()
-        (state / "history.sqlite").chmod(0o600)
-        return state, chat
-
-    def test_selected_catalog_roundtrip_omits_native_sources_and_rebinds_workspace(self):
+class NativePortableTests(unittest.TestCase):
+    def test_own_native_transcripts_roundtrip_without_credentials_or_cross_agent_projection(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            state, chat = self.fixture(root)
-            output = root / "chats.jsonl"
-            report = export_catalog(state, "/vault/workspace", [chat], output)
-            self.assertEqual(report["chats"], 1)
-            self.assertEqual(report["items"], 2)
-            self.assertEqual(report["omitted"], {"provider_reasoning": 1})
-            data = output.read_text()
-            for omitted in ("SOURCE-NATIVE-IDENTITY", "SOURCE-FINGERPRINT", "SOURCE-FACT-SECRET", "SOURCE-CREDENTIAL-CANARY", "/vault/home"):
-                self.assertNotIn(omitted, data)
-            destination = root / "new-catalog"
-            workspace = root / "new-workspace"
-            workspace.mkdir()
-            self.assertEqual(import_catalog(output, destination, workspace), {"chats": 1, "items": 2})
-            database = sqlite3.connect(destination / "history.sqlite")
-            self.assertEqual(database.execute("SELECT id,cwd FROM chat").fetchone(), (chat, str(workspace / "project")))
-            self.assertTrue((workspace / "project").is_dir())
-            self.assertEqual(database.execute("SELECT count(*) FROM native").fetchone()[0], 0)
-            self.assertEqual(database.execute("SELECT count(*) FROM source_chunk").fetchone()[0], 0)
-            bodies = [json.loads(row[0]) for row in database.execute("SELECT body FROM item ORDER BY ordinal")]
-            self.assertEqual(bodies[0]["id"], bodies[1]["id"])
-            database.close()
-            with self.assertRaisesRegex(ValueError, "portable_catalog_destination_exists"):
-                import_catalog(output, destination, workspace)
-            catalog = Catalog(destination)
-            native = catalog.native_id(chat, "codex")
-            cwd = str(workspace / "project")
-            self.assertTrue(allowed_cwd(cwd, workspace))
-            observed, _ = catalog.ingest(Snapshot("codex", native, cwd, "Selected chat", 1, 4,
-                [Item("follow-up", "text", "assistant", {"text": "Continued"}, 4)], fingerprint="follow-up"))
-            self.assertEqual(observed, chat)
-            self.assertEqual(catalog.db.execute("SELECT count(*) FROM chat").fetchone()[0], 1)
-            catalog.close()
+            root = Path(tmp).resolve()
+            source = vault(root / "source")
+            identity = str(uuid.uuid4())
+            codex_ref, _, codex_rows = codex(source, identity=identity)
+            claude_ref, _, claude_rows = claude(source, identity=identity)
+            opencode_ref, _ = opencode(source)
+            (source / "home/.codex/auth.json").write_text("PROFILE-CREDENTIAL-CANARY")
+            (source / "home/.claude/settings.json").write_text("PROFILE-HOOK-CANARY")
+            archive = root / "native.jsonl"
+            self.assertEqual(export_histories(source, None, archive)["chats"], 3)
+            serialized = archive.read_text()
+            self.assertNotIn("PROFILE-CREDENTIAL-CANARY", serialized)
+            self.assertNotIn("PROFILE-HOOK-CANARY", serialized)
+            self.assertNotEqual(codex_ref, claude_ref)
+            destination = vault(root / "destination")
+            self.assertEqual(import_histories(archive, destination), {"chats": 3, "agents": ["claude", "codex", "opencode2"]})
+            transcripts = list((destination / "home/.codex/sessions").rglob("*.jsonl"))
+            self.assertEqual(len(transcripts), 1)
+            restored = records(transcripts[0])
+            self.assertEqual(restored, codex_rows)
+            transcripts = list((destination / "home/.claude/projects").rglob("*.jsonl"))
+            self.assertEqual(len(transcripts), 1)
+            restored = records(transcripts[0])
+            self.assertEqual(restored, claude_rows)
+            self.assertFalse((destination / "home/.oblivion-history").exists())
+            self.assertFalse((destination / "home/.codex/auth.json").exists())
+            self.assertFalse((destination / "state/opencode/opencode.db").exists())
+            pending = list((destination / "state/oblivion/native-imports/opencode2").glob("*.json"))
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(json.loads(pending[0].read_text())["messages"][0]["text"], "Native OpenCode question")
+            self.assertEqual({entry["id"] for entry in native_histories(destination)}, {codex_ref, claude_ref, opencode_ref})
+            with self.assertRaisesRegex(ValueError, "native_history_destination_exists"):
+                import_histories(archive, destination)
 
-    def test_missing_selection_and_busy_profile_leave_existing_destination_untouched(self):
+    def test_native_titles_and_supported_opencode_records_survive_review(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            state, chat = self.fixture(root)
-            existing = root / "existing"
-            existing.write_bytes(b"keep")
-            with self.assertRaises(FileExistsError):
-                export_catalog(state, "/vault/workspace", [chat], existing)
-            self.assertEqual(existing.read_bytes(), b"keep")
-            missing = root / "missing"
-            with self.assertRaisesRegex(ValueError, "portable_chat_missing"):
-                export_catalog(state, "/vault/workspace", [str(uuid.uuid4())], missing)
-            self.assertFalse(missing.exists())
-            lease = state / "codex.active"
-            with open(lease, "a+b") as held:
-                lease.chmod(0o600)
-                fcntl.flock(held, fcntl.LOCK_SH)
-                with self.assertRaisesRegex(ValueError, "history_client_active"):
-                    export_catalog(state, "/vault/workspace", [chat], root / "busy")
+            root = Path(tmp).resolve()
+            source = vault(root / "source")
+            codex_ref, _, rows = codex(source)
+            identity = rows[0]["payload"]["id"]
+            (source / "home/.codex/session_index.jsonl").write_text(encode({"id": identity, "thread_name": "My renamed native chat", "updated_at": "2026-11-04T12:01:03Z"}) + "\n")
+            _, database = opencode(source)
+            connection = sqlite3.connect(database)
+            for seq, kind in enumerate(("system", "skill", "shell", "agent-switched", "model-switched", "location-switched"), 2):
+                connection.execute("INSERT INTO session_message VALUES(?,?,?,?,?)", ("msg_" + str(seq), "ses_nativeExample123", kind, seq, encode({"time": {"created": 1}, "status": "completed", "text": "native data"})))
+            connection.execute("INSERT INTO session_message VALUES(?,?,?,?,?)", ("msg_incomplete", "ses_nativeExample123", "assistant", 99, encode({"time": {"created": 1}, "content": []})))
+            connection.commit(); connection.close()
+            archive = root / "native.jsonl"
+            report = export_histories(source, None, archive)
+            self.assertEqual(report["omitted"]["opencode_unsettled_messages"], 1)
+            destination = vault(root / "target")
+            import_histories(archive, destination)
+            index = records(destination / "home/.codex/session_index.jsonl")
+            self.assertEqual(index[0]["thread_name"], "My renamed native chat")
+            pending = next((destination / "state/oblivion/native-imports/opencode2").glob("*.json"))
+            value = json.loads(pending.read_text())
+            self.assertEqual(len(value["messages"]), 7)
+            self.assertNotIn("msg_incomplete", pending.read_text())
 
-    def test_malformed_portable_history_cannot_escape_or_partially_commit(self):
+    def test_claude_native_sidecars_and_undo_backups_restore_without_profile_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            state, chat = self.fixture(root)
-            output = root / "chats.jsonl"
-            export_catalog(state, "/vault/workspace", [chat], output)
-            rows = [json.loads(line) for line in output.read_text().splitlines()]
-            rows[1]["cwd"] = {"scope": "workspace", "path": "../../home/.ssh"}
-            output.write_text("".join(encode(row) + "\n" for row in rows))
-            with self.assertRaisesRegex(ValueError, "invalid_portable_workspace"):
-                import_catalog(output, root / "invalid", "/new/workspace")
-            database = sqlite3.connect(root / "invalid/history.sqlite")
-            self.assertEqual(database.execute("SELECT count(*) FROM chat").fetchone()[0], 0)
-            database.close()
-            rows[1]["cwd"] = {"scope": "workspace", "path": "project"}
-            rows[-1]["body"]["id"] = "wrong-tool-call"
-            output.write_text("".join(encode(row) + "\n" for row in rows))
-            with self.assertRaisesRegex(ValueError, "invalid_portable_tool_pair"):
-                import_catalog(output, root / "invalid-pair", "/new/workspace")
+            root = Path(tmp).resolve()
+            source = vault(root / "source")
+            selected, transcript, rows = claude(source)
+            sidecar = transcript.parent / transcript.stem / "subagents/agent-example.jsonl"
+            sidecar.parent.mkdir(parents=True)
+            sidecar.write_text(encode(rows[0]) + "\n")
+            backup = source / "home/.claude/file-history" / transcript.stem / "original@v1"
+            backup.parent.mkdir(parents=True)
+            backup.write_text("original document before native edit")
+            rows.append({"type": "file-history-snapshot", "snapshot": {"trackedFileBackups": {"document.txt": {"backupFileName": backup.name}}}})
+            transcript.write_text("".join(encode(row) + "\n" for row in rows))
+            archive = root / "native.jsonl"
+            export_histories(source, [selected], archive)
+            destination = vault(root / "target")
+            import_histories(archive, destination)
+            for original in (transcript, sidecar, backup):
+                copied = destination / "home/.claude" / original.relative_to(source / "home/.claude")
+                self.assertEqual(copied.read_bytes(), original.read_bytes())
+            self.assertFalse((destination / "home/.claude/settings.json").exists())
 
-    def test_imports_scope_and_nested_cwd_are_data_only_and_stay_in_scope(self):
+    def test_selecting_codex_does_not_create_claude_or_opencode_profiles(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            state, chat = self.fixture(root)
-            database = sqlite3.connect(state / "history.sqlite")
-            database.execute("UPDATE chat SET cwd='/vault/imports/research' WHERE id=?", (chat,))
-            database.commit(); database.close()
-            source = root / "selected.jsonl"
-            export_catalog(state, "/vault/workspace", [chat], source, imports="/vault/imports")
-            workspace, imports = root / "workspace", root / "imports"
-            workspace.mkdir(); imports.mkdir()
-            import_catalog(source, root / "target", workspace, imports=imports)
-            self.assertTrue((imports / "research").is_dir())
-            for cwd in ("/vault/workspace/project", "/vault/imports/research", "/vault/workspace"):
-                self.assertTrue(allowed_cwd(cwd, "/vault/workspace"))
-            for cwd in ("/vault/home", "/vault/workspace/../home", "/vault/imports/../../home", "/vault/workspace-other", "/vault/workspace/\x00"):
-                self.assertFalse(allowed_cwd(cwd, "/vault/workspace"))
+            root = Path(tmp).resolve()
+            source = vault(root / "source")
+            selected, _, _ = codex(source)
+            claude(source)
+            archive = root / "selected.jsonl"
+            export_histories(source, [selected], archive)
+            destination = vault(root / "target")
+            import_histories(archive, destination)
+            self.assertTrue((destination / "home/.codex").is_dir())
+            self.assertFalse((destination / "home/.claude").exists())
+            self.assertFalse((destination / "state/oblivion/native-imports").exists())
 
+    def test_unknown_versions_partial_transcripts_and_symlinks_fail_without_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source = vault(root / "source")
+            _, path, rows = codex(source)
+            rows[0]["payload"]["cli_version"] = "unknown"
+            path.write_text("".join(encode(row) + "\n" for row in rows))
+            with self.assertRaisesRegex(ValueError, "unsupported_codex_format"):
+                export_histories(source, None, root / "invalid.jsonl")
+            self.assertFalse((root / "invalid.jsonl").exists())
+            path.write_text('{"type":"session_meta"}')
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                native_histories(source)
+            path.unlink(); path.symlink_to(root / "missing")
+            with self.assertRaises(OSError):
+                native_histories(source)
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_archive_tampering_cannot_publish_profiles_or_escape_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source = vault(root / "source")
+            codex(source)
+            archive = root / "native.jsonl"
+            export_histories(source, None, archive)
+            rows = records(archive)
+            rows[1]["cwd"] = {"root": "workspace", "path": "../../escape"}
+            archive.write_text("".join(encode(row) + "\n" for row in rows))
+            destination = vault(root / "target")
+            with self.assertRaisesRegex(ValueError, "invalid_native_workspace"):
+                import_histories(archive, destination)
+            self.assertEqual(list((destination / "home").iterdir()), [])
+            rows[1]["cwd"] = {"root": "workspace", "path": "project"}
+            rows[2]["data"]["sha256"] = "0" * 64
+            archive.write_text("".join(encode(row) + "\n" for row in rows))
+            with self.assertRaisesRegex(ValueError, "invalid_native_artifact_hash"):
+                import_histories(archive, destination)
+            self.assertEqual(list((destination / "home").iterdir()), [])

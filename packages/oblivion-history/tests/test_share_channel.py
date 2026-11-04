@@ -11,8 +11,8 @@ import tempfile
 import unittest
 import uuid
 
-from oblivion_history.catalog import Catalog
-from oblivion_history.model import encode
+from native_fixture import codex
+from oblivion_history.portable import encode, export_histories
 
 HISTORY = Path(__file__).resolve().parents[1]
 GUEST = HISTORY.parent / "oblivion-host/guest"
@@ -52,17 +52,10 @@ def read_frame(stream):
 
 class ShareChannelTests(unittest.TestCase):
     def vault(self, root, with_chat=True):
+        root = root.resolve()
         for name in ("home", "state", "workspace", "imports"):
-            (root / name).mkdir(mode=0o700)
-        state = root / "home/.oblivion-history"
-        state.mkdir(mode=0o700)
-        chat = str(uuid.uuid4())
-        if with_chat:
-            catalog = Catalog(state)
-            with catalog.db:
-                catalog.db.execute("INSERT INTO chat VALUES(?,?,?,?,?)", (chat, str(root / "workspace"), "Synthetic chat", 1, 2))
-                catalog.db.execute("INSERT INTO item VALUES(?,?,?,?,?,?,?)", (str(uuid.uuid4()), chat, 1, "text", "user", encode({"text": "Synthetic portable conversation"}), 1))
-            catalog.close(); (state / "history.sqlite").chmod(0o600)
+            (root / name).mkdir(mode=0o700, parents=True)
+        chat = codex(root)[0] if with_chat else None
         return root, chat
 
     def start(self, vault, operation="export"):
@@ -80,7 +73,7 @@ class ShareChannelTests(unittest.TestCase):
         return {"version": 1, "operation": "plan", "request_id": uuid.uuid4().hex, "paths": ["workspace", "imports"],
                 "chat_ids": [chat], "exclude_paths": [], "exclude_chats": [], "include_sensitive_paths": [], "include_sensitive_chats": []}
 
-    def test_cancel_cleans_generated_catalog_without_touching_source(self):
+    def test_cancel_cleans_native_archive_without_touching_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             vault, chat = self.vault(Path(tmp))
             client, child = self.start(vault)
@@ -93,7 +86,7 @@ class ShareChannelTests(unittest.TestCase):
             self.assertTrue(read_frame(client)["cancelled"])
             self.assertEqual(child.wait(timeout=15), 0)
             self.assertFalse(generated.exists())
-            self.assertTrue((vault / "home/.oblivion-history/history.sqlite").is_file())
+            self.assertEqual(len(list((vault / "home/.codex/sessions").rglob("*.jsonl"))), 1)
             self.assertIn("history/chats.jsonl", [entry["path"] for entry in plan["manifest"]])
 
     def test_disconnect_after_plan_also_cleans_private_staging(self):
@@ -137,15 +130,16 @@ class ShareChannelTests(unittest.TestCase):
             self.assertNotIn(b"SYNTHETIC-CREDENTIAL-MUST-NOT-EXPORT", b"".join(payload.values()))
 
     @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0 and os.environ.get("OBLIVION_COPY_TEST_BINARY"), "requires root and real Linux oblivion-copy")
-    def test_pending_import_rebuilds_canonical_history_and_correct_ownership(self):
+    def test_import_restores_only_original_native_history_and_correct_ownership(self):
         with tempfile.TemporaryDirectory() as tmp:
             vault, _ = self.vault(Path(tmp), with_chat=False)
             client, child = self.start(vault, "import")
             request_id = uuid.uuid4().hex
             frame(client, {"version": 1, "operation": "import", "request_id": request_id})
-            chat = str(uuid.uuid4())
-            history = (encode({"format": "oblivion-history-portable", "version": 1}) + "\n" + encode({"type": "chat", "id": chat,
-                        "cwd": {"scope": "imports", "path": "research"}, "title": "Imported chat", "created": 1, "updated": 2}) + "\n").encode()
+            source, chat = self.vault(Path(tmp) / "source")
+            archive = Path(tmp) / "native.jsonl"
+            export_histories(source, [chat], archive)
+            history = archive.read_bytes()
             contents = {"history/chats.jsonl": history, "workspace/code.txt": b"Imported data"}
             entries = [{"kind": "directory", "path": "history"}, {"kind": "file", "path": "history/chats.jsonl", "size": len(history), "sha256": hashlib.sha256(history).hexdigest()},
                        {"kind": "directory", "path": "workspace"}, {"kind": "file", "path": "workspace/code.txt", "size": 13, "sha256": hashlib.sha256(b"Imported data").hexdigest()}]
@@ -159,11 +153,11 @@ class ShareChannelTests(unittest.TestCase):
             self.assertEqual(child.wait(timeout=15), 0)
             self.assertEqual((vault / "workspace/code.txt").read_bytes(), b"Imported data")
             self.assertEqual((vault / "workspace/code.txt").stat().st_uid, 1000)
-            self.assertEqual((vault / "imports/research").stat().st_uid, 1001)
-            database = sqlite3.connect(vault / "home/.oblivion-history/history.sqlite")
-            self.assertEqual(database.execute("SELECT id FROM chat").fetchone()[0], chat)
-            self.assertEqual(database.execute("SELECT count(*) FROM native").fetchone()[0], 0)
-            database.close()
+            transcript = next((vault / "home/.codex/sessions").rglob("*.jsonl"))
+            self.assertEqual(transcript.stat().st_uid, 1000)
+            self.assertIn("Synthetic native conversation", transcript.read_text())
+            self.assertFalse((vault / "home/.claude").exists())
+            self.assertFalse((vault / "home/.oblivion-history").exists())
             self.assertFalse((vault / "state/.oblivion-share" / request_id).exists())
 
 

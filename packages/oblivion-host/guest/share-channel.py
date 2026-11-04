@@ -16,7 +16,7 @@ import time
 # -I excludes cwd, PYTHONPATH and user-site code. These are image-owned modules.
 sys.path.insert(0, "/usr/lib/oblivion/history")
 sys.path.insert(0, "/usr/lib/oblivion/guest")
-from oblivion_history.portable import import_catalog
+from oblivion_history.portable import import_histories
 from share_plan import Plan
 
 READY = b"OBSH1\n"
@@ -83,12 +83,12 @@ def cleanup_export(vault, request_id):
         raise ValueError("share_cleanup_required")
     if any(entry.name != "chats.jsonl" for entry in directory.iterdir()):
         raise ValueError("share_cleanup_required")
-    catalog = directory / "chats.jsonl"
+    archive = directory / "chats.jsonl"
     try:
-        info = catalog.lstat()
+        info = archive.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
             raise ValueError("share_cleanup_required")
-        catalog.unlink()
+        archive.unlink()
     except FileNotFoundError:
         pass
     directory.rmdir()
@@ -170,7 +170,7 @@ def require_empty_import(vault):
     if home.is_symlink() or not home.is_dir():
         raise ValueError("share_destination_not_empty")
     for entry in home.iterdir():
-        if entry.name not in (".oblivion-history", ".oblivion-file-staging") or entry.is_symlink() or not entry.is_dir() or any(entry.iterdir()):
+        if entry.name not in (".oblivion-file-staging",) or entry.is_symlink() or not entry.is_dir() or any(entry.iterdir()):
             raise ValueError("share_destination_not_empty")
     for entry in (vault / "state").iterdir():
         if entry.name != ".oblivion-share":
@@ -220,11 +220,12 @@ def receive(fd, vault, request_id=None, copy=COPY):
             os.rename(source, vault / name)
     history = files / "history/chats.jsonl"
     if history.exists():
-        import_catalog(history, vault / "home/.oblivion-history", vault / "workspace", imports=vault / "imports")
+        import_histories(history, vault)
     ownership(vault / "workspace", 1000, 0o700, 0o600)
     ownership(vault / "imports", 1001, 0o750, 0o640)
-    if (vault / "home/.oblivion-history").exists():
-        ownership(vault / "home/.oblivion-history", 1000, 0o700, 0o600)
+    ownership(vault / "home", 1000, 0o700, 0o600)
+    if (vault / "state/oblivion").exists():
+        ownership(vault / "state/oblivion", 1000, 0o700, 0o600)
     if history.exists():
         history.unlink()
         history.parent.rmdir()

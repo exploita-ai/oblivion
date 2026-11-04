@@ -7,14 +7,15 @@ from pathlib import Path
 import re
 import stat
 
-from oblivion_history.portable import export_catalog, identifier, MAX_CHATS
+from oblivion_history.artifacts import chunk
+from oblivion_history.portable import export_histories, native_histories, identifier, MAX_CHATS
 
 MAX_ENTRIES = 16384
 MAX_BYTES = 16 * 1024 * 1024 * 1024
 MAX_WARNINGS = 512
 SCAN_FILE = 64 * 1024
 SCAN_TOTAL = 16 * 1024 * 1024
-DENIED = {".ssh", ".gnupg", ".aws", ".azure", ".codex", ".claude", ".oblivion-system", ".oblivion-history", ".oblivion-jobs"}
+DENIED = {".ssh", ".gnupg", ".aws", ".azure", ".codex", ".claude", ".oblivion-system", ".oblivion-jobs"}
 DENIED_FILES = {"auth.json", "credentials.json", "provider.keys.json", "api-keys.json", "proxy-profiles.json", "oauth.json", "tokens.json", "keyring.json", ".bash_history", ".zsh_history", ".python_history"}
 SECRET = re.compile(rb"(?:-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|(?:sk-[A-Za-z0-9_-]{16,})|(?:gh[pousr]_[A-Za-z0-9]{20,})|(?:github_pat_[A-Za-z0-9_]{20,})|(?:AKIA[A-Z0-9]{16})|(?:Bearer[ \t]+[A-Za-z0-9._~+/-]{16,})|(?i:(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)[\"' ]{0,4}[:=][\"' ]{0,4}[A-Za-z0-9._~+/-]{16,}))")
 
@@ -194,42 +195,42 @@ class Plan:
         requested = self.request["chat_ids"]
         if requested == []:
             return
-        from oblivion_history.portable import source_catalog
-        state = self.vault / "home/.oblivion-history"
-        with source_catalog(state) as database:
-            available = []
-            if database is not None and requested is None:
-                excluded = self.request["exclude_chats"]
-                query = "SELECT id FROM chat WHERE id NOT IN (SELECT chat_id FROM deleted_chat)"
-                if excluded:
-                    query += " AND id NOT IN (" + ",".join("?" for _ in excluded) + ")"
-                available = [row[0] for row in database.execute(query + " ORDER BY id LIMIT ?", (*excluded, MAX_CHATS + 1))]
-            if database is not None and requested:
-                available = [row[0] for row in database.execute("SELECT id FROM chat WHERE id IN (" + ",".join("?" for _ in requested) + ") AND id NOT IN (SELECT chat_id FROM deleted_chat) ORDER BY id", requested)]
-        selected = available if requested is None else requested
+        histories = {entry["id"]: entry for entry in native_histories(self.vault)}
+        available = set(histories)
+        selected = sorted(available if requested is None else set(requested))
         selected = [value for value in selected if value not in self.request["exclude_chats"]]
-        if not set(selected) <= set(available) or len(selected) > MAX_CHATS:
+        if not set(selected) <= available or len(selected) > MAX_CHATS:
             raise ValueError("invalid_share_chat_selection")
         if not selected:
             return
+        for selected_id in selected:
+            for required in histories[selected_id]["required_paths"]:
+                if self.entries.get(required, {}).get("kind") != "file":
+                    raise ValueError("share_native_dependency_not_selected")
         stage = private(self.vault / "state/.oblivion-share")
         selected_stage = stage / self.request["request_id"]
         selected_stage.mkdir(mode=0o700)
         self.stage = selected_stage
-        catalog = self.stage / "chats.jsonl"
-        report = export_catalog(state, self.vault / "workspace", selected, catalog, imports=self.vault / "imports")
+        archive = self.stage / "chats.jsonl"
+        report = export_histories(self.vault, selected, archive)
         excluded = set()
         partial = set()
-        with open(catalog, "rb") as source:
+        carries = {}
+        with open(archive, "rb") as source:
             for line in source:
                 value = json.loads(line)
                 chat = value.get("chat_id") or value.get("id")
+                record = value.get("data")
+                decoded = chunk(record) if isinstance(record, dict) and record.get("type") == "native-chunk" else line
+                key = (chat, record["path"]) if isinstance(record, dict) and record.get("type") == "native-chunk" else (chat, "")
                 limit = min(SCAN_FILE, max(0, SCAN_TOTAL - self.history_scanned))
-                sample = line[:limit]
+                sample = decoded[:limit]
                 self.history_scanned += len(sample)
-                if chat and len(sample) < len(line):
+                if chat and len(sample) < len(decoded):
                     partial.add(chat)
-                if chat and SECRET.search(sample):
+                tested = carries.get(key, b"") + sample
+                carries[key] = sample[-256:] if len(sample) == len(decoded) else b""
+                if chat and SECRET.search(tested):
                     included = chat in self.request["include_sensitive_chats"]
                     self.warn("potential_secret", chat_id=chat, included=included, default_excluded=True)
                     if not included:
@@ -238,15 +239,18 @@ class Plan:
             self.warn("partial_content_scan", chat_id=chat, included=chat not in excluded)
         if excluded:
             selected = [chat for chat in selected if chat not in excluded]
-            catalog.unlink()
+            archive.unlink()
             if not selected:
                 self.stage.rmdir(); self.stage = None
                 return
-            report = export_catalog(state, self.vault / "workspace", selected, catalog, imports=self.vault / "imports")
+            report = export_histories(self.vault, selected, archive)
+        for selected_id in selected:
+            if histories[selected_id].get("required_prefixes", 0):
+                self.warn("native_history_dependency_included", chat_id=selected_id, included=True)
         self.chats = selected
         self.omitted = report["omitted"]
         digest = hashlib.sha256()
-        with open(catalog, "rb") as source:
+        with open(archive, "rb") as source:
             for block in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(block)
         self.directory("history")

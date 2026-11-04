@@ -7,8 +7,8 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from oblivion_history.catalog import Catalog
-from oblivion_history.model import encode
+from native_fixture import codex, claude
+from oblivion_history.portable import encode
 
 spec = importlib.util.spec_from_file_location("share_plan", Path(__file__).resolve().parents[2] / "oblivion-host/guest/share_plan.py")
 module = importlib.util.module_from_spec(spec)
@@ -17,6 +17,7 @@ spec.loader.exec_module(module)
 
 class SharePlanTests(unittest.TestCase):
     def vault(self, root):
+        root = root.resolve()
         for name in ("home", "state", "workspace", "imports"):
             (root / name).mkdir(mode=0o700)
         return root
@@ -56,18 +57,10 @@ class SharePlanTests(unittest.TestCase):
             self.assertIn("workspace/.env", {entry["path"] for entry in plan.public["manifest"]})
             plan.close()
 
-    def test_chat_selection_is_filtered_and_cancel_only_removes_generated_catalog(self):
+    def test_native_chat_selection_is_filtered_and_cancel_only_removes_staging(self):
         with tempfile.TemporaryDirectory() as tmp:
             vault = self.vault(Path(tmp))
-            state = vault / "home/.oblivion-history"
-            state.mkdir(mode=0o700)
-            catalog = Catalog(state)
-            chat, item = str(uuid.uuid4()), str(uuid.uuid4())
-            with catalog.db:
-                catalog.db.execute("INSERT INTO chat VALUES(?,?,?,?,?)", (chat, str(vault / "workspace"), "Share chat", 1, 2))
-                catalog.db.execute("INSERT INTO item VALUES(?,?,?,?,?,?,?)", (item, chat, 1, "text", "user", encode({"text": "sk-publicfixturecredential123456789"}), 1))
-            catalog.close()
-            (state / "history.sqlite").chmod(0o600)
+            chat, transcript, _ = codex(vault, text="sk-publicfixturecredential123456789")
             plan = module.Plan(vault, self.request(chat_ids=[chat]))
             self.assertEqual(plan.public["chats"], [])
             self.assertNotIn("history/chats.jsonl", {entry["path"] for entry in plan.public["manifest"]})
@@ -79,7 +72,22 @@ class SharePlanTests(unittest.TestCase):
             self.assertTrue(generated.is_file())
             plan.close()
             self.assertFalse(generated.exists())
-            self.assertTrue((state / "history.sqlite").is_file())
+            self.assertTrue(transcript.is_file())
+
+    def test_native_attachment_must_be_explicitly_selected_in_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = self.vault(Path(tmp))
+            selected, transcript, rows = claude(vault)
+            document = vault / "workspace/document.pdf"
+            document.write_bytes(b"%PDF synthetic native attachment")
+            rows[0]["message"]["content"] = [{"type": "document", "source": {"type": "file", "path": "/vault/workspace/document.pdf"}}]
+            transcript.write_text("".join(encode(row) + "\n" for row in rows))
+            with self.assertRaisesRegex(ValueError, "share_native_dependency_not_selected"):
+                module.Plan(vault, self.request(paths=[], chat_ids=[selected]))
+            plan = module.Plan(vault, self.request(paths=["workspace/document.pdf"], chat_ids=[selected]))
+            self.assertEqual(plan.public["chats"], [selected])
+            self.assertIn("workspace/document.pdf", {entry["path"] for entry in plan.public["manifest"]})
+            plan.close()
 
     def test_explicit_credential_subtree_and_host_path_are_not_share_sources(self):
         with tempfile.TemporaryDirectory() as tmp:

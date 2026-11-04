@@ -1,1 +1,1 @@
-"""Safe-local native history interoperability for pinned agent versions."""
+"""Safe-local native conversation transfer, without cross-agent synchronization."""
