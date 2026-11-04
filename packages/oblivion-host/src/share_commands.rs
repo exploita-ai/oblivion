@@ -100,11 +100,63 @@ struct Approved {
     plan_sha256: String,
 }
 
-pub fn run(args: &[String]) -> control::Result<i32> {
+/// Share has one syntax owner. Validation does not open files, prompt for
+/// secrets or contact a controller; the native engine consumes the typed action.
+pub struct Command(Action);
+
+enum Action {
+    Export {
+        selector: Selector,
+        output: String,
+        selection: Selection,
+    },
+    Import {
+        file: String,
+        settings: bool,
+    },
+    Imports {
+        json: bool,
+    },
+    Discard {
+        transaction: String,
+    },
+}
+
+enum Selector {
+    Safe(String),
+    Branch(String),
+    All,
+}
+
+pub fn parse(args: &[String]) -> control::Result<Command> {
     match args.first().map(String::as_str) {
-        Some("import") => return import::run(&args[1..]),
-        Some("imports") => return import::status(&args[1..]),
-        Some("discard") => return import::discard(&args[1..]),
+        Some("import") => {
+            let mut file = None;
+            let mut settings = false;
+            for value in &args[1..] {
+                match value.as_str() {
+                    "--apply-settings" if !settings => settings = true,
+                    value if !value.starts_with('-') && file.is_none() => file = Some(value.to_owned()),
+                    _ => return Err("Use share import FILE [--apply-settings]".into()),
+                }
+            }
+            return Ok(Command(Action::Import {
+                file: file.ok_or("Choose an encrypted Share file")?, settings,
+            }));
+        }
+        Some("imports") => {
+            if args.len() != 1 && args[1..] != ["--json"] {
+                return Err("Use share imports [--json]".into());
+            }
+            return Ok(Command(Action::Imports { json: args.len() == 2 }));
+        }
+        Some("discard") => {
+            if args.len() != 2 {
+                return Err("Use share discard TRANSACTION".into());
+            }
+            oblivion_share::manifest::validate_id(&args[1])?;
+            return Ok(Command(Action::Discard { transaction: args[1].clone() }));
+        }
         Some("export") => {}
         _ => return Err("Use share export --safe SAFE FILE, share export --branch SAFE FILE, share export --all FILE or share import FILE".into()),
     }
@@ -122,12 +174,14 @@ pub fn run(args: &[String]) -> control::Result<i32> {
     while let Some(value) = values.next() {
         match value.as_str() {
             "--safe" | "--branch" if selector.is_none() => {
-                selector = Some((
-                    value.as_str(),
-                    Some(values.next().ok_or("Missing Safe name")?),
-                ))
+                let name = values.next().ok_or("Missing Safe name")?.clone();
+                selector = Some(if value == "--safe" {
+                    Selector::Safe(name)
+                } else {
+                    Selector::Branch(name)
+                });
             }
-            "--all" if selector.is_none() => selector = Some(("--all", None)),
+            "--all" if selector.is_none() => selector = Some(Selector::All),
             "--path" => selection
                 .paths
                 .push(values.next().ok_or("Missing guest path")?.clone()),
@@ -159,7 +213,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
         }
     }
     let selector = selector.ok_or("Choose --safe NAME, --branch NAME or --all")?;
-    if selector.0 != "--safe"
+    if !matches!(&selector, Selector::Safe(_))
         && selection
             .chat_ids
             .as_ref()
@@ -189,7 +243,25 @@ pub fn run(args: &[String]) -> control::Result<i32> {
     {
         validate_chat(chat)?;
     }
-    let output = std::path::absolute(output.ok_or("Choose an output Share file")?)?;
+    Ok(Command(Action::Export {
+        selector,
+        output: output.ok_or("Choose an output Share file")?,
+        selection,
+    }))
+}
+
+pub fn run(command: Command) -> control::Result<i32> {
+    let (selector, output, selection) = match command.0 {
+        Action::Import { file, settings } => return import::run(&file, settings),
+        Action::Imports { json } => return import::status(json),
+        Action::Discard { transaction } => return import::discard(&transaction),
+        Action::Export {
+            selector,
+            output,
+            selection,
+        } => (selector, output, selection),
+    };
+    let output = std::path::absolute(output)?;
     let parent = output
         .parent()
         .ok_or("Choose an output directory")?
@@ -202,11 +274,14 @@ pub fn run(args: &[String]) -> control::Result<i32> {
     if state.app_mode != crate::AppMode::Persistent {
         return Err("Unlock writable encrypted storage before sharing Safes".into());
     }
-    let selector = if let Some(name) = selector.1 {
-        let id = state.find_safe(name)?.ok_or("Safe not found")?;
-        json!({"kind":if selector.0 == "--safe" { "safe" } else { "branch" },"safe_id":id})
-    } else {
-        json!({"kind":"all"})
+    let selector = match selector {
+        Selector::Safe(name) => {
+            json!({"kind":"safe","safe_id":state.find_safe(&name)?.ok_or("Safe not found")?})
+        }
+        Selector::Branch(name) => {
+            json!({"kind":"branch","safe_id":state.find_safe(&name)?.ok_or("Safe not found")?})
+        }
+        Selector::All => json!({"kind":"all"}),
     };
     let started: ExportStarted = serde_json::from_str(&control::request(
         "share-export-begin",
@@ -364,7 +439,10 @@ impl BatchSource {
         }
         let slot = crate::free_slot(&crate::status()?)?;
         scope::within(slot, || {
-            let payload = serde_json::to_vec(&ExportOpen { export_id: &self.export_id, password: None })?;
+            let payload = serde_json::to_vec(&ExportOpen {
+                export_id: &self.export_id,
+                password: None,
+            })?;
             let opened = control::request_for(id, "share-export-source-open", Some(id), &payload);
             let output = match opened {
                 Err(error) if error.to_string() == "share_password_required" && prompt => {
@@ -646,7 +724,9 @@ fn validate_review(review: &mut Review, request: &str) -> io::Result<Manifest> {
         ) || warning.path.is_some() == warning.chat_id.is_some()
             || warning.default_excluded.is_some_and(|value| !value)
             || warning.reason == "native_history_dependency_included"
-                && (warning.chat_id.is_none() || !warning.included || warning.default_excluded.is_some())
+                && (warning.chat_id.is_none()
+                    || !warning.included
+                    || warning.default_excluded.is_some())
         {
             return Err(io::Error::other("invalid_share_warning"));
         }
@@ -764,14 +844,106 @@ finally: plan.close()
                 "chat_id": "11111111-1111-4111-8111-111111111111",
                 "included": true,
             });
-            assert!(validate_review(&mut serde_json::from_value(dependency.clone()).unwrap(), &"1".repeat(32)).is_ok());
-            for invalid in [json!({"included": false}), json!({"default_excluded": true}), json!({"chat_id": null, "path": "workspace/project"})] {
+            assert!(
+                validate_review(
+                    &mut serde_json::from_value(dependency.clone()).unwrap(),
+                    &"1".repeat(32)
+                )
+                .is_ok()
+            );
+            for invalid in [
+                json!({"included": false}),
+                json!({"default_excluded": true}),
+                json!({"chat_id": null, "path": "workspace/project"}),
+            ] {
                 let mut value = dependency.clone();
-                value["warnings"][0].as_object_mut().unwrap().extend(invalid.as_object().unwrap().clone());
-                assert!(validate_review(&mut serde_json::from_value(value).unwrap(), &"1".repeat(32)).is_err());
+                value["warnings"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(invalid.as_object().unwrap().clone());
+                assert!(
+                    validate_review(&mut serde_json::from_value(value).unwrap(), &"1".repeat(32))
+                        .is_err()
+                );
             }
         })();
         std::fs::remove_dir_all(&root).unwrap();
         result
+    }
+}
+
+#[cfg(test)]
+mod grammar_tests {
+    use super::{Action, Selector, parse};
+
+    #[test]
+    fn share_parser_preserves_review_selection_without_opening_files() {
+        let args = [
+            "export",
+            "--safe",
+            "GB",
+            "missing/output",
+            "--path",
+            "workspace/project",
+            "--exclude",
+            "workspace/project/.env",
+            "--no-chats",
+        ]
+        .map(str::to_owned);
+        let command = parse(&args).unwrap();
+        let Action::Export {
+            selector,
+            output,
+            selection,
+        } = command.0
+        else {
+            panic!("expected export")
+        };
+        assert!(matches!(selector, Selector::Safe(name) if name == "GB"));
+        assert_eq!(output, "missing/output");
+        assert_eq!(selection.paths, ["workspace/project"]);
+        assert_eq!(selection.exclude_paths, ["workspace/project/.env"]);
+        assert_eq!(selection.chat_ids, Some(vec![]));
+        let command = parse(&["export", "--all", "missing/output"].map(str::to_owned)).unwrap();
+        let Action::Export {
+            selector,
+            selection,
+            ..
+        } = command.0
+        else {
+            panic!("expected all")
+        };
+        assert!(matches!(selector, Selector::All));
+        assert_eq!(selection.paths, ["workspace", "imports"]);
+    }
+
+    #[test]
+    fn import_and_recovery_grammar_is_typed_before_any_file_or_controller_access() {
+        let command =
+            parse(&["import", "missing/file", "--apply-settings"].map(str::to_owned)).unwrap();
+        assert!(
+            matches!(command.0, Action::Import { file, settings: true } if file == "missing/file")
+        );
+        assert!(matches!(
+            parse(&["imports", "--json"].map(str::to_owned)).unwrap().0,
+            Action::Imports { json: true }
+        ));
+        let transaction = "a".repeat(32);
+        assert!(
+            matches!(parse(&["discard".into(), transaction.clone()]).unwrap().0, Action::Discard { transaction: id } if id == transaction)
+        );
+        for values in [
+            vec!["import"],
+            vec!["import", "file", "--apply-settings", "--apply-settings"],
+            vec!["imports", "unexpected"],
+            vec!["discard", "PRIVATE_CANARY"],
+            vec!["export", "--safe", "GB"],
+            vec!["export", "--all", "file", "--path", "workspace/../outside"],
+        ] {
+            let error = parse(&values.into_iter().map(str::to_owned).collect::<Vec<_>>())
+                .err()
+                .unwrap();
+            assert!(!error.to_string().contains("PRIVATE_CANARY"));
+        }
     }
 }

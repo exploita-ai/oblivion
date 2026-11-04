@@ -105,7 +105,7 @@ impl files::Backend for NativeFiles {
 
 /// Copy streams and local selections are the remaining Unix adapter commands.
 /// Other Files grammar and orchestration have one owner in oblivion-cli.
-pub fn run(args: &[String]) -> control::Result<i32> {
+pub fn parse(args: &[String]) -> control::Result<CopyCommand> {
     let operation = args
         .first()
         .map(String::as_str)
@@ -130,7 +130,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
                 if safe.is_some() {
                     return Err("Duplicate --safe".into());
                 }
-                safe = Some(options.next().ok_or("Missing Safe name")?);
+                safe = Some(options.next().ok_or("Missing Safe name")?.clone());
             }
             "--json" => {}
             "--events" => events_output = true,
@@ -164,7 +164,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
                 if name.is_some() {
                     return Err("Duplicate --name".into());
                 }
-                name = Some(options.next().ok_or("Missing destination name")?);
+                name = Some(options.next().ok_or("Missing destination name")?.clone());
             }
             "--limit" => return Err("--limit applies only to files transfers".into()),
             "--cursor" => {
@@ -198,43 +198,111 @@ pub fn run(args: &[String]) -> control::Result<i32> {
             return Err("Invalid operation or opening ID".into());
         }
     }
+    let safe = safe.ok_or("Choose a Safe with --safe NAME")?;
+    let paths = if operation == "import" {
+        &sources
+    } else {
+        &selected
+    };
+    if paths.len() > selection::MAX_SELECTIONS {
+        return Err("selection_limit".into());
+    }
+    if paths.iter().map(String::len).sum::<usize>() > selection::MAX_SELECTION_BYTES {
+        return Err("selection_byte_limit".into());
+    }
+    if paths.len() > 1 && name.is_none() {
+        return Err("Choose a collection name with --name when selecting multiple paths".into());
+    }
+    if let Some(name) = &name {
+        oblivion_transfer::native_files::validate_name(name)
+            .map_err(|_| "Choose a valid destination name with --name")?;
+    }
     let selection = if operation == "import" {
-        let sources = sources
-            .iter()
-            .map(std::path::absolute)
-            .collect::<std::io::Result<Vec<_>>>()?;
-        selection::validate_paths(
-            &sources
-                .iter()
-                .map(|path| {
-                    path.to_str()
-                        .map(str::to_owned)
-                        .ok_or("Source paths must be UTF-8")
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        )?;
-        CopySelection::Upload(sources)
+        CopyInput::Upload(sources)
     } else {
         selection::validate_paths(&selected)?;
-        for path in &selected {
-            if !matches!(path.split('/').next(), Some("workspace" | "imports")) {
-                return Err("Export paths must be under workspace or imports".into());
-            }
+        if selected
+            .iter()
+            .any(|path| !matches!(path.split('/').next(), Some("workspace" | "imports")))
+        {
+            return Err("Export paths must be under workspace or imports".into());
         }
-        CopySelection::Download {
+        CopyInput::Download {
             selected,
-            destination: Path::new(
-                destination
-                    .as_ref()
-                    .ok_or("Missing destination directory")?,
-            )
-            .canonicalize()?,
+            destination: destination.ok_or("Missing destination directory")?,
         }
     };
-    let destination_name = selection.name(name.map(String::as_str))?;
-    let safe = safe.ok_or("Choose a Safe with --safe NAME")?;
+    Ok(CopyCommand {
+        safe,
+        name,
+        selection,
+        operation_id,
+        expected_opening,
+        events_output,
+        confirmed,
+    })
+}
+
+/// Syntax is admitted before runtime startup; filesystem resolution remains in
+/// this adapter and cannot turn an unknown command into a runtime side effect.
+pub struct CopyCommand {
+    safe: String,
+    name: Option<String>,
+    selection: CopyInput,
+    operation_id: Option<String>,
+    expected_opening: Option<String>,
+    events_output: bool,
+    confirmed: bool,
+}
+
+enum CopyInput {
+    Upload(Vec<String>),
+    Download {
+        selected: Vec<String>,
+        destination: String,
+    },
+}
+
+pub fn run(command: CopyCommand) -> control::Result<i32> {
+    let CopyCommand {
+        safe,
+        name,
+        selection,
+        operation_id,
+        expected_opening,
+        events_output,
+        confirmed,
+    } = command;
+    let exporting = matches!(&selection, CopyInput::Download { .. });
+    let selection = match selection {
+        CopyInput::Upload(sources) => {
+            let sources = sources
+                .iter()
+                .map(std::path::absolute)
+                .collect::<std::io::Result<Vec<_>>>()?;
+            selection::validate_paths(
+                &sources
+                    .iter()
+                    .map(|path| {
+                        path.to_str()
+                            .map(str::to_owned)
+                            .ok_or("Source paths must be UTF-8")
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )?;
+            CopySelection::Upload(sources)
+        }
+        CopyInput::Download {
+            selected,
+            destination,
+        } => CopySelection::Download {
+            selected,
+            destination: Path::new(&destination).canonicalize()?,
+        },
+    };
+    let destination_name = selection.name(name.as_deref())?;
     let mut controller = control::Client::new();
-    let target = files::target(&mut controller, safe)?;
+    let target = files::target(&mut controller, &safe)?;
     let opening = files::opening(&mut controller, &target, expected_opening.as_deref())?;
     let id = target.safe_id().to_owned();
     let operation_id = match operation_id {
@@ -249,7 +317,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
         id: operation_id,
         safe_id: id.clone(),
         opening: opening.nonce.clone(),
-        direction: if operation == "export" {
+        direction: if exporting {
             Direction::Export
         } else {
             Direction::Import
@@ -262,7 +330,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
         context.id,
         id,
         context.id,
-        if operation == "export" {
+        if exporting {
             " --destination DIRECTORY"
         } else {
             ""
@@ -612,7 +680,7 @@ fn file_query<T: serde::de::DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
-    use super::run;
+    use super::parse;
 
     #[test]
     fn event_copies_cannot_bypass_their_manifest_approval_with_yes() {
@@ -627,7 +695,7 @@ mod tests {
         ]
         .map(str::to_owned);
         assert_eq!(
-            run(&args).unwrap_err().to_string(),
+            parse(&args).err().unwrap().to_string(),
             "Event copies require their reviewed approval; --yes cannot be combined with --events"
         );
     }
@@ -652,12 +720,74 @@ mod tests {
             ],
         ] {
             assert!(
-                run(&args.into_iter().map(str::to_owned).collect::<Vec<_>>())
-                    .unwrap_err()
+                parse(&args.into_iter().map(str::to_owned).collect::<Vec<_>>())
+                    .err()
+                    .unwrap()
                     .to_string()
                     .starts_with("Use files import --safe SAFE --source PATH")
             );
         }
+    }
+
+    #[test]
+    fn copy_grammar_keeps_selection_order_and_does_not_open_paths() {
+        let args = [
+            "import",
+            "--safe",
+            "GB",
+            "--source",
+            "relative/missing",
+            "--source",
+            "/also-missing",
+            "--name",
+            "collection",
+            "--events",
+            "--operation",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--opening",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ]
+        .map(str::to_owned);
+        let command = parse(&args).unwrap();
+        assert_eq!(command.safe, "GB");
+        assert_eq!(command.name.as_deref(), Some("collection"));
+        assert!(command.events_output && !command.confirmed);
+        assert_eq!(
+            command.operation_id.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(
+            command.expected_opening.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+        let super::CopyInput::Upload(sources) = command.selection else {
+            panic!("expected import")
+        };
+        assert_eq!(sources, ["relative/missing", "/also-missing"]);
+        let command = parse(
+            &[
+                "export",
+                "--safe",
+                "GB",
+                "--path",
+                "workspace/project",
+                "--destination",
+                "/missing",
+                "--yes",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert!(command.confirmed && !command.events_output);
+        let super::CopyInput::Download {
+            selected,
+            destination,
+        } = command.selection
+        else {
+            panic!("expected export")
+        };
+        assert_eq!(selected, ["workspace/project"]);
+        assert_eq!(destination, "/missing");
     }
 
     #[test]

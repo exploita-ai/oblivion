@@ -1,8 +1,8 @@
 use oblivion_host::{autolock, control, scope, sharing};
 use oblivion_share::{Import, Manifest, Package, SecretString, Verified};
-use oblivion_transfer::Receipt;
 use oblivion_transfer::channel::Channel;
 use oblivion_transfer::endpoint::{read_message, write_message};
+use oblivion_transfer::Receipt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -12,20 +12,11 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-pub(super) fn run(args: &[String]) -> control::Result<i32> {
-    let mut file = None;
-    let mut settings = false;
-    for value in args {
-        match value.as_str() {
-            "--apply-settings" if !settings => settings = true,
-            value if !value.starts_with('-') && file.is_none() => file = Some(value),
-            _ => return Err("Use share import FILE [--apply-settings]".into()),
-        }
-    }
+pub(super) fn run(path: &str, settings: bool) -> control::Result<i32> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(file.ok_or("Choose an encrypted Share file")?)?;
+        .open(path)?;
     if !file.metadata()?.is_file() {
         return Err("Choose a regular encrypted Share file".into());
     }
@@ -82,13 +73,10 @@ pub(super) fn run(args: &[String]) -> control::Result<i32> {
     Ok(0)
 }
 
-pub(super) fn status(args: &[String]) -> control::Result<i32> {
-    if !args.is_empty() && args != ["--json"] {
-        return Err("Use share imports [--json]".into());
-    }
+pub(super) fn status(json: bool) -> control::Result<i32> {
     let output = control::request("share-import-status", None, &[])?;
     let statuses: Vec<sharing::Status> = serde_json::from_str(&output)?;
-    if args == ["--json"] {
+    if json {
         println!("{}", serde_json::to_string(&statuses)?);
         return Ok(0);
     }
@@ -109,14 +97,10 @@ pub(super) fn status(args: &[String]) -> control::Result<i32> {
     Ok(0)
 }
 
-pub(super) fn discard(args: &[String]) -> control::Result<i32> {
-    if args.len() != 1 {
-        return Err("Use share discard TRANSACTION".into());
-    }
-    oblivion_share::manifest::validate_id(&args[0])?;
+pub(super) fn discard(transaction: &str) -> control::Result<i32> {
     eprintln!(
         "Discard incomplete import {}. Existing Safes and committed imports cannot be removed by this action.",
-        args[0]
+        transaction
     );
     if !crate::init_commands::confirm("DISCARD")? {
         return Ok(130);
@@ -125,7 +109,7 @@ pub(super) fn discard(args: &[String]) -> control::Result<i32> {
         "share-import-discard",
         None,
         &serde_json::to_vec(&sharing::Discard {
-            transaction: args[0].clone(),
+            transaction: transaction.to_owned(),
         })?,
     )?;
     eprintln!("Incomplete import removed.");

@@ -1,3 +1,4 @@
+use oblivion_cli::command;
 #[cfg(test)]
 use oblivion_cli::controller::AgentSafeState;
 use oblivion_cli::controller::{self, AppMode, State};
@@ -25,110 +26,6 @@ mod proxy_commands;
 mod safe_commands;
 mod share_commands;
 mod shell_commands;
-
-const HELP: &str = "Oblivion — isolated, encrypted workspaces for coding agents
-
-  oblivion                         Open the manager
-  oblivion init                    Create encrypted storage
-  oblivion init --reset-incomplete Review and reset unfinished app storage
-  oblivion unlock                  Unlock encrypted storage
-  oblivion unlock --read-only      Read the encrypted archive without saving
-  oblivion ephemeral               Enter RAM-only mode
-  oblivion safes                   List Safes
-  oblivion status --json           Read controller state
-  oblivion run [OPTIONS] AGENT [AGENT_ARGUMENTS...]
-  oblivion shell --safe SAFE        Open the Safe's tmux workspace
-  oblivion shell --safe SAFE --policy offline
-  oblivion close SAFE              Close and lock one Safe
-  oblivion lock                    Lock Oblivion and all Safes
-
-Safe management
-  oblivion safe open SAFE          Open offline for files
-  oblivion safe rename SAFE NAME   Change its title
-  oblivion safe grow SAFE MIB      Increase a closed Safe's capacity
-  oblivion safe password SAFE [--confirmed-plan SHA]
-  oblivion safe password preview SAFE --json
-  oblivion safe password status [--json]
-  oblivion safe password recover TRANSACTION --complete|--rollback
-  oblivion safe task status SAFE [--json]
-  oblivion safe task review SAFE [--json]
-  oblivion safe task start|retry|cancel SAFE [--request ID] [--json]
-
-Desktop runtime bundles
-  oblivion runtime install-bundle BUNDLE
-  oblivion runtime install BUNDLE
-  oblivion runtime update BUNDLE
-  oblivion runtime deploy BUNDLE
-  oblivion runtime start|stop|recover
-  oblivion runtime choose-storage  Choose Live backing after stopping its VM
-  oblivion runtime gc              Remove stopped, verified old software
-  oblivion runtime uninstall       Remove desktop software; keep encrypted data
-
-Files
-  oblivion files list --safe SAFE [workspace/PATH] --json
-  oblivion files import --safe SAFE --source PATH [--source PATH...] [--name NAME]
-  oblivion files export --safe SAFE --path workspace/PATH [--path imports/PATH...]
-                       --destination DIR [--name NAME]
-  Multiple selections require --name NAME and publish one collection.
-  Copy commands review before copying; --yes approves an unattended copy.
-  oblivion files transfers --safe SAFE [--destination DIR] [--cursor ID] --json
-  Enumerate receiver records; select a directory explicitly for local exports.
-  oblivion files status --safe SAFE --operation ID [--destination DIR] --json
-  oblivion files recover --safe SAFE --operation ID [--destination DIR]
-  oblivion files discard --safe SAFE --operation ID [--destination DIR]
-  Copy commands accept --operation ID; exports reconcile only inside DIR.
-  Discard removes private incomplete staging, never published files.
-
-Personal backup (complete encrypted Safe, including saved logins)
-  oblivion backup export --safe SAFE FILE
-  oblivion backup import FILE
-  oblivion backup finish TRANSACTION
-  oblivion backup status [--json]
-  oblivion backup discard TRANSACTION
-
-Share (closed persistent Safes, no provider credentials)
-  oblivion share export --safe SAFE FILE [--path workspace/PATH] [--no-chats]
-  oblivion share export --branch SAFE FILE
-  oblivion share export --all FILE
-  oblivion share import FILE [--apply-settings]
-  oblivion share imports [--json]   Inspect incomplete and committed imports
-  oblivion share discard TRANSACTION
-  --exclude PATH / --exclude-chat UUID omit reviewed content
-
-Network, scoped to an open Safe
-  oblivion network status --safe SAFE --json
-  oblivion network set --safe SAFE --policy open-internet|strict|offline
-  oblivion network set --safe SAFE --tor
-  oblivion network set --safe SAFE -x socks5h://[USER:PASS@]IP:PORT
-  oblivion network set --safe SAFE --proxy-profile NAME
-
-Automatic lock
-  oblivion settings idle [--json]
-  oblivion settings idle --safe-minutes 15 --host-minutes 30
-  Set a timer to 0 explicitly to disable it. Idle locks stop active agents.
-
-Saved SOCKS5 profiles
-  oblivion proxy list [--json]      Show profile names and public metadata
-  oblivion proxy add NAME [-x URL]  Save a proxy; omitted URL is entered privately
-  oblivion proxy remove NAME       Remove a profile without changing active Safes
-
-Run options (before the agent)
-  --safe NAME                      Open or reuse an existing Safe
-  --name NAME                      Create a new named Safe
-  --ephemeral                      Create a RAM-only Safe
-  --tor                            Route through Tor
-  -x, --proxy socks5h://[USER:PASS@]IP:PORT
-  --proxy-profile NAME             Select saved proxy inside the controller
-  --policy open-internet|strict|offline
-
-Agents: codex, claude, opencode2
-All arguments after the agent are passed unchanged inside the Safe.
-File copies review their prepared content before confirmation; --yes explicitly
-approves an unattended copy. The manager uses a private event/approval channel.
-Proxy USER without :PASS prompts privately for its password.
-In an interactive agent: F7 opens Files, F9 opens Network. The agent keeps running.
-Esc returns from the trusted overlay. Function keys in pasted text are passed through.
-";
 
 static SIGNAL: AtomicI32 = AtomicI32::new(0);
 extern "C" fn signal(value: i32) {
@@ -166,193 +63,115 @@ fn run() -> control::Result<i32> {
                 .map_err(|_| "Arguments must use valid UTF-8")
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if args
-        .first()
-        .is_some_and(|arg| matches!(arg.as_str(), "--help" | "-h" | "help"))
-    {
-        print!("{HELP}");
-        return Ok(0);
+    let command = command::parse(&args, file_commands::parse, share_commands::parse)?;
+    match &command {
+        command::Command::Help => {
+            print!("{}", command::HELP);
+            return Ok(0);
+        }
+        command::Command::Version => {
+            println!("oblivion {}", env!("CARGO_PKG_VERSION"));
+            return Ok(0);
+        }
+        // Reports only address the already-open private control connection.
+        command::Command::Activity => return oblivion_host::activity::forward_stdin(),
+        _ => {}
     }
-    if args.first().is_some_and(|arg| arg == "--version") {
-        println!("oblivion {}", env!("CARGO_PKG_VERSION"));
-        return Ok(0);
-    }
-    // Event reports must never boot or unlock a runtime that has already shut
-    // down. They can only address the existing trusted control connection.
-    if args.len() == 1 && args[0] == "activity" {
-        return oblivion_host::activity::forward_stdin();
-    }
-    let controller_command = controller::Command::parse(&args)?;
-    let storage_command = oblivion_cli::storage::Command::parse(&args)?;
-    let launch_options = if args.first().is_some_and(|arg| arg == "run") {
-        Some(options(&args[1..])?)
-    } else {
-        None
-    };
-    let workspace_options = if args.first().is_some_and(|arg| arg == "shell") {
-        Some(oblivion_cli::shell::parse(&args[1..])?)
-    } else {
-        None
-    };
-    let network_command = if args.first().is_some_and(|arg| arg == "network") {
-        Some(oblivion_cli::network::parse(&args[1..])?)
-    } else {
-        None
-    };
-    let proxy_command = if args.first().is_some_and(|arg| arg == "proxy") {
-        Some(oblivion_cli::proxy_profiles::parse(&args[1..])?)
-    } else {
-        None
-    };
-    let settings_command = if args.first().is_some_and(|arg| arg == "settings") {
-        Some(oblivion_cli::settings::parse(&args[1..])?)
-    } else {
-        None
-    };
-    let files_command = if args.first().is_some_and(|arg| arg == "files") {
-        oblivion_cli::files::parse(&args[1..])?
-    } else {
-        None
-    };
-    let backup_command = if args.first().is_some_and(|arg| arg == "backup") {
-        Some(oblivion_cli::backup::parse(&args[1..])?)
-    } else {
-        None
-    };
-    let family_password_command = if args.first().is_some_and(|arg| arg == "safe")
-        && args.get(1).is_some_and(|arg| arg == "password")
-    {
-        Some(oblivion_cli::family_password::parse(&args[2..])?)
-    } else {
-        None
-    };
-    let child_task_command = if args.first().is_some_and(|arg| arg == "safe")
-        && args.get(1).is_some_and(|arg| arg == "task")
-    {
-        Some(oblivion_cli::child_task::parse(&args[2..])?)
-    } else {
-        None
-    };
-    let safe_command = if args.first().is_some_and(|arg| arg == "safe")
-        && !args
-            .get(1)
-            .is_some_and(|arg| matches!(arg.as_str(), "password" | "task"))
-    {
-        Some(oblivion_cli::safe::parse(&args[1..])?)
-    } else {
-        None
-    };
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        if args.first().is_some_and(|arg| arg == "runtime") {
-            match args.get(1).map(String::as_str) {
-                Some("install-bundle") if args.len() == 3 => {
-                    oblivion_host::native_runtime::install_bundle(std::path::Path::new(&args[2]))?
+        if let command::Command::Runtime(command) = &command {
+            use command::RuntimeCommand;
+            match command {
+                RuntimeCommand::InstallBundle(path) => {
+                    oblivion_host::native_runtime::install_bundle(std::path::Path::new(path))?
                 }
-                Some("deploy") if args.len() == 3 => {
-                    oblivion_host::native_runtime::deploy(std::path::Path::new(&args[2]))?
+                RuntimeCommand::Deploy(path) => {
+                    oblivion_host::native_runtime::deploy(std::path::Path::new(path))?
                 }
-                Some("install") if args.len() == 3 => {
-                    oblivion_host::native_runtime::install(std::path::Path::new(&args[2]))?
+                RuntimeCommand::Install(path) => {
+                    oblivion_host::native_runtime::install(std::path::Path::new(path))?
                 }
-                Some("update") if args.len() == 3 => {
-                    oblivion_host::native_runtime::update(std::path::Path::new(&args[2]))?
+                RuntimeCommand::Update(path) => {
+                    oblivion_host::native_runtime::update(std::path::Path::new(path))?
                 }
-                Some("start") if args.len() == 2 => oblivion_host::native_runtime::start()?,
-                Some("supervise") if args.len() == 3 => {
-                    oblivion_host::native_runtime::supervise(&args[2])?
+                RuntimeCommand::Start => oblivion_host::native_runtime::start()?,
+                RuntimeCommand::Supervise(generation) => {
+                    oblivion_host::native_runtime::supervise(generation)?
                 }
-                Some("choose-storage") if args.len() == 2 => {
+                RuntimeCommand::ChooseStorage => {
                     oblivion_host::native_runtime::choose_live_storage()?
                 }
-                Some("recover") if args.len() == 2 => oblivion_host::native_runtime::recover()?,
-                Some("stop") if args.len() == 2 => oblivion_host::native_runtime::stop()?,
-                Some("gc") if args.len() == 2 => oblivion_host::native_runtime::gc()?,
-                Some("uninstall") if args.len() == 2 => oblivion_host::native_runtime::uninstall()?,
-                _ => {
-                    return Err(
-                        "Use oblivion runtime install-bundle BUNDLE, start, stop, recover, gc or uninstall".into(),
-                    );
-                }
+                RuntimeCommand::Recover => oblivion_host::native_runtime::recover()?,
+                RuntimeCommand::Stop => oblivion_host::native_runtime::stop()?,
+                RuntimeCommand::Gc => oblivion_host::native_runtime::gc()?,
+                RuntimeCommand::Uninstall => oblivion_host::native_runtime::uninstall()?,
             }
             return Ok(0);
         }
         oblivion_host::desktop_bundle::prepare_environment()?;
-        let storage = match args.first().map(String::as_str) {
-            Some("ephemeral") if args.len() == 1 => Some(true),
-            Some("init" | "unlock") => Some(false),
-            Some("run") => launch_options.as_ref().and_then(|parsed| {
-                if parsed.ephemeral {
-                    return Some(true);
-                }
-                parsed.name.as_ref().map(|_| false)
-            }),
-            _ => None,
-        };
-        oblivion_host::native_runtime::request_live_storage(storage)?;
-        if args.is_empty() {
-            oblivion_host::native_runtime::prepare_manager()?;
-        } else if matches!(&controller_command, Some(controller::Command::StatusJson)) {
-            oblivion_host::native_runtime::ensure_status()?;
-        } else {
-            oblivion_host::native_runtime::ensure()?;
+        oblivion_host::native_runtime::request_live_storage(command.live_storage())?;
+        match &command {
+            command::Command::Manager => oblivion_host::native_runtime::prepare_manager()?,
+            command::Command::Controller(controller::Command::StatusJson) => {
+                oblivion_host::native_runtime::ensure_status()?
+            }
+            _ => oblivion_host::native_runtime::ensure()?,
         }
     }
-    if args.is_empty() {
-        let launcher = std::env::current_exe()?;
-        let manager = launcher
-            .parent()
-            .ok_or("executable_directory_missing")?
-            .join("oblivion-manager");
-        return Err(Command::new(manager)
-            .env("OBLIVION_LAUNCHER", launcher)
-            .exec()
-            .into());
-    }
-    if let Some(command) = controller_command {
-        return controller::execute(
+    match command {
+        command::Command::Manager => {
+            let launcher = std::env::current_exe()?;
+            let manager = launcher
+                .parent()
+                .ok_or("executable_directory_missing")?
+                .join("oblivion-manager");
+            Err(Command::new(manager)
+                .env("OBLIVION_LAUNCHER", launcher)
+                .exec()
+                .into())
+        }
+        command::Command::Controller(command) => controller::execute(
             &mut control::Client::new(),
             command,
             &mut std::io::stdout().lock(),
-        );
-    }
-    if let Some(command) = storage_command {
-        return oblivion_cli::storage::execute(&mut UnixRuntime::new(), command);
-    }
-    match args[0].as_str() {
-        "settings" => idle_commands::run(settings_command.ok_or("settings_command_missing")?),
-        "run" => oblivion_cli::run::execute(
+        ),
+        command::Command::Storage(command) => {
+            oblivion_cli::storage::execute(&mut UnixRuntime::new(), command)
+        }
+        command::Command::Run(options) => oblivion_cli::run::execute(
             &mut UnixRuntime::new(),
-            launch_options.ok_or("run_options_missing")?,
+            options.resolve_transport(resolve_proxy)?,
             oblivion_cli::run::Context {
                 prefer_ephemeral: std::env::var("OBLIVION_LIVE_STORAGE").as_deref()
                     == Ok("ephemeral"),
             },
         ),
-        "shell" => shell_commands::run(workspace_options.ok_or("workspace_options_missing")?),
-        "files" => match files_command {
-            Some(command) => file_commands::inspect(command),
-            None => file_commands::run(&args[1..]),
-        },
-        "backup" => backup_commands::run(backup_command.ok_or("backup_command_missing")?),
-        "share" => share_commands::run(&args[1..]),
-        "safe" if args.get(1).is_some_and(|arg| arg == "password") => {
-            family_password_commands::run(
-                family_password_command.ok_or("family_password_command_missing")?,
-            )
+        command::Command::Shell(command) => shell_commands::run(command),
+        command::Command::Network(command) => network_commands::run(command),
+        command::Command::Proxy(command) => proxy_commands::run(command),
+        command::Command::Settings(command) => idle_commands::run(command),
+        command::Command::Safe(command) => safe_commands::run(command),
+        command::Command::FamilyPassword(command) => family_password_commands::run(command),
+        command::Command::ChildTask(command) => child_task_commands::run(command),
+        command::Command::Backup(command) => backup_commands::run(command),
+        command::Command::Files(command::Files::Inspect(command)) => {
+            file_commands::inspect(command)
         }
-        "safe" if args.get(1).is_some_and(|arg| arg == "task") => {
-            child_task_commands::run(child_task_command.ok_or("child_task_command_missing")?)
+        command::Command::Files(command::Files::Copy(command)) => file_commands::run(command),
+        command::Command::Share(command) => share_commands::run(command),
+        command::Command::Help
+        | command::Command::Version
+        | command::Command::Activity
+        | command::Command::Runtime(_) => {
+            Err("Command was not handled by the platform adapter".into())
         }
-        "safe" => safe_commands::run(safe_command.ok_or("safe_command_missing")?),
-        "network" => network_commands::run(network_command.ok_or("network_command_missing")?),
-        "proxy" => proxy_commands::run(proxy_command.ok_or("proxy_command_missing")?),
-        _ => Err("Unknown command. Run oblivion --help.".into()),
     }
 }
 
+#[cfg(test)]
 type Options = oblivion_cli::run::Options<oblivion_transport::Transport>;
 
+#[cfg(test)]
 fn options(args: &[String]) -> control::Result<Options> {
     let parsed = oblivion_cli::run::parse(args)?;
     parsed.resolve_transport(resolve_proxy)
@@ -633,16 +452,14 @@ mod tests {
         assert!(parse(&["--policy", "direct", "codex"]).is_err());
         assert!(parse(&["--tor", "-x", "socks5h://192.0.2.1:1080", "codex"]).is_err());
         assert!(parse(&["--proxy-profile", "Office", "--tor", "codex"]).is_err());
-        assert!(
-            parse(&[
-                "--proxy-profile",
-                "Office",
-                "--proxy-profile",
-                "Other",
-                "codex"
-            ])
-            .is_err()
-        );
+        assert!(parse(&[
+            "--proxy-profile",
+            "Office",
+            "--proxy-profile",
+            "Other",
+            "codex"
+        ])
+        .is_err());
         assert!(parse(&["--proxy-profile", "../outside", "codex"]).is_err());
     }
 
@@ -678,27 +495,23 @@ mod tests {
         assert!(state.find_safe(&"b".repeat(32)).unwrap().is_none());
         assert!(state.find_safe("missing").unwrap().is_none());
         state.agent_safes[0].state = AgentSafeState::Failed;
-        assert!(
-            oblivion_cli::run::open_existing(
-                &mut UnixRuntime::new(),
-                &state,
-                scope::current(),
-                &"a".repeat(32)
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("not created successfully")
-        );
+        assert!(oblivion_cli::run::open_existing(
+            &mut UnixRuntime::new(),
+            &state,
+            scope::current(),
+            &"a".repeat(32)
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("not created successfully"));
         state.agent_safes[0].state = AgentSafeState::RecoveryRequired;
-        assert!(
-            oblivion_cli::run::open_existing(
-                &mut UnixRuntime::new(),
-                &state,
-                scope::current(),
-                &"a".repeat(32)
-            )
-            .is_err()
-        );
+        assert!(oblivion_cli::run::open_existing(
+            &mut UnixRuntime::new(),
+            &state,
+            scope::current(),
+            &"a".repeat(32)
+        )
+        .is_err());
     }
 
     #[test]

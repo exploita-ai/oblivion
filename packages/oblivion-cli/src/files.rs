@@ -3,9 +3,9 @@
 use crate::controller::{self, Call, Controller, Result};
 use oblivion_transfer::browser;
 use oblivion_transfer::native_files::{
-    Action, Direction, Status, TransfersPage, TransfersQuery, TRANSFERS_PAGE_LIMIT,
+    Action, Direction, Status, TRANSFERS_PAGE_LIMIT, TransfersPage, TransfersQuery,
 };
-use oblivion_wire::control::{valid_id, Operation};
+use oblivion_wire::control::{Operation, valid_id};
 use oblivion_wire::idle::{Opening, View};
 use serde_json::json;
 use std::io::Write;
@@ -17,6 +17,23 @@ pub struct Command {
     action: CommandAction,
     expected_opening: Option<String>,
     json: bool,
+}
+
+impl Command {
+    /// Native frontends without a local publication endpoint reject these
+    /// commands before runtime discovery. Guest metadata uses only its lease.
+    pub fn needs_local_filesystem(&self) -> bool {
+        matches!(
+            &self.action,
+            CommandAction::Transfers {
+                destination: Some(_),
+                ..
+            } | CommandAction::Manage {
+                destination: Some(_),
+                ..
+            }
+        )
+    }
 }
 
 enum CommandAction {
@@ -93,7 +110,7 @@ pub fn parse(args: &[String]) -> Result<Option<Command>> {
             }
             "--json" if !json => json = true,
             "--events" | "--yes" => {
-                return Err("--events and --yes apply only to file import or export".into())
+                return Err("--events and --yes apply only to file import or export".into());
             }
             value if !value.starts_with('-') && path.is_none() => path = Some(value.to_owned()),
             _ => return Err("Unknown or duplicate file option".into()),
@@ -316,7 +333,11 @@ pub fn execute<B: Backend>(
                 )?;
             }
             if page.skipped != 0 {
-                writeln!(diagnostics,"{} unavailable records skipped. Listing does not authorize recovery or discard.",page.skipped)?;
+                writeln!(
+                    diagnostics,
+                    "{} unavailable records skipped. Listing does not authorize recovery or discard.",
+                    page.skipped
+                )?;
             }
         }
         CommandAction::Manage {
