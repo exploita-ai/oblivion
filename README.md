@@ -85,6 +85,7 @@ Headless Debian controller VM       Direct Debian controller
 | **Portable history** | A canonical catalog and adapters for the three native resume stores. Provider-specific records have explicit portability limits. |
 | **Share** | Export one Safe, a family branch or all Safes to a separate passphrase-encrypted package. Import into new offline volumes after full verification. |
 | **Personal backup** | [Copy the complete closed encrypted volume](docs/BACKUPS.md) through a revocable private stream. Restore the original identity using its original password; native credentials may be included. |
+| **Family passwords** | [Review and change one local family's password](docs/PASSWORDS.md), with explicit recovery after interruption. Existing backup passwords and data keys are unchanged. |
 
 These are source capabilities with different levels of verification. Component
 checks do not establish that the complete installed product is ready for
@@ -161,6 +162,13 @@ oblivion close research
 Imported files enter the Safe only through an explicit copy. Export destinations
 must already exist. Files shared by agents in one Safe remain shared by those
 agents; they can read and modify them according to guest permissions.
+
+In the manager, open **Files → Import**, then press **P** for **Enter path**.
+Paste a local path or `file://` URL, inspect it and choose it before confirming
+the copy. Terminals that paste a path on drop can use the same field. This is
+an explicit local selection, with no shared folder or virtual exchange disk.
+Literal paths and a single surrounding quote pair are accepted; shell escapes
+and environment-variable expansion are not interpreted.
 
 Share differs from a personal backup: a full disk backup can contain saved
 provider credentials. Share selects portable conversations and files, excluding

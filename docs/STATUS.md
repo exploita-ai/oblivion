@@ -14,6 +14,19 @@ export, guest review, encrypted streams, fresh-volume import, atomic collection
 publication and explicit import recovery. These source statements do not imply
 that all end-to-end paths have passed in an installed candidate.
 
+The local chooser now accepts an explicitly pasted path or local file URL,
+reviews its type and resolved location, and leaves the existing copy review
+in place. Nothing is imported by pasting. Whole-path quotes are supported;
+shell expansion and OS-native drag-and-drop APIs are not implemented.
+
+Claude now has process-bound prompt admission through its mandatory managed
+hook, with canonical-chat checks, stale-projection denial and a same-boot
+restart fence. Pinned native offline fixtures exercise resume conflicts and
+hook failures. This does not cover every native mutation: `/compact` and
+interactive picker behavior remain part of the complete ownership gate.
+Codex/OpenCode admission still needs their local control-protocol integrations.
+See [history and admission](HISTORY.md).
+
 Agent-created Safes have an explicit review screen. Closed RAM children resolve
 to their existing volume and require their live parent's family authority; they
 are not silently replaced with another Safe. Queued child tasks are sealed to
@@ -34,8 +47,18 @@ password/token and task context without requiring the mother, preserves original
 identity/family/key and publishes through the current transaction with Offline
 policy. The native personal-backup CLI provides full-volume export/import,
 explicit finish after a wrong password, metadata-only status and discard.
+The manager provides the corresponding path chooser, contents review and
+transaction recovery screens, with passwords handled only by the private CLI.
 Lock revokes copy workers before releasing the archive. An actual VM
 backup/restore round trip remains an acceptance gate.
+
+Family password changes now preview the complete local family, bind the review
+to the current host opening and header digest, and preflight actual keyslots
+before updating wrappers. An encrypted journal fences affected members after
+interruption; explicit completion or rollback checks the whole set first.
+Real LUKS2 header fixtures cover recovery and standalone child credentials.
+Data keys are unchanged, so old copied headers and backups are not revoked.
+See [family passwords](PASSWORDS.md).
 
 The footer now shows a fresh Safe-scoped policy beside Network. Policy and
 Tor/SOCKS5 observations bind to the host opening and the exact Safe ID, slot and
@@ -46,8 +69,10 @@ at narrow and wide sizes; real gateway fault-injection acceptance remains open.
 
 Development desktop bundles pair the CLI, manager and helper with a verified,
 source-matching controller image and boot files. Stopped-runtime updates preserve
-the private disk identity and reject mismatched assets. Actual installation,
-update, uninstall and signed-distribution qualification remain open; unsigned
+the private disk identity and reject mismatched assets. Stopped-only collection
+and uninstall now remove verified managed software while preserving encrypted
+data and runtime identity; fixture tests cover ownership and reinstall. Actual
+installation, update, uninstall and signed-distribution qualification remain open; unsigned
 checksums are not release provenance. See [desktop bundles](DESKTOP.md).
 
 The development Debian package reuses the Live immutable role assets. Real dpkg

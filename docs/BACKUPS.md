@@ -6,6 +6,12 @@ and any credentials saved inside that Safe. Keep the original Safe password.
 Use [Share](SHARING.md) to create portable copies with new identities and keys
 while excluding native provider credentials.
 
+In the manager, select the source in **Safes**, then open **Settings → Personal
+backups**. Create backup, restore and transfer recovery are separate actions.
+The review shows the chosen local path and the complete-volume credential
+policy before the CLI requests any password. Transfer history uses actual
+controller records; interrupted commands must be inspected before retrying.
+
 Unlock writable Oblivion storage and close the source Safe, then run:
 
 ```sh
