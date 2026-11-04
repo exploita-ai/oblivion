@@ -203,7 +203,7 @@ mod linux {
         lifetime.check()?;
         qmp.command("cont", Instant::now() + Duration::from_secs(5))?;
         let stop = Arc::new(AtomicBool::new(false));
-        let token = Arc::new(auth::Token::random()?);
+        let token = Arc::new(auth::token()?);
         let (sender, ready) = std::sync::mpsc::sync_channel(1);
         let provisioning_token = token.clone();
         let provisioning_cancelled = stop.clone();

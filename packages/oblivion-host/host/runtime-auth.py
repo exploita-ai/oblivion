@@ -20,7 +20,7 @@ def profile(arguments):
     if "oblivion.runtime=1" not in arguments:
         raise ValueError("native_runtime_required")
     selected = [value.split("=", 1)[1] for value in arguments if value.startswith("oblivion.runtime-backend=")]
-    if len(selected) != 1 or selected[0] not in ("apple-vz", "qemu-kvm"):
+    if len(selected) != 1 or selected[0] not in ("apple-vz", "qemu-kvm", "hcs-hyperv"):
         raise ValueError("runtime_backend_profile_required")
     return selected[0]
 

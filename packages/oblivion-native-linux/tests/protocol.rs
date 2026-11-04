@@ -321,7 +321,7 @@ with open(sys.argv[2], 'rb') as source:
     token = bytearray(source.read())
 assert os.stat(sys.argv[2]).st_mode & 0o777 == 0o600
 stream = socket.socket(fileno=os.dup(0))
-relay.authenticate_linux(stream, token)
+relay.authenticate_runtime(stream, token)
 assert relay.exact(stream, 10) == b'AFTER_AUTH'
 token[:] = bytes(32)
 "#;
@@ -334,7 +334,7 @@ token[:] = bytes(32)
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let token = oblivion_native_linux::auth::Token::random().unwrap();
+    let token = oblivion_native_linux::auth::token().unwrap();
     let stop = AtomicBool::new(false);
     oblivion_native_linux::auth::provision(
         &mut host,
@@ -367,7 +367,7 @@ relay.serve_client(socket.socket(fileno=0), bytearray(range(32)), sys.argv[2])
         header.as_slice(),
     ]
     .concat();
-    let wrong = [oblivion_native_linux::auth::HELLO.as_slice(), &[0; 32]].concat();
+    let wrong = [oblivion_wire::runtime_auth::HELLO.as_slice(), &[0; 32]].concat();
     for payload in [plain, wrong] {
         let (mut host, guest) = UnixStream::pair().unwrap();
         host.set_read_timeout(Some(Duration::from_secs(3))).unwrap();

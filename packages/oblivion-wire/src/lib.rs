@@ -7,5 +7,6 @@ pub mod control;
 pub mod control_client;
 pub mod frame;
 pub mod idle;
+pub mod runtime_auth;
 pub mod session_title;
 pub mod volume;

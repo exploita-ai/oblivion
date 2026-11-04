@@ -41,16 +41,17 @@ def secret_limit(operation):
     return MAX_SECRET
 
 
-def runtime_token():
-    arguments = Path("/proc/cmdline").read_text().split()
+def runtime_token(arguments=None, path=Path("/run/oblivion-runtime-auth/control-token")):
+    if arguments is None:
+        arguments = Path("/proc/cmdline").read_text().split()
     selected = [value.split("=", 1)[1] for value in arguments if value.startswith("oblivion.runtime-backend=")]
     if "oblivion.runtime=1" not in arguments or len(selected) != 1:
         raise ValueError("runtime_backend_profile_required")
     if selected[0] == "apple-vz":
         return None
-    if selected[0] != "qemu-kvm":
+    if selected[0] not in ("qemu-kvm", "hcs-hyperv"):
         raise ValueError("runtime_backend_profile_required")
-    fd = os.open("/run/oblivion-runtime-auth/control-token", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size != 32 or info.st_nlink != 1:
@@ -65,7 +66,7 @@ def runtime_token():
         os.close(fd)
 
 
-def authenticate_linux(remote, token):
+def authenticate_runtime(remote, token):
     offered = exact(remote, len(AUTH_HELLO) + 32)
     try:
         if not hmac.compare_digest(memoryview(offered)[:len(AUTH_HELLO)], AUTH_HELLO) or not hmac.compare_digest(memoryview(offered)[len(AUTH_HELLO):], token):
@@ -182,7 +183,7 @@ def serve_client(remote, token, controller=CONTROL):
     try:
         remote.settimeout(10)
         if token is not None:
-            authenticate_linux(remote, token)
+            authenticate_runtime(remote, token)
             authenticated = True
         length = struct.unpack("!I", exact(remote, 4))[0]
         if not 0 < length <= MAX_HEADER:
@@ -248,8 +249,8 @@ def main():
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CLIENTS) as pool:
             while True:
                 remote, address = listener.accept()
-                # CID2 identifies the hardware host, not its Unix user. Linux
-                # additionally proves its per-boot token before any v1 frame.
+                # CID2 identifies the hypervisor host, not its OS user. QEMU
+                # and HCS additionally prove the private token before any frame.
                 if address[0] != socket.VMADDR_CID_HOST or not active.acquire(blocking=False):
                     remote.close()
                     continue
