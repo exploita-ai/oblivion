@@ -925,3 +925,26 @@ async fn tools_only_grant_rejects_provider_role_and_routes_tools_without_provide
         proxy.await.unwrap();
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn dedicated_collectors_never_contact_the_proxy_even_when_open_and_explicitly_allowed() {
+    use futures_util::FutureExt;
+    timeout(Duration::from_secs(5), async {
+        for host in ["ab.chatgpt.com", "o33249.ingest.us.sentry.io", "http-intake.logs.us5.datadoghq.com", "o1158394.ingest.us.sentry.io"] {
+            for user in [TOOLS_USER, WEB_USER] {
+                let (egress, mut client, upstream, server) = configured_fixture(false, Some(Tools {
+                    access: Access::Open,
+                    ..tools(json!([{"destination":host,"port":443,"action":"allow"}]))
+                })).await;
+                assert_eq!(authenticate_as(&mut client, user, TOKEN.as_bytes()).await, [1, 0]);
+                request(&mut client, host.as_bytes(), 443).await;
+                let mut reply = [0; 10];
+                client.read_exact(&mut reply).await.unwrap();
+                assert_eq!(reply[1], 2);
+                assert!(upstream.accept().now_or_never().is_none());
+                egress.revoke();
+                server.await.unwrap().unwrap();
+            }
+        }
+    }).await.unwrap();
+}

@@ -33,3 +33,26 @@ HTTPS origin requires the client's own setting to distinguish its purpose.
 These are launch defaults. A user with root access inside their Safe can
 change application configuration or invoke a client directly. The VM's enforced
 Tor/SOCKS5 path and prohibition of direct egress remain the controller boundary.
+
+## Dedicated collector enforcement
+
+The gateway additionally denies these exact collector hosts on every port,
+including in Open Internet and when a user rule would allow the destination.
+
+| Client | Collector | Purpose and evidence |
+| --- | --- | --- |
+| Codex 0.159.2 | `ab.chatgpt.com` | Built-in metrics exporter in the [pinned source](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/otel/src/config.rs). |
+| Codex 0.159.2 | `o33249.ingest.us.sentry.io` | Feedback uploader in the [pinned source](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/feedback/src/lib.rs). |
+| Claude Code 2.1.302 | `http-intake.logs.us5.datadoghq.com` | Logging intake hostname embedded in the verified official release binary. |
+| Claude Code 2.1.302 | `o1158394.ingest.us.sentry.io` | Error reporting hostname embedded in the verified official release binary. |
+
+The Claude hostnames were inspected in the package selected by
+`script/oblivion/install-agents.json`. The vendor documents the metrics and error
+reporting channels separately. [Claude data usage](https://code.claude.com/docs/en/data-usage).
+
+OpenCode 2 has no fixed default collector in the inspected source. Its optional
+OTLP destinations are removed by the launch profile. Provider traffic to
+`chatgpt.com` and `api.anthropic.com` remains available because those HTTPS
+origins carry functional requests as well. The gateway cannot identify the
+purpose of an encrypted request on a shared origin. Disabling those client
+channels remains the launch profile's responsibility.
