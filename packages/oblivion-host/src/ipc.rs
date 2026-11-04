@@ -1198,7 +1198,9 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
             lease: Some(ClientLease { backup: None, slot: request.slot, id, safe_id: session,
                 operation: "agent-release", secret: Zeroizing::new(Vec::new()), export: None, _hold: None, timeout: None }) });
     }
-    if matches!(request.operation, Operation::Lock | Operation::ShutdownRuntime | Operation::ShutdownIdle) {
+    if matches!(request.operation, Operation::Lock) {
+        // Lock is an explicit revocation intent even if physical cleanup fails.
+        // A shutdown may instead be refused because protected work is active.
         crate::share_export::registry().end(None)?;
         families.lock().map_err(|_| Error("family_cache_failed"))?.clear();
     }
@@ -1276,6 +1278,10 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         command.arg(id);
     }
     let output = worker_output(command, secret, families, request.slot.index(), None)?;
+    if output.status.success() && matches!(request.operation, Operation::ShutdownRuntime | Operation::ShutdownIdle) {
+        crate::share_export::registry().end(None)?;
+        families.lock().map_err(|_| Error("family_cache_failed"))?.clear();
+    }
     if output.status.success() && attach_tools {
         let startup: crate::storage::AgentStart = serde_json::from_slice(&output.stdout).map_err(|_| Error("invalid_response"))?;
         require(startup.opening.slot == request.slot
@@ -1555,6 +1561,58 @@ mod family_tests {
 
     const SAFE: &str = "00000000000000000000000000000001";
     const FAMILY: &str = "11111111111111111111111111111111";
+
+    #[test]
+    fn rejected_shutdown_preserves_authority_but_lock_revokes_on_intent() {
+        let families: Families = Arc::new(Mutex::new(BTreeMap::new()));
+        for slot in [0, 1] {
+            worker(&families, slot, || {
+                let capability = Capability::from_root_secret(FAMILY, Zeroizing::new([7; 32])).unwrap();
+                retain_family(SAFE, &capability).unwrap_or_else(|error| panic!("{}", error.0));
+            });
+        }
+        let registry = crate::share_export::registry();
+        let export = "a".repeat(32);
+        let host = "b".repeat(32);
+        registry.begin(export.clone(), host.clone(), vec![crate::share_export::Source {
+            id: SAFE.into(), parent: None,
+        }]).unwrap_or_else(|error| panic!("{}", error.0));
+        registry.lease(&export, &host).unwrap_or_else(|error| panic!("{}", error.0));
+        registry.retain(&export, &host, SAFE,
+            Capability::from_root_secret(FAMILY, Zeroizing::new([7; 32])).unwrap())
+            .unwrap_or_else(|error| panic!("{}", error.0));
+        let tools = Arc::new(crate::safe_tools::Registry::default());
+        let idle = crate::idle_controller::Controller::new().unwrap_or_else(|error| panic!("{}", error.0));
+        let ordinary = Mutex::new(());
+        for operation in ["shutdown-idle", "shutdown-runtime", "lock"] {
+            let (mut client, mut server) = UnixStream::pair().unwrap();
+            let header = serde_json::to_vec(&serde_json::json!({
+                "operation": operation, "secret_len": 0, "slot": 0,
+            })).unwrap();
+            client.write_all(&(header.len() as u32).to_be_bytes()).unwrap();
+            client.write_all(&header).unwrap();
+            // Exercise the actual handler and real subprocess boundary. The
+            // test harness rejects storage worker arguments without touching
+            // a production config, volume, runtime directory or service.
+            let response = handle(&mut server, Path::new("/unused/controller.json"),
+                unsafe { libc::geteuid() }, &families, &tools, &idle, &ordinary)
+                .unwrap_or_else(|error| panic!("{}", error.0));
+            assert!(!response.ok && response.error.is_some());
+            if operation == "lock" {
+                assert!(families.lock().unwrap().is_empty());
+                assert!(registry.lookup(&export, &host, SAFE, FAMILY).is_err());
+                continue;
+            }
+            let cache = families.lock().unwrap();
+            assert_eq!(cache.len(), 2);
+            for slot in [0, 1] {
+                assert_eq!(cache[&slot].safe_id, SAFE);
+                assert_eq!(cache[&slot].capability.root_secret(), &[7; 32]);
+            }
+            assert_eq!(registry.lookup(&export, &host, SAFE, FAMILY)
+                .unwrap_or_else(|error| panic!("{}", error.0)).unwrap().root_secret(), &[7; 32]);
+        }
+    }
 
     #[test]
     #[ignore = "requires an isolated root-owned tmpfs /run; no production state"]
