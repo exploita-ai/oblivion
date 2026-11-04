@@ -11,11 +11,15 @@ mod safe_tools;
 #[cfg(target_os = "linux")]
 mod chat_jobs;
 #[cfg(target_os = "linux")]
+mod child_tasks;
+#[cfg(target_os = "linux")]
 mod idle_controller;
 #[cfg(target_os = "linux")]
 mod share_host;
 #[cfg(target_os = "linux")]
 mod share_import;
+#[cfg(target_os = "linux")]
+mod raw_restore;
 #[cfg(target_os = "linux")]
 mod share_export;
 #[cfg(target_os = "linux")]

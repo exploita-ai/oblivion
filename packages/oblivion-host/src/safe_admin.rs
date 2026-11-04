@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
 pub const READY: &[u8; 6] = b"OBSA1\n";
-pub const REQUEST_LIMIT: usize = 4096;
+pub const REQUEST_LIMIT: usize = 32768;
 pub const RESPONSE_LIMIT: usize = 65536;
 pub const PAGE_SIZE: usize = 50;
 
@@ -23,6 +23,7 @@ pub enum Command {
     Checkpoint { metadata: Metadata },
     Inspect {},
     ArchiveState { cursor: Option<String> },
+    Job { job_id: String },
 }
 
 impl Request {
@@ -40,13 +41,14 @@ impl Request {
                 Command::ArchiveState { cursor } => {
                     cursor.as_ref().is_none_or(|id| valid_chat_id(id))
                 }
+                Command::Job { job_id } => crate::managed::id(job_id),
                 Command::Usage {} | Command::Inspect {} => true,
             }
     }
 }
 
 /// Only the current 1.0 Safe format; no agent-specific or beta database reader.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Metadata {
     pub format: String,
@@ -54,6 +56,7 @@ pub struct Metadata {
     pub safe_id: String,
     pub title: Option<String>,
     pub history_version: u8,
+    pub origin: crate::safe_origin::Origin,
 }
 impl Metadata {
     pub fn valid(&self) -> bool {
@@ -61,6 +64,7 @@ impl Metadata {
             && self.version == 1
             && self.history_version == 1
             && valid_safe_id(&self.safe_id)
+            && self.origin.valid(&self.safe_id)
             && self
                 .title
                 .as_ref()
@@ -82,6 +86,7 @@ pub enum Response {
     Exported { path: String, bytes: u64 },
     Metadata { metadata: Metadata },
     ArchiveState { state: ArchiveState },
+    Job { info: Option<crate::managed::Info> },
     Rejected { error: Rejection },
     Unavailable {},
 }
@@ -141,6 +146,7 @@ impl Response {
                 metadata.valid() && metadata == expected
             }
             (Self::Metadata { metadata }, Command::Inspect {}) => metadata.valid(),
+            (Self::Job { info }, Command::Job { job_id }) => info.as_ref().is_none_or(|info| info.valid() && info.job_id == *job_id),
             (Self::ArchiveState { state }, Command::ArchiveState { cursor }) => {
                 state.history_version == 1
                     && (!matches!(state.consistency, Consistency::CatalogEmpty)
@@ -175,7 +181,7 @@ impl Response {
             }
             (
                 Self::Rejected { .. },
-                Command::Checkpoint { .. } | Command::Inspect {} | Command::ArchiveState { .. },
+                Command::Checkpoint { .. } | Command::Inspect {} | Command::ArchiveState { .. } | Command::Job { .. },
             ) => true,
             (Self::Unavailable {}, _) => true,
             _ => false,
@@ -188,7 +194,7 @@ pub fn exchange(channel: &mut (impl Read + Write), request: &Request) -> Result<
         return Err("invalid_safe_admin_request".into());
     }
     let request_bytes = serde_json::to_vec(request)?;
-    if request_bytes.len() > REQUEST_LIMIT {
+    if request_bytes.len() > if matches!(request.command, Command::Checkpoint { .. }) { REQUEST_LIMIT } else { 4096 } {
         return Err("safe_admin_request_too_large".into());
     }
     let mut ready = [0; 6];

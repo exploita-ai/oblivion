@@ -1,6 +1,8 @@
 """SafeAdmin v1. Fixed Safe-local roots, metadata only, no agent/server process."""
 
 import contextlib
+import base64
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -18,7 +20,7 @@ sys.path.insert(0, "/usr/lib/oblivion/history")
 from oblivion_history.admin import catalog_state
 
 READY = b"OBSA1\n"
-REQUEST_LIMIT = 4096
+REQUEST_LIMIT = 32768
 RESPONSE_LIMIT = 65536
 AGENTS = {"codex", "claude", "opencode2"}
 
@@ -51,7 +53,7 @@ def safe_text(value, maximum):
 
 
 def metadata(value):
-    if not isinstance(value, dict) or set(value) != {"format", "version", "safe_id", "title", "history_version"}:
+    if not isinstance(value, dict) or set(value) != {"format", "version", "safe_id", "title", "history_version", "origin"}:
         raise Rejected("invalid-metadata")
     if type(value["version"]) is not int or type(value["history_version"]) is not int:
         raise Rejected("invalid-metadata")
@@ -62,7 +64,47 @@ def metadata(value):
     title = value["title"]
     if title is not None and (not safe_text(title, 80) or not title.strip() or title != title.strip() or len(title.encode()) > 256):
         raise Rejected("invalid-metadata")
+    origin(value["origin"], value["safe_id"])
     return value
+
+
+def origin(value, identifier):
+    if value == {"kind": "local"}:
+        return
+    if not isinstance(value, dict):
+        raise Rejected("invalid-metadata")
+    if value.get("kind") == "agent-created" and set(value) == {"kind", "record"}:
+        record = value["record"]
+        fields = {"safe_id", "parent_id", "request_id", "agent", "creator_chat_id", "sealed_task", "attempts"}
+        if not isinstance(record, dict) or set(record) != fields or record["safe_id"] != identifier or not safe_id(record["parent_id"]) or record["parent_id"] == identifier or not safe_id(record["request_id"]) or record["agent"] not in AGENTS:
+            raise Rejected("invalid-metadata")
+        creator = record["creator_chat_id"]
+        if creator is not None and (not isinstance(creator, str) or not 0 < len(creator.encode()) <= 256 or any(ord(char) < 32 or 127 <= ord(char) < 160 for char in creator)):
+            raise Rejected("invalid-metadata")
+        attempts = record["attempts"]
+        if not isinstance(attempts, list) or len(attempts) > 16 or any(not safe_id(item) for item in attempts) or len(set(attempts)) != len(attempts) or attempts and attempts[0] != record["request_id"]:
+            raise Rejected("invalid-metadata")
+        sealed = record["sealed_task"]
+        if not isinstance(sealed, dict) or set(sealed) != {"version", "family_id", "nonce", "ciphertext"} or type(sealed["version"]) is not int or sealed["version"] != 1 or not safe_id(sealed["family_id"]) or not isinstance(sealed["nonce"], list) or len(sealed["nonce"]) != 24 or any(type(byte) is not int or not 0 <= byte <= 255 for byte in sealed["nonce"]) or not isinstance(sealed["ciphertext"], str) or len(sealed["ciphertext"]) > 21868:
+            raise Rejected("invalid-metadata")
+        try:
+            ciphertext = base64.b64decode(sealed["ciphertext"], validate=True)
+        except (ValueError, TypeError):
+            raise Rejected("invalid-metadata") from None
+        if not 17 <= len(ciphertext) <= 16400 or base64.b64encode(ciphertext).decode() != sealed["ciphertext"]:
+            raise Rejected("invalid-metadata")
+        return
+    if value.get("kind") == "shared" and set(value) == {"kind", "parent_id", "provenance", "source_policy", "required_proxy"}:
+        if value["parent_id"] is not None and (not safe_id(value["parent_id"]) or value["parent_id"] == identifier) or value["source_policy"] not in ("offline", "strict", "open-internet"):
+            raise Rejected("invalid-metadata")
+        provenance = value["provenance"]
+        if provenance is not None and (not isinstance(provenance, dict) or set(provenance) != {"created_by_agent", "requested_agent", "parent_not_included"} or type(provenance["created_by_agent"]) is not bool or type(provenance["parent_not_included"]) is not bool or provenance["requested_agent"] is not None and provenance["requested_agent"] not in AGENTS or not provenance["created_by_agent"] and provenance["requested_agent"] is not None):
+            raise Rejected("invalid-metadata")
+        proxy = value["required_proxy"]
+        if proxy is not None and (not isinstance(proxy, str) or not proxy.strip() or len(proxy.encode()) > 240 or any(ord(char) < 32 or 127 <= ord(char) < 160 for char in proxy)):
+            raise Rejected("invalid-metadata")
+        return
+    raise Rejected("invalid-metadata")
 
 
 def report(value):
@@ -92,6 +134,8 @@ def request(value):
     if not isinstance(command, dict):
         raise ValueError("invalid_safe_admin_request")
     if command in ({"operation": "usage"}, {"operation": "inspect"}):
+        return command
+    if command.get("operation") == "job" and set(command) == {"operation", "job_id"} and safe_id(command["job_id"]):
         return command
     if command.get("operation") == "diagnostics" and set(command) == {"operation", "report"}:
         report(command["report"])
@@ -161,9 +205,9 @@ def read_metadata(target):
     descriptor = os.open("safe.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=target)
     with os.fdopen(descriptor, "rb") as source:
         info = os.fstat(source.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1 or info.st_mode & 0o077 or not 0 < info.st_size <= 4096:
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1 or info.st_mode & 0o077 or not 0 < info.st_size <= REQUEST_LIMIT:
             raise Rejected("invalid-metadata")
-        return metadata(json.loads(source.read(4097), object_pairs_hook=unique))
+        return metadata(json.loads(source.read(REQUEST_LIMIT + 1), object_pairs_hook=unique))
 
 
 def write_metadata(vault, value, owner):
@@ -227,6 +271,31 @@ def execute(value, *, vault=Path("/vault"), owner):
         raise ValueError("invalid_safe_admin_owner")
     command = request(value)
     operation = command["operation"]
+    if operation == "job":
+        home = os.open(vault / "home", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            try:
+                directory = os.open(".oblivion-jobs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=home)
+            except FileNotFoundError:
+                return {"result": "job", "info": None}
+            try:
+                info = os.fstat(directory)
+                if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                    raise ValueError("invalid_job_storage")
+                spec = importlib.util.spec_from_file_location("oblivion_managed_job", Path(__file__).with_name("managed-job.py"))
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                try:
+                    result = module.inspect(directory, command["job_id"])
+                except module.Rejected as error:
+                    if error.code != "not-found":
+                        raise ValueError("invalid_job_storage") from None
+                    result = None
+                return {"result": "job", "info": result}
+            finally:
+                os.close(directory)
+        finally:
+            os.close(home)
     if operation == "usage":
         space = os.statvfs(vault)
         return {"result": "storage", "usage": {
@@ -302,7 +371,10 @@ def serve_channel(channel, *, vault=Path("/vault"), owner):
         length = struct.unpack("!I", exact(4))[0]
         if not 0 < length <= REQUEST_LIMIT:
             raise ValueError("invalid_safe_admin_frame")
-        result = execute(json.loads(exact(length), object_pairs_hook=unique), vault=vault, owner=owner)
+        value = json.loads(exact(length), object_pairs_hook=unique)
+        if length > 4096 and request(value)["operation"] != "checkpoint":
+            raise ValueError("invalid_safe_admin_frame")
+        result = execute(value, vault=vault, owner=owner)
     except Exception:
         # No filename, user text, credential or raw exception crosses this channel.
         result = {"result": "unavailable"}

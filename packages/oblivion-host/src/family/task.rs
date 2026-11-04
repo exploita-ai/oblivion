@@ -22,7 +22,7 @@ pub struct TaskContext<'a> {
 
 /// No plaintext or encryption key is serialized. Fields are private and the
 /// current-only reader admits a bounded, structurally valid envelope once.
-#[derive(Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct SealedTask {
     version: u8,
     family_id: String,

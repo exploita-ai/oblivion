@@ -19,6 +19,7 @@ mod proxy_commands;
 mod safe_commands;
 mod share_commands;
 mod shell_commands;
+mod child_task_commands;
 
 const HELP: &str = "Oblivion — isolated, encrypted workspaces for coding agents
 
@@ -41,6 +42,9 @@ Safe management
   oblivion safe open SAFE          Open offline for files
   oblivion safe rename SAFE NAME   Change its title
   oblivion safe grow SAFE MIB      Increase a closed Safe's capacity
+  oblivion safe task status SAFE [--json]
+  oblivion safe task review SAFE [--json]
+  oblivion safe task start|retry|cancel SAFE [--request ID] [--json]
 
 Desktop runtime bundles
   oblivion runtime install-bundle BUNDLE

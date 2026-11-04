@@ -532,6 +532,11 @@ enum Operation {
     OpenChildDocuments,
     OpenDocumentsEphemeral,
     StartAgent,
+    ChildTaskStatus,
+    ChildTaskReview,
+    ChildTaskStart,
+    ChildTaskRetry,
+    ChildTaskCancel,
     PinSafe,
     AgentAttach,
     FileAttach,
@@ -771,6 +776,8 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         || request.expected_session.is_none() && request.slot.index() == 0, "invalid_ram_request")?;
     require(!matches!(request.operation, Operation::CloseIdle) || request.expected_session.is_some(), "expected_session_required")?;
     require(!matches!(request.operation, Operation::StartAgent) || request.expected_session.is_some(), "expected_session_required")?;
+    require(!matches!(request.operation, Operation::ChildTaskStatus | Operation::ChildTaskReview | Operation::ChildTaskStart
+        | Operation::ChildTaskRetry | Operation::ChildTaskCancel) || request.expected_session.is_some(), "expected_session_required")?;
     require(!matches!(request.operation, Operation::OpenChildDocuments)
         || request.expected_session.is_some() && request.session == request.expected_session, "expected_session_required")?;
     require(!matches!(request.operation, Operation::ShareAttach | Operation::ShareRelease | Operation::ShareExportCancel
@@ -809,6 +816,9 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
             | Operation::RenameSession
             | Operation::SessionStorage
             | Operation::OpenDocuments
+            | Operation::ChildTaskStart
+            | Operation::ChildTaskRetry
+            | Operation::ChildTaskCancel
             | Operation::ShareExportCancel
             | Operation::ShareExportBegin
             | Operation::ShareExportEnd
@@ -859,6 +869,37 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
             _ => unreachable!(),
         }
         return Ok(Response { ok: true, output: String::new(), error: None, console: None, lease: None });
+    }
+    if matches!(request.operation, Operation::ChildTaskStatus | Operation::ChildTaskReview | Operation::ChildTaskStart
+        | Operation::ChildTaskRetry | Operation::ChildTaskCancel) {
+        use crate::child_tasks::Action;
+        let jobs = tools.jobs();
+        let action = match request.operation {
+            Operation::ChildTaskStatus => Action::Status,
+            Operation::ChildTaskReview => Action::Review,
+            Operation::ChildTaskStart => Action::Start,
+            Operation::ChildTaskRetry => Action::Retry,
+            Operation::ChildTaskCancel => Action::Cancel,
+            _ => unreachable!(),
+        };
+        let body = if secret.is_empty() { None } else {
+            let body: oblivion_host::child_task::Request = serde_json::from_slice(&secret).map_err(|_| Error("invalid_child_task_request"))?;
+            require(oblivion_host::managed::id(&body.request_id), "invalid_child_task_request")?;
+            Some(body)
+        };
+        let context = crate::child_tasks::prepare(request.expected_session.as_deref().ok_or(Error("expected_session_required"))?)?;
+        let capability = {
+            let cached = families.lock().map_err(|_| Error("family_cache_failed"))?;
+            let cached = cached.get(&request.slot.index()).filter(|cached| cached.safe_id == context.safe_id)
+                .ok_or(Error("family_not_authorized"))?;
+            Capability::from_root_secret(cached.capability.family_id(), Zeroizing::new(*cached.capability.root_secret())).map_err(Error)?
+        };
+        let release_config = config.to_owned();
+        let release_families = Arc::clone(families);
+        let output = crate::child_tasks::call(&jobs, &context, &capability, action, body.as_ref(), Arc::new(move |context, client| {
+            managed_release(&release_config, &release_families, context, client)
+        }))?;
+        return Ok(Response { ok: true, output, error: None, console: None, lease: None });
     }
     if matches!(request.operation, Operation::ShareExportBegin) {
         require(request.expected_session.is_none(), "invalid_share_request")?;
@@ -984,7 +1025,8 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         Operation::NetworkPolicy => "network-policy",
         Operation::Transfers => "transfers",
         Operation::Onion => "onion",
-        Operation::AgentAttach | Operation::FileAttach | Operation::ShareAttach | Operation::ShareImportAttach
+        Operation::ChildTaskStatus | Operation::ChildTaskReview | Operation::ChildTaskStart | Operation::ChildTaskRetry | Operation::ChildTaskCancel
+            | Operation::AgentAttach | Operation::FileAttach | Operation::ShareAttach | Operation::ShareImportAttach
             | Operation::ShareExportBegin | Operation::ShareExportLease | Operation::ShareExportEnd
             | Operation::Activity | Operation::IdleSettings => unreachable!(),
     };
@@ -1099,6 +1141,41 @@ pub fn notify_ready() -> Result<()> {
 #[cfg(test)]
 mod family_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires isolated root-owned tmpfs /run; no production state"]
+    fn child_task_requests_cannot_supply_execution_facts_or_unscoped_authority() {
+        assert_eq!(std::env::var("OBLIVION_CHILD_TASK_RPC_TEST").as_deref(), Ok("1"));
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        assert!(!Path::new("/run/oblivion").exists());
+        let id = "a".repeat(32);
+        let cases = [
+            ("child-task-review", None, Vec::new(), "expected_session_required"),
+            ("child-task-status", Some(id.clone()), b"{}".to_vec(), "unexpected_secret"),
+            ("child-task-start", Some(id.clone()), Vec::new(), "unexpected_secret"),
+            ("child-task-start", Some(id.clone()), serde_json::to_vec(&serde_json::json!({"request_id":id,"task":"must never be accepted through public task RPC"})).unwrap(), "invalid_child_task_request"),
+            ("child-task-retry", Some(id.clone()), serde_json::to_vec(&serde_json::json!({"request_id":id,"prior":{"state":"failed"}})).unwrap(), "invalid_child_task_request"),
+            ("child-task-cancel", Some(id.clone()), br#"{"request_id":"invalid"}"#.to_vec(), "invalid_child_task_request"),
+        ];
+        let families = Arc::new(Mutex::new(BTreeMap::new()));
+        let tools = crate::safe_tools::Registry::default();
+        let idle = crate::idle_controller::Controller::new().unwrap_or_else(|error| panic!("{}", error.0));
+        let ordinary = Mutex::new(());
+        for (operation, expected, body, rejection) in cases {
+            let (mut client, mut server) = UnixStream::pair().unwrap();
+            let header = serde_json::to_vec(&serde_json::json!({"operation":operation,"session":null,"slot":0,
+                "expected_session":expected,"secret_len":body.len()})).unwrap();
+            client.write_all(&(header.len() as u32).to_be_bytes()).unwrap();
+            client.write_all(&header).unwrap();
+            client.write_all(&body).unwrap();
+            match handle(&mut server, Path::new("/unused/controller.json"), 0, &families, &tools, &idle, &ordinary) {
+                Err(error) => assert_eq!(error.0, rejection),
+                Ok(_) => panic!("invalid task authority was accepted"),
+            }
+        }
+        assert!(families.lock().unwrap().is_empty());
+        assert!(!Path::new("/run/oblivion").exists());
+    }
 
     #[test]
     fn child_open_rejects_slot_identity_swap_and_any_password_before_starting_a_worker() {

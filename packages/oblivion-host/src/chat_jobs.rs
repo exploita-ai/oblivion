@@ -15,7 +15,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
-type Release = Arc<dyn Fn(&Context, &str) -> Result<()> + Send + Sync>;
+pub(crate) type Release = Arc<dyn Fn(&Context, &str) -> Result<()> + Send + Sync>;
 struct Record {
     info: Info,
     ready: bool,
@@ -62,7 +62,7 @@ impl Registry {
         serde_json::to_value(value).map_err(|_| "invalid_chat_job_response".into())
     }
 
-    fn create(
+    pub(crate) fn create(
         self: &Arc<Self>,
         context: &Context,
         agent: &str,
@@ -161,7 +161,7 @@ impl Registry {
         wait_admission(&job)
     }
 
-    fn status(&self, context: &Context, id: &str, release: Release) -> Result<Info> {
+    pub(crate) fn status(&self, context: &Context, id: &str, release: Release) -> Result<Info> {
         current(context)?;
         if let Some(job) = self
             .jobs
@@ -187,7 +187,7 @@ impl Registry {
         )
     }
 
-    fn cancel(&self, context: &Context, id: &str) -> Result<Info> {
+    pub(crate) fn cancel(&self, context: &Context, id: &str) -> Result<Info> {
         current(context)?;
         let job = self
             .jobs
@@ -259,7 +259,7 @@ fn fence(context: &Context) -> Result<()> {
         opening: context.opening.clone(),
     })
 }
-fn derive_id(safe_id: &str, request_id: &str) -> String {
+pub(crate) fn derive_id(safe_id: &str, request_id: &str) -> String {
     let value = Sha256::digest(format!("{safe_id}{request_id}").as_bytes());
     value[..16]
         .iter()

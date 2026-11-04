@@ -132,6 +132,7 @@ fn metadata() -> Metadata {
         safe_id: "b".repeat(32),
         title: Some("Città".into()),
         history_version: 1,
+        origin: oblivion_host::safe_origin::Origin::Local {},
     }
 }
 
@@ -188,6 +189,59 @@ fn real_guest_checkpoint_and_inspect_need_no_native_database_or_agent() {
         serde_json::from_slice::<serde_json::Value>(&fs::read(target).unwrap()).unwrap()["version"],
         2
     );
+}
+
+#[test]
+fn standalone_agent_snapshot_preserves_sealed_context_and_attempts_without_general_or_mother() {
+    let source = Fixture::new();
+    let target = Fixture::new();
+    let capability = oblivion_host::family::Capability::from_root_secret(&"1".repeat(32), zeroize::Zeroizing::new([7; 32])).unwrap();
+    let mut origin = oblivion_host::safe_origin::AgentCreated {
+        safe_id: "b".repeat(32), parent_id: "c".repeat(32), request_id: "d".repeat(32), agent: "codex".into(),
+        creator_chat_id: Some("reported-native-chat".into()),
+        sealed_task: oblivion_host::family::SealedTask::seal(&capability, &oblivion_host::family::TaskContext {
+            safe_id: &"b".repeat(32), parent_id: &"c".repeat(32), request_id: &"d".repeat(32), agent: "codex",
+        }, &"private-task-canary ".repeat(800)).unwrap(),
+        attempts: vec!["d".repeat(32), "e".repeat(32)],
+    };
+    origin.creator_chat_id = Some("z".repeat(256));
+    let mut value = metadata();
+    value.origin = oblivion_host::safe_origin::Origin::AgentCreated { record: origin };
+    assert!(value.valid());
+    assert!(matches!(source.call(Command::Checkpoint { metadata: value.clone() }).unwrap(), Response::Metadata { .. }));
+    let bytes = fs::read(source.0.join("state/oblivion/safe.json")).unwrap();
+    assert!(bytes.len() > 4096 && bytes.len() < safe_admin::REQUEST_LIMIT);
+    assert!(!String::from_utf8_lossy(&bytes).contains("private-task-canary"));
+    fs::DirBuilder::new().mode(0o700).create(target.0.join("state/oblivion")).unwrap();
+    fs::write(target.0.join("state/oblivion/safe.json"), bytes).unwrap();
+    fs::set_permissions(target.0.join("state/oblivion/safe.json"), fs::Permissions::from_mode(0o600)).unwrap();
+    let Response::Metadata { metadata } = target.call(Command::Inspect {}).unwrap() else { panic!("metadata unavailable") };
+    let oblivion_host::safe_origin::Origin::AgentCreated { record } = metadata.origin else { panic!("origin lost") };
+    assert_eq!(record.parent_id, "c".repeat(32));
+    assert_eq!(record.attempts, ["d".repeat(32), "e".repeat(32)]);
+    assert!(record.sealed_task.open(&capability, &record.context()).unwrap().starts_with("private-task-canary"));
+    assert!(!target.0.join("general").exists() && !target.0.join("mother").exists());
+}
+
+#[test]
+fn offline_job_observation_reads_only_bounded_status_and_reconciles_a_dead_runner() {
+    let fixture = Fixture::new();
+    let id = "1".repeat(32);
+    assert!(matches!(fixture.call(Command::Job { job_id: id.clone() }).unwrap(), Response::Job { info: None }));
+    assert!(!fixture.0.join("home/.oblivion-jobs").exists());
+    let path = fixture.0.join("home/.oblivion-jobs").join(&id);
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(&path).unwrap();
+    fs::write(path.join("task.txt"), "private-job-task-canary").unwrap();
+    fs::write(path.join("stdout.jsonl"), "private-output-canary").unwrap();
+    fs::write(path.join("status.json"), serde_json::to_vec(&serde_json::json!({"version":1,"output_bytes":0,
+        "info":{"job_id":id,"request_id":"2".repeat(32),"agent":"codex","state":"running","native_chat_id":null,"reason":null}})).unwrap()).unwrap();
+    fs::set_permissions(path.join("status.json"), fs::Permissions::from_mode(0o600)).unwrap();
+    let response = fixture.call(Command::Job { job_id: id }).unwrap();
+    assert!(matches!(&response, Response::Job { info: Some(info) }
+        if info.state == oblivion_host::managed::State::Failed && info.reason == Some(oblivion_host::managed::Reason::Interrupted)));
+    let encoded = serde_json::to_string(&response).unwrap();
+    assert!(!encoded.contains("private-job-task-canary") && !encoded.contains("private-output-canary"));
+    assert!(!fixture.0.join("home/.codex").exists());
 }
 
 #[test]

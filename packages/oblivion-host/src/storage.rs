@@ -30,6 +30,15 @@ fn share_imports() -> crate::share_import::Repository {
     crate::share_import::Repository::new(Path::new(MOUNT))
 }
 
+fn raw_restores() -> crate::raw_restore::Repository { crate::raw_restore::Repository::new(Path::new(MOUNT)) }
+
+fn collection_directory(id: &str) -> Result<Option<PathBuf>> {
+    let imported = share_imports().imported()?.into_iter().find(|safe| safe.id == id).map(|safe| safe.directory);
+    let restored = raw_restores().restored()?.into_iter().find(|safe| safe.metadata.safe_id == id).map(|safe| safe.directory);
+    require(imported.is_none() || restored.is_none(), "duplicate_safe_identity")?;
+    Ok(imported.or(restored))
+}
+
 pub(crate) fn persistent_safe_import(id: &str) -> Result<Option<crate::share_import::Imported>> {
     validate_id(id)?;
     Ok(share_imports().imported()?.into_iter().find(|safe| safe.id == id))
@@ -39,30 +48,30 @@ pub(crate) fn persistent_safe_parents() -> Result<Vec<(String, String)>> {
     Ok(safe_relations(&agent_safe_records()?)?.into_iter().map(|relation| (relation.id, relation.parent)).collect())
 }
 
-/// Two current origins share one Safe identity contract: ordinary volumes and
-/// atomically published portable collections. Pending imports are never read.
+/// Created volumes, portable collections and personal restores share one
+/// current identity contract. Pending collections are never resolved here.
 pub(crate) fn persistent_safe_path(id: &str) -> Result<PathBuf> {
     validate_id(id)?;
     let ordinary = Path::new(MOUNT).join(format!("sessions/{id}.luks"));
-    if let Some(imported) = share_imports().imported()?.into_iter().find(|safe| safe.id == id) {
+    if let Some(directory) = collection_directory(id)? {
         require(!ordinary.try_exists().map_err(|_| Error("image_check_failed"))?, "duplicate_safe_identity")?;
-        return Ok(imported.directory.join("volume.luks"));
+        return Ok(directory.join("volume.luks"));
     }
     Ok(ordinary)
 }
 
 pub(crate) fn persistent_safe_profile(id: &str) -> Result<PathBuf> {
     validate_id(id)?;
-    Ok(match share_imports().imported()?.into_iter().find(|safe| safe.id == id) {
-        Some(imported) => imported.directory.join("profile"),
+    Ok(match collection_directory(id)? {
+        Some(directory) => directory.join("profile"),
         None => Path::new(PROFILE).join("sessions").join(id),
     })
 }
 
 fn persistent_safe_title(id: &str) -> Result<PathBuf> {
     validate_id(id)?;
-    Ok(match share_imports().imported()?.into_iter().find(|safe| safe.id == id) {
-        Some(imported) => imported.directory.join("title"),
+    Ok(match collection_directory(id)? {
+        Some(directory) => directory.join("title"),
         None => Path::new(MOUNT).join(format!("sessions/{id}.title")),
     })
 }
@@ -110,9 +119,10 @@ struct AgentSafeRecord {
     agent: String,
     creator_chat_id: Option<String>,
     request_id: String,
-    // Only family-authorized future delivery can open this task. This General
-    // journal is separate from portable Share and raw inner-volume backups.
+    // Delivery needs this Safe's family capability. Personal backup checkpoints
+    // the ciphertext and context inside the Safe; portable Share excludes it.
     sealed_task: family::SealedTask,
+    attempts: Vec<String>,
     ephemeral: bool,
     mib: u64,
     state: AgentSafeState,
@@ -140,6 +150,19 @@ struct AgentSafeLimits {
 }
 
 impl AgentSafeRecord {
+    fn from_origin(origin: oblivion_host::safe_origin::AgentCreated, mib: u64) -> Self {
+        Self { version: 1, id: origin.safe_id, parent: origin.parent_id, created_by_agent: true,
+            agent: origin.agent, creator_chat_id: origin.creator_chat_id, request_id: origin.request_id,
+            sealed_task: origin.sealed_task, attempts: origin.attempts, ephemeral: false, mib, state: AgentSafeState::AwaitingStart }
+    }
+    fn origin(&self) -> oblivion_host::safe_origin::AgentCreated {
+        oblivion_host::safe_origin::AgentCreated {
+            safe_id: self.id.clone(), parent_id: self.parent.clone(), request_id: self.request_id.clone(),
+            agent: self.agent.clone(), creator_chat_id: self.creator_chat_id.clone(),
+            sealed_task: self.sealed_task.clone(), attempts: self.attempts.clone(),
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         validate_id(&self.id)?;
         validate_id(&self.parent)?;
@@ -147,6 +170,7 @@ impl AgentSafeRecord {
         oblivion_host::volume::size(self.mib).map_err(Error)?;
         require(self.version == 1 && self.created_by_agent && self.id != self.parent
             && matches!(self.agent.as_str(), "codex" | "claude" | "opencode2")
+            && oblivion_host::safe_origin::attempts_valid(&self.request_id, &self.attempts)
             && self.creator_chat_id.as_ref().is_none_or(|id| !id.is_empty() && id.len() <= 256
                 && !id.chars().any(char::is_control)), "invalid_safe_provenance")
     }
@@ -217,12 +241,25 @@ fn agent_safe_records() -> Result<Vec<AgentSafeRecord>> {
             require(records.len() <= CHILD_LIMIT, "safe_provenance_limit")?;
         }
     }
+    for restored in raw_restores().restored()? {
+        if let oblivion_host::safe_origin::Origin::AgentCreated { record: origin } = restored.metadata.origin {
+            require(!records.iter().any(|record| record.id == origin.safe_id), "duplicate_safe_identity")?;
+            let bytes = trusted_file(&restored.directory.join("volume.luks"))?.metadata().map_err(|_| Error("metadata_failed"))?.len();
+            require(bytes % MIB == 0, "invalid_session_size")?;
+            let record = AgentSafeRecord::from_origin(origin, bytes / MIB);
+            record.validate()?;
+            records.push(record);
+        }
+    }
     records.sort_by(|left, right| left.id.cmp(&right.id));
     for record in &records { safe_ancestors(&records, &record.id)?; }
     Ok(records)
 }
 
 fn write_agent_safe(record: &AgentSafeRecord) -> Result<()> {
+    if raw_restores().restored()?.iter().any(|safe| safe.metadata.safe_id == record.id) {
+        return raw_restores().write_agent_origin(record.origin());
+    }
     let directory = record.directory();
     private_directory(&directory, true)?;
     let pending = directory.join(format!("{}.pending", record.id));
@@ -240,6 +277,42 @@ fn write_agent_safe(record: &AgentSafeRecord) -> Result<()> {
     sync_directory(&directory)
 }
 
+/// The caller holds storage.lock. Opening nonces and real ownership are
+/// rechecked; this returns only the sealed journal, never its plaintext task.
+pub(crate) fn task_origin(opening: &oblivion_host::autolock::Opening) -> Result<oblivion_host::safe_origin::AgentCreated> {
+    require(opening.slot == scope::current() && idle_opening()?.as_ref() == Some(opening), "session_changed")?;
+    require_safe_branch_open(&opening.safe_id)?;
+    require(session_info()?.is_some_and(|entry| matches!(entry.1.as_str(), "documents" | "agent"))
+        && !crate::vm::stopped()?, "session_not_open")?;
+    let records = agent_safe_records()?;
+    let record = records.iter().find(|record| record.id == opening.safe_id).ok_or(Error("safe_not_agent_created"))?;
+    require(matches!(record.state, AgentSafeState::AwaitingStart), "child_safe_not_available")?;
+    Ok(record.origin())
+}
+
+/// Prior Info must come from the trusted guest/managed-job inspection by the
+/// dispatcher, not from a public request. No derived job status is journaled.
+pub(crate) fn task_attempt(opening: &oblivion_host::autolock::Opening, prior: Option<&oblivion_host::managed::Info>, retry: bool) -> Result<String> {
+    let origin = task_origin(opening)?;
+    let records = agent_safe_records()?;
+    let mut record = records.into_iter().find(|record| record.id == opening.safe_id).ok_or(Error("safe_not_agent_created"))?;
+    let attempt = match origin.attempts.last() {
+        None => { require(!retry, "task_retry_not_confirmed")?; record.request_id.clone() }
+        Some(last) if !retry => return Ok(last.clone()),
+        Some(last) => {
+            require(origin.attempts.len() < oblivion_host::safe_origin::ATTEMPT_LIMIT, "task_attempt_limit")?;
+            let info = prior.ok_or(Error("task_retry_not_confirmed"))?;
+            require(info.valid() && info.request_id == *last && info.agent == origin.agent
+                && matches!(info.state, oblivion_host::managed::State::Failed | oblivion_host::managed::State::Cancelled), "task_retry_not_confirmed")?;
+            random_id()?
+        }
+    };
+    require(!record.attempts.contains(&attempt), "task_attempt_conflict")?;
+    record.attempts.push(attempt.clone());
+    write_agent_safe(&record)?;
+    Ok(attempt)
+}
+
 struct SafeRelation { id: String, parent: String }
 
 fn safe_relations(records: &[AgentSafeRecord]) -> Result<Vec<SafeRelation>> {
@@ -247,6 +320,12 @@ fn safe_relations(records: &[AgentSafeRecord]) -> Result<Vec<SafeRelation>> {
     for imported in share_imports().imported()? {
         require(!records.iter().any(|record| record.id == imported.id), "duplicate_safe_identity")?;
         if let Some(parent) = imported.parent { relations.push(SafeRelation { id: imported.id, parent }); }
+    }
+    for restored in raw_restores().restored()? {
+        if let oblivion_host::safe_origin::Origin::Shared { parent_id: Some(parent), .. } = restored.metadata.origin {
+            require(!relations.iter().any(|relation| relation.id == restored.metadata.safe_id), "duplicate_safe_identity")?;
+            relations.push(SafeRelation { id: restored.metadata.safe_id, parent });
+        }
     }
     Ok(relations)
 }
@@ -1157,11 +1236,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 mount_mode()? == MountMode::ReadWrite,
                 "general_not_writable",
             )?;
-            discard_pending(&PathBuf::from(format!(
-                "{MOUNT}/sessions/{}.pending",
-                args[3]
-            )))?;
-            discard_restore_record(&args[3])
+            discard_personal_restore(&args[3])
         }
         "enter-ram" => config.enter_ram(),
         "unlock" | "unlock-read-only" => {
@@ -1601,15 +1676,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 transfers::Command::RestoreDiscard { id } => {
                     crate::transfer_host::idle()?;
                     closed_archive()?;
-                    validate_id(&id)?;
-                    let path = Path::new(MOUNT).join(format!("sessions/{id}.pending"));
-                    if path
-                        .try_exists()
-                        .map_err(|_| Error("restore_record_failed"))?
-                    {
-                        discard_pending(&path)?;
-                    }
-                    discard_restore_record(&id)
+                    discard_personal_restore(&id)
                 }
                 transfers::Command::Recover => {
                     let started = crate::transfer_host::start_recovery()?;
@@ -1907,6 +1974,44 @@ fn session_policy(id: &str, access: Access) -> Result<Tools> {
     })
 }
 
+fn backup_origin(id: &str) -> Result<oblivion_host::safe_origin::Origin> {
+    if let Some(record) = agent_safe_records()?.into_iter().find(|record| record.id == id) {
+        return Ok(oblivion_host::safe_origin::Origin::AgentCreated { record: record.origin() });
+    }
+    if let Some(restored) = raw_restores().restored()?.into_iter().find(|safe| safe.metadata.safe_id == id) {
+        return Ok(restored.metadata.origin);
+    }
+    if let Some(imported) = persistent_safe_import(id)? {
+        return Ok(oblivion_host::safe_origin::Origin::Shared { parent_id: imported.parent,
+            provenance: imported.source.provenance, source_policy: imported.source.policy, required_proxy: imported.source.required_proxy });
+    }
+    Ok(oblivion_host::safe_origin::Origin::Local {})
+}
+
+fn authenticate_backup_origin(origin: &oblivion_host::safe_origin::Origin, capability: &family::Capability) -> Result<()> {
+    if let oblivion_host::safe_origin::Origin::AgentCreated { record } = origin {
+        let task = record.sealed_task.open(capability, &record.context()).map_err(Error)?;
+        drop(task);
+    }
+    Ok(())
+}
+
+fn validate_restore_relations(id: &str, origin: &oblivion_host::safe_origin::Origin, records: &[AgentSafeRecord]) -> Result<()> {
+    let mut relations = safe_relations(records)?;
+    let parent = match origin {
+        oblivion_host::safe_origin::Origin::AgentCreated { record } => Some(&record.parent_id),
+        oblivion_host::safe_origin::Origin::Shared { parent_id, .. } => parent_id.as_ref(),
+        _ => None,
+    };
+    if let Some(parent) = parent {
+        require_branch_open(records, parent)?;
+        require(!relations.iter().any(|relation| relation.id == id), "safe_provenance_conflict")?;
+        relations.push(SafeRelation { id: id.into(), parent: parent.clone() });
+    }
+    for relation in &relations { relation_ancestors(&relations, &relation.id)?; }
+    Ok(())
+}
+
 fn share_proxy_requirement(transport: Option<&egress::Profile>, unresolved: Option<&str>) -> Option<String> {
     match transport {
         Some(profile) => matches!(profile.transport(), oblivion_transport::Transport::Socks5 { .. }).then(|| "SOCKS5 proxy".to_owned()),
@@ -1948,13 +2053,22 @@ impl Config {
         let records = agent_safe_records()?;
         require_branch_open(&records, id)?;
         let title = session_titles(&MountMode::ReadWrite)?.remove(id).unwrap_or_else(|| "Untitled Safe".into());
-        let provenance = records.iter().find(|record| record.id == id);
-        let imported = persistent_safe_import(id)?;
-        let imported_provenance = imported.as_ref().and_then(|entry| entry.source.provenance.as_ref());
+        let origin = backup_origin(id)?;
+        let (created_by_agent, requested_agent, parent_not_included, unresolved_proxy) = match &origin {
+            oblivion_host::safe_origin::Origin::Local {} => (false, None, false, None),
+            oblivion_host::safe_origin::Origin::AgentCreated { record } => (true, Some(record.agent.clone()), true, None),
+            oblivion_host::safe_origin::Origin::Shared { parent_id, provenance, required_proxy, .. } => (
+                provenance.as_ref().is_some_and(|origin| origin.created_by_agent),
+                provenance.as_ref().and_then(|origin| origin.requested_agent.as_ref()).map(|agent| match agent {
+                    oblivion_share::Agent::Codex => "codex", oblivion_share::Agent::Claude => "claude", oblivion_share::Agent::Opencode2 => "opencode2",
+                }.to_owned()),
+                parent_id.is_some() || provenance.as_ref().is_some_and(|origin| origin.parent_not_included), required_proxy.as_deref(),
+            ),
+        };
         let profile = persistent_safe_profile(id)?;
         let access = crate::safe_access_store::read_profile(&profile.join("access.json"))?.unwrap_or(Access::Open);
         let transport = read_transport_profile(&profile.join("transport.json"))?;
-        let required_proxy = share_proxy_requirement(transport.as_ref(), imported.as_ref().and_then(|safe| safe.source.required_proxy.as_deref()));
+        let required_proxy = share_proxy_requirement(transport.as_ref(), unresolved_proxy);
         let vm = self.vm.as_ref().ok_or(Error("vm_not_configured"))?;
         vm.validate()?;
         open()?;
@@ -1967,14 +2081,7 @@ impl Config {
             require(crate::vm::network_devices()? == 0, "unsafe_share_network")?;
             Ok(crate::share_host::Metadata {
                 opening: idle_opening()?.ok_or(Error("idle_opening_unknown"))?, title,
-                created_by_agent: provenance.is_some_and(|record| record.created_by_agent)
-                    || imported_provenance.is_some_and(|record| record.created_by_agent),
-                requested_agent: provenance.map(|record| record.agent.clone()).or_else(|| imported_provenance
-                    .and_then(|record| record.requested_agent.as_ref()).map(|agent| match agent {
-                        oblivion_share::Agent::Codex => "codex", oblivion_share::Agent::Claude => "claude", oblivion_share::Agent::Opencode2 => "opencode2",
-                    }.to_owned())),
-                parent_not_included: provenance.is_some() || imported_provenance.is_some_and(|record| record.parent_not_included)
-                    || imported.as_ref().is_some_and(|entry| entry.parent.is_some()),
+                created_by_agent, requested_agent, parent_not_included,
                 policy: match access { Access::Offline => "offline", Access::Strict => "strict", Access::Open => "open-internet" },
                 required_proxy,
             })
@@ -2357,7 +2464,7 @@ impl Config {
         let mut record = AgentSafeRecord {
             version: 1, id, parent, created_by_agent: true,
             agent: request.agent, creator_chat_id: request.creator_chat_id,
-            request_id: request.request_id, sealed_task,
+            request_id: request.request_id, sealed_task, attempts: Vec::new(),
             ephemeral, mib, state: AgentSafeState::Creating,
         };
         write_agent_safe(&record)?;
@@ -2545,12 +2652,13 @@ impl Config {
             safe_id: id.into(),
             title: session_titles(&MountMode::ReadWrite)?.remove(id),
             history_version: 1,
+            origin: backup_origin(id)?,
         };
         let result = (|| {
-            self.open(id, secret)?;
-            write_session_info(id, "starting")?;
-            vm.start_documents()?;
-            write_session_info(id, "documents")?;
+            let credential = self.open_credential(id, secret)?;
+            authenticate_backup_origin(&metadata.origin, &credential.capability)?;
+            drop(credential);
+            self.start_personal_maintenance(id)?;
             match session_admin(oblivion_host::safe_admin::Command::Checkpoint { metadata })? {
                 oblivion_host::safe_admin::Response::Metadata { .. } => Ok(()),
                 oblivion_host::safe_admin::Response::Rejected { error } => {
@@ -2569,27 +2677,36 @@ impl Config {
                 _ => Err(Error("invalid_backup_metadata")),
             }
         })();
-        close_maintenance_session()?;
+        require(self.close_slot(result.is_err())?, "backup_cleanup_required")?;
         result
+    }
+
+    fn start_personal_maintenance(&self, id: &str) -> Result<()> {
+        write_key_file("opening-nonce", random_id()?.as_bytes())?;
+        write_key_file("session-info", &serde_json::to_vec(&(id, "share")).map_err(|_| Error("encode_failed"))?)?;
+        crate::share_host::begin(&idle_opening()?.ok_or(Error("idle_opening_unknown"))?)?;
+        self.vm.as_ref().ok_or(Error("vm_not_configured"))?.start_share()?;
+        require(crate::vm::network_devices()? == 0, "unsafe_backup_network")
     }
 
     fn finish_restore(&self, id: &str, secret: &[u8]) -> Result<()> {
         require((1..=1024).contains(&secret.len()), "invalid_secret_length")?;
         closed_archive()?;
+        require(!raw_restores().committed(id)?, "restore_already_committed")?;
+        require(!raw_restores().staged(id)?, "restore_staged_recovery_required")?;
         restore_receipt(id)?;
         let vm = self.vm.as_ref().ok_or(Error("vm_not_configured"))?;
         vm.validate()?;
         let path = Path::new(MOUNT).join(format!("sessions/{id}.pending"));
         self.admit_family()?;
         let credential = safe_credential(&path, None, secret)?;
-        let destination = Path::new(MOUNT).join(format!("sessions/{}.luks", credential.token.safe_id));
         require(!persistent_safe_path(&credential.token.safe_id)?.try_exists().map_err(|_| Error("image_check_failed"))?, "safe_already_exists")?;
+        require(!agent_safe_records()?.iter().any(|record| record.id == credential.token.safe_id), "safe_provenance_conflict")?;
         let result = (|| {
             self.admit_memory(self.reserved_mib(&open_sessions()?)?, vm.reservation_mib(), vm.reservation_mib(), "insufficient_session_memory")?;
+            write_key_file("personal-restore", id.as_bytes())?;
             crypt_open_keyslot(&path, "oblivion-session", credential.key.as_ref(), false, Some(credential.token.keyslot))?;
-            write_session_info(&credential.token.safe_id, "starting")?;
-            vm.start_documents()?;
-            write_session_info(&credential.token.safe_id, "documents")?;
+            self.start_personal_maintenance(&credential.token.safe_id)?;
             match session_admin(oblivion_host::safe_admin::Command::Inspect {})? {
                 oblivion_host::safe_admin::Response::Metadata { metadata } => Ok(metadata),
                 oblivion_host::safe_admin::Response::Rejected { error } => {
@@ -2608,13 +2725,15 @@ impl Config {
                 _ => Err(Error("invalid_backup_metadata")),
             }
         })();
-        close_maintenance_session()?;
+        require(self.close_slot(result.is_err())?, "restore_cleanup_required")?;
         let metadata = result?;
         require(metadata.safe_id == credential.token.safe_id, "invalid_backup_metadata")?;
-        if let Some(title) = metadata.title {
-            write_session_title(&credential.token.safe_id, &title)?;
-        }
-        publish(&path, &destination)?;
+        authenticate_backup_origin(&metadata.origin, &credential.capability)?;
+        require(!recovery_required()?, "recovery_required")?;
+        let records = agent_safe_records()?;
+        require_branch_open(&records, &metadata.safe_id)?;
+        validate_restore_relations(&metadata.safe_id, &metadata.origin, &records)?;
+        raw_restores().publish(id, &path, metadata)?;
         discard_restore_record(id)?;
         println!("{}", credential.token.safe_id);
         Ok(())
@@ -2683,6 +2802,10 @@ impl Config {
     }
 
     fn open(&self, id: &str, secret: &[u8]) -> Result<()> {
+        self.open_credential(id, secret).map(|_| ())
+    }
+
+    fn open_credential(&self, id: &str, secret: &[u8]) -> Result<SafeCredential> {
         validate_id(id)?;
         require_branch_open(&agent_safe_records()?, id)?;
         require(!open_sessions()?.iter().any(|entry| entry.id.as_deref() == Some(id)), "session_already_open")?;
@@ -2706,7 +2829,7 @@ impl Config {
             crypt_close("oblivion-session")?;
             return Err(error);
         }
-        Ok(())
+        Ok(credential)
     }
 
     fn format(&self, path: &Path, secret: &[u8]) -> Result<()> {
@@ -3116,6 +3239,8 @@ fn restore_receipt(id: &str) -> Result<oblivion_transfer::Receipt> {
 
 pub(crate) fn cleanup_restore(id: &str) -> Result<()> {
     validate_id(id)?;
+    if raw_restores().committed(id)? { return discard_restore_record(id) }
+    if raw_restores().staged(id)? { return Ok(()) }
     if Path::new(MOUNT)
         .join(format!("sessions/{id}.restore"))
         .try_exists()
@@ -3131,6 +3256,19 @@ pub(crate) fn cleanup_restore(id: &str) -> Result<()> {
     {
         discard_pending(&path)?;
     }
+    discard_restore_record(id)
+}
+
+fn discard_personal_restore(id: &str) -> Result<()> {
+    validate_id(id)?;
+    for index in 0..scope::LIMIT {
+        let slot = scope::Slot::try_from(index).map_err(Error)?;
+        require(scope::within(slot, || read_nonce(&runtime_record("personal-restore")))?.as_deref() != Some(id), "restore_cleanup_required")?;
+    }
+    require(!raw_restores().committed(id)?, "restore_already_committed")?;
+    raw_restores().discard(id)?;
+    let path = Path::new(MOUNT).join(format!("sessions/{id}.pending"));
+    if path.try_exists().map_err(|_| Error("restore_record_failed"))? { discard_pending(&path)?; }
     discard_restore_record(id)
 }
 
@@ -3468,7 +3606,7 @@ mod agent_safe_tests {
         AgentSafeRecord {
             version: 1, id: id.clone(), parent,
             created_by_agent: true, agent: "codex".into(), creator_chat_id: Some("explicit-native-chat-id".into()),
-            request_id: id, sealed_task,
+            request_id: id, sealed_task, attempts: Vec::new(),
             ephemeral: false, mib: 512, state: AgentSafeState::AwaitingStart,
         }
     }
@@ -3587,6 +3725,36 @@ mod agent_safe_tests {
             safe_id: &reopened.id, parent_id: &reopened.parent, request_id: &reopened.request_id, agent: &reopened.agent,
         }).unwrap();
         assert_eq!(task.len(), 16384);
+    }
+
+    #[test]
+    fn personal_restore_authenticates_standalone_task_context_before_publication() {
+        let record = record(2, 1);
+        let capability = family::Capability::from_root_secret("ffffffffffffffffffffffffffffffff", Zeroizing::new([7; 32])).unwrap();
+        let mut origin = record.origin();
+        assert!(authenticate_backup_origin(&oblivion_host::safe_origin::Origin::AgentCreated { record: origin.clone() }, &capability).is_ok());
+        origin.parent_id = format!("{:032x}", 3);
+        assert!(authenticate_backup_origin(&oblivion_host::safe_origin::Origin::AgentCreated { record: origin }, &capability).is_err());
+        let wrong_capability = family::Capability::from_root_secret("ffffffffffffffffffffffffffffffff", Zeroizing::new([8; 32])).unwrap();
+        assert!(authenticate_backup_origin(&oblivion_host::safe_origin::Origin::AgentCreated { record: record.origin() }, &wrong_capability).is_err());
+        assert!(validate_restore_relations(&record.id, &oblivion_host::safe_origin::Origin::AgentCreated { record: record.origin() }, &[]).is_ok());
+        assert!(validate_restore_relations(&record.id, &oblivion_host::safe_origin::Origin::AgentCreated { record: record.origin() }, &[self::record(1, 2)]).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires isolated root-owned tmpfs /run; no production state"]
+    fn personal_restore_discard_cannot_unlink_a_different_slots_maintenance_volume() {
+        assert_eq!(std::env::var("OBLIVION_PERSONAL_RESTORE_TEST").as_deref(), Ok("1"));
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        let id = "a".repeat(32);
+        private_directory(&Path::new(MOUNT).join("sessions"), true).unwrap_or_else(|error| panic!("{}", error.0));
+        let path = Path::new(MOUNT).join(format!("sessions/{id}.pending"));
+        OpenOptions::new().create_new(true).write(true).mode(0o600).open(&path).unwrap().write_all(b"encrypted pending source").unwrap();
+        let owner = scope::Slot::try_from(2).unwrap();
+        private_directory(Path::new(&owner.runtime()), true).unwrap_or_else(|error| panic!("{}", error.0));
+        scope::within(owner, || write_key_file("personal-restore", id.as_bytes())).unwrap_or_else(|error| panic!("{}", error.0));
+        assert!(matches!(discard_personal_restore(&id), Err(Error("restore_cleanup_required"))));
+        assert_eq!(fs::read(path).unwrap(), b"encrypted pending source");
     }
 
     #[test]
@@ -4078,6 +4246,18 @@ fn sessions(extension: &str) -> Result<Vec<String>> {
             trusted_file(&if extension == ".growing" { path.with_extension("growing") } else { path })?;
             ids.push(imported.id);
         }
+        for restored in raw_restores().restored()? {
+            let path = restored.directory.join("volume.luks");
+            if extension == ".growing" && !path.with_extension("growing").try_exists().map_err(|_| Error("session_list_failed"))? { continue }
+            require(!ids.contains(&restored.metadata.safe_id), "duplicate_safe_identity")?;
+            trusted_file(&if extension == ".growing" { path.with_extension("growing") } else { path })?;
+            ids.push(restored.metadata.safe_id);
+        }
+    }
+    if extension == ".pending" {
+        for transfer in raw_restores().staged_ids()? {
+            if !ids.contains(&transfer) { ids.push(transfer); }
+        }
     }
     ids.sort();
     Ok(ids)
@@ -4204,14 +4384,15 @@ fn write_session_info(id: &str, mode: &str) -> Result<()> {
     }
     Ok(())
 }
-fn session_admin(command: oblivion_host::safe_admin::Command) -> Result<oblivion_host::safe_admin::Response> {
+pub(crate) fn session_admin(command: oblivion_host::safe_admin::Command) -> Result<oblivion_host::safe_admin::Response> {
     require(!recovery_required()? && mapping_open("oblivion-session")? && !crate::vm::stopped()?, "session_not_open")?;
+    let budget = if matches!(command, oblivion_host::safe_admin::Command::Job { .. }) { 4 } else { 65 };
     let request = oblivion_host::safe_admin::Request::new(command);
     require(request.valid(), "invalid_safe_admin_request")?;
     let id = random_id()?;
     let result = (|| {
         let stream = crate::vm::safe_admin_port(&id)?;
-        let mut channel = oblivion_host::channel::Channel::new(&stream, std::time::Duration::from_secs(65));
+        let mut channel = oblivion_host::channel::Channel::new(&stream, std::time::Duration::from_secs(budget));
         oblivion_host::safe_admin::exchange(&mut channel, &request).map_err(|_| Error("safe_admin_failed"))
     })();
     let cleanup = crate::vm::remove_copy_port(&id);
@@ -4468,6 +4649,7 @@ impl Config {
             && ephemeral_child_id()?.is_none()
             && !runtime_record("session-recovery-required").exists()
             && !runtime_record("session-info").exists()
+            && !runtime_record("personal-restore").exists()
             && crate::share_host::maintenance_opening()?.is_none()
             && !crate::transfer_host::prepared()? && !crate::onion_host::prepared()? {
             return Ok(true);
@@ -4490,6 +4672,7 @@ impl Config {
             clear_key_file("access.json")?;
             clear_key_file("native-offline")?;
             clear_key_file("share-import")?;
+            clear_key_file("personal-restore")?;
             clear_key_file("manual-owner")?;
             let clients = Path::new(&scope::current().runtime()).join("agent-clients");
             if clients.exists() { fs::remove_dir_all(clients).map_err(|_| Error("client_cleanup_failed"))?; }
