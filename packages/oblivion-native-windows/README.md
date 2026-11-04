@@ -2,8 +2,8 @@
 
 Experimental `oblivion-vm.exe` source for a headless, owned Hyper-V controller.
 This is the backend core, **not an installable Windows Oblivion release**.
-The Windows frontend, privileged installation, VHDX initialization, network
-recovery integration and actual nested-Safe boot remain unfinished or unqualified.
+The installed Windows frontend, privilege setup, interrupted-install/resource
+recovery and actual nested-Safe boot remain unfinished or unqualified.
 The surrounding architecture is described in [Windows](../../docs/WINDOWS.md).
 
 The helper uses the Windows SDK through the pinned `windows-sys` bindings.
@@ -15,6 +15,16 @@ network device. `network: true` prepares a separate, owned HCN ICS network and
 one statically addressed controller endpoint before creating the VM.
 `capabilities` distinguishes observed HCS/nested availability from product
 support, which remains false until the complete integration is qualified.
+
+`supervisor.rs` owns one helper process and its lifetime pipe, while terminal
+clients hold authenticated leases. Its initial-install path creates a new VHDX;
+normal acquisition reuses existing storage. An SDK-verified creation capability
+authorizes the first guest bootstrap, never a general configuration flag. No
+existing disk is overwritten or mounted on the Windows host. The current
+bootstrap sends the token plus Existing/NewDisk metadata; only matching fresh
+authority permits the guest to write its initial marker. Shutdown waits for the
+owned helper's real exit. Uncertain cleanup persists Recovery; missing pipes do
+not authorize recovery or VM adoption.
 
 The network follows the HCN default schema used by Microsoft's WSL implementation:
 ICS with `IsolateSwitch: true` and the nonpersistent flag, a requested private
@@ -36,8 +46,10 @@ the DNS flag omitted, interaction with other virtualization products and retaine
 resource recovery still need Windows qualification. Safe routing remains the
 responsibility of the existing per-Safe Tor/SOCKS5 gateways inside the controller.
 
-The one supported private invocation is `oblivion-vm.exe run --config PATH`.
-Its supervisor must provide an inherited stdin pipe and keep its writer open;
+The ordinary backend invocation is `oblivion-vm.exe run --config PATH`.
+The supervisor's distinct initial-install invocation creates the disk before
+boot; it cannot retry by overwriting an existing VHDX. Both backend paths require
+an inherited stdin pipe whose writer the supervisor keeps open;
 no application bytes belong on that pipe. EOF or any byte revokes the runtime.
 Configuration is a private, bounded regular file with no token or provider key.
 During HCS waits the supervisor is checked at intervals of at most 100 ms.
@@ -47,7 +59,7 @@ Each configuration binds its 32-character runtime identity to its compute-system
 ID, control-pipe namespace and the VHDX Identifier. The VHDX must already contain
 the current runtime disk marker or ext4 identity in its **virtual block content**;
 putting the marker in the VHDX container header would corrupt the container.
-The helper neither initializes a disk nor adopts a disk selected by its name.
+Normal startup never initializes an unknown disk or adopts one selected by name.
 Guest preparation independently selects the configured VMBus SCSI controller
 and data LUN 1 before checking the marker/UUID. Its disk selection never depends
 on the assigned `sdX` name.

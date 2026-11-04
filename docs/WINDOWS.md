@@ -1,6 +1,6 @@
 # Windows native backend — feasibility and implementation proposal
 
-Implementation checkpoint: 4 November 2026. **The Windows product is not complete
+Implementation checkpoint: 5 November 2026. **The Windows product is not complete
 or qualified.** An experimental HCS helper core and owned HCN ICS network are
 implemented. A same-user authenticated named-pipe client and shared CLI adapter
 are now present; complete frontend integration, installation and recovery remain
@@ -8,6 +8,14 @@ open. The manager has a Windows x64 build target; its PE
 execution and complete installed path still need qualification. This is a proposal for phase 8 of the
 [roadmap](oblivion1.0-roadmap.md), rather than instructions for an available product.
 No Windows VM has been booted to qualify this source increment.
+
+The source supervisor now elects one private runtime generation and gives each
+terminal a lease. It owns the helper process and lifetime pipe; control probes
+verify that exact kernel process object, not merely an SID or recorded PID.
+The last lease requests guarded shutdown, and only a confirmed helper exit after
+HCS/network/grant cleanup permits Stopped. Failed or uncertain shutdown persists
+Recovery. Recovery after losing the supervisor still needs the dedicated owned
+resource reconciliation; an absent pipe cannot clear that fence.
 
 ## First target: Windows 11 x64 with an HCS-owned Hyper-V VM
 
@@ -51,8 +59,8 @@ owned network adapter, or omit networking entirely. `capabilities` reports obser
 separately from product support, which remains false. The common CLI has a
 Windows transport adapter for this endpoint. The native Runtime supplies console
 passwords, guest terminal frames, pipe I/O, resize, signals and opening-scoped
-human activity to the common workflows. Runtime discovery, supervision and the
-command entrypoint are still required before it can serve an installed Windows
+human activity to the common workflows. Installed discovery, supervisor integration
+and the command entrypoint are still required before it can serve an installed Windows
 CLI or manager. Its terminal keeps the control lease until explicit agent release;
 guest Exit alone must not race the controller's EOF cleanup.
 
@@ -222,6 +230,16 @@ Concrete integration and qualification still required:
   anonymous users, so default ACLs are unsuitable here. [Pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights).
 
 ## Storage and lifecycle
+
+Fresh-disk creation is now implemented with `CreateVirtualDisk`, a private owner
+and DACL, pinned ancestors and the runtime UUID. The initial-install helper owns
+the resulting creation capability through first boot. Its private bootstrap
+sends the runtime identity and capacity; the guest places this authority in
+root-only RAM and consumes it before marking the matching blank block device.
+It then uses the existing ext4 preparation. Ordinary `run` sends Existing and
+refuses a blank, unrecognized disk. This does not require attaching the VHDX to
+the Windows host for formatting. Installed setup and interrupted-install recovery
+remain to be connected and qualified. [SDK creation](https://learn.microsoft.com/en-us/windows/win32/api/virtdisk/nf-virtdisk-createvirtualdisk).
 
 A VHDX can present the same logical block disk to the controller; LUKS2 and Safe
 volumes remain inside it, with no Windows filesystem mount. Microsoft supports

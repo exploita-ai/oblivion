@@ -90,10 +90,17 @@ transport failure. The runtime supervisor must supply the trusted runtime ID.
 native guest frames, resize, signals, exact redirected bytes and explicit agent
 release before closing its lease. Console presentation uses the same terminal
 filter and launch model as Unix. Only human input renews idle activity; bounded
-reports carry opening identities, never input content. Discovery, supervision,
-installation and the installed Windows command entrypoint remain unfinished.
+reports carry opening identities, never input content. Installed discovery,
+supervisor integration, installation and the Windows command entrypoint remain unfinished.
 Real named-pipe, stdio and isolated-console fixtures are part of the Windows test
 target; cross-compilation on Mac does not execute them.
+
+`Runtime::supervised` now holds a per-terminal lease on the private supervisor;
+`Runtime::initialize` requests the distinct fresh-disk path. Both wait for the
+owned helper's authenticated controller before running the common commands.
+Another terminal reuses the same runtime. Last-owner idle shutdown is guarded,
+and uncertain stop leaves Recovery. Installed discovery, privilege setup and
+owned-resource reconciliation after losing the supervisor remain unfinished.
 
 Personal backup grammar and `status`, `finish` and `discard` use the common
 frontend. The native ciphertext copy engine consumes the same status and finish

@@ -7,6 +7,13 @@ They package the native launcher, VM helper, terminal manager, and a separately
 built matching Oblivion controller ISO. They are not release artifacts and do
 not establish support on real hardware.
 
+The same manifest and assembly tool now also understand `windows-x86_64` with
+three native `.exe` files and the pinned OpenTUI DLL. Validation is shared through
+`oblivion-bundle`, including Windows path and case-alias checks. This is a build
+contract, not a complete Windows bundle: the installed CLI entrypoint and
+installer remain unfinished. Do not substitute the Unix launcher or ship an
+incomplete package; see [Windows status](WINDOWS.md).
+
 Linux ARM64 additionally requires QEMU 10.1 or newer for its outer nested
 controller. The helper checks the trusted executable before runtime allocation;
 the ARM64 Live installs the appropriate Debian backports package automatically.

@@ -15,7 +15,14 @@ to the host/controller, outside this crate.
 Agent channels retain their existing kind byte, u32 big-endian payload length and
 at most 65536 raw payload bytes; empty payloads remain valid for stdin EOF. Size
 is the shared guest PTY geometry. Agent launch admission, managed jobs, file
-manifests and OS-specific byte transport remain in their current packages.
+manifests and OS-specific byte transport retain their domain/platform owners.
+Launch requests and the incremental frame decoder are shared here.
+
+The private runtime bootstrap has one current v2 format: READY, the per-boot
+token, bounded Existing/NewDisk metadata and SET. NewDisk carries only an exact
+runtime identity and capacity; the creating host adapter owns authorization.
+There is no disk pathname or compatibility reader in this protocol. Control
+connections retain their separate HELLO/token/ACK exchange.
 
 From this directory:
 

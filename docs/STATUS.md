@@ -1,6 +1,6 @@
 # Oblivion 1.0 status
 
-Updated 4 November 2026. The current source is a development refactor. Published
+Updated 5 November 2026. The current source is a development refactor. Published
 0.x images are the earlier Live-only product; they are not releases of the native
 privacy framework. Use the [roadmap](oblivion1.0-roadmap.md) as the authoritative
 feature and acceptance ledger.
@@ -277,7 +277,7 @@ attachment lease closes. Human activity uses the same classifier and
 opening-bound report as Unix, through a bounded worker. Real Windows fixtures
 cover these boundaries, including an isolated console subprocess; they have
 only been cross-compiled on this Mac. There is still no installed Windows
-entrypoint, runtime election/supervision or installer qualification.
+entrypoint or installer qualification.
 
 Remaining release gates include real login and scoped child-credential delegation,
 chat persistence after cold restart,
@@ -291,3 +291,30 @@ cleanup and signed release provenance. Local inference is deferred until after
 
 CI builds current-source images as drafts. A successful check, build or checksum
 alone must not publish them as qualified releases.
+
+The Windows source now has a private runtime supervisor with per-client leases,
+exact helper-process identity and an owned lifetime pipe. Multiple terminals
+reuse that runtime. The final owner requests guarded idle shutdown; an uncertain
+stop persists Recovery and never becomes a successful stop because a pipe or PID
+disappeared. A cancelled or rejected client is isolated at admission, without
+stopping other owners. Installed discovery, privilege setup and reconciliation
+of HCS/network/grants after a crash remain unfinished.
+
+Fresh Windows disk initialization now creates a private VHDX through the SDK,
+binds its identifier and capacity, and retains a nonserializable creation
+capability. Only the distinct initial-install path can send NewDisk authority
+through the current private bootstrap. The guest stores it in root-only RAM,
+matches runtime identity and capacity, requires a blank first block and consumes
+the authority before writing its marker. Normal startup cannot authorize a blank
+disk. Formatting/checking uses the pinned descriptor; a read-only handoff keeps
+that object pinned through mounting. Real Linux procfd tests cover formatting,
+checking, refusal and the handoff; the mount case was skipped without the required
+capability/loop support. Rust/Python bootstrap tests pass. Windows disk and
+supervisor fixtures have been cross-compiled, not executed on this Mac.
+
+Desktop bundles now share one portable manifest validator and canonical identity,
+already consumed by the Unix installer. The existing builder accepts a Windows
+target with native `.exe` roles and the OpenTUI DLL, while rejecting Windows path
+aliases. There is no completed Windows CLI binary/installer to distribute yet.
+The compiler context now includes the common bundle, wire, CLI and Windows
+dependency sources; this source change was not qualified by building another ISO.
