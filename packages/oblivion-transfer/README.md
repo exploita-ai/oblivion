@@ -36,6 +36,27 @@ selected desktop files over private streams without shared folders. Current
 The relay binary requires Linux; Mac tests exercise its library with explicit
 lifetime channels, while Linux tests and the VM laboratory exercise real pidfds.
 
+## Native copy outcomes
+
+The desktop CLI creates an operation ID before mutating a receiver. Native
+import operations keep bounded context and receipts in the Safe's encrypted
+staging; exports keep them in `.oblivion-transfers` inside the explicitly chosen
+destination. No absolute host source path is saved in that durable context. The manager keeps
+only its latest 32 operation references in RAM, clearing them when Oblivion locks.
+
+`files status`, `files recover` and `files discard` select that exact operation
+and Safe. Export inspection additionally requires the original destination.
+Current Safe opening and destination directory identity are rechecked. A lost
+acknowledgment or cleanup error cannot prove that publication failed, so callers
+query the receiver instead of starting a second copy automatically.
+
+Recovery revalidates the complete private tree against the approved manifest,
+including unexpected files, before publishing through pinned directory handles.
+It finishes publication only; it does not resume a partially transmitted payload.
+A published receipt records the original transfer, while later working-file
+edits remain intact. Discard removes only identifiable unpublished private data,
+never published output. Missing or untrusted context remains an unknown result.
+
 ## Encrypted session portability
 
 Closed-session backup and restore reuse the streaming, approval and receipt

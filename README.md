@@ -177,6 +177,25 @@ Existing literal paths take precedence. A single surrounding quote pair or a
 terminal-escaped path is also accepted, without running a shell or expanding
 environment variables, globs or multiple selections.
 
+**Files → Transfers and recovery** checks the receiver's recorded outcome after
+a copy, including a lost final reply. It can finish publication of a verified
+copy without copying its source again, or discard only private incomplete
+staging. Published output is kept. The latest 32 operation references stay in the
+manager's RAM; the CLI prints each operation ID before copying, so keep that ID
+for inspection after closing the manager.
+
+```sh
+oblivion files status --safe research --operation COPY_ID --json
+oblivion files recover --safe research --operation COPY_ID
+oblivion files discard --safe research --operation COPY_ID
+```
+
+Open the Safe first. For an export, add `--destination ./exports` to identify
+its original destination directory. Recovery checks the current Safe opening
+and the recorded destination identity. A published receipt describes the
+original copy; it does not certify later edits to those files. An unknown result
+does not trigger another copy automatically.
+
 When choosing an agent in an existing Safe, **Enter** starts a new conversation
 and **C** continues that agent's latest conversation for its current workspace.
 Saved tasks can reopen their recorded native chat after completion and verified

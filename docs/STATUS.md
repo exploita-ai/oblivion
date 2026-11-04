@@ -21,6 +21,17 @@ accepts a single terminal-escaped path without executing a shell, expanding
 variables or globs. Nothing is imported by pasting. Actual terminal drop gestures
 and OS-native drag-and-drop APIs remain unqualified or unimplemented respectively.
 
+Native copies now have stable operation IDs and receiver-side outcome records.
+CLI and manager distinguish unknown, incomplete, ready, published and discarded
+states rather than treating a failed command as proof that no output exists.
+Explicit recovery verifies private staged content and finishes publication
+without recopying; discard preserves published output and later user edits.
+Records bind the Safe and destination identity, and file attachment checks the
+current opening and lock fences under the controller lock. The manager's latest
+32 references stay in RAM; durable context is only in encrypted Safe staging or
+the selected export destination. Transfer progress/cancellation UI, multi-select
+and source manifest summaries before confirmation remain incomplete.
+
 Cross-agent conversation sharing, synchronization, conversion and handoff are
 outside the 1.0 scope. Each agent owns its native chats and resume inside the
 Safe. The canonical catalog, sync/projection workers, cross-agent deletion
@@ -126,7 +137,7 @@ production emulation fallback. Linux hardware acceptance and the Windows backend
 remain open.
 
 Portable CLI run/proxy parsing, private wire framing and Files validation now
-compile for Windows MSVC and are exercised in the Windows CI job. The shared
+compile for Windows MSVC; the Windows CI job includes their portable tests. The shared
 amd64 controller build also verifies Hyper-V driver coverage in its kernel and
 initramfs. The Windows frontend, backend, bootstrap authentication, EFI boot and
 installer remain unimplemented or unqualified; see [Windows requirements](WINDOWS.md).
