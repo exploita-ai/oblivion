@@ -160,11 +160,23 @@ preserves raw JSON status and binds close requests to the observed slot and Safe
 ID. This is a migrated frontend slice, rather than a second Windows command
 implementation; the remaining orchestration and OS adapters are still open.
 
+Agent `run`, `unlock` and tmux `shell --safe` now share their actual orchestration
+as well. Safe lookup, creation/reopening, mode checks, protected startup and idle
+cleanup use an injected controller and platform hooks; the existing Unix launcher
+consumes them directly. First archive setup, private terminal prompts, clock/wait,
+notifications and agent/Workspace attachment remain platform hooks. Run and shell
+syntax is checked before VM startup. Transport, policy and cleanup calls after an
+opening carry both the chosen slot and expected Safe ID. The portable code uses
+the same network-command DTOs as the Linux controller, without linking to its
+Unix services. Real Unix-socket fixtures cover the path; this is not a native
+Windows terminal adapter or Hyper-V implementation.
+
 Remaining split, without a second command implementation:
 
-1. Move the existing frontend commands/orchestration into a portable launcher
-   boundary. Keep Linux controller services and storage code in the Linux host
-   package, rather than linking them into every desktop executable.
+1. Move the remaining command orchestration, including archive initialization,
+   Files, network settings, Share and backup, into the portable frontend boundary.
+   Keep Linux controller services and storage code in the Linux host package,
+   rather than linking them into every desktop executable.
 2. Connect the shared CLI, wire and transfer boundaries to Windows transports
    and filesystem endpoints. Keep one command grammar and protocol rather than
    adding platform-specific copies or compatibility readers.

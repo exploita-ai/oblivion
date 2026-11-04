@@ -1,15 +1,39 @@
-# Portable Oblivion CLI syntax
+# Portable Oblivion frontend
 
-The native launcher uses this single parser for `oblivion run` options and SOCKS5
-URLs. It performs no terminal, filesystem, network, VM or authentication I/O.
-The Windows frontend can consume the same parser without reproducing its grammar.
-Name validity, Safe selection and authorization remain at their owning domain
-boundary; a parsed request does not grant access or mean a named Safe exists.
+The native launcher consumes the shared command parser and executor in this
+crate. `status --json`, `safes` and `close NAME` use one controller read model;
+`run` owns Safe lookup, creation or reopening, network configuration, protected
+startup and cleanup after a failed attachment. `shell --safe` uses the same
+opening, startup and cleanup for tmux; `unlock` uses the shared storage-mode
+checks and password request. The Windows frontend can consume
+the same implementation without reproducing these decisions.
+
+The frontend uses an injected authenticated controller and platform hooks for
+private passwords, initial archive setup, available slots, monotonic time,
+waiting, notices and terminal attachment. It does not open sockets, configure a
+VM, read an OS credential store or manage a terminal itself. Controller-side
+authorization remains authoritative; a parsed request does not grant access or
+mean a named Safe exists.
 
 Options stop at `codex`, `claude` or `opencode2`. All subsequent UTF-8 strings are
 passed unchanged, including empty strings and options with the same spelling as
 Oblivion's. The parser neither splits commands nor expands shell expressions.
 An omitted transport/policy remains omitted rather than changing an existing Safe.
+
+An existing `--safe` never creates a replacement. An active Safe reuses its slot
+and refuses network overrides through `run`; trusted network controls handle
+those changes separately. A closed RAM child reopens its existing volume through
+its family authority. Calls after opening, including transport changes and idle
+cleanup, carry the selected slot and expected Safe identity. A malformed creation
+reply is rejected without echoing its contents or using it as a name.
+
+Only `gateway_not_ready` is retried, at 500 ms intervals within a 240-second retry
+window. The authenticated transport owns each RPC deadline; this window is not a
+hard limit on the total command duration. No direct-network fallback is added.
+Attachment failure after a new opening asks the controller to close it only when
+idle. A Safe already used by another client is not closed by that failure path.
+The shared Workspace executor rejects pipes before issuing controller or password
+requests. The launcher rejects malformed Workspace syntax before runtime startup.
 
 SOCKS5 URLs accept the existing literal IPv4/port syntax and optional percent-
 encoded credentials. Both `socks5://` and `socks5h://` use the existing transport;
@@ -28,4 +52,5 @@ cargo test --locked
 cargo check --locked --lib --target x86_64-pc-windows-msvc
 ```
 
-This is a portable parsing boundary, not an implemented Windows CLI or VM backend.
+The Unix launcher uses this executor in production. Portable compilation and
+component tests do not qualify an installed Windows CLI or Hyper-V backend.

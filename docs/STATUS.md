@@ -192,12 +192,21 @@ no Windows PE execution, installed bundle or Hyper-V qualification is claimed.
 
 `status --json`, `safes` and `close NAME` now run through the shared frontend
 parser/executor in `oblivion-cli`, with the same State/Safe lookup used by the
-other existing launcher commands. The authenticated Unix adapter remains the
-production transport. Both local and desktop control paths use one portable
-request/response codec while preserving their framing and lifetime boundaries.
+other existing launcher commands. Agent `run`, `unlock` and tmux `shell` now use
+shared orchestration too: Safe creation/reopening, storage-mode checks, protected
+startup and idle cleanup are consumed by the actual Unix launcher. OS adapters
+retain private prompts, first archive setup, monotonic clocks and terminal leases.
+Run and Workspace syntax are checked before runtime startup. Network changes after
+opening, including Egress, carry both the slot and expected Safe ID; malformed
+creation IDs fail before naming or attachment. Actual Unix-socket fixtures cover
+these paths, including opaque argv, RAM-child reuse and failed cleanup. This does
+not qualify the installed VM or complete the Windows launcher. The authenticated
+Unix adapter remains the production transport. Both local and desktop control
+paths use one portable request/response codec while preserving their framing and
+lifetime boundaries.
 Malformed peer data produces static protocol/state errors instead of repeating
-payload fields. Actual Unix-socket fixtures cover the migrated commands; a
-Windows backend and the remaining portable command orchestration are still open.
+payload fields. A Windows backend and the remaining portable command
+orchestration are still open.
 
 Remaining release gates include real login and scoped child-credential delegation,
 chat persistence after cold restart,

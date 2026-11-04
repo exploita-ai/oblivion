@@ -46,6 +46,8 @@ La grammatica di `run` e dei proxy è ora condivisa in `oblivion-cli`, separata 
 
 Anche `status --json`, `safes` e `close NAME` ora usano un solo parser ed executor portabile con proiezione dello stato e risoluzione delle Safe condivise, consumato dal launcher Unix reale. I due adapter di controllo usano lo stesso codec request/response mantenendo autenticazione, deadline, framing locale/native e lease. Il manager dispone di target Windows x64 per eseguibile e DLL OpenTUI, con descrittore comune al builder e alla ricerca del launcher; il picker riceve il percorso padre dal chiamante locale o guest. Le fixture verificano questi confini e la CI aggiunge build/test frontend su Windows. Non sono ancora un backend Hyper-V, una CLI interamente portata o un’installazione Windows qualificata.
 
+Anche l’orchestrazione di `run`, `unlock` e `shell --safe` è ora condivisa e usata dal launcher Unix: ricerca, creazione o riapertura della Safe, vincoli della modalità storage, attesa del gateway e pulizia dopo errore hanno una sola implementazione portabile. Gli adapter conservano prompt privati, primo setup dell’archivio, orologio e attesa, messaggi e attachment del terminale. Il parsing di run e Workspace precede l’avvio del runtime. Dopo l’apertura anche Egress, oltre a policy e pulizia, vincola la richiesta a slot e ID della Safe; un ID creato malformato viene rifiutato senza ripeterne il contenuto. Le fixture con socket Unix reale verificano argv opachi, riuso della Safe attiva e delle figlie RAM, scoping e fallimento della pulizia. Restano da portare gli altri comandi e da qualificare l’installazione completa; questa separazione non risolve il blocco KVM sul Mac.
+
 ## 1. Vocabolario, distribuzioni e confini
 
 | Termine | Significato per la 1.0 |
