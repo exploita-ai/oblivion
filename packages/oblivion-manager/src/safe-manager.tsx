@@ -15,6 +15,8 @@ import { NativeShare, type ShareSelection } from "./native-share"
 import { NativeImports } from "./native-imports"
 import { requestedAgentName, SafeInspector } from "./safe-inspector"
 import { NativeTask } from "./native-task"
+import { NativeBackups } from "./native-backups"
+import { NativePassword } from "./native-password"
 
 const agents = [
   { id: "codex", name: "Codex", description: "Open the official Codex CLI. Its login, tools and conversation history stay inside this Safe." },
@@ -31,7 +33,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
   const [attached, setAttached] = createSignal(false)
   const [selected, setSelected] = createSignal(0)
   const [area, setArea] = createSignal<"list" | "actions">("list")
-  const [page, setPage] = createSignal<"safes" | "name" | "agents" | "lock" | "settings" | "system" | "network" | "files" | "rename" | "grow" | "idle" | "storage" | "share" | "imports" | "inspect" | "task">(props.overlay?.page ?? "safes")
+  const [page, setPage] = createSignal<"safes" | "name" | "agents" | "lock" | "settings" | "system" | "network" | "files" | "rename" | "grow" | "idle" | "storage" | "share" | "imports" | "backups" | "password" | "inspect" | "task">(props.overlay?.page ?? "safes")
   const [sharing, setSharing] = createSignal<ShareSelection>()
   const [storageReview, setStorageReview] = createSignal<{ plan: StoragePlan | null; reset: boolean }>()
   const [context, setContext] = createSignal<string | undefined>(props.overlay?.safe)
@@ -75,6 +77,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
     : error() ? "Runtime status is unavailable. Press R to refresh before opening."
     : !state()?.sessions.includes(id) && !agentRecord(id) && !active().some((entry) => entry.id === id) ? "This Safe is no longer present. Return to Safes."
     : hostClosing() || safeClosing(id) ? "This Safe is closing and locking."
+    : state()?.family_password_pending.includes(id) ? "Complete or roll back this family's pending password change in Settings before opening this Safe."
     : state()?.recovery_required || active().some((entry) => entry.id === id && entry.recovery_required) || agentRecord(id)?.state === "recovery-required" ? "Recovery is required before this Safe can open."
     : agentRecord(id)?.state === "failed" ? "This Safe's creation failed. No interactive client can start from this record."
     : agentRecord(id)?.ephemeral && !active().some((entry) => entry.id === id)
@@ -144,7 +147,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
     }
   }
 
-  function section(next: "safes" | "settings" | "system" | "network" | "files" | "rename" | "grow" | "idle" | "imports") {
+  function section(next: "safes" | "settings" | "system" | "network" | "files" | "rename" | "grow" | "idle" | "imports" | "backups" | "password") {
     if (attached() || busy()) return
     if (selectedId()) setContext(selectedId())
     if (["network", "files", "rename", "grow"].includes(next) && !safe()) return
@@ -262,11 +265,15 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
       { name: "Increase storage", description: "Increase the encrypted capacity of a closed Safe. This requires its password.", disabled: selectedOpen() ? "Close this Safe before increasing its storage." : undefined, action: "Increase storage", run: () => section("grow") },
     ] : []),
       { name: "Automatic lock", description: "Set inactivity timers for every Safe and Oblivion. Only human input keeps work open.", action: "Configure automatic lock", run: () => section("idle") },
+      { name: "Personal backups", description: "Back up a complete closed Safe, including saved logins, or restore its original encrypted volume. Inspect interrupted transfers separately from Share.", disabled: state()?.app_mode !== "persistent" ? "Unlock writable encrypted storage first." : undefined,
+        action: "Open backup and recovery", run: () => section("backups") },
       { name: "Share all Safes", description: "Export every persistent Safe into one encrypted Share. Provider login stores are excluded; content scanning is best effort.",
         disabled: state()?.app_mode !== "persistent" ? "Unlock writable encrypted storage first." : !state()?.sessions.length ? "There are no persistent Safes to export." : active().length ? "Close the included Safes before Share all." : hostClosing() || state()?.recovery_required ? "Wait for verified teardown and recovery." : undefined,
         action: "Choose destination", run: shareAll },
       { name: "Share imports", description: "Inspect pending and interrupted imports, or discard unpublished data explicitly. Completed imports are read-only.", disabled: state()?.app_mode === "ram-only" ? "Unlock your encrypted archive to inspect Share imports." : undefined,
-        action: "Inspect imports", run: () => section("imports") }]
+        action: "Inspect imports", run: () => section("imports") },
+      { name: "Family passwords", description: "Review the selected Safe's local family, change its shared password, or recover an interrupted update. Old backups retain their password.", disabled: state()?.app_mode !== "persistent" ? "Unlock writable encrypted storage first." : undefined,
+        action: "Review family and recovery", run: () => section("password") }]
     if (page() === "lock") return [
       { name: "Keep working", description: "Return to your Safes.", run: () => { setPage("safes"); setSelected(0) } },
       { name: quitAfterLock() ? "Lock and exit" : "Lock Oblivion", description: `Close ${active().length} active Safe(s), stop their agents and lock encrypted storage.`, run: () => {
@@ -295,7 +302,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
       const origin = agentRecord(id)
       return {
         name: `${depth ? "  ".repeat(Math.min(depth - 1, 4)) + "└─ " : ""}${state()?.session_titles[id] ?? `Safe ${id.slice(0, 8)}`}`,
-        badge: `${origin ? "Agent-created · " : ""}${safeClosing(id) || opened && hostClosing() ? "Closing" : opened ? opened.recovery_required ? "Recovery required" : "Open" : origin?.state === "failed" ? "Creation failed" : origin?.state === "recovery-required" ? "Recovery required" : "Locked"}`,
+        badge: `${origin ? "Agent-created · " : ""}${safeClosing(id) || opened && hostClosing() ? "Closing" : state()?.family_password_pending.includes(id) ? "Password recovery" : opened ? opened.recovery_required ? "Recovery required" : "Open" : origin?.state === "failed" ? "Creation failed" : origin?.state === "recovery-required" ? "Recovery required" : "Locked"}`,
         description: `${id.slice(0, 8)} · ${state()?.session_sizes?.[id] ? capacity(state()!.session_sizes![id]) + " · " : ""}${origin ? `Agent-created · requested ${requestedAgentName(origin.agent)}. Review its origin and creation record before opening.` : opened ? "Open another agent in this Safe's VM. All agents in this Safe share its files." : "Unlock this Safe and open an agent in its isolated VM."}`,
         action: origin ? "Review Safe" : "Choose agent",
         disabled: origin ? undefined : openingBlocked(id),
@@ -338,14 +345,14 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
     if (key.name === "f7" && state()?.app_open) { key.preventDefault(); section("files"); return }
     if (key.name === "f9" && state()?.app_open) { key.preventDefault(); section("network"); return }
     if (key.name === "escape") {
-      if (["files", "network", "rename", "grow", "idle", "storage", "share", "imports", "task"].includes(page())) return
+      if (["files", "network", "rename", "grow", "idle", "storage", "share", "imports", "backups", "password", "task"].includes(page())) return
       key.preventDefault()
       if (page() === "agents") { backFromAgents(); return }
       if (page() !== "safes") { section("safes"); return }
       lock(true)
       return
     }
-    if (["name", "files", "network", "rename", "grow", "idle", "storage", "share", "imports", "task"].includes(page())) return
+    if (["name", "files", "network", "rename", "grow", "idle", "storage", "share", "imports", "backups", "password", "task"].includes(page())) return
     if (key.name === "r" && ["safes", "inspect"].includes(page())) { key.preventDefault(); void refresh(); return }
     if (key.name === "tab" && toolbar().length) { key.preventDefault(); setArea((value) => value === "list" ? "actions" : "list"); return }
     if (page() === "safes" && state()?.app_open) {
@@ -369,7 +376,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
         { title: "Safes", id: "safes" as const, key: "F1" },
         { title: "Settings", id: "settings" as const, key: "F2" },
         { title: "System", id: "system" as const, key: "F3" },
-      ]}>{(item) => <ActionItem theme={palette} modern flush variant={(page() === item.id || item.id === "settings" && ["network", "rename", "grow", "idle", "imports"].includes(page()) || item.id === "safes" && ["name", "agents", "files", "share", "inspect", "task"].includes(page())) ? "primary" : "secondary"}
+      ]}>{(item) => <ActionItem theme={palette} modern flush variant={(page() === item.id || item.id === "settings" && ["network", "rename", "grow", "idle", "imports", "backups", "password"].includes(page()) || item.id === "safes" && ["name", "agents", "files", "share", "inspect", "task"].includes(page())) ? "primary" : "secondary"}
         action={{ title: item.title, key: item.key, disabled: attached() || busy() || item.id === "settings" && !state()?.app_open, onTrigger: () => section(item.id) }} />}</For></box></Show>
       <text fg={theme.text.muted}>{props.overlay ? "Safe panel" : props.preview ? "Preview" : state()?.app_open ? state()?.app_mode === "ram-only" ? "Ephemeral mode" : state()?.app_mode === "read-only" ? "Read-only archive" : `${active().length} active Safe(s)` : "Privacy layer"}</text>
     </box>
@@ -378,6 +385,14 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
       <Show when={page() === "inspect" && context() && state()}><SafeInspector state={state()!} id={context()!} blocked={openingBlocked(context()!)} task={() => { void reviewTask(context()!) }} launch={(agent) => { if (!openingBlocked(context()!)) void execute(["run", "--safe", context()!, agent]) }} choose={() => chooseAgent(context())} back={() => section("safes")} /></Show>
       <Show when={page() === "task" && context() && state()}><NativeTask runtime={props.runtime} state={state()!} safe={context()!} name={safeTitle()} policy={scopedNetworkObservation(observed(), context(), state(), now())?.safe_access.current} blocked={openingBlocked(context()!)} run={(args) => execute(args, undefined, false)} back={() => inspect(context()!)} /></Show>
       <Show when={page() === "imports"}><NativeImports runtime={props.runtime} writable={state()?.app_mode === "persistent" && !hostClosing()} run={(args) => execute(args, undefined, false)} back={() => section("settings")} /></Show>
+      <Show when={page() === "password"}><NativePassword runtime={props.runtime} writable={state()?.app_mode === "persistent" && !hostClosing()} opening={state()?.idle_lock.host?.nonce}
+        blocked={error() ? "Runtime status is unavailable. Refresh before changing a password." : state()?.recovery_required ? "Complete verified teardown and recovery first." : undefined}
+        safe={safe() ? { id: safe()!, name: safeTitle(), persistent: state()?.sessions.includes(safe()!) ?? false, closed: !selectedOpen() } : undefined}
+        openIds={active().flatMap((entry) => entry.id ? [entry.id] : [])} run={(args) => execute(args, undefined, false)} back={() => section("settings")} /></Show>
+      <Show when={page() === "backups"}><NativeBackups runtime={props.runtime} writable={state()?.app_mode === "persistent" && !hostClosing()} opening={state()?.idle_lock.host?.nonce}
+        blocked={state()?.recovery_required ? "Complete storage recovery before creating or restoring a backup." : undefined}
+        safe={safe() ? { id: safe()!, name: safeTitle(), persistent: state()?.sessions.includes(safe()!) ?? false, closed: !active().some((entry) => entry.id === safe()) } : undefined}
+        run={(args) => execute(args, undefined, false)} back={() => section("settings")} /></Show>
       <Show when={page() === "share" && sharing()} keyed>{(selection) => <NativeShare
         selection={selection.operation === "import" ? selection : selection.scope === "all" ? { ...selection, count: state()?.sessions.length ?? 0, closed: !active().length }
           : { ...selection, closed: !active().some((safe) => safe.id === selection.safe), branch: selection.branch ? { count: branchMembers(selection.safe).length, closed: !active().some((safe) => branchMembers(selection.safe).includes(safe.id!)) } : undefined }}

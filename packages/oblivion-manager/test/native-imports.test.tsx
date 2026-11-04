@@ -129,7 +129,7 @@ test("Settings opens the Share imports lifecycle page and Esc returns without a 
   try {
     await visible(app, "Your Safes")
     await app.mockInput.pressKey("F2")
-    for (let index = 0; index < 5; index++) await app.mockInput.pressArrow("down")
+    for (let index = 0; index < 6; index++) await app.mockInput.pressArrow("down")
     await app.renderOnce()
     expect(app.captureCharFrame()).toContain("Inspect imports")
     await app.mockInput.pressEnter()

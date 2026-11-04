@@ -22,6 +22,7 @@ export const nativeStatus = z.object({
   general_open: z.boolean(),
   general_readonly: z.boolean(),
   recovery_required: z.boolean(),
+  family_password_pending: z.array(z.string().regex(/^[a-f0-9]{32}$/)).max(32768),
   sessions: z.array(z.string().regex(/^[a-f0-9]{32}$/)),
   safe_parents: z.array(z.object({ id: z.string().regex(/^[a-f0-9]{32}$/), parent: z.string().regex(/^[a-f0-9]{32}$/) })),
   agent_safes: z.array(z.object({
@@ -103,13 +104,14 @@ export async function reportNativeActivity(launcher: string, input: z.infer<type
 export function nativePreview(exit: () => void, initial: Partial<NativeStatus> = {}): NativeRuntime {
   const ids = ["0123456789abcdef0123456789abcdef", "abcdef0123456789abcdef0123456789"]
   const tasks = new Map<string, { attempts: number; request: string; state: "running" | "cancelled" }>()
+  const passwordChanges: { transaction: string; family_id: string; members: { safe_id: string; title: string }[]; outcome: "complete" }[] = []
   let current: NativeStatus = {
     app_open: false, app_mode: "locked",
     safe_access: { current: "open", saved: null, temporary: false },
     idle_lock: { preferences: { version: 1, safe_minutes: 15, host_minutes: 30 }, storage: "defaults", writable: false, host: null, safes: [], last_error: null },
     general_present: true, general_open: false, general_readonly: false,
     general_incomplete: false, persistence: null,
-    recovery_required: false, sessions: ids,
+    recovery_required: false, family_password_pending: [], sessions: ids,
     safe_parents: [],
     agent_safes: [],
     session_titles: { [ids[0]]: "Research", [ids[1]]: "Development" },
@@ -121,6 +123,13 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
     async activity() {},
     async status() { return current },
     async query(args) {
+      if (args[0] === "safe" && args[1] === "password") {
+        if (!current.idle_lock.host || current.app_mode !== "persistent") throw new Error("Unlock the preview storage first.")
+        if (args[2] === "status") return { host_opening: current.idle_lock.host.nonce, transactions: passwordChanges }
+        const id = args[3]
+        if (args[2] !== "preview" || !current.sessions.includes(id) || current.open_sessions.some((entry) => entry.id === id)) throw new Error("Choose a closed preview Safe.")
+        return { host_opening: current.idle_lock.host.nonce, family_id: id, members: [{ safe_id: id, title: current.session_titles[id] }], sha256: "f".repeat(64) }
+      }
       if (args[0] === "safe" && args[1] === "task") {
         const origin = current.agent_safes.find((record) => record.id === args[3])
         if (!origin || !current.open_sessions.some((opened) => opened.id === origin.id)) throw new Error("Open the preview Safe to review its task.")
@@ -132,6 +141,7 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
         return args[2] === "review" ? { status, task: "Preview task: inspect the workspace and describe the project. This local preview does not submit a task or start an agent." } : status
       }
       if (args[0] === "share" && args[1] === "imports") return []
+      if (args[0] === "backup" && args[1] === "status") return { transactions: [] }
       if (args[0] === "network") return { ...current, network_status: { label: "NOT STARTED", direct_blocked: false, host_link: "STATUS UNKNOWN", age_ms: 0 }, safe_access: { current: "open", saved: null, temporary: false } }
       if (args[0] === "files" && args[1] === "list") {
         const selected = args.find((value) => value === "workspace" || value === "imports" || value.startsWith("workspace/") || value.startsWith("imports/")) ?? ""
@@ -140,6 +150,14 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
       throw new Error("Preview data is unavailable for this operation.")
     },
     async run(args) {
+      if (args[0] === "safe" && args[1] === "password") {
+        const id = args[2]
+        if (!current.idle_lock.host || current.app_mode !== "persistent" || !current.sessions.includes(id)
+          || current.open_sessions.some((entry) => entry.id === id) || args[3] !== "--confirmed-plan" || args[4] !== "f".repeat(64)) return 130
+        passwordChanges.push({ transaction: passwordChanges.length.toString(16).padStart(32, "0"), family_id: id,
+          members: [{ safe_id: id, title: current.session_titles[id] }], outcome: "complete" })
+        return 0
+      }
       if (args[0] === "safe" && args[1] === "task") {
         const previous = tasks.get(args[3])
         if (args[2] === "start" && !previous) tasks.set(args[3], { attempts: 1, request: "e".repeat(32), state: "running" })
