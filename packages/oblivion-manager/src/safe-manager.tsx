@@ -17,6 +17,7 @@ import { requestedAgentName, SafeInspector } from "./safe-inspector"
 import { NativeTask } from "./native-task"
 import { NativeBackups } from "./native-backups"
 import { NativePassword } from "./native-password"
+import { conversationArgs } from "./native-conversation"
 
 const agents = [
   { id: "codex", name: "Codex", description: "Open the official Codex CLI. Its login, tools and conversation history stay inside this Safe." },
@@ -185,6 +186,13 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
     section("safes")
   }
 
+  function continueLatest() {
+    const agent = agents[selected()]
+    const id = target()
+    if (page() !== "agents" || !state()?.app_open || !id || !agent || openingBlocked(id) || attached() || busy()) return
+    void execute(["run", "--safe", id, agent.id, ...conversationArgs(agent.id, "latest")])
+  }
+
   function newSafe() {
     if (state()?.recovery_required || hostClosing()) return
     if (state()?.app_mode !== "persistent") { chooseAgent(undefined, true); return }
@@ -283,7 +291,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
     if (page() === "agents") return agents.map((agent) => ({
       name: agent.name,
       description: agent.description,
-      action: "Open agent",
+      action: "New conversation",
       run: () => { void execute(["run", ...(target() ? ["--safe", target()!] : safeName() ? ["--name", safeName()!] : []), ...(ephemeral() ? ["--ephemeral"] : []), agent.id]) },
     }))
     if (!state()?.app_open) return [
@@ -311,7 +319,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
     })
   })
 
-  const toolbar = () => state()?.app_open && page() === "safes" ? [
+  const toolbar = () => page() === "agents" && target() ? [{ title: "Continue latest", key: "C", disabled: !state()?.app_open || !!openingBlocked(target()!), run: continueLatest }] : state()?.app_open && page() === "safes" ? [
     { title: "New Safe", key: "N", disabled: state()?.recovery_required || hostClosing(), run: () => newSafe() },
     { title: "Refresh", key: "R", run: () => { void refresh() } },
     { title: "Import Share", key: "I", disabled: state()?.app_mode !== "persistent" || state()?.recovery_required || hostClosing(), run: () => share("import") },
@@ -355,6 +363,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
     if (["name", "files", "network", "rename", "grow", "idle", "storage", "share", "imports", "backups", "password", "task"].includes(page())) return
     if (key.name === "r" && ["safes", "inspect"].includes(page())) { key.preventDefault(); void refresh(); return }
     if (key.name === "tab" && toolbar().length) { key.preventDefault(); setArea((value) => value === "list" ? "actions" : "list"); return }
+    if (page() === "agents" && key.name === "c" && target()) { key.preventDefault(); continueLatest(); return }
     if (page() === "safes" && state()?.app_open) {
       if (key.name === "n") { key.preventDefault(); newSafe(); return }
       if (key.name === "w") { key.preventDefault(); workspace(); return }
@@ -408,7 +417,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
       <Show when={page() === "rename" || page() === "grow"}><FormView form={{ title: page() === "rename" ? "Rename Safe" : "Increase storage", description: safeTitle(), fields: [{ id: "value", label: page() === "rename" ? "Safe name" : "New total capacity (MiB)", value: page() === "rename" ? safeTitle() : String(Math.max(2048, Math.ceil((state()?.session_sizes?.[safe()!] ?? 0) / 1024 ** 2) + 1024)), validate: (value) => page() === "rename" ? !value.trim() || value.trim() !== value ? "Enter a name without leading or trailing spaces." : undefined : !/^\d+$/.test(value) || Number(value) < 512 ? "Enter a capacity of at least 512 MiB." : undefined }], submit: page() === "rename" ? "Rename" : "Increase storage", run: async () => {} }} cancel={() => section("settings")} submit={(values) => { void execute(["safe", page() === "rename" ? "rename" : "grow", safe()!, values.value]) }} /></Show>
       <Show when={["safes", "settings", "name", "agents", "lock"].includes(page())}>
       <Show when={page() === "name"} fallback={<Menu title={page() === "settings" ? "Settings" : page() === "lock" ? "Close and lock" : page() === "agents" ? "Choose an agent" : state()?.app_open ? "Your Safes" : "Welcome to Oblivion"}
-        description={page() === "settings" ? `${safeTitle()} · Network and storage apply to the selected Safe. Automatic lock applies to Oblivion.` : page() === "agents" ? target() ? `${state()?.session_titles[target()!] ?? target()!.slice(0, 8)} · Shared files, independent agent conversations` : ephemeral() ? "Create an isolated Safe in RAM. Its contents are discarded when closed." : `${safeName() ?? "New Safe"} · Separate password, encrypted files and virtual machine.` : page() === "lock" ? "Active work stops when its Safe is locked." : state()?.app_open ? "Choose a Safe to continue, or create a separate environment." : "Run your coding agent in an isolated VM. Choose how to keep your work."}
+        description={page() === "settings" ? `${safeTitle()} · Network and storage apply to the selected Safe. Automatic lock applies to Oblivion.` : page() === "agents" ? target() ? `${state()?.session_titles[target()!] ?? target()!.slice(0, 8)} · Shared files, independent agent conversations\nEnter starts a new conversation. C continues the highlighted agent's latest saved conversation.` : ephemeral() ? "Create an isolated Safe in RAM. Its contents are discarded when closed." : `${safeName() ?? "New Safe"} · Separate password, encrypted files and virtual machine.` : page() === "lock" ? "Active work stops when its Safe is locked." : state()?.app_open ? "Choose a Safe to continue, or create a separate environment." : "Run your coding agent in an isolated VM. Choose how to keep your work."}
         items={items()} selected={selected()} change={setSelected} focused={area() === "list"} disabled={attached() || busy() || !!error()}
         choose={(index) => { const item = items()[index]; if (item && !item.disabled) item.run() }}
         toolbar={toolbar()} actionsFocused={area() === "actions"} focusActions={() => setArea("actions")} focus={() => setArea("list")}

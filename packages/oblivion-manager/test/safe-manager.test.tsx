@@ -3,6 +3,32 @@ import { testRender } from "@opentui/solid"
 import { SafeManager } from "../src/safe-manager"
 import { nativePreview } from "../src/native-control"
 
+test.each([[80, 24], [160, 50]])("existing Safe agents distinguish New conversation and native Continue latest at %ix%i", async (width, height) => {
+  const fixture = nativePreview(() => {})
+  await fixture.run(["unlock"])
+  const initial = await fixture.status()
+  const commands: string[][] = []
+  const app = await testRender(() => <SafeManager initial={initial} runtime={{ ...fixture, run: async (args) => { commands.push(args); return fixture.run(args) } }} />, { width, height, kittyKeyboard: true })
+  try {
+    for (const [index, agent, args] of [[0, "codex", ["resume", "--last"]], [1, "claude", ["--continue"]], [2, "opencode2", ["--continue"]]] as const) {
+      await app.renderOnce()
+      await app.mockInput.pressEnter()
+      for (let row = 0; row < index; row++) await app.mockInput.pressArrow("down")
+      await app.renderOnce()
+      expect(app.captureCharFrame()).toContain("New conversation")
+      expect(app.captureCharFrame()).toContain("Continue latest")
+      await app.mockInput.pressEscape()
+      await app.renderOnce()
+      expect(commands).toHaveLength(index)
+      await app.mockInput.pressEnter()
+      for (let row = 0; row < index; row++) await app.mockInput.pressArrow("down")
+      await app.mockInput.pressKey("c")
+      await app.renderOnce()
+      expect(commands.at(-1)).toEqual(["run", "--safe", initial.sessions[0], agent, ...args])
+    }
+  } finally { await app.dispose() }
+})
+
 test.each([[80, 24], [160, 50]])("native manager opens the chosen agent in the selected Safe at %ix%i", async (width, height) => {
   const fixture = nativePreview(() => {})
   await fixture.run(["unlock"])

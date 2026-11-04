@@ -8,6 +8,7 @@ import { FormView } from "./form"
 import { Menu } from "./menu"
 import { PageHeader } from "./page-header"
 import { requestedAgentName } from "./safe-inspector"
+import { conversationArgs } from "./native-conversation"
 import { theme } from "./theme"
 import type { NativeRuntime, NativeStatus } from "./native-control"
 
@@ -41,7 +42,8 @@ export function NativeTask(props: { runtime: NativeRuntime; state: NativeStatus;
   const [task, setTask] = createSignal("")
   const [reviewed, setReviewed] = createSignal<string>()
   const [selected, setSelected] = createSignal(0)
-  const [page, setPage] = createSignal<"overview" | "review" | "retry" | "cancel" | "details">("overview")
+  const [page, setPage] = createSignal<"overview" | "review" | "retry" | "cancel" | "details" | "resume">("overview")
+  const [resumeReview, setResumeReview] = createSignal<{ opening: string; status: z.infer<typeof taskStatus> }>()
   const [area, setArea] = createSignal<"text" | "actions">("text")
   const [loading, setLoading] = createSignal(true)
   const [working, setWorking] = createSignal(false)
@@ -61,6 +63,7 @@ export function NativeTask(props: { runtime: NativeRuntime; state: NativeStatus;
   function clearReview() {
     setTask("")
     setReviewed(undefined)
+    setResumeReview(undefined)
   }
 
   function back() {
@@ -145,14 +148,60 @@ export function NativeTask(props: { runtime: NativeRuntime; state: NativeStatus;
     setPage("retry")
   }
 
+  const resumable = (value: z.infer<typeof taskStatus> | undefined) => !!value?.job?.native_chat_id
+    && ["completed", "failed", "cancelled"].includes(value.job.state) && value.job.reason !== "cleanup-required"
+    && (!value.blocked || value.blocked === "task_attempt_limit")
+
+  function prepareResume() {
+    const value = status()
+    const opening = authority()
+    if (!allowed() || !opening || !resumable(value)) return
+    setTask("")
+    setResumeReview({ opening, status: value! })
+    setPage("resume")
+  }
+
+  async function resume() {
+    const reviewed = resumeReview()
+    if (!allowed() || !reviewed || reviewed.opening !== authority()) return
+    setWorking(true)
+    setTask("")
+    setNotice("")
+    try {
+      const value = taskStatus.parse(await props.runtime.query(["safe", "task", "status", props.safe, "--json"]))
+      if (stopped || reviewed.opening !== authority()) return
+      accept(value)
+      if (value.request_id !== reviewed.status.request_id || value.attempt_request_id !== reviewed.status.attempt_request_id || JSON.stringify(value.job) !== JSON.stringify(reviewed.status.job) || !resumable(value)) {
+        setPage("overview")
+        setResumeReview(undefined)
+        setNotice("The task or its conversation changed. Review its current state before resuming.")
+        return
+      }
+      setResumeReview(undefined)
+      setPage("overview")
+      const code = await props.run(["run", "--safe", props.safe, value.agent, ...conversationArgs(value.agent, { id: value.job!.native_chat_id! })])
+      if (!stopped && reviewed.opening === authority()) setNotice(code === 0 ? "Client closed. Checking the saved task's current state." : "The client ended or was interrupted. Checking current task state.")
+    } catch {
+      if (!stopped && reviewed.opening === authority()) {
+        clearReview()
+        setStatus(undefined)
+        setPage("overview")
+        setError("Task conversation status could not be verified. Refresh before resuming.")
+      }
+    } finally {
+      if (!stopped) { setWorking(false); await refresh() }
+    }
+  }
+
   const outcome = () => status()?.job ? `Task · ${status()!.job!.state}${status()!.job!.reason ? ` · ${status()!.job!.reason}` : ""}`
     : status()?.phase === "not-started" ? "Task · not started" : "Task · outcome not yet observed"
   const items = () => [
     { name: "Review saved task", description: "Read the exact saved task after unlocking this Safe. No task is submitted by opening this page.", action: "Review task", disabled: !allowed() ? "A fresh status and an open Safe are required." : undefined, run: () => { void review() } },
-    { name: "Open requested agent", description: "Open the Safe's native client or resume picker. Native login controls are available if needed; this action sends no saved task.", action: "Open client", disabled: !allowed() ? "An open Safe and a fresh status are required." : undefined, run: () => { void execute("login") } },
+    { name: "Open requested agent", description: "Open the Safe's native client for a new conversation or login. This action sends no saved task; native resume controls remain inside the client.", action: "Open client", disabled: !allowed() ? "An open Safe and a fresh status are required." : undefined, run: () => { void execute("login") } },
     { name: status()?.phase === "unknown" ? "Start or reconcile saved task" : "Start requested task", description: "Review the task first. Start reuses its current attempt identity; an uncertain response does not allocate another attempt.", action: reviewed() === status()?.request_id ? "Start task" : "Review before starting", disabled: !allowed() || !status()?.can_start ? status()?.blocked ? taskBlock(status()!.blocked!) : "This task cannot start in its current state." : undefined, run: () => { void execute("start") } },
     ...(status()?.can_retry ? [{ name: "Retry failed task", description: "Create a new attempt only after the previous task is confirmed failed or cancelled. Existing file changes remain.", action: "Review retry", run: () => { void retry() } }] : []),
     ...(status()?.can_cancel ? [{ name: "Cancel task", description: "Request cancellation of this managed task and verify its final state. Other interactive clients can remain open.", action: "Review cancellation", run: () => { if (allowed()) { setTask(""); setPage("cancel") } } }] : []),
+    ...(status()?.job?.native_chat_id ? [{ name: "Resume task conversation", description: "Open this task's observed native conversation in its requested agent. No saved task or new prompt is submitted.", action: "Review resume", disabled: !allowed() || !resumable(status()) ? "A terminal job with verified cleanup and a native conversation is required." : undefined, run: prepareResume }] : []),
   ]
   const reviewActions = () => [
     { title: "Back", key: "Esc", run: () => { setTask(""); setPage("overview") } },
@@ -184,7 +233,7 @@ export function NativeTask(props: { runtime: NativeRuntime; state: NativeStatus;
     if (key.defaultPrevented || working()) return
     if (key.name === "escape") {
       key.preventDefault()
-      if (page() !== "overview") { setTask(""); setPage("overview"); return }
+      if (page() !== "overview") { setTask(""); setResumeReview(undefined); setPage("overview"); return }
       back(); return
     }
     if (key.name === "r") { key.preventDefault(); void refresh(); return }
@@ -218,7 +267,7 @@ export function NativeTask(props: { runtime: NativeRuntime; state: NativeStatus;
       <ActionBar actions={[{ title: "Back", key: "Esc", run: () => setPage("overview") }]} />
     </Show>
     <Show when={page() !== "details"}>
-    <Show when={page() === "review"} fallback={<Show when={page() === "retry" || page() === "cancel"} fallback={<Menu title={`Saved task · ${props.name}`} description={[
+    <Show when={page() === "resume" && resumeReview()} fallback={<Show when={page() === "review"} fallback={<Show when={page() === "retry" || page() === "cancel"} fallback={<Menu title={`Saved task · ${props.name}`} description={[
       record() ? `${requestedAgentName(record()!.agent)} · /vault/workspace` : "Requested client unavailable",
       outcome(),
       ...(status() ? [`Attempt ${status()!.attempts}/${status()!.attempt_limit}${status()!.job?.native_chat_id ? ` · Native chat ${status()!.job!.native_chat_id}` : ""}`] : []),
@@ -231,6 +280,8 @@ export function NativeTask(props: { runtime: NativeRuntime; state: NativeStatus;
       </scrollbox>
       <text flexShrink={0} fg={theme.text.muted}>{area() === "text" ? "↑ ↓ / PgUp PgDn scroll · Tab actions" : "Tab task text · ← → select action"}</text>
       <ActionBar actions={reviewActions()} focused={area() === "actions"} />
+    </Show>}>
+      <FormView form={{ title: "Resume task conversation?", description: `${requestedAgentName(resumeReview()!.status.agent)} · Safe ${props.name}\nNative conversation ${resumeReview()!.status.job!.native_chat_id}\nResume the recorded conversation in the native client. No saved task or prompt is sent. Current task status and Safe opening are verified again before launch.`, fields: [], submit: "Resume conversation", run: async () => {} }} cancel={() => { setResumeReview(undefined); setPage("overview") }} submit={() => { void resume() }} />
     </Show>
     </Show>
     <Show when={status()?.blocked || error() || notice()}><text flexShrink={0} fg={error() || status()?.blocked ? theme.feedback.warning : theme.feedback.info}>{error() || (status()?.blocked ? taskBlock(status()!.blocked!) : notice())}</text></Show>

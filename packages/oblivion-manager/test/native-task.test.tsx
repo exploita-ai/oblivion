@@ -11,16 +11,16 @@ const request = "e".repeat(32)
 const task = "Sensitive canary · città\nRead workspace/project.\tLiteral ESC: \x1b[31m and direction: \u202e."
 const origin: NativeStatus["agent_safes"][number] = { id: safe, parent, created_by_agent: true, agent: "claude", ephemeral: false, mib: 2048, state: "awaiting-start" }
 
-function status(state?: "queued" | "running" | "completed" | "failed" | "cancelled") {
-  return taskStatus.parse({ version: 1, safe_id: safe, agent: "claude", request_id: request,
+function status(state?: "queued" | "running" | "completed" | "failed" | "cancelled", agent: NativeStatus["agent_safes"][number]["agent"] = "claude") {
+  return taskStatus.parse({ version: 1, safe_id: safe, agent, request_id: request,
     attempt_request_id: state ? request : null, attempts: state ? 1 : 0, attempt_limit: 16,
     phase: state ? "submitted" : "not-started",
-    job: state ? { job_id: "a".repeat(32), request_id: request, agent: "claude", state, native_chat_id: "12345678-1234-4234-8234-123456789abc", reason: state === "failed" ? "needs-auth" : null } : null,
+    job: state ? { job_id: "a".repeat(32), request_id: request, agent, state, native_chat_id: agent === "opencode2" ? "ses_taskConversation1" : "12345678-1234-4234-8234-123456789abc", reason: state === "failed" ? "needs-auth" : null } : null,
     can_start: !state, can_retry: state === "failed" || state === "cancelled", can_cancel: state === "queued" || state === "running", blocked: null })
 }
 
-async function opened() {
-  const fixture = nativePreview(() => {}, { agent_safes: [origin], safe_parents: [{ id: safe, parent }] })
+async function opened(agent: NativeStatus["agent_safes"][number]["agent"] = "claude") {
+  const fixture = nativePreview(() => {}, { agent_safes: [{ ...origin, agent }], safe_parents: [{ id: safe, parent }] })
   await fixture.run(["unlock"])
   await fixture.run(["safe", "open", safe])
   return fixture
@@ -259,4 +259,95 @@ test("an unknown attempt is reconciled with its existing identity instead of off
     expect(commands).toEqual([["safe", "task", "start", safe, "--request", request, "--json"]])
     expect(app.captureCharFrame()).toContain("Attempt 1/16")
   } finally { await app.dispose() }
+})
+
+test.each([[80, 24], [160, 50]])("terminal task conversations resume with exact native arguments and cancellable review at %ix%i", async (width, height) => {
+  for (const agent of ["codex", "claude", "opencode2"] as const) {
+    const fixture = await opened(agent)
+    const current = await fixture.status()
+    const response = status(agent === "codex" ? "completed" : agent === "claude" ? "failed" : "cancelled", agent)
+    const commands: string[][] = []
+    const queries: string[][] = []
+    const runtime = { ...fixture, query: async (args: string[]) => { queries.push(args); return response } }
+    const app = await testRender(() => <NativeTask runtime={runtime} state={current} safe={safe} name="Development" back={() => {}} run={async (args) => { commands.push(args); return 0 }} />, { width, height, kittyKeyboard: true })
+    try {
+      await visible(app, "Resume task conversation")
+      await app.mockInput.pressKey("END")
+      await app.mockInput.pressEnter()
+      await visible(app, "Resume task conversation?")
+      expect(app.captureCharFrame()).toContain(response.job!.native_chat_id!)
+      expect(commands).toHaveLength(0)
+      await app.mockInput.pressEscape()
+      await visible(app, `Task · ${response.job!.state}`)
+      expect(commands).toHaveLength(0)
+      await app.mockInput.pressKey("END")
+      await app.mockInput.pressEnter()
+      await visible(app, "Resume task conversation?")
+      await app.mockInput.pressEnter()
+      await visible(app, "Client closed")
+      expect(commands).toEqual([["run", "--safe", safe, agent, ...(agent === "codex" ? ["resume", response.job!.native_chat_id!] : [agent === "claude" ? "--resume" : "--session", response.job!.native_chat_id!])]])
+      expect(queries.every((args) => args[0] === "safe" && args[1] === "task" && args[2] === "status")).toBe(true)
+      expect(queries.length).toBeGreaterThanOrEqual(3)
+    } finally { await app.dispose() }
+  }
+})
+
+test.each(["queued", "running", "cleanup-required", "no-native-id"])("task resume cannot launch %s work", async (reason) => {
+  const fixture = await opened()
+  const current = await fixture.status()
+  const response = reason === "queued" ? status("queued") : reason === "running" ? status("running")
+    : reason === "cleanup-required" ? { ...status("failed"), can_retry: false, blocked: "recovery_required", job: { ...status("failed").job!, reason: "cleanup-required" } }
+    : { ...status("completed"), job: { ...status("completed").job!, native_chat_id: null } }
+  const commands: string[][] = []
+  const app = await testRender(() => <NativeTask runtime={{ ...fixture, query: async () => response }} state={current} safe={safe} name="Development" back={() => {}} run={async (args) => { commands.push(args); return 0 }} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await visible(app, "Task ·")
+    if (reason === "no-native-id") expect(app.captureCharFrame()).not.toContain("Resume task conversation")
+    await app.mockInput.pressKey("END")
+    await app.mockInput.pressEnter()
+    await app.renderOnce()
+    expect(app.captureCharFrame()).not.toContain("Resume task conversation?")
+    expect(commands).toHaveLength(0)
+  } finally { await app.dispose() }
+})
+
+test.each(["conversation", "job", "running", "request"])("resume confirmation cannot launch a changed %s", async (change) => {
+  const fixture = await opened()
+  const current = await fixture.status()
+  const [response, setResponse] = createSignal(status("completed"))
+  const commands: string[][] = []
+  const app = await testRender(() => <NativeTask runtime={{ ...fixture, query: async () => response() }} state={current} safe={safe} name="Development" back={() => {}} run={async (args) => { commands.push(args); return 0 }} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await visible(app, "Resume task conversation")
+    await app.mockInput.pressKey("END")
+    await app.mockInput.pressEnter()
+    await visible(app, "Resume task conversation?")
+    setResponse(change === "running" ? status("running") : change === "request" ? { ...status("completed"), request_id: "f".repeat(32) }
+      : { ...status("completed"), job: { ...status("completed").job!, ...(change === "conversation" ? { native_chat_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" } : { job_id: "f".repeat(32) }) } })
+    await app.mockInput.pressEnter()
+    await visible(app, "The task or its conversation changed")
+    expect(commands).toHaveLength(0)
+  } finally { await app.dispose() }
+})
+
+test("a new Safe opening rejects a late task-resume preflight", async () => {
+  const fixture = await opened()
+  const [current, setCurrent] = createSignal(await fixture.status())
+  const pending = Promise.withResolvers<unknown>()
+  const commands: string[][] = []
+  let queries = 0
+  const runtime = { ...fixture, query: async () => ++queries === 2 ? pending.promise : status("completed") }
+  const app = await testRender(() => <NativeTask runtime={runtime} state={current()} safe={safe} name="Development" back={() => {}} run={async (args) => { commands.push(args); return 0 }} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await visible(app, "Resume task conversation")
+    await app.mockInput.pressKey("END")
+    await app.mockInput.pressEnter()
+    await visible(app, "Resume task conversation?")
+    await app.mockInput.pressEnter()
+    setCurrent((before) => ({ ...before, idle_lock: { ...before.idle_lock, safes: before.idle_lock.safes.map((entry) => ({ ...entry, opening: { ...entry.opening, nonce: "e".repeat(32) } })) } }))
+    pending.resolve(status("completed"))
+    await visible(app, "Task · completed")
+    expect(app.captureCharFrame()).not.toContain("Resume task conversation?")
+    expect(commands).toHaveLength(0)
+  } finally { pending.resolve(status("completed")); await app.dispose() }
 })
