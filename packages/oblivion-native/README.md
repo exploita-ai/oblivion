@@ -48,4 +48,10 @@ Before stopping the runtime, the launcher closes clients and asks the controller
 
 The native VM, nested virtualization flag and private stream bridge are implemented here. [`remote_control.rs`](../oblivion-host/src/remote_control.rs) provides the launcher client for the relay. Each request sends a u32 big-endian JSON header length, a local controller header with `version` set to `1`, and exactly `secret_len` secret bytes. Each response sends a u32 big-endian length and the controller JSON response. A successful `agent-attach` response switches to the raw agent-channel protocol. The relay holds the local controller connection as the attachment lease until disconnect. stdin EOF is an explicit agent-channel frame, while closing the transport releases the lease. Other descriptor operations (`console` and `terminal`) are rejected by this relay.
 
-Packaging the native Debian image, relaying PTYs, importing files and managing the public `oblivion` command belong to the surrounding stack.
+The surrounding stack now has a [development desktop bundle source path](../../docs/DESKTOP.md)
+for the CLI, helper, manager and verified matching image. The public runtime
+installer accepts that bundle instead of an arbitrary ISO. It keeps its strict
+bundle/hash binding in `runtime.json` and sends this backend only the private
+current VM configuration projection. A source build and valid checksums do not
+qualify nested hardware, approve client redistribution, or provide Developer ID
+signing/notarization.

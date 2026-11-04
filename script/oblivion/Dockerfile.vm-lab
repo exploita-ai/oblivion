@@ -36,7 +36,7 @@ RUN sh /tmp/setup && rm /tmp/setup
 
 FROM os AS rust-toolchain
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
-RUN apt-get update && apt-get install -y --no-install-recommends rustup git gcc g++ libc6-dev cmake make perl libclang-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends rustup git gcc g++ libc6-dev cmake make perl libclang-dev python3 \
     && rm -rf /var/lib/apt/lists/* \
     && rustup toolchain install 1.88.0 --profile minimal --no-self-update \
     && rustup default 1.88.0 \
@@ -87,6 +87,20 @@ COPY packages/oblivion-transfer/ /oblivion-transfer/
 COPY packages/oblivion-share/ /oblivion-share/
 COPY packages/oblivion-history/ /oblivion-history/
 COPY packages/oblivion-host/ ./
+COPY packages/oblivion-tools/dist/server.mjs /oblivion-tools/dist/server.mjs
+COPY packages/oblivion-gateway/ /oblivion-gateway/
+COPY packages/oblivion-onion/ /oblivion-onion/
+COPY packages/oblivion-clipboard/ /oblivion-clipboard/
+COPY packages/oblivion-manager/src/ /oblivion-manager/src/
+COPY packages/oblivion-manager/script/build.ts /oblivion-manager/script/build.ts
+COPY packages/oblivion-manager/package.json /oblivion-manager/package.json
+COPY packages/theme/src/ /theme/src/
+COPY packages/tui-kit/src/ /tui-kit/src/
+COPY package.json bun.lock LICENSE NOTICE /workspace-inputs/
+COPY script/oblivion/Dockerfile.vm-lab script/oblivion/live-setup.sh script/oblivion/live-pack.sh script/oblivion/live-grub.cfg script/oblivion/live-controller.json script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/session-identities.sh script/oblivion/pack-vm-assets.sh script/oblivion/host-firewall.nft script/oblivion/install-agents.py script/oblivion/install-agents.json script/oblivion/session-node.json script/oblivion/install-session-node.py script/oblivion/session-packages.txt script/oblivion/session-analysis.lock script/oblivion/session-analysis-licenses.json script/oblivion/install-session-analysis.py script/oblivion/onionshare-source.json script/oblivion/onionshare-requirements.lock script/oblivion/onionshare-licenses.json script/oblivion/install-onionshare.py script/oblivion/install-vbox-clipboard.py script/oblivion/vbox-clipboard.json /runtime-inputs/
+COPY script/oblivion/display/ /runtime-inputs/display/
+COPY script/oblivion/native-bundle/host-sources.py /runtime-inputs/native-bundle/host-sources.py
+COPY script/oblivion/native-bundle/host-sources.py /host-sources.py
 RUN cargo test --locked && cargo build --locked --release --bins --examples && cp target/release/oblivion-storage /tmp/oblivion-storage \
     && cargo build --locked --release --features lab-emulation --bin oblivion-storage
 RUN cd /oblivion-transfer && cargo test --locked && cargo build --locked --release --bins
@@ -94,7 +108,7 @@ RUN mkdir /bundle && cp /oblivion-transfer/target/release/oblivion-copy /oblivio
     && cp target/release/oblivion-storage /bundle/oblivion-storage-lab \
     && cp target/release/oblivion target/release/oblivion-control target/release/oblivion-display /bundle/ \
     && cp host/*.service /bundle/ \
-    && find Cargo.toml Cargo.lock src tests host ../oblivion-transfer/Cargo.toml ../oblivion-transfer/Cargo.lock ../oblivion-transfer/src ../oblivion-share/Cargo.toml ../oblivion-share/Cargo.lock ../oblivion-share/src ../oblivion-tor-state/Cargo.toml ../oblivion-tor-state/src ../oblivion-transport/Cargo.toml ../oblivion-transport/src -type f -print0 | sort -z | xargs -0 sha256sum > /bundle/sources.sha256 \
+    && python3 -B /host-sources.py /build --scripts /runtime-inputs --workspace /workspace-inputs > /bundle/sources.sha256 \
     && cd /bundle && sha256sum oblivion-* sources.sha256 > SHA256SUMS
 
 # Small development bundle, overlaid only in the disposable laboratory's RAM.

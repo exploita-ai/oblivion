@@ -3,6 +3,8 @@ pub mod activity;
 pub mod agent;
 pub mod channel;
 pub mod control;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod desktop_bundle;
 pub mod diagnostics;
 #[cfg(target_os = "linux")]
 pub mod display;

@@ -71,6 +71,9 @@ script/oblivion/*
 !script/oblivion/transfer_fixture.py
 !script/oblivion/Dockerfile.vm-lab
 !script/oblivion/Dockerfile.vm-lab.dockerignore
+!script/oblivion/native-bundle/
+script/oblivion/native-bundle/*
+!script/oblivion/native-bundle/host-sources.py
 !script/oblivion/live-*
 !script/oblivion/host-firewall.nft
 !script/oblivion/display/
@@ -153,6 +156,9 @@ packages/oblivion-history/.pytest_cache/
 !script/oblivion/build-deb.sh
 !script/oblivion/debian/
 !script/oblivion/debian/**
+!script/oblivion/native-bundle/
+script/oblivion/native-bundle/*
+!script/oblivion/native-bundle/host-sources.py
 !package.json
 !bun.lock
 !packages/oblivion-manager/

@@ -22,11 +22,12 @@ for (const file of ["LICENSE", "NOTICE"]) {
 for (const file of ["LICENSE", "PROVENANCE.md"]) {
   await Bun.write(path.join(path.dirname(output), "assets/licenses/termcn", file), Bun.file(path.resolve(import.meta.dir, "../src/vendor/termcn", file)))
 }
-if (target.includes("linux")) {
+if (target.includes("linux") || target === "bun-darwin-arm64") {
   const native = `@opentui/core-${target.slice(4)}`
+  const library = target.includes("linux") ? "libopentui.so" : "libopentui.dylib"
   await Bun.write(
-    path.join(path.dirname(output), "assets", native, "libopentui.so"),
-    Bun.file(path.join(path.dirname(Bun.resolveSync(native, import.meta.resolve("@opentui/core"))), "libopentui.so")),
+    path.join(path.dirname(output), "assets", native, library),
+    Bun.file(path.join(path.dirname(Bun.resolveSync(native, import.meta.resolve("@opentui/core"))), library)),
   )
 }
 console.log(output)

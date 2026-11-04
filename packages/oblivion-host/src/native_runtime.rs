@@ -1,5 +1,6 @@
 //! Desktop runtime state contains public boot assets and an encrypted data disk.
 use crate::control::{self, Result};
+use crate::desktop_bundle::{self, Binding, Bundle};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -114,18 +115,19 @@ fn backend() -> &'static str {
     "qemu-kvm"
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Disk {
     path: PathBuf,
     read_only: bool,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Settings {
     version: u8,
     backend: String,
+    bundle: Binding,
     runtime_id: String,
     kernel: PathBuf,
     initrd: PathBuf,
@@ -166,6 +168,7 @@ impl Settings {
     }
 
     fn validate(&self) -> Result<()> {
+        self.bundle.validate()?;
         let parameters: Vec<_> = self.command_line.split_whitespace().collect();
         let platform = format!("oblivion.runtime-backend={}", backend());
         let identity = format!("oblivion.runtime-id={}", self.runtime_id);
@@ -215,7 +218,11 @@ impl Settings {
 }
 
 fn preflight() -> Result<()> {
-    let capabilities = Command::new(helper()?).arg("capabilities").output()?;
+    preflight_with(&helper()?)
+}
+
+fn preflight_with(helper: &Path) -> Result<()> {
+    let capabilities = Command::new(helper).arg("capabilities").output()?;
     let value: serde_json::Value = serde_json::from_slice(&capabilities.stdout)?;
     if !capabilities.status.success()
         || value["version"] != 1
@@ -223,46 +230,62 @@ fn preflight() -> Result<()> {
         || value["supported"] != true
     {
         return Err(if backend() == "qemu-kvm" {
-            "Linux runtime requires x86_64, usable KVM with nested VMX/SVM, vhost-vsock and QEMU. Run oblivion-vm capabilities."
-        } else { "This Mac does not support the nested virtual machines required by Oblivion. Run oblivion-vm capabilities." }.into());
+            match value["reason"].as_str() {
+                Some("qemu_system_x86_64_required") => "QEMU is missing. On Debian install it with: sudo apt install qemu-system-x86. The installer changes no system packages.",
+                Some("usable_kvm_required") => "No usable KVM access for this account. Have the administrator check hardware virtualization and /dev/kvm permissions; no VM was started.",
+                Some("nested_virtualization_unavailable") => "KVM does not expose usable nested VMX/SVM. This host is not ready for the desktop runtime; no software-emulation fallback is used.",
+                Some("vhost_vsock_unavailable") => "The account lacks usable vhost-vsock access. Have the administrator check /dev/vhost-vsock and AF_VSOCK support; the installer changes no modules or permissions.",
+                _ => "Linux runtime requires x86_64, usable nested KVM, vhost-vsock and QEMU. Run oblivion-vm capabilities.",
+            }
+        } else { "This Mac does not advertise the nested virtual machines required by Oblivion. Run oblivion-vm capabilities; hardware acceptance remains separate." }.into());
     }
     Ok(())
 }
 
-fn extractor() -> Result<&'static Path> {
-    #[cfg(target_os = "macos")]
-    return Ok(Path::new("/usr/bin/tar"));
-    #[cfg(target_os = "linux")]
-    {
-        let path = Path::new("/usr/bin/bsdtar");
-        if path.is_file() {
-            return Ok(path);
-        }
-        Err("Install libarchive-tools (bsdtar) before installing the Linux runtime".into())
-    }
-}
-
-fn extract(image: &Path, assets: &Path) -> Result<()> {
-    let program = extractor()?;
-    for (source, target) in [("live/vmlinuz", "kernel"), ("live/initrd.img", "initrd")] {
-        let path = assets.join(target);
-        let file = OpenOptions::new()
+fn copy_boot(bundle: &Bundle, assets: &Path) -> Result<()> {
+    for (source, target) in [
+        (&bundle.runtime().image, "controller.iso"),
+        (&bundle.runtime().kernel, "kernel"),
+        (&bundle.runtime().initrd, "initrd"),
+    ] {
+        let expected = bundle.file(source)?;
+        let mut input = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(bundle.root.join(source))?;
+        let target = assets.join(target);
+        let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o600)
-            .open(&path)?;
-        let result = Command::new(program)
-            .args(["-xOf"])
-            .arg(image)
-            .arg(source)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(file))
-            .stderr(Stdio::null())
-            .status()?;
-        if !result.success() {
-            return Err("The ISO is missing its matching runtime boot files".into());
+            .mode(0o400)
+            .open(&target)?;
+        std::io::copy(&mut input, &mut output)?;
+        output.sync_all()?;
+        if output.metadata()?.len() != expected.bytes
+            || desktop_bundle::digest(&target)? != expected.sha256
+        {
+            return Err("desktop_bundle_changed_during_install".into());
         }
-        fs::File::open(path)?.sync_all()?;
+    }
+    fs::File::open(assets)?.sync_all()?;
+    Ok(())
+}
+
+fn verify_boot(settings: &Settings) -> Result<()> {
+    for (path, expected) in [&settings.disks[0].path, &settings.kernel, &settings.initrd]
+        .into_iter()
+        .zip(&settings.bundle.boot)
+    {
+        let info = fs::symlink_metadata(path)?;
+        if !info.is_file()
+            || info.uid() != unsafe { libc::getuid() }
+            || info.mode() & 0o077 != 0
+            || info.nlink() != 1
+            || info.len() != expected.bytes
+            || desktop_bundle::digest(path)? != expected.sha256
+        {
+            return Err("installed_runtime_integrity_failed".into());
+        }
     }
     Ok(())
 }
@@ -323,116 +346,363 @@ fn require_desktop() -> Result<()> {
     Ok(())
 }
 
-pub fn install(image: &Path) -> Result<()> {
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Pending {
+    version: u8,
+    previous: Option<String>,
+    settings: Settings,
+}
+
+fn pending(root: &Path) -> Result<Option<Pending>> {
+    let path = root.join("update.pending.json");
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let info = file.metadata()?;
+    if !info.is_file()
+        || info.uid() != unsafe { libc::getuid() }
+        || info.mode() & 0o077 != 0
+        || info.nlink() != 1
+    {
+        return Err("unsafe_runtime_update_journal".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(65537).read_to_end(&mut bytes)?;
+    if bytes.len() > 65536 {
+        return Err("runtime_update_journal_limit".into());
+    }
+    let value: Pending = serde_json::from_slice(&bytes)?;
+    if value.version != 1 {
+        return Err("invalid_runtime_update_journal".into());
+    }
+    value.settings.validate()?;
+    Ok(Some(value))
+}
+
+fn commit_pending(root: &Path, bundle: &Bundle) -> Result<bool> {
+    let Some(pending) = pending(root)? else {
+        return Ok(false);
+    };
+    if pending.settings.bundle.bundle_id != bundle.id()
+        || pending.settings.bundle.source_sha256 != bundle.source()
+    {
+        return Err(
+            "An interrupted update needs its matching desktop bundle; rerun that installer".into(),
+        );
+    }
+    let current = match Settings::read(&root.join("runtime.json")) {
+        Ok(current) => Some(current),
+        Err(error) if !root.join("runtime.json").exists() => {
+            let _ = error;
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(current) = &current {
+        if current.bundle.bundle_id != pending.settings.bundle.bundle_id
+            && Some(&current.bundle.bundle_id) != pending.previous.as_ref()
+        {
+            return Err("runtime_update_base_changed".into());
+        }
+        if current.runtime_id != pending.settings.runtime_id
+            || current.disks[1].path != pending.settings.disks[1].path
+            || current.guest_cid != pending.settings.guest_cid
+        {
+            return Err("runtime_update_identity_changed".into());
+        }
+    } else if pending.previous.is_some() {
+        return Err("runtime_update_base_missing".into());
+    }
+    verify_boot(&pending.settings)?;
+    write_settings(root, &pending.settings)?;
+    // Publication of the desktop entry happens after this transaction. The
+    // matching binary clears the journal on first launch; an interrupted
+    // activation is resumed explicitly by rerunning its installer.
+    Ok(true)
+}
+
+pub fn install(path: &Path) -> Result<()> {
+    change_bundle(path, false, false)
+}
+pub fn update(path: &Path) -> Result<()> {
+    change_bundle(path, true, false)
+}
+pub fn deploy(path: &Path) -> Result<()> {
+    change_bundle(path, true, true)
+}
+
+fn change_bundle(path: &Path, updating: bool, deploy: bool) -> Result<()> {
     require_desktop()?;
-    // Hardware access and extraction tools are checked before allocating data.
-    preflight()?;
-    extractor()?;
-    let image = image.canonicalize()?;
+    let bundle = Bundle::read(path)?;
+    // No persistent disk is allocated before actual platform/tool access passes.
+    preflight_with(&bundle.root.join("bin/oblivion-vm"))?;
     let root = directory()?;
     let sockets = socket_directory()?;
     private_directory(&root)?;
     private_directory(&sockets)?;
-    let config = root.join("runtime.json");
     let election = private_lock(&root.join("installation.lock"))?;
     if !try_lock(&election)? {
         return Err("runtime_installation_busy".into());
     }
-    if fs::symlink_metadata(&config).is_ok() {
-        return Err("Runtime is already installed".into());
+    let config = root.join("runtime.json");
+    let previous = match Settings::read(&config) {
+        Ok(value) => Some(value),
+        Err(error) if !config.exists() => {
+            let _ = error;
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    if previous.is_some() && !updating {
+        return Err("Runtime is already installed; use runtime update BUNDLE".into());
     }
-    let runtime_id = random_id()?;
-    let assets = root.join(format!("runtime-{runtime_id}"));
-    fs::DirBuilder::new().mode(0o700).create(&assets)?;
-    let result = (|| -> Result<()> {
-        extract(&image, &assets)?;
-        let disk = assets.join("storage.raw");
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&disk)?;
-        file.set_len(16 * 1024 * 1024 * 1024)?;
-        file.write_all(format!("OBLIVION-RUNTIME-1\n{runtime_id}\n").as_bytes())?;
-        file.sync_all()?;
-        let settings = Settings {
-            version: 1,
-            backend: backend().into(),
-            command_line: format!(
-                "boot=live components console=hvc0 quiet loglevel=0 oblivion.runtime=1 oblivion.runtime-backend={} oblivion.runtime-id={runtime_id}",
-                backend()
-            ),
-            runtime_id,
-            kernel: assets.join("kernel"),
-            initrd: assets.join("initrd"),
-            disks: [
-                Disk {
-                    path: image,
-                    read_only: true,
-                },
-                Disk {
-                    path: disk,
-                    read_only: false,
-                },
-            ],
-            cpu_count: 4,
-            memory_mi_b: 6144,
-            control_socket: sockets.join("runtime.sock"),
-            control_port: 4050,
-            guest_cid: guest_cid()?,
-            network: true,
-            serial_stdio: false,
-        };
-        settings.validate()?;
-        write_settings(&root, &settings)?;
-        Ok(())
-    })();
-    if result.is_err() && !config.exists() {
-        let _ = fs::remove_dir_all(assets);
+    if previous.is_none() && updating && !deploy && pending(&root)?.is_none() {
+        return Err("Runtime is not installed".into());
     }
-    result
-}
-
-pub fn update(image: &Path) -> Result<()> {
-    require_desktop()?;
-    preflight()?;
-    extractor()?;
-    let image = image.canonicalize()?;
-    let root = directory()?;
-    private_directory(&root)?;
-    let mut settings = Settings::read(&root.join("runtime.json"))?;
-    private_directory(
-        settings
-            .control_socket
-            .parent()
-            .ok_or("invalid_runtime_socket")?,
-    )?;
-    let startup = private_lock(&sidecar(&settings.control_socket, ".startup.lock"))?;
-    let running = private_lock(&sidecar(&settings.control_socket, ".lock"))?;
+    let socket = previous
+        .as_ref()
+        .map(|value| value.control_socket.clone())
+        .unwrap_or_else(|| sockets.join("runtime.sock"));
+    let startup = private_lock(&sidecar(&socket, ".startup.lock"))?;
+    let running = private_lock(&sidecar(&socket, ".lock"))?;
     if !try_lock(&startup)? || !try_lock(&running)? {
-        return Err("Stop the protected runtime before updating its image".into());
+        return Err("Stop the protected runtime before updating its bundle".into());
     }
+    if commit_pending(&root, &bundle)? {
+        return Ok(());
+    }
+    if previous
+        .as_ref()
+        .is_some_and(|current| current.bundle.bundle_id == bundle.id())
+    {
+        verify_boot(previous.as_ref().ok_or("runtime_configuration_missing")?)?;
+        return Ok(());
+    }
+    let runtime_id = match &previous {
+        Some(current) => current.runtime_id.clone(),
+        None => random_id()?,
+    };
     let assets = root.join(format!("boot-{}", random_id()?));
     fs::DirBuilder::new().mode(0o700).create(&assets)?;
     let result = (|| -> Result<()> {
-        extract(&image, &assets)?;
-        settings.disks[0].path = image;
+        copy_boot(&bundle, &assets)?;
+        let mut settings = if let Some(current) = &previous {
+            current.clone()
+        } else {
+            let disk = assets.join("storage.raw");
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&disk)?;
+            file.set_len(16 * 1024 * 1024 * 1024)?;
+            file.write_all(format!("OBLIVION-RUNTIME-1\n{runtime_id}\n").as_bytes())?;
+            file.sync_all()?;
+            Settings {
+                version: 1,
+                backend: backend().into(),
+                bundle: bundle.binding()?,
+                command_line: format!(
+                    "boot=live components console=hvc0 quiet loglevel=0 oblivion.runtime=1 oblivion.runtime-backend={} oblivion.runtime-id={runtime_id}",
+                    backend()
+                ),
+                runtime_id,
+                kernel: assets.join("kernel"),
+                initrd: assets.join("initrd"),
+                disks: [
+                    Disk {
+                        path: assets.join("controller.iso"),
+                        read_only: true,
+                    },
+                    Disk {
+                        path: disk,
+                        read_only: false,
+                    },
+                ],
+                cpu_count: 4,
+                memory_mi_b: 6144,
+                control_socket: socket,
+                control_port: 4050,
+                guest_cid: guest_cid()?,
+                network: true,
+                serial_stdio: false,
+            }
+        };
         settings.kernel = assets.join("kernel");
         settings.initrd = assets.join("initrd");
-        write_settings(&root, &settings)
+        settings.disks[0].path = assets.join("controller.iso");
+        settings.bundle = bundle.binding()?;
+        settings.validate()?;
+        let pending = Pending {
+            version: 1,
+            previous: previous
+                .as_ref()
+                .map(|current| current.bundle.bundle_id.clone()),
+            settings,
+        };
+        write_record(&root, "update.pending.json", &pending)?;
+        commit_pending(&root, &bundle)?;
+        Ok(())
     })();
-    // A directory fsync error after rename must not remove newly committed assets.
     if result.is_err()
-        && !Settings::read(&root.join("runtime.json"))
-            .is_ok_and(|current| current.kernel == assets.join("kernel"))
+        && pending(&root)?.is_none()
+        && !Settings::read(&config).is_ok_and(|current| current.kernel == assets.join("kernel"))
     {
         let _ = fs::remove_dir_all(assets);
     }
     result
 }
 
+/// Install a development bundle for this account. App release publication and
+/// boot activation are retryable; the encrypted persistence file is never copied
+/// into a release, replaced, or removed by this operation.
+pub fn install_bundle(path: &Path) -> Result<()> {
+    require_desktop()?;
+    let bundle = Bundle::read(path)?;
+    preflight_with(&bundle.root.join("bin/oblivion-vm"))?;
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or("home_unavailable")?);
+    let data = match std::env::var_os("XDG_DATA_HOME") {
+        Some(path) => PathBuf::from(path),
+        None => home.join(".local/share"),
+    };
+    let prefix = data.join("oblivion-desktop");
+    private_directory(&prefix)?;
+    let installation = private_lock(&prefix.join("install.lock"))?;
+    if !try_lock(&installation)? {
+        return Err("desktop_installation_busy".into());
+    }
+    let releases = prefix.join("releases");
+    private_directory(&releases)?;
+    let entry_directory = home.join(".local/bin");
+    if !entry_directory.exists() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(&entry_directory)?;
+    }
+    let info = fs::symlink_metadata(&entry_directory)?;
+    if !info.is_dir() || info.uid() != unsafe { libc::getuid() } || info.mode() & 0o022 != 0 {
+        return Err("unsafe_desktop_command_directory".into());
+    }
+    let entry = entry_directory.join("oblivion");
+    if let Ok(info) = fs::symlink_metadata(&entry) {
+        let target = fs::read_link(&entry)
+            .map_err(|_| "An existing ~/.local/bin/oblivion is not managed by this installer")?;
+        let relative = target.strip_prefix(&releases).ok();
+        let parts = relative
+            .map(|path| path.components().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let identity = parts
+            .first()
+            .and_then(|component| component.as_os_str().to_str());
+        if !info.file_type().is_symlink()
+            || info.uid() != unsafe { libc::getuid() }
+            || parts.len() != 3
+            || !identity.is_some_and(|value| {
+                value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            || parts.get(1).map(|part| part.as_os_str()) != Some(std::ffi::OsStr::new("bin"))
+            || parts.get(2).map(|part| part.as_os_str()) != Some(std::ffi::OsStr::new("oblivion"))
+        {
+            return Err(
+                "An existing ~/.local/bin/oblivion is not managed by this installer".into(),
+            );
+        }
+    }
+    let destination = releases.join(bundle.id());
+    if fs::symlink_metadata(&destination).is_ok() {
+        let installed = Bundle::read(&destination)?;
+        if installed.id() != bundle.id() {
+            return Err("installed_desktop_release_changed".into());
+        }
+    } else {
+        let pending = releases.join(format!("pending-{}", random_id()?));
+        fs::DirBuilder::new().mode(0o700).create(&pending)?;
+        let staged = (|| -> Result<()> {
+            for file in bundle.files() {
+                let target = pending.join(&file.path);
+                fs::create_dir_all(target.parent().ok_or("invalid_desktop_bundle_path")?)?;
+                let mut source = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                    .open(bundle.root.join(&file.path))?;
+                let mut output = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(if file.executable { 0o755 } else { 0o644 })
+                    .open(&target)?;
+                std::io::copy(&mut source, &mut output)?;
+                output.sync_all()?;
+                if output.metadata()?.len() != file.bytes
+                    || desktop_bundle::digest(&target)? != file.sha256
+                {
+                    return Err("desktop_bundle_changed_during_install".into());
+                }
+            }
+            let manifest = bundle.manifest_bytes()?;
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o644)
+                .open(pending.join("bundle.json"))?;
+            output.write_all(&manifest)?;
+            output.sync_all()?;
+            Bundle::read(&pending)?;
+            let mut directories = vec![pending.clone()];
+            let mut index = 0;
+            while index < directories.len() {
+                for entry in fs::read_dir(&directories[index])? {
+                    let entry = entry?;
+                    if entry.file_type()?.is_dir() {
+                        directories.push(entry.path());
+                    }
+                }
+                index += 1;
+            }
+            for directory in directories.into_iter().rev() {
+                fs::File::open(directory)?.sync_all()?;
+            }
+            fs::rename(&pending, &destination)?;
+            fs::File::open(&releases)?.sync_all()?;
+            Ok(())
+        })();
+        if staged.is_err() {
+            let _ = fs::remove_dir_all(&pending);
+        }
+        staged?;
+    }
+    // A stopped-only transaction preserves runtime identity, storage and CID.
+    // If it fails, the previous command symlink stays untouched.
+    deploy(&destination)?;
+    let temporary = entry_directory.join(format!("oblivion-pending-{}", random_id()?));
+    std::os::unix::fs::symlink(destination.join("bin/oblivion"), &temporary)?;
+    if let Err(error) = fs::rename(&temporary, &entry) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    fs::File::open(&entry_directory)?.sync_all()?;
+    eprintln!(
+        "Development bundle installed. Run ~/.local/bin/oblivion; add ~/.local/bin to PATH if needed."
+    );
+    Ok(())
+}
+
 fn write_settings(root: &Path, settings: &Settings) -> Result<()> {
     settings.validate()?;
+    write_record(root, "runtime.json", settings)
+}
+
+fn write_record(root: &Path, name: &str, value: &impl Serialize) -> Result<()> {
     let pending = root.join(format!("runtime-{}.pending", random_id()?));
     let result = (|| -> Result<()> {
         let mut file = OpenOptions::new()
@@ -440,9 +710,9 @@ fn write_settings(root: &Path, settings: &Settings) -> Result<()> {
             .create_new(true)
             .mode(0o600)
             .open(&pending)?;
-        file.write_all(&serde_json::to_vec_pretty(settings)?)?;
+        file.write_all(&serde_json::to_vec_pretty(value)?)?;
         file.sync_all()?;
-        fs::rename(&pending, root.join("runtime.json"))?;
+        fs::rename(&pending, root.join(name))?;
         fs::File::open(root)?.sync_all()?;
         Ok(())
     })();
@@ -457,8 +727,7 @@ fn prepare_connection() -> Result<Settings> {
     let path = root.join("runtime.json");
     if !path.is_file() {
         return Err(
-            "Install the matching runtime with oblivion runtime install /path/to/oblivion.iso"
-                .into(),
+            "Install the matching development desktop bundle before starting Oblivion".into(),
         );
     }
     private_directory(&root)?;
@@ -492,7 +761,31 @@ pub fn ensure() -> Result<()> {
         return Ok(());
     }
     let settings = prepare_connection()?;
-    let config = directory()?.join("runtime.json");
+    let bundle = Bundle::current()?;
+    if bundle.id() != settings.bundle.bundle_id || bundle.source() != settings.bundle.source_sha256
+    {
+        return Err(
+            "Desktop binary and runtime image differ; rerun the matching bundle installer".into(),
+        );
+    }
+    let root = directory()?;
+    if pending(&root)?.is_some() {
+        let installation = private_lock(&root.join("installation.lock"))?;
+        if !try_lock(&installation)? {
+            return Err("runtime_installation_busy".into());
+        }
+        let transaction = pending(&root)?.ok_or("runtime_update_journal_changed")?;
+        if transaction.settings.bundle.bundle_id != bundle.id()
+            || serde_json::to_value(&transaction.settings)? != serde_json::to_value(&settings)?
+        {
+            return Err("runtime_update_requires_matching_bundle_installer".into());
+        }
+        verify_boot(&settings)?;
+        bundle.verify_native()?;
+        fs::remove_file(root.join("update.pending.json"))?;
+        fs::File::open(&root)?.sync_all()?;
+    }
+    let config = root.join("vm.json");
     let socket = &settings.control_socket;
     let deadline = Instant::now() + Duration::from_secs(390);
     if crate::remote_control::probe(socket, Duration::from_secs(2)).is_ok() {
@@ -520,6 +813,8 @@ pub fn ensure() -> Result<()> {
                     return Err("The protected runtime stopped before its controller became ready. Retry to start it again.".into());
                 }
                 preflight()?;
+                bundle.verify_native()?;
+                verify_boot(&settings)?;
                 // Linux never silently adopts an old QMP/control socket. Recovery
                 // is an explicit command under both election and lifetime locks.
                 if backend() == "qemu-kvm"
@@ -536,6 +831,14 @@ pub fn ensure() -> Result<()> {
                 if unsafe { libc::flock(helper_lock.as_raw_fd(), libc::LOCK_UN) } != 0 {
                     return Err(std::io::Error::last_os_error().into());
                 }
+                // Backend configuration is a distinct current protocol. The
+                // launcher-owned bundle binding remains in runtime.json and is
+                // verified before generating this private, fixed VM projection.
+                let mut wire = serde_json::to_value(&settings)?;
+                wire.as_object_mut()
+                    .ok_or("invalid_runtime_configuration")?
+                    .remove("bundle");
+                write_record(&root, "vm.json", &wire)?;
                 let mut command = Command::new(helper()?);
                 command
                     .args(["run", "--config"])
@@ -687,7 +990,9 @@ pub fn stop_if_idle() -> Result<()> {
             // checking whether the runtime is now unowned. Other errors retain
             // their meaning and never trigger a repeated shutdown request.
             Err(error) if error.to_string() == "controller_busy" => {
-                if Instant::now() >= deadline { return Ok(()); }
+                if Instant::now() >= deadline {
+                    return Ok(());
+                }
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(error) => return Err(error),
@@ -720,6 +1025,18 @@ mod tests {
         Settings {
             version: 1,
             backend: backend().into(),
+            bundle: Binding {
+                bundle_id: "aa".repeat(32),
+                source_sha256: "bb".repeat(32),
+                boot: ["runtime/controller.iso", "runtime/kernel", "runtime/initrd"].map(|path| {
+                    desktop_bundle::File {
+                        path: path.into(),
+                        sha256: "cc".repeat(32),
+                        bytes: 1,
+                        executable: false,
+                    }
+                }),
+            },
             runtime_id: identity.into(),
             kernel: root.join("kernel"),
             initrd: root.join("initrd"),
@@ -851,5 +1168,84 @@ mod tests {
         fs::write(&stale, b"not a socket").unwrap();
         assert!(recover_sockets(&[stale.clone()]).is_err());
         assert!(stale.exists());
+    }
+
+    #[test]
+    fn interrupted_bundle_activation_preserves_storage_identity_and_rejects_changed_boot() {
+        let fixture = Fixture::new();
+        let source = desktop_bundle::tests::Fixture::new();
+        let bundle = source.bundle();
+        let assets = fixture.0.join("next");
+        fs::create_dir(&assets).unwrap();
+        fs::set_permissions(&assets, fs::Permissions::from_mode(0o700)).unwrap();
+        copy_boot(&bundle, &assets).unwrap();
+        let previous = settings(&fixture.0);
+        fs::write(
+            &previous.disks[1].path,
+            b"synthetic encrypted data sentinel",
+        )
+        .unwrap();
+        write_settings(&fixture.0, &previous).unwrap();
+        let mut next = previous.clone();
+        next.bundle = bundle.binding().unwrap();
+        next.kernel = assets.join("kernel");
+        next.initrd = assets.join("initrd");
+        next.disks[0].path = assets.join("controller.iso");
+        let transaction = Pending {
+            version: 1,
+            previous: Some(previous.bundle.bundle_id.clone()),
+            settings: next,
+        };
+        write_record(&fixture.0, "update.pending.json", &transaction).unwrap();
+        assert!(commit_pending(&fixture.0, &bundle).unwrap());
+        let current = Settings::read(&fixture.0.join("runtime.json")).unwrap();
+        assert_eq!(current.runtime_id, previous.runtime_id);
+        assert_eq!(current.disks[1].path, previous.disks[1].path);
+        assert_eq!(current.guest_cid, previous.guest_cid);
+        assert_eq!(
+            fs::read(&current.disks[1].path).unwrap(),
+            b"synthetic encrypted data sentinel"
+        );
+        assert!(commit_pending(&fixture.0, &bundle).unwrap());
+        fs::set_permissions(&current.kernel, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&current.kernel, b"modified fixture").unwrap();
+        assert!(commit_pending(&fixture.0, &bundle).is_err());
+        assert_eq!(
+            fs::read(&current.disks[1].path).unwrap(),
+            b"synthetic encrypted data sentinel"
+        );
+    }
+
+    #[test]
+    fn update_journal_never_rebinds_an_existing_persistence_disk() {
+        let fixture = Fixture::new();
+        let source = desktop_bundle::tests::Fixture::new();
+        let bundle = source.bundle();
+        let previous = settings(&fixture.0);
+        write_settings(&fixture.0, &previous).unwrap();
+        let mut next = previous.clone();
+        next.bundle = bundle.binding().unwrap();
+        next.disks[1].path = fixture.0.join("replacement.raw");
+        write_record(
+            &fixture.0,
+            "update.pending.json",
+            &Pending {
+                version: 1,
+                previous: Some(previous.bundle.bundle_id.clone()),
+                settings: next,
+            },
+        )
+        .unwrap();
+        assert!(commit_pending(&fixture.0, &bundle).is_err());
+        assert_eq!(
+            Settings::read(&fixture.0.join("runtime.json"))
+                .unwrap()
+                .disks[1]
+                .path,
+            previous.disks[1].path
+        );
+        let mut prior = serde_json::to_value(&previous).unwrap();
+        prior.as_object_mut().unwrap().remove("bundle");
+        assert!(serde_json::from_value::<Settings>(prior).is_err());
     }
 }

@@ -42,6 +42,13 @@ Safe management
   oblivion safe rename SAFE NAME   Change its title
   oblivion safe grow SAFE MIB      Increase a closed Safe's capacity
 
+Desktop runtime bundles
+  oblivion runtime install-bundle BUNDLE
+  oblivion runtime install BUNDLE
+  oblivion runtime update BUNDLE
+  oblivion runtime deploy BUNDLE
+  oblivion runtime start|stop|recover
+
 Files
   oblivion files list --safe SAFE [workspace/PATH] --json
   oblivion files import --safe SAFE SOURCE [--name NAME]
@@ -184,6 +191,12 @@ fn run() -> control::Result<i32> {
     {
         if args.first().is_some_and(|arg| arg == "runtime") {
             match args.get(1).map(String::as_str) {
+                Some("install-bundle") if args.len() == 3 => {
+                    oblivion_host::native_runtime::install_bundle(std::path::Path::new(&args[2]))?
+                }
+                Some("deploy") if args.len() == 3 => {
+                    oblivion_host::native_runtime::deploy(std::path::Path::new(&args[2]))?
+                }
                 Some("install") if args.len() == 3 => {
                     oblivion_host::native_runtime::install(std::path::Path::new(&args[2]))?
                 }
@@ -195,11 +208,14 @@ fn run() -> control::Result<i32> {
                 Some("stop") if args.len() == 2 => oblivion_host::native_runtime::stop()?,
                 _ => {
                     return Err(
-                        "Use oblivion runtime install IMAGE or oblivion runtime start".into(),
+                        "Use oblivion runtime install-bundle BUNDLE or oblivion runtime start".into(),
                     );
                 }
             }
             return Ok(0);
+        }
+        if oblivion_host::native_runtime::mode()? == oblivion_host::native_runtime::Mode::Desktop {
+            oblivion_host::desktop_bundle::prepare_environment()?;
         }
         oblivion_host::native_runtime::ensure()?;
     }

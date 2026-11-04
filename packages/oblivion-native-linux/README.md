@@ -9,13 +9,23 @@ Build on x86_64 Linux with Rust and the distribution's QEMU packages installed:
 ```sh
 cargo build --release --manifest-path packages/oblivion-native-linux/Cargo.toml
 packages/oblivion-native-linux/target/release/oblivion-vm capabilities
-# Install the helper beside the matching oblivion executable.
-oblivion runtime install /absolute/path/to/oblivion-amd64.iso
-oblivion runtime start
-oblivion
+# Pair the helper with the current CLI, manager and verified runtime evidence
+# using the development desktop bundle builder below.
 ```
 
-The launcher also requires `/usr/bin/bsdtar` from `libarchive-tools` to extract only the matching kernel and initrd from the ISO. Hardware and tool preflight precede persistent runtime data allocation. It stores private state in `$XDG_DATA_HOME/oblivion` or `$HOME/.local/share/oblivion`, and an owned `0700` socket directory below `$XDG_RUNTIME_DIR` or `/tmp`. The runtime data file is a dedicated, identity-marked sparse 16 GiB file; its size is capacity rather than memory consumption. `oblivion runtime update IMAGE` preserves that file, runtime identity and guest CID, and requires the runtime to be stopped. `runtime stop` never starts a stopped VM. After a crash, `runtime recover` removes only owned disconnected control/QMP/auth sockets while holding the startup and lifetime locks; it refuses live listeners and arbitrary files.
+The [development desktop bundle](../../docs/DESKTOP.md) pairs this helper with
+the CLI, manager and matching current-source ISO evidence. Its installer runs
+`oblivion runtime install-bundle BUNDLE`; arbitrary ISO installation is refused.
+Kernel/initrd extraction uses `bsdtar` at source-build time, so end-user
+installation does not require it. Hardware and tool preflight precede persistent
+runtime data allocation. Private state lives in `$XDG_DATA_HOME/oblivion` or
+`$HOME/.local/share/oblivion`, and an owned `0700` socket directory below
+`$XDG_RUNTIME_DIR` or `/tmp`. The data file is a dedicated, identity-marked sparse
+16 GiB file; its size is capacity rather than memory consumption. A stopped-only
+`runtime update BUNDLE` preserves it, the runtime identity and guest CID.
+`runtime stop` never starts a stopped VM. After a crash, `runtime recover`
+removes only owned disconnected control/QMP/auth sockets while holding startup
+and lifetime locks; it refuses live listeners and arbitrary files.
 
 Debian/Live installations select the local controller using root-owned `/etc/oblivion/installation.json` (`0644`) with exactly `{ "version": 1, "mode": "direct-controller" }`. A missing marker selects the desktop backend; an invalid marker errors. Runtime failures never fall back to a local controller. The launcher sets `OBLIVION_RUNTIME_MODE=desktop|direct` before starting the manager, so its exit action is explicit. Existing prototype configurations are not migrated.
 
@@ -23,7 +33,10 @@ The executable uses `/usr/bin/qemu-system-x86_64`, requiring a root-owned execut
 
 `capabilities` reports `version`, `backend`, `architecture`, `virtualization`, `nested`, `vsock`, `supported` and a static failure `reason`. Preflight opens `/dev/kvm`, checks API 12, creates and closes a VM descriptor, checks KVM's supported VMX/SVM CPUID flags and the enabled nested module parameter. It also requires access to `/dev/vhost-vsock` and an AF_VSOCK socket. It never substitutes TCG when KVM or nesting is unavailable. These probes establish access and advertised features; they do not replace a real nested guest acceptance test. [KVM API](https://docs.kernel.org/virt/kvm/api.html), [nested KVM](https://docs.kernel.org/virt/kvm/x86/running-nested-guests.html).
 
-The configuration uses the native runtime's v1 fields, an explicit backend and Linux `guestCID`:
+The backend receives a private `vm.json` projection with v1 fields, an explicit
+backend and Linux `guestCID`. The launcher's separate `runtime.json` additionally
+requires its strict current bundle/hash binding; the backend never chooses or
+upgrades that binding:
 
 ```json
 {
