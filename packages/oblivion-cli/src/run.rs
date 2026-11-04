@@ -115,4 +115,4 @@ impl<T> Options<T> {
 
 #[path = "run_runtime.rs"]
 mod runtime;
-pub use runtime::{Context, Notice, Runtime, cleanup, execute, free_slot, open_existing, start_agent, unlock};
+pub use runtime::{Context, Notice, Runtime, cleanup, execute, free_slot, open_existing, start_agent};

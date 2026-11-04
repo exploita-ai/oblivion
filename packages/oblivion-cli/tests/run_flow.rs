@@ -1,153 +1,9 @@
-use oblivion_cli::{
-    controller::{Call, Controller, Result},
-    proxy, run,
-};
-use oblivion_transport::Transport;
+mod support;
+use oblivion_cli::run;
 use oblivion_wire::control::Operation;
-use serde_json::{Value, json};
-use std::cell::Cell;
-use std::collections::VecDeque;
+use serde_json::json;
 use std::time::Duration;
-use zeroize::Zeroizing;
-const ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const CREATED: &str = "cccccccccccccccccccccccccccccccc";
-struct Step {
-    operation: Operation,
-    output: std::result::Result<String, &'static str>,
-}
-struct Sent {
-    operation: Operation,
-    slot: Option<u8>,
-    session: Option<String>,
-    expected: Option<String>,
-    body: Zeroizing<Vec<u8>>,
-}
-struct Runtime {
-    steps: VecDeque<Step>,
-    sent: Vec<Sent>,
-    events: Vec<String>,
-    clock: Cell<Duration>,
-    advance: Option<Duration>,
-    attached: Option<(u8, String, String, Vec<String>)>,
-    slots: Vec<u8>,
-}
-impl Runtime {
-    fn new(steps: Vec<Step>) -> Self {
-        Self {
-            steps: steps.into(),
-            sent: Vec::new(),
-            events: Vec::new(),
-            clock: Cell::new(Duration::ZERO),
-            advance: None,
-            attached: None,
-            slots: vec![0, 1],
-        }
-    }
-    fn finished(&self) {
-        assert!(self.steps.is_empty());
-    }
-}
-impl Controller for Runtime {
-    type Slot = u8;
-    fn request(&mut self, call: Call<'_, u8>) -> Result<String> {
-        let step = self.steps.pop_front().expect("unexpected controller call");
-        assert_eq!(call.operation, step.operation);
-        self.sent.push(Sent {
-            operation: call.operation,
-            slot: call.slot,
-            session: call.session.map(str::to_owned),
-            expected: call.expected_session.map(str::to_owned),
-            body: Zeroizing::new(call.secret.to_vec()),
-        });
-        step.output.map_err(Into::into)
-    }
-}
-impl run::Runtime for Runtime {
-    type Mark = Duration;
-    fn slots(&self) -> Vec<u8> {
-        self.slots.clone()
-    }
-    fn password(&mut self, label: &'static str) -> Result<Zeroizing<Vec<u8>>> {
-        self.events.push(format!("password:{label}"));
-        Ok(Zeroizing::new(b"synthetic unlock password".to_vec()))
-    }
-    fn new_password(&mut self, label: &'static str) -> Result<Zeroizing<Vec<u8>>> {
-        self.events.push(format!("new-password:{label}"));
-        Ok(Zeroizing::new(b"synthetic new password".to_vec()))
-    }
-    fn initialize_archive(&mut self) -> Result<()> {
-        self.events.push("initialize".into());
-        Ok(())
-    }
-    fn now(&self) -> Duration {
-        self.clock.get()
-    }
-    fn elapsed(&self, start: &Duration) -> Duration {
-        self.clock.get().saturating_sub(*start)
-    }
-    fn wait(&mut self, duration: Duration) -> Result<()> {
-        self.events.push(format!("wait:{}", duration.as_millis()));
-        self.clock
-            .set(self.clock.get() + self.advance.unwrap_or(duration));
-        Ok(())
-    }
-    fn notice(&mut self, notice: run::Notice<'_>) -> Result<()> {
-        self.events.push(match notice {
-            run::Notice::WaitingForConnection => "waiting".into(),
-            run::Notice::SafeOpened(id) => format!("opened:{id}"),
-        });
-        Ok(())
-    }
-    fn attach(&mut self, slot: u8, id: &str, agent: &str, argv: &[String]) -> Result<i32> {
-        self.attached = Some((slot, id.into(), agent.into(), argv.to_vec()));
-        Ok(7)
-    }
-    fn attach_workspace(&mut self, _: u8, _: &str) -> Result<i32> {
-        panic!("agent launch cannot attach a Workspace")
-    }
-}
-fn state(mode: &str) -> Value {
-    json!({"app_open":mode!="locked","app_mode":mode,"general_present":true,"general_incomplete":false,
-        "general_bytes":8589934592_u64,"recovery_required":false,"sessions":[],"session_titles":{},"open_sessions":[],"agent_safes":[]})
-}
-fn active() -> Value {
-    let mut value = state("persistent");
-    value["sessions"] = json!([ID]);
-    value["session_titles"] = json!({ID:"GB"});
-    value["open_sessions"] = json!([{"slot":1,"id":ID,"mode":"agent"}]);
-    value
-}
-fn response(operation: Operation, value: impl Into<String>) -> Step {
-    Step {
-        operation,
-        output: Ok(value.into()),
-    }
-}
-fn status(value: &Value) -> Step {
-    response(Operation::Status, value.to_string())
-}
-fn rejected(operation: Operation, error: &'static str) -> Step {
-    Step {
-        operation,
-        output: Err(error),
-    }
-}
-fn options(values: &[&str]) -> run::Options<Transport> {
-    run::parse(
-        &values
-            .iter()
-            .map(|value| (*value).into())
-            .collect::<Vec<_>>(),
-    )
-    .unwrap()
-    .resolve_transport(|request| -> std::result::Result<_, &'static str> {
-        match request {
-            proxy::Request::Ready(transport) => Ok(transport),
-            proxy::Request::NeedsPassword(_) => Err("no proxy prompt in this fixture"),
-        }
-    })
-    .unwrap()
-}
+use support::{CREATED, ID, Runtime, active, options, rejected, response, state, status};
 
 #[test]
 fn first_new_launch_guides_setup_unlock_and_creation_and_keeps_native_arguments() {
@@ -157,6 +13,8 @@ fn first_new_launch_guides_setup_unlock_and_creation_and_keeps_native_arguments(
     let opened = state("persistent");
     let mut runtime = Runtime::new(vec![
         status(&missing),
+        status(&missing),
+        response(Operation::InitGeneral, ""),
         status(&locked),
         response(Operation::Unlock, ""),
         status(&opened),
@@ -187,7 +45,9 @@ fn first_new_launch_guides_setup_unlock_and_creation_and_keeps_native_arguments(
     assert_eq!(
         runtime.events,
         [
-            "initialize",
+            "capacity:8589934592",
+            "new-password:Oblivion password",
+            "storage-created",
             "password:Oblivion password",
             "new-password:New Safe password",
             &format!("opened:{CREATED}")

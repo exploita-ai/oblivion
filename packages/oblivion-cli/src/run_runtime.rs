@@ -16,6 +16,10 @@ pub struct Context {
 pub enum Notice<'a> {
     WaitingForConnection,
     SafeOpened(&'a str),
+    StorageCapacity(u64),
+    StorageCreated,
+    IncompleteStorageReview,
+    IncompleteStorageDiscarded,
 }
 
 pub trait Runtime: Controller {
@@ -23,45 +27,13 @@ pub trait Runtime: Controller {
     fn slots(&self) -> Vec<Self::Slot>;
     fn password(&mut self, label: &'static str) -> Result<Zeroizing<Vec<u8>>>;
     fn new_password(&mut self, label: &'static str) -> Result<Zeroizing<Vec<u8>>>;
-    fn initialize_archive(&mut self) -> Result<()>;
+    fn confirm(&mut self, word: &'static str) -> Result<bool>;
     fn now(&self) -> Self::Mark;
     fn elapsed(&self, start: &Self::Mark) -> Duration;
     fn wait(&mut self, duration: Duration) -> Result<()>;
     fn notice(&mut self, notice: Notice<'_>) -> Result<()>;
     fn attach(&mut self, slot: Self::Slot, id: &str, agent: &str, argv: &[String]) -> Result<i32>;
     fn attach_workspace(&mut self, slot: Self::Slot, id: &str) -> Result<i32>;
-}
-
-pub fn unlock<R: Runtime>(runtime: &mut R, read_only: bool) -> Result<()> {
-    let state = controller::status(runtime)?;
-    if state.app_open {
-        if state.app_mode
-            != if read_only {
-                AppMode::ReadOnly
-            } else {
-                AppMode::Persistent
-            }
-        {
-            return Err("Lock Oblivion before changing its storage mode".into());
-        }
-        return Ok(());
-    }
-    if !state.general_present {
-        return Err("Encrypted storage is missing. Run oblivion init.".into());
-    }
-    let secret = runtime.password("Oblivion password")?;
-    runtime.request(Call {
-        operation: if read_only {
-            Operation::UnlockReadOnly
-        } else {
-            Operation::Unlock
-        },
-        slot: None,
-        session: None,
-        expected_session: None,
-        secret: &secret,
-    })?;
-    Ok(())
 }
 
 pub fn free_slot<R: Runtime>(runtime: &R, state: &State<R::Slot>) -> Result<R::Slot> {
@@ -151,9 +123,18 @@ pub fn execute<R: Runtime>(
         } else {
             // Selecting an existing Safe must never replace missing storage.
             if options.safe.is_none() && !initial.general_present {
-                runtime.initialize_archive()?;
+                crate::storage::execute(
+                    runtime,
+                    crate::storage::Command::Init {
+                        reset_incomplete: false,
+                        confirmed_reset: false,
+                    },
+                )?;
             }
-            unlock(runtime, false)?;
+            crate::storage::execute(
+                runtime,
+                crate::storage::Command::Unlock { read_only: false },
+            )?;
         }
     }
     let state = controller::status(runtime)?;

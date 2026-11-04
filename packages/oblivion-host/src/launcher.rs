@@ -183,6 +183,7 @@ fn run() -> control::Result<i32> {
         return oblivion_host::activity::forward_stdin();
     }
     let controller_command = controller::Command::parse(&args)?;
+    let storage_command = oblivion_cli::storage::Command::parse(&args)?;
     let launch_options = if args.first().is_some_and(|arg| arg == "run") {
         Some(options(&args[1..])?)
     } else {
@@ -190,6 +191,16 @@ fn run() -> control::Result<i32> {
     };
     let workspace_options = if args.first().is_some_and(|arg| arg == "shell") {
         Some(oblivion_cli::shell::parse(&args[1..])?)
+    } else {
+        None
+    };
+    let network_command = if args.first().is_some_and(|arg| arg == "network") {
+        Some(oblivion_cli::network::parse(&args[1..])?)
+    } else {
+        None
+    };
+    let proxy_command = if args.first().is_some_and(|arg| arg == "proxy") {
+        Some(oblivion_cli::proxy_profiles::parse(&args[1..])?)
     } else {
         None
     };
@@ -267,32 +278,11 @@ fn run() -> control::Result<i32> {
             &mut std::io::stdout().lock(),
         );
     }
+    if let Some(command) = storage_command {
+        return oblivion_cli::storage::execute(&mut UnixRuntime::new(), command);
+    }
     match args[0].as_str() {
         "settings" => idle_commands::run(&args[1..]),
-        "init" => init_commands::run(&args[1..]),
-        "unlock" if args.len() == 1 => {
-            unlock(false)?;
-            Ok(0)
-        }
-        "unlock" if args.len() == 2 && args[1] == "--read-only" => {
-            unlock(true)?;
-            Ok(0)
-        }
-        "ephemeral" if args.len() == 1 => {
-            let state = status()?;
-            if state.app_mode == AppMode::RamOnly {
-                return Ok(0);
-            }
-            if state.app_open {
-                return Err("Lock Oblivion, then enter Ephemeral mode. Active work must close before changing storage modes.".into());
-            }
-            control::request("enter-ram", None, &[])?;
-            Ok(0)
-        }
-        "lock" if args.len() == 1 => {
-            control::request("lock", None, &[])?;
-            Ok(0)
-        }
         "run" => oblivion_cli::run::execute(
             &mut UnixRuntime::new(),
             launch_options.ok_or("run_options_missing")?,
@@ -306,14 +296,18 @@ fn run() -> control::Result<i32> {
         "backup" => backup_commands::run(&args[1..]),
         "share" => share_commands::run(&args[1..]),
         "safe" => safe_commands::run(&args[1..]),
-        "network" => network_commands::run(&args[1..]),
-        "proxy" => proxy_commands::run(&args[1..]),
+        "network" => network_commands::run(network_command.ok_or("network_command_missing")?),
+        "proxy" => proxy_commands::run(proxy_command.ok_or("proxy_command_missing")?),
         _ => Err("Unknown command. Run oblivion --help.".into()),
     }
 }
 
 fn unlock(read_only: bool) -> control::Result<()> {
-    oblivion_cli::run::unlock(&mut UnixRuntime::new(), read_only)
+    oblivion_cli::storage::execute(
+        &mut UnixRuntime::new(),
+        oblivion_cli::storage::Command::Unlock { read_only },
+    )
+    .map(|_| ())
 }
 
 type Options = oblivion_cli::run::Options<oblivion_transport::Transport>;
@@ -323,6 +317,7 @@ fn options(args: &[String]) -> control::Result<Options> {
     parsed.resolve_transport(resolve_proxy)
 }
 
+#[cfg(test)]
 fn proxy(url: &str) -> control::Result<oblivion_transport::Transport> {
     resolve_proxy(oblivion_cli::proxy::parse(url)?)
 }
@@ -330,14 +325,7 @@ fn proxy(url: &str) -> control::Result<oblivion_transport::Transport> {
 fn resolve_proxy(
     request: oblivion_cli::proxy::Request,
 ) -> control::Result<oblivion_transport::Transport> {
-    match request {
-        oblivion_cli::proxy::Request::Ready(transport) => Ok(transport),
-        oblivion_cli::proxy::Request::NeedsPassword(request) => {
-            Ok(request.complete(Zeroizing::new(String::from_utf8(
-                password("Proxy password", false)?.to_vec(),
-            )?))?)
-        }
-    }
+    oblivion_cli::proxy::complete(request, &mut UnixRuntime::new())
 }
 
 pub(crate) struct UnixRuntime {
@@ -372,8 +360,8 @@ impl oblivion_cli::run::Runtime for UnixRuntime {
     fn new_password(&mut self, label: &'static str) -> control::Result<Zeroizing<Vec<u8>>> {
         new_password(label)
     }
-    fn initialize_archive(&mut self) -> control::Result<()> {
-        init_commands::run(&[]).map(|_| ())
+    fn confirm(&mut self, word: &'static str) -> control::Result<bool> {
+        init_commands::confirm(word)
     }
     fn now(&self) -> Instant {
         Instant::now()
@@ -386,13 +374,32 @@ impl oblivion_cli::run::Runtime for UnixRuntime {
         Ok(())
     }
     fn notice(&mut self, notice: oblivion_cli::run::Notice<'_>) -> control::Result<()> {
+        let mut output = std::io::stderr().lock();
         match notice {
             oblivion_cli::run::Notice::WaitingForConnection => {
-                eprintln!("Waiting for the protected connection…")
+                writeln!(output, "Waiting for the protected connection…")?
             }
-            oblivion_cli::run::Notice::SafeOpened(id) => {
-                eprintln!("Safe {} opened", id.get(..8).ok_or("invalid_safe_id")?)
+            oblivion_cli::run::Notice::SafeOpened(id) => writeln!(
+                output,
+                "Safe {} opened",
+                id.get(..8).ok_or("invalid_safe_id")?
+            )?,
+            oblivion_cli::run::Notice::StorageCapacity(bytes) => writeln!(
+                output,
+                "Create the managed encrypted archive: {} MiB.",
+                bytes / 1024 / 1024
+            )?,
+            oblivion_cli::run::Notice::StorageCreated => {
+                writeln!(output, "Encrypted storage created. Run oblivion unlock.")?
             }
+            oblivion_cli::run::Notice::IncompleteStorageReview => writeln!(
+                output,
+                "Only the unfinished app archive is removed. Published encrypted storage is preserved."
+            )?,
+            oblivion_cli::run::Notice::IncompleteStorageDiscarded => writeln!(
+                output,
+                "Incomplete setup removed. Run oblivion init to create encrypted storage."
+            )?,
         }
         Ok(())
     }

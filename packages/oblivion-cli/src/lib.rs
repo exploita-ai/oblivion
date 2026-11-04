@@ -5,5 +5,8 @@
 pub mod proxy;
 pub mod run;
 pub mod shell;
+pub mod storage;
 
 pub mod controller;
+pub mod network;
+pub mod proxy_profiles;

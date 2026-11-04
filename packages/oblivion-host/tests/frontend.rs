@@ -1,8 +1,9 @@
 use oblivion_cli::controller::{self, Command};
-use oblivion_cli::{run, shell};
+use oblivion_cli::{network, proxy_profiles, run, shell, storage};
 use oblivion_host::{control, scope};
 use oblivion_wire::control::{HEADER_LIMIT, Operation, RESPONSE_LIMIT, Request, Response};
 use oblivion_wire::frame;
+use std::collections::VecDeque;
 use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -98,13 +99,25 @@ fn state() -> serde_json::Value {
         "agent_safes":[],"platform_details":{"preserve_this_field":true}
     })
 }
+fn missing_storage(incomplete: bool) -> serde_json::Value {
+    let mut source = state();
+    source["app_open"] = serde_json::json!(false);
+    source["app_mode"] = serde_json::json!("locked");
+    source["general_present"] = serde_json::json!(false);
+    source["general_incomplete"] = serde_json::json!(incomplete);
+    source["sessions"] = serde_json::json!([]);
+    source["open_sessions"] = serde_json::json!([]);
+    source
+}
 
 // Only terminal interaction and time are substituted. Controller requests use
 // the production Unix adapter, codec, socket authentication and slot scoping.
 struct RunTerminal {
     controller: control::Client,
     prompts: Vec<&'static str>,
-    initialization: usize,
+    answers: VecDeque<Zeroizing<Vec<u8>>>,
+    confirmations: Vec<&'static str>,
+    confirmed: bool,
     now: Duration,
     notices: Vec<String>,
     attached: Vec<(u8, String, String, Vec<String>)>,
@@ -115,7 +128,9 @@ impl RunTerminal {
         Self {
             controller: control::Client::remote(path),
             prompts: vec![],
-            initialization: 0,
+            answers: VecDeque::new(),
+            confirmations: vec![],
+            confirmed: false,
             now: Duration::ZERO,
             notices: vec![],
             attached: vec![],
@@ -138,14 +153,17 @@ impl run::Runtime for RunTerminal {
     }
     fn password(&mut self, label: &'static str) -> controller::Result<Zeroizing<Vec<u8>>> {
         self.prompts.push(label);
-        Ok(Zeroizing::new(b"SYNTHETIC_PASSWORD_CANARY".to_vec()))
+        Ok(self
+            .answers
+            .pop_front()
+            .unwrap_or_else(|| Zeroizing::new(b"SYNTHETIC_PASSWORD_CANARY".to_vec())))
     }
     fn new_password(&mut self, label: &'static str) -> controller::Result<Zeroizing<Vec<u8>>> {
         self.password(label)
     }
-    fn initialize_archive(&mut self) -> controller::Result<()> {
-        self.initialization += 1;
-        Ok(())
+    fn confirm(&mut self, word: &'static str) -> controller::Result<bool> {
+        self.confirmations.push(word);
+        Ok(self.confirmed)
     }
     fn now(&self) -> Self::Mark {
         self.now
@@ -161,6 +179,10 @@ impl run::Runtime for RunTerminal {
         self.notices.push(match notice {
             run::Notice::WaitingForConnection => "waiting".into(),
             run::Notice::SafeOpened(id) => format!("opened {id}"),
+            run::Notice::StorageCapacity(bytes) => format!("capacity {bytes}"),
+            run::Notice::StorageCreated => "storage-created".into(),
+            run::Notice::IncompleteStorageReview => "review-incomplete".into(),
+            run::Notice::IncompleteStorageDiscarded => "discarded-incomplete".into(),
         });
         Ok(())
     }
@@ -248,7 +270,7 @@ fn shared_run_reuses_an_active_safe_preserves_argv_and_waits_only_for_its_gatewa
     assert_eq!(terminal.now, Duration::from_secs(1));
     assert_eq!(terminal.notices, ["waiting"]);
     assert!(terminal.prompts.is_empty());
-    assert_eq!(terminal.initialization, 0);
+    assert!(terminal.confirmations.is_empty());
     assert_eq!(
         terminal.attached,
         [(
@@ -384,7 +406,7 @@ fn shared_run_reopens_ram_children_without_allocating_a_replacement_and_reports_
     .unwrap_err();
     assert_eq!(error.to_string(), "cleanup_failed");
     assert!(terminal.prompts.is_empty());
-    assert_eq!(terminal.initialization, 0);
+    assert!(terminal.confirmations.is_empty());
     assert_eq!(terminal.attached.len(), 1);
     assert_eq!(scope::current().index(), 0);
     server.join().unwrap();
@@ -484,6 +506,265 @@ fn shared_workspace_rejects_pipes_before_any_controller_or_password_request() {
     );
     assert!(terminal.prompts.is_empty());
     assert!(terminal.attached.is_empty());
+}
+
+#[test]
+fn common_storage_setup_creates_the_archive_without_unlocking_or_entering_a_mode() {
+    let (fixture, listener) = Fixture::new();
+    let server = std::thread::spawn(move || {
+        loop {
+            let mut stream = accept(&listener);
+            let (request, secret) = receive(&mut stream);
+            assert_eq!(request.slot.index(), 0);
+            assert!(request.session.is_none() && request.expected_session.is_none());
+            match request.operation {
+                Operation::Status => reply(&mut stream, &missing_storage(false).to_string(), None),
+                Operation::InitGeneral => {
+                    assert_eq!(secret.as_slice(), b"SYNTHETIC_PASSWORD_CANARY");
+                    reply(&mut stream, "", None);
+                    break;
+                }
+                operation => panic!("Unexpected setup operation: {operation:?}"),
+            }
+        }
+    });
+    let mut terminal = RunTerminal::new(&fixture.path);
+    assert_eq!(
+        storage::execute(
+            &mut terminal,
+            storage::Command::Init {
+                reset_incomplete: false,
+                confirmed_reset: false
+            }
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(terminal.prompts, ["Oblivion password"]);
+    assert_eq!(terminal.notices, ["capacity 8589934592", "storage-created"]);
+    assert!(terminal.confirmations.is_empty());
+    assert!(terminal.attached.is_empty());
+    server.join().unwrap();
+}
+
+#[test]
+fn common_storage_reset_can_be_cancelled_or_discard_only_the_incomplete_archive() {
+    for confirmed_reset in [false, true] {
+        let (fixture, listener) = Fixture::new();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept(&listener);
+            assert_eq!(read(&mut stream).operation, Operation::Status);
+            reply(&mut stream, &missing_storage(true).to_string(), None);
+            drop(stream);
+            if confirmed_reset {
+                let mut stream = accept(&listener);
+                let request = read(&mut stream);
+                assert_eq!(request.operation, Operation::DiscardGeneralPending);
+                assert!(request.session.is_none() && request.expected_session.is_none());
+                reply(&mut stream, "", None);
+            }
+        });
+        let mut terminal = RunTerminal::new(&fixture.path);
+        let result = storage::execute(
+            &mut terminal,
+            storage::Command::Init {
+                reset_incomplete: true,
+                confirmed_reset,
+            },
+        );
+        if confirmed_reset {
+            assert_eq!(result.unwrap(), 0);
+            assert!(terminal.confirmations.is_empty());
+            assert_eq!(
+                terminal.notices,
+                ["review-incomplete", "discarded-incomplete"]
+            );
+        } else {
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "Storage reset cancelled. Nothing was changed."
+            );
+            assert_eq!(terminal.confirmations, ["RESET"]);
+            assert_eq!(terminal.notices, ["review-incomplete"]);
+        }
+        assert!(terminal.prompts.is_empty() && terminal.attached.is_empty());
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn common_ram_mode_and_global_lock_use_the_existing_authenticated_controller() {
+    let (fixture, listener) = Fixture::new();
+    let server = std::thread::spawn(move || {
+        for operation in [Operation::Status, Operation::EnterRam, Operation::Lock] {
+            let mut stream = accept(&listener);
+            let request = read(&mut stream);
+            assert_eq!(request.operation, operation);
+            assert_eq!(request.slot.index(), 0);
+            assert!(request.session.is_none() && request.expected_session.is_none());
+            reply(
+                &mut stream,
+                &if operation == Operation::Status {
+                    missing_storage(false).to_string()
+                } else {
+                    String::new()
+                },
+                None,
+            );
+        }
+    });
+    let mut terminal = RunTerminal::new(&fixture.path);
+    assert_eq!(
+        storage::execute(&mut terminal, storage::Command::Ephemeral).unwrap(),
+        0
+    );
+    assert_eq!(
+        storage::execute(&mut terminal, storage::Command::Lock).unwrap(),
+        0
+    );
+    assert!(terminal.prompts.is_empty() && terminal.confirmations.is_empty());
+    assert!(terminal.attached.is_empty());
+    server.join().unwrap();
+}
+
+#[test]
+fn common_network_change_keeps_proxy_password_private_and_targets_the_read_only_safe() {
+    let (fixture, listener) = Fixture::new();
+    let server = std::thread::spawn(move || {
+        let mut changed = false;
+        loop {
+            let mut stream = accept(&listener);
+            let (request, secret) = receive(&mut stream);
+            match request.operation {
+                Operation::Status => {
+                    let mut source = state();
+                    source["app_mode"] = serde_json::json!("read-only");
+                    if changed {
+                        assert_eq!(request.slot.index(), 4);
+                        assert_eq!(request.expected_session.as_deref(), Some(SAFE));
+                        source["network_status"] = serde_json::json!({"label":"SOCKS5 READY"});
+                        source["safe_access"] = serde_json::json!({"current":"open"});
+                    }
+                    reply(&mut stream, &source.to_string(), None);
+                    if changed {
+                        break;
+                    }
+                }
+                Operation::Egress => {
+                    assert!(!changed);
+                    assert_eq!(request.slot.index(), 4);
+                    assert_eq!(request.expected_session.as_deref(), Some(SAFE));
+                    assert!(request.session.is_none());
+                    assert_eq!(
+                        serde_json::from_slice::<serde_json::Value>(&secret).unwrap(),
+                        serde_json::json!({
+                            "action":"select", "transport":{"mode":"socks5","endpoint":"192.0.2.5:1080",
+                                "authentication":{"username":"alice","password":"SYNTHETIC_PASSWORD_CANARY"}}
+                        })
+                    );
+                    changed = true;
+                    reply(&mut stream, "", None);
+                }
+                operation => panic!("Unexpected network operation: {operation:?}"),
+            }
+        }
+    });
+    let mut terminal = RunTerminal::new(&fixture.path);
+    let command = network::parse(
+        &[
+            "set",
+            "--safe",
+            "GB",
+            "-x",
+            "socks5h://alice@192.0.2.5:1080",
+        ]
+        .map(String::from),
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    let mut diagnostics = Vec::new();
+    assert_eq!(
+        network::execute(&mut terminal, command, &mut output, &mut diagnostics).unwrap(),
+        0
+    );
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "SOCKS5 READY · open-internet\n"
+    );
+    let diagnostics = String::from_utf8(diagnostics).unwrap();
+    assert!(diagnostics.contains("aaaaaaaa"));
+    assert!(!diagnostics.contains("CANARY") && !diagnostics.contains("alice"));
+    assert_eq!(terminal.prompts, ["Proxy password"]);
+    assert_eq!(scope::current().index(), 0);
+    server.join().unwrap();
+}
+
+#[test]
+fn common_proxy_profile_creation_prompts_privately_and_leaves_active_safes_unchanged() {
+    let (fixture, listener) = Fixture::new();
+    let server = std::thread::spawn(move || {
+        let mut stream = accept(&listener);
+        let (request, secret) = receive(&mut stream);
+        assert_eq!(request.operation, Operation::ProxyProfiles);
+        assert_eq!(request.slot.index(), 0);
+        assert!(request.expected_session.is_none() && request.session.is_none());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&secret).unwrap(),
+            serde_json::json!({
+                "action":"add", "name":"Office", "transport":{"mode":"socks5","endpoint":"192.0.2.5:1080",
+                    "authentication":{"username":"alice","password":"PROXY_PRIVATE_CANARY"}}
+            })
+        );
+        reply(&mut stream, "", None);
+    });
+    let mut terminal = RunTerminal::new(&fixture.path);
+    terminal.answers.push_back(Zeroizing::new(
+        b"socks5h://alice:PROXY_PRIVATE_CANARY@192.0.2.5:1080".to_vec(),
+    ));
+    let command = proxy_profiles::parse(&["add", "Office"].map(String::from)).unwrap();
+    let mut output = Vec::new();
+    let mut diagnostics = Vec::new();
+    assert_eq!(
+        proxy_profiles::execute(&mut terminal, command, &mut output, &mut diagnostics).unwrap(),
+        0
+    );
+    assert!(output.is_empty());
+    let diagnostics = String::from_utf8(diagnostics).unwrap();
+    assert!(diagnostics.contains("Active Safes keep their current transport"));
+    assert!(!diagnostics.contains("CANARY") && !diagnostics.contains("alice"));
+    assert_eq!(terminal.prompts, ["SOCKS5 URL (hidden)"]);
+    assert!(terminal.answers.is_empty());
+    server.join().unwrap();
+}
+
+#[test]
+fn common_proxy_profile_listing_does_not_surface_secret_fields_from_a_malformed_reply() {
+    let (fixture, listener) = Fixture::new();
+    let server = std::thread::spawn(move || {
+        let mut stream = accept(&listener);
+        let (request, secret) = receive(&mut stream);
+        assert_eq!(request.operation, Operation::ProxyProfiles);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&secret).unwrap(),
+            serde_json::json!({"action":"list"})
+        );
+        reply(
+            &mut stream,
+            r#"{"entries":[],"PROXY_SECRET_CANARY":"hidden"}"#,
+            None,
+        );
+    });
+    let mut terminal = RunTerminal::new(&fixture.path);
+    let command = proxy_profiles::parse(&["list", "--json"].map(String::from)).unwrap();
+    let mut output = Vec::new();
+    let mut diagnostics = Vec::new();
+    let error =
+        proxy_profiles::execute(&mut terminal, command, &mut output, &mut diagnostics).unwrap_err();
+    assert!(!format!("{error:?}").contains("CANARY"));
+    assert!(error.source().is_none());
+    assert!(output.is_empty() && diagnostics.is_empty());
+    assert!(terminal.prompts.is_empty());
+    server.join().unwrap();
 }
 
 #[test]
@@ -704,6 +985,48 @@ fn the_compiled_launcher_checks_shared_workspace_syntax_before_booting_a_runtime
         (
             vec!["shell", "--safe", "GB", "codex"],
             "Use oblivion shell --safe SAFE [--policy open-internet|strict|offline]",
+        ),
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_oblivion"))
+            .args(args)
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!("Oblivion: {error}\n")
+        );
+    }
+}
+
+#[test]
+fn the_compiled_launcher_checks_storage_network_and_proxy_commands_before_runtime_start() {
+    for (args, error) in [
+        (
+            vec!["init", "--confirmed-reset"],
+            "--confirmed-reset requires --reset-incomplete",
+        ),
+        (
+            vec!["unlock", "unexpected"],
+            "Use oblivion unlock [--read-only]",
+        ),
+        (vec!["ephemeral", "unexpected"], "Use oblivion ephemeral"),
+        (
+            vec!["network", "status", "--safe", "GB", "--tor"],
+            "Use network set to change the selected transport or policy",
+        ),
+        (
+            vec![
+                "network", "set", "--safe", "GB", "--tor", "--policy", "offline",
+            ],
+            "Choose either a transport or a policy for this change",
+        ),
+        (
+            vec!["proxy", "remove", "../PRIVATE_CANARY"],
+            "invalid_proxy_profile_name",
         ),
     ] {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_oblivion"))

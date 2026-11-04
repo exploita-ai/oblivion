@@ -30,6 +30,21 @@ impl PasswordRequest {
     }
 }
 
+pub fn complete(
+    request: Request,
+    runtime: &mut impl crate::run::Runtime,
+) -> crate::controller::Result<Transport> {
+    match request {
+        Request::Ready(transport) => Ok(transport),
+        Request::NeedsPassword(request) => {
+            let password = runtime.password("Proxy password")?;
+            let password =
+                std::str::from_utf8(&password).map_err(|_| "invalid_proxy_authentication")?;
+            Ok(request.complete(Zeroizing::new(password.to_owned()))?)
+        }
+    }
+}
+
 pub fn parse(url: &str) -> Result<Request, &'static str> {
     let value = url
         .strip_prefix("socks5h://")

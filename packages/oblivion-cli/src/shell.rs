@@ -51,7 +51,7 @@ pub fn execute<R: run::Runtime>(
         return Err("Workspace requires an interactive terminal".into());
     }
     if !controller::status(runtime)?.app_open {
-        run::unlock(runtime, false)?;
+        crate::storage::execute(runtime, crate::storage::Command::Unlock { read_only: false })?;
     }
     let state = controller::status(runtime)?;
     if state.recovery_required {
