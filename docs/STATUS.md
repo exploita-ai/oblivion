@@ -232,7 +232,15 @@ The controller's human-activity tracker is unchanged. Real Unix-socket fixtures,
 portable DTO/command tests and the Linux maintenance-admission predicate cover
 these source boundaries. Actual disk growth and cold-restart acceptance remain open.
 
-Windows now has an experimental offline HCS helper core with direct kernel/initrd
+Files inspection and recovery now use the portable frontend for list, transfers,
+status, recover and discard. The Unix adapter supplies private file channels and
+the local receiver filesystem; copy source selection, approval and payload
+streaming remain in that adapter. Both paths reuse the same Safe lookup and fresh
+opening check. Invalid inspection syntax fails before runtime startup. Portable
+tests, a real Unix controller-socket fixture and the existing copy checks pass;
+this does not provide Windows filesystem endpoints or installed transfer acceptance.
+
+Windows now has an experimental HCS helper core with direct kernel/initrd
 boot, owned VM handles, private VirtioSerial token provisioning, local named-pipe
 control and authenticated AF_HYPERV. Linux and Windows consume one runtime-auth
 implementation. File leases check ACLs, object identity and VHDX metadata; the
@@ -241,8 +249,15 @@ Supervisor loss is observed during HCS waits. Successful shutdown requires an
 actual Stopped observation; uncertain cleanup retains the leases until exit.
 Portable models and MSVC compilation pass locally. Native Windows ACL, pipe,
 cancellation and lifetime fixtures are defined in CI but have not been executed
-on this Mac. Network startup remains explicitly refused: HNS, Windows frontend,
-installer and grant-recovery integration are unfinished. Pipe peer/ACL behavior
+on this Mac. Network startup now prepares an owned isolated HCN ICS switch and
+static endpoint. The HCS builder binds its metadata to the runtime; Debian writes
+the MAC-matched IPv4 profile only in RAM before NetworkManager starts, with no
+automatic Hyper-V DHCP fallback. HCN responses must confirm the requested
+identity and addresses. Creation precedes the VM, and cleanup requires its
+confirmed stop and observed network-resource absence. HCN calls are synchronous;
+service hangs, exact flags, coexistence and recovery still require Windows tests.
+Windows frontend, installer and grant/network-recovery integration are unfinished.
+Pipe peer/ACL behavior
 with the actual HCS worker, boot, inner KVM and the installed lifecycle remain
 Windows acceptance gates. See the [Windows backend](WINDOWS.md).
 

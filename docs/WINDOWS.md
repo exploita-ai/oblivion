@@ -1,8 +1,8 @@
 # Windows native backend — feasibility and implementation proposal
 
 Implementation checkpoint: 4 November 2026. **The Windows product is not complete
-or qualified.** An experimental offline HCS helper core is implemented; HNS,
-frontend integration, installation and recovery remain open. The manager has a Windows x64 build target; its PE
+or qualified.** An experimental HCS helper core and owned HCN ICS network are
+implemented; frontend integration, installation and recovery remain open. The manager has a Windows x64 build target; its PE
 execution and complete installed path still need qualification. This is a proposal for phase 8 of the
 [roadmap](oblivion1.0-roadmap.md), rather than instructions for an available product.
 No Windows VM has been booted to qualify this source increment.
@@ -44,8 +44,8 @@ Windows Terminal / PowerShell -> oblivion.exe
 
 The [HCS helper source](../packages/oblivion-native-windows/README.md) now creates
 an owned compute system, provisions a private per-boot token and relays authenticated
-local control pipes over AF_HYPERV. Its typed configuration currently refuses
-network devices and online startup. `capabilities` reports observed HCS availability
+local control pipes over AF_HYPERV. Its typed configuration can prepare one
+owned network adapter, or omit networking entirely. `capabilities` reports observed HCS availability
 separately from product support, which remains false. This is not yet connected
 to an installed Windows CLI or manager.
 
@@ -58,6 +58,35 @@ Supervisor EOF revokes the helper, including during bounded HCS waits. A success
 HCS request is not a stopped observation. Unknown cleanup retains leases until the
 one-shot process exits and requires explicit grant reconciliation; that recovery
 frontend is still to be implemented.
+
+## Owned controller network
+
+An isolated ICS network follows Microsoft's WSL HCN path. A separate manual
+WinNAT network is unsuitable: Microsoft documents a single internal NAT prefix
+and warns of unknown state with multiple independent NATs. The helper instead
+creates its own named ICS switch and endpoint; it never adopts another product's
+network. The same default HCN schema is used for creation and queries, with no
+second version reader or fallback path. Requested static addresses must be
+confirmed by the provider. Existing host routes and HCN subnets constrain the
+private `/28` selection. [WinNAT limits](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/setup-nat-network),
+[WSL creation and observation](https://github.com/microsoft/WSL/blob/master/src/windows/common/NatNetworking.cpp),
+[default schema](https://github.com/microsoft/WSL/blob/master/src/shared/inc/hns_schema.h).
+
+DHCP is not assumed. The HCS builder appends only validated IPv4, gateway and MAC
+metadata. A controller-only service writes a private NetworkManager keyfile in
+`/run` before NetworkManager starts. It matches the actual NIC by MAC and uses
+static IPv4; automatic DHCP profiles are disabled for the Hyper-V adapter. The
+existing empty resolver, firewall and IPv6 restrictions remain unchanged.
+Per-Safe traffic still traverses the inner gateways and their Tor/SOCKS5 policy.
+
+The requested flags enable nonpersistent networking without requesting DNS or
+DHCP service. WSL normally includes the DNS flag: our exact flag combination,
+SharedAccess behavior and coexistence remain Windows acceptance gates. HCN calls
+are synchronous and expose no cancellation handle. Creation occurs before HCS VM
+creation, and deletion only after Stopped is observed. A blocked service call is
+not turned into a fabricated deadline or a detached mutating worker. Cleanup
+checks both resource identity and observed absence; failed cleanup requires
+reconciliation by the unfinished recovery frontend.
 
 The installer should automate feature detection, explicit elevation, VM creation,
 image verification and any restart handoff. Everyday commands should run as the
@@ -264,7 +293,7 @@ paths and Unix-socket fixtures do not implement the Windows OS adapters below.
 
 Remaining split, without a second command implementation:
 
-1. Move the remaining command orchestration, including Files, family passwords,
+1. Move the remaining command orchestration, including Files import/export, family passwords,
    saved tasks, Share and backup, into the portable frontend boundary.
    Keep Linux controller services and storage code in the Linux host package,
    rather than linking them into every desktop executable.
@@ -275,7 +304,7 @@ Remaining split, without a second command implementation:
    adapters for Unix and Windows. Preserve opaque argument arrays; never feed
    agent arguments into a PowerShell command string. The three agent binaries
    remain the existing pinned Linux binaries inside the Safe.
-4. Complete the Windows HCS backend with HNS, provisioned VHDX data, explicit
+4. Qualify the owned HCN network and complete provisioned VHDX data, explicit
    failed-stop/grant recovery and the installer, using the same runtime lifetime
    contract. Compile and qualify a native OpenTUI manager
    artifact as well; a CLI-only substitute would not satisfy bare `oblivion`.
