@@ -70,6 +70,14 @@ def require_current(path):
     return digest(path)
 
 
+def sources(args):
+    """Expose the same byte inventory used by runtime preparation and pairing."""
+    encoded = current_sources()
+    with args.output.open("xb") as output:
+        output.write(encoded)
+    print(hashlib.sha256(encoded).hexdigest())
+
+
 def copy(source, target, executable=False):
     regular(source)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -220,6 +228,8 @@ def assemble(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    inventory = commands.add_parser("sources", help="Write the current source inventory without creating a runtime or bundle")
+    inventory.add_argument("--output", required=True, type=Path)
     prep = commands.add_parser("prepare", help="Verify source-image evidence before compiling any host component")
     prep.add_argument("--runtime", required=True, type=Path)
     prep.add_argument("--platform", required=True, choices=PLATFORMS)
@@ -232,7 +242,7 @@ def main():
         build.add_argument("--" + name, required=True, type=Path)
     args = parser.parse_args()
     try:
-        (prepare if args.command == "prepare" else assemble)(args)
+        {"sources": sources, "prepare": prepare, "assemble": assemble}[args.command](args)
     except (OSError, ValueError, KeyError, UnicodeError, subprocess.CalledProcessError) as error:
         parser.exit(1, str(error) + "\n")
 

@@ -280,7 +280,7 @@ Local inference is deferred until after 1.0.
 | **Debian controller package, amd64 / arm64** | Development `.deb` source and package lifecycle fixtures implemented for the trusted controller layer. Real-role and hardware acceptance remain open. |
 | **Linux desktop, x86_64** | Native headless QEMU/KVM helper implemented; actual hardware acceptance remains open. |
 | **macOS, Apple Silicon** | Native Virtualization.framework helper implemented. Inner Safe KVM boots currently fail in qualification on the test Mac; not a supported release yet. |
-| **Windows** | Shared CLI/wire/Files foundations, manager x64 build target and controller drivers implemented; native backend, installer and platform qualification remain open. See [Windows](docs/WINDOWS.md). |
+| **Windows** | HCS backend, command entrypoint, manager target, verified bundles and initial setup implemented in source. Local file payloads, privilege broker, software lifecycle and platform qualification remain open. See [Windows](docs/WINDOWS.md). |
 
 Hardware virtualization is required. There is no automatic software-emulation
 fallback. Emulator-only development tests do not qualify a platform.

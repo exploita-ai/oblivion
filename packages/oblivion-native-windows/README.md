@@ -2,8 +2,9 @@
 
 Experimental `oblivion-vm.exe` source for a headless, owned Hyper-V controller.
 This is the backend core, **not an installable Windows Oblivion release**.
-The installed Windows frontend, privilege setup, interrupted-install/resource
-recovery and actual nested-Safe boot remain unfinished or unqualified.
+The installed Windows frontend and initial setup are connected in source.
+Ordinary-user privilege setup, interrupted-install/resource recovery and actual
+nested-Safe boot remain unfinished or unqualified.
 The surrounding architecture is described in [Windows](../../docs/WINDOWS.md).
 
 The helper uses the Windows SDK through the pinned `windows-sys` bindings.
@@ -25,6 +26,16 @@ bootstrap sends the token plus Existing/NewDisk metadata; only matching fresh
 authority permits the guest to write its initial marker. Shutdown waits for the
 owned helper's real exit. Uncertain cleanup persists Recovery; missing pipes do
 not authorize recovery or VM adoption.
+
+`bundle.rs` consumes the common manifest and verifies the actual inventory,
+ACLs, file identities and hashes before publishing into a new private directory.
+`installation.rs` uses the actual LocalAppData known folder and a strict
+Pending/Ready registry. It prepares boot copies outside the immutable release,
+boots and stops the new runtime, and commits Ready only after checking the VHDX.
+Interrupted setup never authorizes another initialization or automatic deletion.
+Metadata-only status/activity discovery does not hash boot assets or call HCS.
+Initial setup currently requires elevation; a normal-user broker, software
+update/removal and interrupted-setup/resource reconciliation remain unfinished.
 
 The network follows the HCN default schema used by Microsoft's WSL implementation:
 ICS with `IsolateSwitch: true` and the nonpersistent flag, a requested private

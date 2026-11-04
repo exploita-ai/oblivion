@@ -5,7 +5,7 @@ crate. `status --json`, `safes` and `close NAME` use one controller read model;
 `run` owns Safe lookup, creation or reopening, network configuration, protected
 startup and cleanup after a failed attachment. `shell --safe` uses the same
 opening, startup and cleanup for tmux. `init`, `unlock`, `ephemeral` and `lock`
-share their storage-mode checks, confirmation and controller operations. The Windows frontend can consume
+share their storage-mode checks, confirmation and controller operations. The Windows frontend consumes
 the same implementation without reproducing these decisions.
 
 The frontend uses an injected authenticated controller and platform hooks for
@@ -91,7 +91,8 @@ native guest frames, resize, signals, exact redirected bytes and explicit agent
 release before closing its lease. Console presentation uses the same terminal
 filter and launch model as Unix. Only human input renews idle activity; bounded
 reports carry opening identities, never input content. Installed discovery,
-supervisor integration, installation and the Windows command entrypoint remain unfinished.
+supervisor integration and the command entrypoint are now connected to a per-user
+installation registry. The actual installed path is not yet qualified.
 Real named-pipe, stdio and isolated-console fixtures are part of the Windows test
 target; cross-compilation on Mac does not execute them.
 
@@ -99,8 +100,27 @@ target; cross-compilation on Mac does not execute them.
 `Runtime::initialize` requests the distinct fresh-disk path. Both wait for the
 owned helper's authenticated controller before running the common commands.
 Another terminal reuses the same runtime. Last-owner idle shutdown is guarded,
-and uncertain stop leaves Recovery. Installed discovery, privilege setup and
-owned-resource reconciliation after losing the supervisor remain unfinished.
+and uncertain stop leaves Recovery. Installed discovery verifies one current
+bundle, configuration and data identity. Privilege setup and owned-resource
+reconciliation after losing the supervisor remain unfinished.
+
+`command` owns the complete top-level grammar and help for both native entrypoints.
+The Unix copy and Share adapters supply typed parsers before runtime startup;
+no command falls through to a second raw-argument dispatcher. The Windows binary
+is built explicitly with `--features windows-launcher --bin oblivion` on Windows.
+It starts the actual installed manager with a held runtime lease, or runs the
+same storage, agent, network, task and administration executors directly.
+Status polling and human-activity forwarding read bounded private metadata and
+address the existing pipe, without hashing the ISO or booting a stopped runtime.
+`runtime start` explicitly starts a resident runtime.
+
+Windows Files connects guest directory pages and receiver metadata through the
+opening-scoped file attachment. It releases the client before closing that pipe,
+including malformed-response paths. Local payload copies, Share and personal
+backup file endpoints, runtime updates/removal and the Live storage selector
+are still explicitly unavailable on Windows; these fail before installation
+discovery or VM startup. The shared help describes the full product grammar,
+not a claim that every Windows endpoint is complete.
 
 Personal backup grammar and `status`, `finish` and `discard` use the common
 frontend. The native ciphertext copy engine consumes the same status and finish
@@ -124,6 +144,9 @@ From this directory:
 ```sh
 cargo test --locked
 cargo check --locked --lib --target x86_64-pc-windows-msvc
+# On Windows, link and exercise the actual executable without booting a VM:
+cargo build --locked --features windows-launcher --bin oblivion
+cargo test --locked --features windows-launcher --test windows_entrypoint
 ```
 
 The Unix launcher uses this executor in production. Portable compilation and

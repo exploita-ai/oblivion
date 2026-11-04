@@ -10,9 +10,10 @@ not establish support on real hardware.
 The same manifest and assembly tool now also understand `windows-x86_64` with
 three native `.exe` files and the pinned OpenTUI DLL. Validation is shared through
 `oblivion-bundle`, including Windows path and case-alias checks. This is a build
-contract, not a complete Windows bundle: the installed CLI entrypoint and
-installer remain unfinished. Do not substitute the Unix launcher or ship an
-incomplete package; see [Windows status](WINDOWS.md).
+contract. The Windows command entrypoint, initial managed setup and bundle
+verification are now connected in source. Privilege setup, local payload endpoints,
+software lifecycle and hardware qualification remain unfinished; see
+[Windows status](WINDOWS.md). Do not substitute the Unix launcher in a Windows bundle.
 
 Linux ARM64 additionally requires QEMU 10.1 or newer for its outer nested
 controller. The helper checks the trusted executable before runtime allocation;
@@ -60,6 +61,28 @@ digits, `.`, `+`, `:`, `~` or `-`. Output defaults to
 select a new directory. Existing output is never overwritten. The build calls
 the existing Swift helper build on macOS, the Rust helper build on Linux, the
 Rust `oblivion` target, and the manager's native Bun target.
+
+Windows development builds use native x64 MSVC Developer PowerShell 7.4 or later,
+the pinned Rust 1.88.0 toolchain, repository-pinned Bun, Python 3 and cached
+dependencies. Run the builder without elevation so generated files belong to
+the actual user. It creates its own private work/output tree; it does not change
+ACLs on other files, install tools, boot a VM or build an ISO.
+
+```powershell
+# Actual PE executables and assets only; no runtime or installable bundle:
+pwsh -File script/oblivion/build-native-windows.ps1 -Version '1.0.0~dev20261105'
+
+# Assemble a bundle only with the matching real amd64 controller and evidence:
+pwsh -File script/oblivion/build-native-windows.ps1 -Version '1.0.0~dev20261105' -Runtime artifacts/oblivion-runtime-amd64
+```
+
+Without `-Runtime`, output is explicitly marked build inputs and contains no
+`bundle.json` or install flow. With it, the same Python prepare/assemble tools
+verify the runtime checksums and exact current source inventory. Git attributes
+keep source text in LF form on every platform; the build refuses source changes
+during compilation. Outputs must be new paths and retain their private ACLs.
+This is an unsigned development build, not proof of Windows installer support
+or bit-identical binaries across different Windows SDK/linker versions.
 
 Before compiling the launcher, the builder requires exactly the expected ISO
 and fixed evidence filenames in `SHA256SUMS`, verifies every entry, and compares

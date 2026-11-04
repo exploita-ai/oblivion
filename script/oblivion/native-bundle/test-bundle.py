@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Source-only fixtures: no real ISO boot, VM, provider or host installation."""
 import argparse
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import shutil
@@ -101,6 +103,25 @@ class DesktopBundle(unittest.TestCase):
         for name in ("package.json", "bun.lock", "LICENSE", "NOTICE"):
             shutil.copyfile(self.repo / name, compiler / "workspace-inputs" / name)
         self.assertEqual(builder.current_sources().decode("ascii"), sources.inventory(compiler / "build", compiler / "runtime-inputs", compiler / "workspace-inputs"))
+
+    def test_source_inventory_command_uses_actual_graph_and_never_overwrites(self):
+        output = self.root / "host-sources.sha256"
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            builder.sources(argparse.Namespace(output=output))
+        self.assertEqual(output.read_bytes(), builder.current_sources())
+        self.assertEqual(printed.getvalue().strip(), hashlib.sha256(output.read_bytes()).hexdigest())
+        before = output.read_bytes()
+        with self.assertRaises(FileExistsError):
+            builder.sources(argparse.Namespace(output=output))
+        self.assertEqual(output.read_bytes(), before)
+        source = self.repo / "packages/oblivion-cli/src/lib.rs"
+        source.write_bytes(source.read_bytes() + b"changed current graph\n")
+        changed = self.root / "changed.sha256"
+        with contextlib.redirect_stdout(io.StringIO()):
+            builder.sources(argparse.Namespace(output=changed))
+        self.assertNotEqual(changed.read_bytes(), before)
+        self.assertFalse((self.root / "bundle.json").exists())
 
     def test_guest_gateway_and_lock_changes_invalidate_sources(self):
         baseline = builder.current_sources()

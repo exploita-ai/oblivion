@@ -3,8 +3,10 @@
 Implementation checkpoint: 5 November 2026. **The Windows product is not complete
 or qualified.** An experimental HCS helper core and owned HCN ICS network are
 implemented. A same-user authenticated named-pipe client and shared CLI adapter
-are now present; complete frontend integration, installation and recovery remain
-open. The manager has a Windows x64 build target; its PE
+are now present. The installed command entrypoint, bundle verification and
+one-shot per-user setup are connected in source; ordinary-user privilege setup,
+local file payload endpoints, update/removal and crash recovery remain open.
+The manager has a Windows x64 build target; its PE
 execution and complete installed path still need qualification. This is a proposal for phase 8 of the
 [roadmap](oblivion1.0-roadmap.md), rather than instructions for an available product.
 No Windows VM has been booted to qualify this source increment.
@@ -59,10 +61,56 @@ owned network adapter, or omit networking entirely. `capabilities` reports obser
 separately from product support, which remains false. The common CLI has a
 Windows transport adapter for this endpoint. The native Runtime supplies console
 passwords, guest terminal frames, pipe I/O, resize, signals and opening-scoped
-human activity to the common workflows. Installed discovery, supervisor integration
-and the command entrypoint are still required before it can serve an installed Windows
-CLI or manager. Its terminal keeps the control lease until explicit agent release;
+human activity to the common workflows. The command entrypoint now discovers the
+registered installation and holds a supervisor lease while running these workflows
+or the real manager child. Its terminal keeps the control lease until explicit agent release;
 guest Exit alone must not race the controller's EOF cleanup.
+
+## Installed development entrypoint
+
+The Windows `oblivion.exe` is built from `packages/oblivion-cli` with the explicit
+`windows-launcher` build feature. Its top-level grammar and help have the same
+owner as the Unix launcher. Official agent arguments remain opaque. Invalid
+syntax and currently unavailable local endpoints fail before installation
+discovery, private prompts or VM startup.
+
+`runtime install-bundle DIRECTORY` verifies a current source-bound manifest,
+the exact inventory, hashes, file identities and ACLs. It creates a private
+`%LOCALAPPDATA%\Oblivion` root discovered with the Windows known-folder API,
+rather than trusting an environment override. The durable Pending record precedes
+publication, configuration and VHDX creation. It publishes into a new release
+directory and prepares separate boot copies; HCS grants never modify the immutable
+installed bundle's ACLs. The data VHDX remains outside replaceable software.
+
+Setup boots the new controller, waits for authenticated control and stops it
+cleanly. Only after checking the ungranted VHDX UUID, capacity and file identity
+does it commit Ready. Encrypted user storage is created separately by `oblivion
+init` or the manager. A failed or interrupted setup remains Pending and cannot
+be retried as a new disk initialization. No automatic deletion of partial or
+unknown content is implemented.
+
+This development path currently requires an elevated token and available nested
+HCS capabilities before creating any files. It neither elevates implicitly nor
+installs a privileged service. A normal-user broker and its privilege contract
+are still required for the intended everyday experience. The source bundle must
+also meet the private ACL contract; arbitrary extraction into a broadly writable
+directory is not accepted as a trusted installation source.
+
+`oblivion` launches the real manager with its installed assets and launcher path,
+keeping the verified bundle and runtime lease alive until the child exits.
+`runtime start` explicitly makes the runtime resident. Status polls and activity
+reports read only bounded private metadata and address existing control pipes;
+they do not hash the ISO or boot a stopped runtime. Files browsing and guest
+transfer status/recovery use private, opening-scoped messages. Local import/export
+payloads, Share, backup file streams, software update/removal and the Live storage
+selector remain explicitly unavailable on Windows.
+
+The executable smoke tests exercise help, version and pre-startup rejection on
+Windows without starting a VM. The actual installed lifecycle and HCS permissions
+remain hardware acceptance gates, regardless of cross-compilation results.
+The [development builder](DESKTOP.md#build) creates the real CLI/helper PE files
+and manager assets, and assembles a bundle only with a matching real runtime.
+No-runtime output is labelled build inputs and cannot be installed as a bundle.
 
 The helper pins trusted boot assets, a private VHDX and their parent directories,
 checks actual ACLs and file identities, and grants VM access only to that reviewed

@@ -256,7 +256,7 @@ automatic Hyper-V DHCP fallback. HCN responses must confirm the requested
 identity and addresses. Creation precedes the VM, and cleanup requires its
 confirmed stop and observed network-resource absence. HCN calls are synchronous;
 service hangs, exact flags, coexistence and recovery still require Windows tests.
-Windows frontend, installer and grant/network-recovery integration are unfinished.
+The Windows installed entrypoint and initial setup are now connected in source; local payload endpoints, a normal-user privilege broker, software lifecycle and grant/network-recovery integration remain unfinished.
 Pipe peer/ACL behavior
 with the actual HCS worker, boot, inner KVM and the installed lifecycle remain
 Windows acceptance gates. See the [Windows backend](WINDOWS.md).
@@ -276,7 +276,7 @@ stdin intact; pipes retain native bytes. Explicit release finishes before the
 attachment lease closes. Human activity uses the same classifier and
 opening-bound report as Unix, through a bounded worker. Real Windows fixtures
 cover these boundaries, including an isolated console subprocess; they have
-only been cross-compiled on this Mac. There is still no installed Windows
+only been cross-compiled on this Mac. There is still no qualified installed Windows
 entrypoint or installer qualification.
 
 Remaining release gates include real login and scoped child-credential delegation,
@@ -315,6 +315,39 @@ supervisor fixtures have been cross-compiled, not executed on this Mac.
 Desktop bundles now share one portable manifest validator and canonical identity,
 already consumed by the Unix installer. The existing builder accepts a Windows
 target with native `.exe` roles and the OpenTUI DLL, while rejecting Windows path
-aliases. There is no completed Windows CLI binary/installer to distribute yet.
+aliases. The native Windows command binary and initial per-user setup now consume this bundle model, but are not a completed or qualified installer to distribute.
 The compiler context now includes the common bundle, wire, CLI and Windows
 dependency sources; this source change was not qualified by building another ISO.
+
+The top-level command grammar and HELP now have one portable owner, including
+runtime commands and typed entry to Unix Files/Share adapters. The actual Unix
+executable rejects unknown and malformed commands before runtime startup. The
+Windows executable connects the same control/storage/agent/network/task workflows
+to per-user installed discovery and supervisor leases; it launches the real
+manager with pinned installed assets. Status polling and human-activity reports
+read bounded private metadata and use the existing pipe without hashing the ISO
+or implicitly starting a stopped runtime. Windows Files reads guest pages and
+receiver outcomes through opening-bound attachments, releasing before pipe close.
+Local payload copies, Share, backup file streams and software update/removal are
+still explicitly unavailable there and fail before installation discovery/boot.
+
+Windows setup now records Pending before bundle publication, configuration or
+VHDX creation. Bundle validation checks real inventory, hashes, file identities
+and ACLs; publication creates only a new private directory. Boot copies are
+separate from the immutable release. Setup commits Ready only after authenticated
+controller startup, verified shutdown and VHDX UUID/capacity/file-identity checks.
+Interrupted setup never retries as disk initialization. Current preflight requires
+an elevated token and nested HCS capabilities; no implicit elevation or normal-user
+broker is implemented. Portable installation tests and MSVC compilation pass.
+Windows-only fixture execution, actual installation/boot, privilege setup and
+HCS/network/ACL reconciliation remain acceptance gates. No ISO was built for this
+increment.
+
+The Windows development builder now compiles the actual CLI/helper and manager
+assets on the matching host, binding the launcher to the shared source inventory.
+With a real matching controller it uses the same prepare/assemble verification;
+without one it emits build inputs, never an installable manifest or fake runtime.
+Its new work/output tree has private current-user/System ACLs. Repository text
+uses LF across platforms for exact source pairing. The Python inventory and
+builder suite passes; PowerShell parsing is registered in Windows CI, while a
+real Windows build has not been executed on the development Mac.
