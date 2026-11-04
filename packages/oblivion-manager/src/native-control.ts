@@ -75,13 +75,24 @@ export function nativeOverlay(args: string[]): NativeOverlay | undefined {
   return { page: parsed.data[1], safe: parsed.data[3] }
 }
 
-export async function readNativeStatus(launcher: string) {
-  return nativeStatus.parse(await readNativeJson(launcher, ["status", "--json"]))
+export function statusReader(read: (initial: boolean) => Promise<NativeStatus>) {
+  let initial = true
+  let pending: Promise<NativeStatus> | undefined
+  return () => {
+    if (pending) return pending
+    const starting = initial
+    pending = read(starting).then((state) => { initial = false; return state }).finally(() => { pending = undefined })
+    return pending
+  }
 }
 
-export async function readNativeJson(launcher: string, args: string[]) {
+export async function readNativeStatus(launcher: string, timeout = 10_000) {
+  return nativeStatus.parse(await readNativeJson(launcher, ["status", "--json"], timeout))
+}
+
+export async function readNativeJson(launcher: string, args: string[], timeout = 10_000) {
   const child = Bun.spawn([launcher, ...args], {
-    stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: 10_000,
+    stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout,
     env: { ...process.env, OBLIVION_MANAGER_ACTIVE: "1" },
   })
   const output = await new Response(child.stdout).text()

@@ -4,12 +4,14 @@ import { theme } from "./theme"
 import { createManagerClipboard } from "./clipboard"
 import { SafeManager } from "./safe-manager"
 import { Startup } from "./startup"
-import { nativeLauncher, nativeOverlay, nativePreview, readNativeJson, readNativeStatus, reportNativeActivity, type NativeRuntime } from "./native-control"
+import { nativeLauncher, nativeOverlay, nativePreview, readNativeJson, readNativeStatus, reportNativeActivity, statusReader, type NativeRuntime } from "./native-control"
 
 const demonstration = process.argv.includes("--preview")
 const overlay = nativeOverlay(process.argv.slice(2))
 const liveStorage = demonstration ? undefined : process.env.OBLIVION_LIVE_STORAGE
 if (liveStorage !== undefined && liveStorage !== "persistent" && liveStorage !== "ephemeral") throw new Error("Invalid Live storage mode")
+const intro = !demonstration && !overlay && liveStorage !== undefined && process.env.OBLIVION_SHOW_INTRO === "1"
+delete process.env.OBLIVION_SHOW_INTRO
 // A cold Linux virtual console may still interpret output as an 8-bit charset.
 // Select UTF-8 before OpenTUI draws its borders or accepts non-ASCII input.
 if (process.env.TERM === "linux") process.stdout.write("\u001b%G")
@@ -35,7 +37,7 @@ async function launch(args: string[]) {
 }
 
 const runtime: NativeRuntime = demonstration ? nativePreview(exit) : {
-  status: () => readNativeStatus(nativeLauncher()),
+  status: statusReader((initial) => readNativeStatus(nativeLauncher(), initial && !overlay ? 400_000 : 10_000)),
   query: (args) => readNativeJson(nativeLauncher(), args),
   activity: (input) => reportNativeActivity(nativeLauncher(), input),
   run: launch,
@@ -46,6 +48,5 @@ const runtime: NativeRuntime = demonstration ? nativePreview(exit) : {
     exit()
   },
 }
-const intro = !demonstration && !overlay && liveStorage !== undefined && process.env.OBLIVION_SHOW_INTRO === "1"
-const initial = intro ? runtime.status().then((state) => ({ state, received: performance.now() }), () => undefined) : undefined
+const initial = intro ? runtime.status().then((state) => ({ state, received: performance.now() })) : undefined
 await render(() => intro ? <Startup runtime={runtime} initial={initial!} liveStorage={liveStorage} /> : <SafeManager runtime={runtime} preview={demonstration} overlay={overlay} liveStorage={liveStorage} />, renderer)

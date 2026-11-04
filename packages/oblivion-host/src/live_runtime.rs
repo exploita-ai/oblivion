@@ -91,7 +91,6 @@ pub(super) fn prepare(root: &Path, path: &Path) -> Result<()> {
         unsafe {
             std::env::set_var("OBLIVION_LIVE_STORAGE", selected);
         }
-        intro()?;
         return Ok(());
     }
     preflight()?;
@@ -226,27 +225,32 @@ pub(super) fn prepare(root: &Path, path: &Path) -> Result<()> {
             if ephemeral { "ephemeral" } else { "persistent" },
         );
     }
-    intro()?;
     Ok(())
 }
 
-fn intro() -> Result<()> {
-    if std::env::args_os().count() != 1 {
-        return Ok(());
+pub(super) fn intro() -> Result<()> {
+    unsafe {
+        std::env::remove_var("OBLIVION_SHOW_INTRO");
     }
+    if claim_intro(Path::new("/run/oblivion-live/user/intro.shown"))? {
+        unsafe {
+            std::env::set_var("OBLIVION_SHOW_INTRO", "1");
+        }
+    }
+    Ok(())
+}
+
+fn claim_intro(path: &Path) -> Result<bool> {
     match OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open("/run/oblivion-live/user/intro.shown")
+        .open(path)
     {
-        Ok(_) => unsafe {
-            std::env::set_var("OBLIVION_SHOW_INTRO", "1");
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error.into()),
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error.into()),
     }
-    Ok(())
 }
 
 pub(super) fn activate_ram() -> Result<()> {
@@ -311,4 +315,27 @@ pub(super) fn reset() -> Result<()> {
     }
     fs::File::open(root)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manager_intro_is_claimed_once_outside_resettable_runtime_state() {
+        let root = std::env::temp_dir().join(format!("oblivion-intro-{}", random_id().unwrap()));
+        fs::create_dir(&root).unwrap();
+        let marker = root.join("intro.shown");
+        assert!(claim_intro(&marker).unwrap());
+        assert!(!claim_intro(&marker).unwrap());
+        let runtime = root.join("runtime");
+        fs::create_dir(&runtime).unwrap();
+        fs::write(runtime.join("runtime.json"), b"synthetic runtime state").unwrap();
+        fs::remove_dir_all(runtime).unwrap();
+        assert!(!claim_intro(&marker).unwrap());
+        assert_eq!(fs::metadata(&marker).unwrap().mode() & 0o777, 0o600);
+        fs::remove_file(&marker).unwrap();
+        assert!(claim_intro(&marker).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
 }

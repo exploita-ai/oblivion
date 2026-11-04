@@ -248,7 +248,11 @@ fn run() -> control::Result<i32> {
             _ => None,
         };
         oblivion_host::native_runtime::request_live_storage(storage)?;
-        oblivion_host::native_runtime::ensure()?;
+        if args.is_empty() {
+            oblivion_host::native_runtime::prepare_manager()?;
+        } else {
+            oblivion_host::native_runtime::ensure()?;
+        }
     }
     if args.is_empty() {
         let launcher = std::env::current_exe()?;

@@ -6,18 +6,19 @@ import type { NativeRuntime, NativeStatus } from "./native-control"
 
 export type InitialStatus = { state: NativeStatus; received: number }
 
-export function Startup(props: { runtime: NativeRuntime; initial: Promise<InitialStatus | undefined>; liveStorage?: "persistent" | "ephemeral" }) {
+export function Startup(props: { runtime: NativeRuntime; initial: Promise<InitialStatus>; liveStorage?: "persistent" | "ephemeral" }) {
   const clock = useRenderer().clock
   const [elapsed, setElapsed] = createSignal(0)
   const [boot, setBoot] = createSignal(true)
   const [initial, setInitial] = createSignal<InitialStatus>()
+  const [error, setError] = createSignal<string>()
   const started = clock.now()
   let stopped = false
   const animation = clock.setInterval(() => setElapsed(clock.now() - started), 16)
   const finish = clock.setTimeout(() => { clock.clearInterval(animation); setBoot(false) }, 3000)
-  onMount(() => { void props.initial.then((value) => { if (!stopped) setInitial(value) }) })
+  onMount(() => { void props.initial.then((value) => { if (!stopped) setInitial(value) }, () => { if (!stopped) setError("The Oblivion runtime is unavailable. Press R to retry.") }) })
   onCleanup(() => { stopped = true; clock.clearInterval(animation); clock.clearTimeout(finish) })
-  return <Show when={boot()} fallback={<SafeManager runtime={props.runtime} initial={initial()?.state} initialReceived={initial()?.received} liveStorage={props.liveStorage} />}>
+  return <Show when={boot()} fallback={<SafeManager runtime={props.runtime} initial={initial()?.state} initialReceived={initial()?.received} initialError={error()} liveStorage={props.liveStorage} />}>
     <BootLogo elapsed={elapsed()} />
   </Show>
 }

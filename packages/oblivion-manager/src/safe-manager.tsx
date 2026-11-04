@@ -1,5 +1,5 @@
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
-import { useKeyboard, usePaste, useTerminalDimensions } from "@opentui/solid"
+import { useKeyboard, usePaste, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { ActionItem } from "@oblivion/tui-kit"
 import { ActionBar } from "./action-bar"
 import { BusyModal } from "./busy-modal"
@@ -25,12 +25,13 @@ const agents = [
   { id: "opencode2", name: "OpenCode 2", description: "Open the official OpenCode 2 TUI and choose your provider inside this Safe." },
 ] as const
 
-export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeStatus; initialReceived?: number; preview?: boolean; overlay?: NativeOverlay; liveStorage?: "persistent" | "ephemeral" }) {
+export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeStatus; initialReceived?: number; initialError?: string; preview?: boolean; overlay?: NativeOverlay; liveStorage?: "persistent" | "ephemeral" }) {
   const size = useTerminalDimensions()
+  const clock = useRenderer().clock
   const [state, setState] = createSignal(props.initial)
-  const [error, setError] = createSignal("")
+  const [error, setError] = createSignal(props.initialError ?? "")
   const [notice, setNotice] = createSignal("")
-  const [busy, setBusy] = createSignal(!props.initial)
+  const [busy, setBusy] = createSignal(!props.initial && !props.initialError)
   const [attached, setAttached] = createSignal(false)
   const [selected, setSelected] = createSignal(0)
   const [area, setArea] = createSignal<"list" | "actions">("list")
@@ -86,6 +87,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
     : undefined
   const spacious = () => size().width >= 110 && size().height >= 32
   let refreshInFlight = false
+  let awaitingInitialRetry = !!props.initialError
   let stopped = false
   let activityAt = -Infinity
   let activityInFlight = false
@@ -103,6 +105,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
   async function refresh() {
     if (refreshInFlight || attached()) return
     refreshInFlight = true
+    awaitingInitialRetry = false
     const beforeId = selectedId()
     try {
       const next = await props.runtime.status()
@@ -120,6 +123,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
         } catch { if (!stopped) setObserved(undefined) }
       } else if (!id || !next.open_sessions.some((opened) => opened.id === id)) setObserved(undefined)
     } catch {
+      awaitingInitialRetry = !state()
       if (!stopped) setError("The Oblivion runtime is unavailable. Press R to retry.")
     } finally {
       refreshInFlight = false
@@ -331,10 +335,10 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
   ] : []
 
   onMount(() => {
-    if (!props.initial) void refresh()
-    const timer = setInterval(() => { void refresh() }, 5000)
-    const clock = setInterval(() => setNow(performance.now()), 1000)
-    onCleanup(() => { clearInterval(timer); clearInterval(clock) })
+    if (!props.initial && !props.initialError) void refresh()
+    const timer = clock.setInterval(() => { if (!awaitingInitialRetry) void refresh() }, 5000)
+    const tick = clock.setInterval(() => setNow(performance.now()), 1000)
+    onCleanup(() => { clock.clearInterval(timer); clock.clearInterval(tick) })
   })
   onCleanup(() => { stopped = true })
 

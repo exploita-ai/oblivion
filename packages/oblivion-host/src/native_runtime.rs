@@ -1390,6 +1390,23 @@ pub fn start() -> Result<()> {
     ensure()
 }
 
+/// Keep physical storage review on the trusted terminal, before the Live TUI.
+/// The manager's initial status request starts the VM while its logo renders.
+pub fn prepare_manager() -> Result<()> {
+    unsafe {
+        std::env::remove_var("OBLIVION_SHOW_INTRO");
+    }
+    #[cfg(target_os = "linux")]
+    if mode()? == Mode::Live {
+        let root = directory()?;
+        live::prepare(&root, &root.join("runtime.json"))?;
+        prepare_connection()?;
+        live::intro()?;
+        return Ok(());
+    }
+    ensure()
+}
+
 pub fn ensure() -> Result<()> {
     #[cfg(target_os = "linux")]
     if mode()? == Mode::Live {
