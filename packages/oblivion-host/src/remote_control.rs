@@ -52,7 +52,7 @@ pub fn attach(path: &Path, operation: &str, expected: &str) -> Result<(UnixStrea
 }
 
 pub fn attach_scoped(path: &Path, operation: &str, session: Option<&str>, expected: Option<&str>) -> Result<(UnixStream, String)> {
-    if !matches!(operation, "agent-attach" | "file-attach" | "share-attach" | "share-import-attach" | "share-export-lease") {
+    if !matches!(operation, "agent-attach" | "file-attach" | "share-attach" | "share-import-attach" | "share-export-lease" | "backup-attach") {
         return Err("invalid_attachment".into());
     }
     let stream = connect(
@@ -138,7 +138,7 @@ fn read_response(stream: &UnixStream, operation: &str) -> Result<String> {
         stream,
         Duration::from_secs(if operation == "session-storage" {
             1800
-        } else if matches!(operation, "egress" | "proxy-profiles" | "start-agent" | "open-child-documents") {
+        } else if matches!(operation, "egress" | "proxy-profiles" | "start-agent" | "open-child-documents" | "backup-export-begin" | "backup-import-finish") {
             210
         } else {
             120

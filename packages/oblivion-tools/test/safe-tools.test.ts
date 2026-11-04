@@ -5,7 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { Client } from "@modelcontextprotocol/client"
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio"
-import { discoverSafeTools, jobInfo } from "../src/safe-tools"
+import { childDelivery, discoverSafeTools, jobInfo } from "../src/safe-tools"
 
 function frame(value: unknown) {
   const body = Buffer.from(JSON.stringify(value))
@@ -45,7 +45,7 @@ test("real Unix capability discovery gates tools and a lost creation reply is ne
       }
       if (request.call.task === "drop reply") { peer.destroy(); return }
       if (request.call.task === "unknown outcome") { peer.end(frame({ version: 1, request_id: request.request_id, ok: false, error: "safe_tool_outcome_unknown" })); return }
-      const info = { id: child, parent, created_by_agent: true, agent: "claude", creator_chat_id: null, request_id: request.request_id, ephemeral: false, mib: 2048, state: "awaiting-start" }
+      const info = { id: child, parent, created_by_agent: true, agent: "claude", creator_chat_id: null, request_id: request.request_id, ephemeral: false, mib: 2048, state: "awaiting-start", delivery: { phase: "queued", job: null, reason: null } }
       peer.end(frame({ version: 1, request_id: request.request_id, ok: true, result: request.call.operation === "safe-status"
         ? { safe_id: parent, mode: "agent", children: [], next_offset: null, limits: { direct_children: 8, descendants: 32, depth: 4, records: 128 }, closing: false }
         : info }))
@@ -70,13 +70,14 @@ test("real Unix capability discovery gates tools and a lost creation reply is ne
     const catalog = await client.listTools()
     expect(catalog.tools.map((tool) => tool.name)).toEqual(["tor_rotate", "safe_status", "safe_create", "chat_create", "chat_status", "chat_cancel"])
     expect(catalog.tools.find((tool) => tool.name === "chat_status")?.inputSchema.oneOf).toEqual([{ required: ["job_id"] }, { required: ["request_id"] }])
-    expect(catalog.tools.find((tool) => tool.name === "safe_create")?.description).toContain("DOES NOT start an agent")
+    expect(catalog.tools.find((tool) => tool.name === "safe_create")?.description).toContain("schedule its requested official agent/task once")
     expect(catalog.tools.find((tool) => tool.name === "safe_status")?.annotations?.readOnlyHint).toBe(true)
     const status = await client.callTool({ name: "safe_status", arguments: {} })
     expect(status.structuredContent).toMatchObject({ safe_id: parent, children: [], closing: false })
     expect(calls[0]?.call).toEqual({ operation: "safe-status", offset: 0 })
     const created = await client.callTool({ name: "safe_create", arguments: { agent: "claude", task: "Review imported source" } })
-    expect(created.structuredContent).toMatchObject({ id: child, parent, state: "awaiting-start", agent: "claude" })
+    expect(created.structuredContent).toMatchObject({ id: child, parent, state: "awaiting-start", agent: "claude", delivery: { phase: "queued", job: null, reason: null } })
+    expect(JSON.stringify(created.content)).not.toContain("Review imported source")
     expect(calls[1]?.request_id).toMatch(/^[a-f0-9]{32}$/)
     expect(calls[1]?.call).toEqual({ operation: "safe-create", agent: "claude", task: "Review imported source" })
     const invalid = await client.callTool({ name: "safe_create", arguments: { agent: "claude", task: "Review", parent: child } })
@@ -130,6 +131,17 @@ test("real Unix capability discovery gates tools and a lost creation reply is ne
     await rm(directory, { recursive: true, force: true })
   }
   expect(Buffer.concat(errors).toString()).toBe("")
+})
+
+test("child delivery requires observed job completion and never accepts secrets", () => {
+  expect(childDelivery.safeParse({ phase: "queued", job: null, reason: null }).success).toBe(true)
+  expect(childDelivery.safeParse({ phase: "needs-auth", job: null, reason: "needs-auth" }).success).toBe(true)
+  expect(childDelivery.safeParse({ phase: "finished", job: null, reason: null }).success).toBe(false)
+  expect(childDelivery.safeParse({ phase: "queued", job: null, reason: null, credential: "synthetic-secret" }).success).toBe(false)
+  const job = { job_id: "c".repeat(32), request_id: "d".repeat(32), agent: "codex", state: "running", native_chat_id: null, reason: null }
+  expect(childDelivery.safeParse({ phase: "finished", job, reason: null }).success).toBe(false)
+  expect(childDelivery.safeParse({ phase: "submitted", job, reason: null }).success).toBe(true)
+  expect(childDelivery.safeParse({ phase: "finished", job: { ...job, state: "completed" }, reason: null }).success).toBe(true)
 })
 
 test.each(["unsupported-version", "oversized-frame", "truncated-frame"])("invalid %s handshake advertises no Safe capabilities", async (kind) => {

@@ -1,4 +1,5 @@
 pub mod autolock;
+pub mod backup;
 pub mod activity;
 pub mod agent;
 pub mod channel;

@@ -53,6 +53,7 @@ fn connect_expected(
                 | "share-export-source-open"
                 | "share-import-open"
                 | "share-import-finish"
+                | "backup-import-finish"
         ) {
             4096
         } else {
@@ -86,7 +87,7 @@ fn connect_expected(
     channel.write_all(&(header.len() as u32).to_be_bytes())?;
     channel.write_all(&header)?;
     channel.write_all(secret)?;
-    if !matches!(operation, "agent-attach" | "file-attach" | "share-attach" | "share-import-attach" | "share-export-lease") {
+    if !matches!(operation, "agent-attach" | "file-attach" | "share-attach" | "share-import-attach" | "share-export-lease" | "backup-attach") {
         stream.shutdown(std::net::Shutdown::Write)?;
     }
     Ok(stream)
@@ -125,7 +126,7 @@ fn request_expected(
         &stream,
         Duration::from_secs(if operation == "session-storage" {
             1800
-        } else if matches!(operation, "egress" | "proxy-profiles" | "start-agent" | "open-child-documents") {
+        } else if matches!(operation, "egress" | "proxy-profiles" | "start-agent" | "open-child-documents" | "backup-export-begin" | "backup-import-finish") {
             210
         } else {
             120
@@ -159,6 +160,10 @@ pub fn attach_client(operation: &str, expected: &str) -> Result<(UnixStream, Uni
 
 pub fn attach_export(id: &str) -> Result<(UnixStream, UnixStream, String)> {
     attach_scoped("share-export-lease", Some(id), None)
+}
+
+pub fn attach_backup(transaction: &str) -> Result<(UnixStream, UnixStream, String)> {
+    attach_scoped("backup-attach", Some(transaction), None)
 }
 
 #[cfg(target_os = "linux")]

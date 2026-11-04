@@ -4,7 +4,7 @@ A local stdio MCP server for the official Codex, Claude Code and OpenCode2 clien
 
 - `tor_rotate` rotates only the current Safe's Tor route.
 - `safe_status` reads the current Safe's identity, closing state, creation limits and paginated child records.
-- `safe_create` creates a separate encrypted child Safe and records an intended agent and task. The child remains closed in `awaiting-start`; no agent or task starts, and no files, provider login or credentials are copied.
+- `safe_create` creates a separate encrypted child Safe and schedules its requested official agent/task once. Only that agent's supported credential is handed over through a private sealed channel; no files or unrelated profiles are copied. Missing or unsupported authentication produces `delivery: needs-auth`, without anonymous startup. The creation record's `awaiting-start` state is separate from nullable controller observations: queued/preparing, submitted, finished or unavailable. Submission means admission; the observed job state determines the actual outcome.
 - `chat_create` admits a managed conversation using an official agent in the current Safe, sharing its files and existing agent login. `queued` confirms admission only. Authentication and permission prompts are not bypassed.
 - `chat_status` reads job metadata by exactly one `job_id` or creation `request_id`, without starting or resuming an agent.
 - `chat_cancel` requests cancellation of one managed job. Only a returned `cancelled` state confirms cancellation; other states require another status check.

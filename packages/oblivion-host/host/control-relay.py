@@ -200,10 +200,10 @@ def serve_client(remote, token, controller=CONTROL):
             local.sendall(local_header)
             local.sendall(secret)
             secret[:] = bytes(len(secret))
-            timeout = 1800 if operation == "session-storage" else 210 if operation in ("egress", "proxy-profiles", "start-agent", "open-child-documents") else 120
+            timeout = 1800 if operation == "session-storage" else 210 if operation in ("egress", "proxy-profiles", "start-agent", "open-child-documents", "backup-export-begin", "backup-import-finish") else 120
             local.settimeout(timeout)
             remote.settimeout(timeout)
-            if operation in ("agent-attach", "file-attach", "share-attach", "share-import-attach", "share-export-lease"):
+            if operation in ("agent-attach", "file-attach", "share-attach", "share-import-attach", "share-export-lease", "backup-attach"):
                 guest, rejection = descriptor(local)
                 if guest is None:
                     response(remote, rejection)

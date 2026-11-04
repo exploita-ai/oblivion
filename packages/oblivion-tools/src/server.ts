@@ -24,7 +24,7 @@ export function createServer(safes?: SafeTools) {
   })
   if (safes?.operations.includes("safe_status")) server.registerTool("safe_status", {
     title: "Inspect this Safe and its children",
-    description: "Read this Safe's identity, closing state, child Safe records and creation limits. Only this Safe's controller-scoped children are visible. Results are paginated; pass next_offset to read the next page. awaiting-start means the child is closed and no agent is running. Use this to reconcile an unconfirmed safe_create request ID before any further action.",
+    description: "Read this Safe's identity, closing state, child Safe creation records, limits and bounded observed delivery metadata. Only this Safe's controller-scoped children are visible. Results are paginated; pass next_offset to read the next page. Creation state awaiting-start is separate from delivery: queued/preparing do not confirm execution; submitted is admission; inspect the job state for completion. Null delivery means no observation in this controller opening. needs-auth requires native login/user action; do not invent credentials or start anonymously. Use this to reconcile unconfirmed safe_create without replaying creation.",
     inputSchema: z.object({ offset: z.number().int().min(0).max(32).default(0).describe("Page offset from next_offset; omit for the first page.") }).strict(),
     outputSchema: safeStatus,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -37,7 +37,7 @@ export function createServer(safes?: SafeTools) {
   })
   if (safes?.operations.includes("safe_create")) server.registerTool("safe_create", {
     title: "Create a closed child Safe",
-    description: "Create one separate encrypted child Safe under the current Safe, recording an intended official agent and task. A persistent child shares its family's unlock password and has an independent volume. An ephemeral parent creates a RAM-only child discarded on branch or host lock. The controller attests created_by_agent; creator_chat_id is caller-reported metadata. This call DOES NOT start an agent, run the task, authenticate a provider, or copy files or credentials. A successful child has state awaiting-start and remains closed until explicitly opened. The controller supplies parent authority; the caller cannot choose a parent or password. Respect the limits from safe_status. Never retry an unconfirmed creation automatically.",
+    description: "Create one separate encrypted child Safe and schedule its requested official agent/task once in the background. A persistent child shares its family's unlock password and has an independent volume. An ephemeral parent creates a RAM-only child discarded on branch or host lock. Only the requested agent's explicitly supported credential is handed over through a sealed private channel; no other provider profiles or files are copied. Missing/unsupported authentication leaves delivery needs-auth and does not start anonymously. created_by_agent is controller-attested; creator_chat_id is caller-reported metadata. queued/preparing are startup observations, submitted is admission, and only the returned job state can confirm completion. Parent closure/idle lock fences the child. The caller cannot choose a parent, password or authority. Respect safe_status limits. Never retry an unconfirmed creation automatically.",
     inputSchema: createInput,
     outputSchema: childInfo,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -48,7 +48,7 @@ export function createServer(safes?: SafeTools) {
     if (!parsed.success || parsed.data.request_id !== reply.request_id || parsed.data.state !== "awaiting-start") return {
       isError: true, content: [{ type: "text", text: `Safe creation could not be confirmed (request ${reply.request_id}). Check safe_status before continuing. Do not retry creation automatically.` }],
     }
-    return { structuredContent: parsed.data, content: [{ type: "text", text: `Created closed child Safe ${parsed.data.id}. State: awaiting-start. No agent or task was started.` }] }
+    return { structuredContent: parsed.data, content: [{ type: "text", text: JSON.stringify(parsed.data) }] }
   })
   if (safes?.operations.includes("chat_create")) server.registerTool("chat_create", {
     title: "Start a managed agent conversation in this Safe",

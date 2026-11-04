@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 mod file_commands;
+mod backup_commands;
 mod idle_commands;
 mod init_commands;
 mod network_commands;
@@ -57,6 +58,13 @@ Files
   oblivion files list --safe SAFE [workspace/PATH] --json
   oblivion files import --safe SAFE SOURCE [--name NAME]
   oblivion files export --safe SAFE workspace/PATH DESTINATION
+
+Personal backup (complete encrypted Safe, including saved logins)
+  oblivion backup export --safe SAFE FILE
+  oblivion backup import FILE
+  oblivion backup finish TRANSACTION
+  oblivion backup status [--json]
+  oblivion backup discard TRANSACTION
 
 Share (closed persistent Safes, no provider credentials)
   oblivion share export --safe SAFE FILE [--path workspace/PATH] [--no-chats]
@@ -306,6 +314,7 @@ fn run() -> control::Result<i32> {
         "run" => launch(&args[1..]),
         "shell" => shell_commands::run(&args[1..]),
         "files" => file_commands::run(&args[1..]),
+        "backup" => backup_commands::run(&args[1..]),
         "share" => share_commands::run(&args[1..]),
         "safe" => safe_commands::run(&args[1..]),
         "network" => network_commands::run(&args[1..]),

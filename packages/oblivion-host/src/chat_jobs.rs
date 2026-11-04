@@ -34,6 +34,17 @@ pub(crate) struct Registry {
 }
 
 impl Registry {
+    /// Last bounded observation from the already authenticated job channel.
+    /// Closing its VM cannot turn a terminal observation into a new execution.
+    pub(crate) fn observed(&self, context: &Context, id: &str) -> Result<Option<Info>> {
+        let jobs = self.jobs.lock().map_err(|_| Error("chat_jobs_unavailable"))?;
+        let Some(job) = jobs.get(&(context.safe_id.clone(), id.to_owned()))
+            .filter(|job| job.context.opening == context.opening) else { return Ok(None) };
+        let record = job.record.lock().map_err(|_| Error("chat_jobs_unavailable"))?;
+        if !record.ready { return Ok(None); }
+        require(record.info.valid(), "invalid_chat_job_response")?;
+        Ok(Some(record.info.clone()))
+    }
     pub(crate) fn call(
         self: &Arc<Self>,
         context: &Context,
@@ -549,5 +560,26 @@ mod tests {
         peer.write_all(&[1]).unwrap();
         peer.write_all(&65537u32.to_be_bytes()).unwrap();
         assert!(private_frame(&mut Channel::new(&host, Duration::from_secs(1))).is_err());
+    }
+
+    #[test]
+    fn cached_observations_keep_exact_opening_and_do_not_invent_missing_completion() {
+        let context = context();
+        let (host, mut peer) = UnixStream::pair().unwrap();
+        let sender = std::thread::spawn(move || guest(&mut peer, info(State::Completed)));
+        let received = receive(&host, &context, &"c".repeat(32), None).unwrap_or_else(|error| panic!("{}", error.0));
+        sender.join().unwrap();
+        let registry = Registry::default();
+        let job = Arc::new(Job { context: context.clone(), record: Mutex::new(Record {
+            info: received, ready: true, error: None, stream: None, cancelling: None,
+        }), changed: Condvar::new() });
+        registry.jobs.lock().unwrap().insert((context.safe_id.clone(), "c".repeat(32)), Arc::clone(&job));
+        assert_eq!(registry.observed(&context, &"c".repeat(32)).unwrap_or_else(|error| panic!("{}", error.0)).unwrap().state, State::Completed);
+        let mut reopened = context.clone();
+        reopened.opening.nonce = "e".repeat(32);
+        assert!(registry.observed(&reopened, &"c".repeat(32)).unwrap_or_else(|error| panic!("{}", error.0)).is_none());
+        assert!(registry.observed(&context, &"f".repeat(32)).unwrap_or_else(|error| panic!("{}", error.0)).is_none());
+        job.record.lock().unwrap().ready = false;
+        assert!(registry.observed(&context, &"c".repeat(32)).unwrap_or_else(|error| panic!("{}", error.0)).is_none());
     }
 }

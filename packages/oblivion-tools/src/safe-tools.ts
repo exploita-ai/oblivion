@@ -17,11 +17,23 @@ const identifier = z.string().regex(/^[a-f0-9]{32}$/)
 const nativeAgent = z.enum(["codex", "claude", "opencode2"])
 const task = z.string().refine((value) => value.trim().length > 0 && Buffer.byteLength(value) <= 16384 && !value.includes("\0"), "Enter a nonempty task of at most 16384 UTF-8 bytes without NUL.")
 const chatID = z.string().min(1).refine((value) => Buffer.byteLength(value) <= 256 && !/[\x00-\x1f\x7f-\x9f]/u.test(value), "Use a native chat ID of at most 256 bytes without control characters.")
+export const childDelivery = z.object({
+  phase: z.enum(["queued", "preparing", "needs-auth", "submitted", "finished", "unavailable"]),
+  job: z.lazy(() => jobInfo).nullable(),
+  reason: z.enum(["needs-auth", "startup-unavailable", "cleanup-required"]).nullable(),
+}).strict().refine((value) => {
+  if (value.phase === "submitted") return value.job !== null && value.reason === null
+  if (value.phase === "finished") return value.job !== null && ["completed", "failed", "cancelled"].includes(value.job.state) && value.reason === null
+  if (value.phase === "needs-auth") return value.job === null && value.reason === "needs-auth"
+  if (value.phase === "unavailable") return value.job === null && value.reason !== null
+  return value.job === null && value.reason === null
+}, "Use observed delivery facts; queued/preparing never mean the task completed.")
 export const childInfo = z.object({
   id: identifier, parent: identifier, created_by_agent: z.literal(true),
   agent: nativeAgent, creator_chat_id: chatID.nullable(),
   request_id: identifier, ephemeral: z.boolean(), mib: z.number().int().positive(),
   state: z.enum(["awaiting-start", "failed", "recovery-required"]),
+  delivery: childDelivery.nullable(),
 }).strict()
 export const safeStatus = z.object({
   safe_id: identifier, mode: z.string().min(1).max(32), children: z.array(childInfo).max(16),
@@ -30,8 +42,8 @@ export const safeStatus = z.object({
   closing: z.boolean(),
 }).strict()
 export const createInput = z.object({
-  agent: nativeAgent.describe("Official agent intended for the child. Creation does not start it."),
-  task: task.describe("Task recorded in the child's encrypted provenance; never executed by this call."),
+  agent: nativeAgent.describe("Official agent requested for the separate child Safe. Only this agent's supported credential can be delegated."),
+  task: task.describe("Task sealed into the child. The controller schedules one background start after creation; observe delivery and safe_status."),
   creator_chat_id: chatID.optional().describe("Current native agent chat ID, when known. Caller-reported metadata, not an authenticated identity. Do not invent an ID."),
 }).strict().refine((value) => requestBody("0".repeat(32), { operation: "safe-create", ...value }).length <= frameLimit, "The encoded task exceeds the local bridge's 24 KiB frame limit. Shorten the task.")
 export const jobInfo = z.object({
