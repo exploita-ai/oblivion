@@ -110,6 +110,8 @@ test("file export reviews the Safe source and explicit local destination before 
     await visible("project/")
     await app.mockInput.pressArrow("down")
     await app.mockInput.pressKey(" ")
+    await visible("1 selected")
+    await app.mockInput.pressKey("c")
     await visible("Choose destination directory")
     await app.mockInput.pressKey(".")
     await visible("Confirm export")
@@ -120,7 +122,7 @@ test("file export reviews the Safe source and explicit local destination before 
     await app.mockInput.pressEnter()
     await visible("Copy completed and verified.")
     expect(approvals).toBe(1)
-    expect(copies[0]?.args.slice(0, 6)).toEqual(["files", "export", "--safe", "0123456789abcdef0123456789abcdef", "workspace/project", process.cwd()])
-    expect(copies[0]?.args.slice(6)).toEqual(["--operation", expect.stringMatching(/^[a-f0-9]{32}$/), "--opening", "d".repeat(32)])
+    expect(copies[0]?.args.slice(0, 10)).toEqual(["files", "export", "--safe", "0123456789abcdef0123456789abcdef", "--path", "workspace/project", "--destination", process.cwd(), "--name", "project"])
+    expect(copies[0]?.args.slice(10)).toEqual(["--operation", expect.stringMatching(/^[a-f0-9]{32}$/), "--opening", "d".repeat(32)])
   } finally { await app.dispose() }
 })

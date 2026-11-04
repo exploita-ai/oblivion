@@ -119,8 +119,11 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
   const pendingCopies = new Set<RunningFileCopy>()
   const files: NativeFileClient = {
     start(request, event) {
+      const mapping = request.sources.map((_, input_index) => ({ input_index, alias: `preview-${input_index + 1}`, covered_by: null }))
+      const selected = mapping.length === 1 ? mapping[0]!.alias : "selection"
+      const mapping_sha256 = new Bun.CryptoHasher("sha256").update(JSON.stringify([selected, mapping.map((entry) => [entry.input_index, entry.alias, entry.covered_by])])).digest("hex")
       const review: Extract<FileEvent, { event: "review" }> = { event: "review", identity: request.identity, direction: request.direction, name: request.name,
-        summary: { manifest_sha256: "f".repeat(64), entries: 1, files: 1, directories: 0, bytes: 24 } }
+        summary: { manifest_sha256: "f".repeat(64), mapping_sha256, entries: mapping.length + Number(mapping.length > 1), files: mapping.length, directories: 0, bytes: 24 } }
       const completion = Promise.withResolvers<{ code: number; finished?: Extract<FileEvent, { event: "finished" }> }>()
       let approved = false
       let stopped = false
@@ -130,7 +133,7 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
           approved = true
           event({ event: "progress", identity: request.identity, phase: "copying", bytes: 24, total_bytes: 24 })
           event({ event: "progress", identity: request.identity, phase: "finalizing", bytes: 24, total_bytes: 24 })
-          const receipt = { id: request.identity.operation_id, manifest_sha256: review.summary.manifest_sha256, entries: 1, bytes: 24 }
+          const receipt = { id: request.identity.operation_id, manifest_sha256: review.summary.manifest_sha256, entries: review.summary.entries, bytes: 24 }
           copies.set(receipt.id, { operation_id: receipt.id, safe_id: request.identity.safe_id, opening: request.identity.opening, source_opening: request.identity.opening,
             state: "published", receipt, can_recover: false, can_discard: false })
           const finished = { event: "finished" as const, identity: request.identity, outcome: "completed" as const, receipt }
@@ -145,7 +148,11 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
         done: completion.promise,
       }
       pendingCopies.add(copy)
-      queueMicrotask(() => { if (!stopped) event(review) })
+      queueMicrotask(() => {
+        if (stopped) return
+        for (let start = 0; start < mapping.length; start += 4) event({ event: "mapping", identity: request.identity, selected, start, total: mapping.length, entries: mapping.slice(start, start + 4), mapping_sha256 })
+        event(review)
+      })
       return copy
     },
     async close() { await Promise.all([...pendingCopies].map((copy) => copy.cancel())) },

@@ -8,7 +8,7 @@ import { InputRenderable } from "@opentui/core"
 import { NativeFiles } from "../src/native-files"
 import { createFileTransfers } from "../src/native-file-transfers"
 import { nativePreview } from "../src/native-control"
-import type { FileCopyRequest, FileEvent, FileFinished, NativeFileClient } from "../src/native-file-events"
+import type { FileCopyRequest, FileEvent, FileFinished, FileMappingEntry, NativeFileClient } from "../src/native-file-events"
 
 const safe = "0123456789abcdef0123456789abcdef"
 const opening = "d".repeat(32)
@@ -66,7 +66,12 @@ async function fixture() {
     cancelled: () => cancelled,
     backend(value: string) { backendNonce = value },
     reopen(value: string) { backendNonce = value; setNonce(value) },
-    review() { emit({ event: "review", identity: request().identity, direction: "import", name: "project", summary: { manifest_sha256: digest, entries: 6, files: 3, directories: 3, bytes: 12 } }) },
+    review(entries: FileMappingEntry[] = request().sources.map((_, input_index) => ({ input_index, alias: "project", covered_by: null }))) {
+      const selected = entries.length === 1 ? "project" : "selection"
+      const mapping_sha256 = new Bun.CryptoHasher("sha256").update(JSON.stringify([selected, entries.map((entry) => [entry.input_index, entry.alias, entry.covered_by])])).digest("hex")
+      emit({ event: "mapping", identity: request().identity, selected, start: 0, total: entries.length, entries, mapping_sha256 })
+      emit({ event: "review", identity: request().identity, direction: "import", name: request().name, summary: { manifest_sha256: digest, mapping_sha256, entries: 6, files: 3, directories: entries.length === 1 ? 3 : 2, bytes: 12 } })
+    },
     progress(bytes: number, phase: "copying" | "finalizing" = "copying") { emit({ event: "progress", identity: request().identity, phase, bytes, total_bytes: 12 }) },
     publish() { published = true },
     failCleanup() { cleanupFailed = true; completion.reject(new Error("Lost protocol")) },
@@ -94,6 +99,8 @@ async function prepare(app: Awaited<ReturnType<typeof testRender>>, state: Await
   await app.mockInput.pressEnter()
   await visible(app, "Review local path")
   await app.mockInput.pressEnter()
+  await visible(app, "1 selected")
+  await app.mockInput.pressKey("c")
   await visible(app, "Name the imported copy")
   await app.mockInput.pressEnter()
   await app.mockInput.pressEnter()
@@ -237,5 +244,55 @@ test("a validated preparation failure before approval does not imply a copied de
     expect(state.queries).toHaveLength(0)
     expect(state.approvals).toHaveLength(0)
     expect(app.captureCharFrame()).not.toContain("destination may already contain")
+  } finally { await app.dispose(); await rm(state.root, { recursive: true }) }
+})
+
+
+test.each([[80, 24], [160, 50]])("collection review shows every backend alias and overlap without starting payload at %ix%i", async (width, height) => {
+  const state = await fixture()
+  const other = path.join(state.root, "elsewhere", "project")
+  await mkdir(other, { recursive: true })
+  await writeFile(path.join(other, "other.txt"), "other")
+  const sources = [state.source, path.join(state.source, "a", "note.txt"), other]
+  const app = await testRender(() => <NativeFiles safe={safe} name="Research" opening={state.nonce()} transfers={state.transfers} runtime={state.runtime} run={state.run} back={() => {}} />, { width, height, kittyKeyboard: true })
+  try {
+    await app.renderOnce()
+    await app.mockInput.pressEnter()
+    for (const source of sources) {
+      await visible(app, "Enter path")
+      await app.mockInput.pressKey("p")
+      await visible(app, "Enter local path")
+      await app.mockInput.pressKey("u", { ctrl: true })
+      await app.mockInput.pasteBracketedText(source)
+      await app.mockInput.pressEnter()
+      await app.mockInput.pressEnter()
+      await visible(app, "Review local path")
+      await app.mockInput.pressEnter()
+    }
+    await visible(app, "3 selected")
+    expect(state.requests).toHaveLength(0)
+    await app.mockInput.pressKey("c")
+    await visible(app, "Name the collection")
+    await app.mockInput.pressEnter()
+    await app.mockInput.pressEnter()
+    await state.started
+    expect(state.requests[0]?.sources).toEqual(sources)
+    expect(state.requests[0]?.args.slice(0, 12)).toEqual(["files", "import", "--safe", safe, "--source", sources[0]!, "--source", sources[1]!, "--source", sources[2]!, "--name", "Imported files"])
+    expect(state.transfers.entries()[0]?.sources).toEqual(sources)
+    state.review([{ input_index: 0, alias: "project", covered_by: null }, { input_index: 1, alias: null, covered_by: 0 }, { input_index: 2, alias: "project~2", covered_by: null }])
+    await visible(app, "Confirm import")
+    await app.mockInput.pressKeys(["\x1b[6~"])
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Included in selection 1")
+    expect(app.captureCharFrame()).toContain("Imported files/project~2")
+    expect(state.approvals).toHaveLength(0)
+    expect(state.commands.every((args) => args[0] !== "files")).toBe(true)
+    await app.mockInput.pressEnter()
+    await state.approved
+    expect(state.approvals).toEqual([digest])
+    state.progress(5)
+    await visible(app, "5 B / 12 B transferred")
+    state.publish(); state.finish()
+    await visible(app, "Copy completed and verified")
   } finally { await app.dispose(); await rm(state.root, { recursive: true }) }
 })

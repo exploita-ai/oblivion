@@ -2,8 +2,9 @@ import path from "node:path"
 import { lstat, readdir, stat } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import parse from "shell-quote/parse"
-import { createEffect, createMemo, createSignal, on, onCleanup, onMount, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js"
 import { useKeyboard, usePaste } from "@opentui/solid"
+import { ScrollBoxRenderable } from "@opentui/core"
 import { z } from "zod"
 import { Menu } from "./menu"
 import { FormView } from "./form"
@@ -14,7 +15,8 @@ import { FilePicker } from "./vendor/termcn/file-picker"
 import { theme } from "./theme"
 import type { NativeRuntime } from "./native-control"
 import { createFileTransfers, fileOutcome, type FileOutcome, type FileTransfer } from "./native-file-transfers"
-import type { FileReview, RunningFileCopy } from "./native-file-events"
+import type { FileMappingEntry, FileReview, RunningFileCopy } from "./native-file-events"
+import { SelectionBasket, selectionError, type FileSelection } from "./file-selection"
 
 const unsafePathText = /[\p{Cc}\p{Bidi_Control}\p{Zl}\p{Zp}]/u
 
@@ -28,7 +30,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
   const [page, setPage] = createSignal<"menu" | "source" | "guest" | "destination" | "name" | "transfer" | "records" | "outcome" | "recover" | "discard">("menu")
   const [selected, setSelected] = createSignal(0)
   const [operation, setOperation] = createSignal<"import" | "export">("import")
-  const [source, setSource] = createSignal("")
+  const [sources, setSources] = createSignal<string[]>([])
   const [destination, setDestination] = createSignal("")
   const [name, setName] = createSignal("")
   const [notice, setNotice] = createSignal("")
@@ -38,11 +40,13 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
   const [working, setWorking] = createSignal(false)
   const [copyStage, setCopyStage] = createSignal<"preparing" | "review" | "copying" | "finalizing" | "cancelling" | "reconciling">()
   const [copyReview, setCopyReview] = createSignal<FileReview>()
+  const [copyMappings, setCopyMappings] = createSignal<FileMappingEntry[]>([])
   const [copied, setCopied] = createSignal(0)
   let running: RunningFileCopy | undefined
   let decision: { requested: boolean } | undefined
   let copyEpoch = 0
   let stopped = false
+  let reviewScroll: ScrollBoxRenderable | undefined
   const records = () => transfers.entries().filter((entry) => entry.safe === props.safe)
   const current = () => records().find((entry) => entry.id === transaction())
   const generation = createMemo(() => `${props.safe}/${props.opening ?? ""}`)
@@ -118,6 +122,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
 
   async function beginCopy() {
     if (working() || copyStage() || props.blocked) return
+    if (!sources().length || selectionError(sources())) return
     const safe = props.safe
     setNotice(""); setWorking(true)
     try {
@@ -128,20 +133,21 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       const opened = state.idle_lock.safes.find((entry) => entry.opening.safe_id === safe && !entry.closing)?.opening
       if (!state.app_open || !state.idle_lock.host || state.idle_lock.host.closing || !opened) { setNotice("The Safe is no longer available. Reopen it before copying."); return }
       if (props.opening && props.opening !== opened.nonce) { setNotice("The Safe opening changed. Refresh Files and review the copy again."); return }
-      const entry: FileTransfer = { id: crypto.randomUUID().replaceAll("-", ""), safe, opening: opened.nonce, kind: operation(), source: source(), destination: operation() === "import" ? `workspace/${name()}` : destination() }
+      const entry: FileTransfer = { id: crypto.randomUUID().replaceAll("-", ""), safe, opening: opened.nonce, kind: operation(), sources: sources(), destination: operation() === "import" ? `workspace/${name()}` : destination() }
       transfers.remember(entry)
-      setTransaction(entry.id); setObserved(undefined); setCopyReview(undefined); setCopied(0); setCopyStage("preparing"); setPage("transfer")
+      setTransaction(entry.id); setObserved(undefined); setCopyReview(undefined); setCopyMappings([]); setCopied(0); setCopyStage("preparing"); setPage("transfer")
       const args = entry.kind === "import"
-        ? ["files", "import", "--safe", entry.safe, entry.source, "--name", name()]
-        : ["files", "export", "--safe", entry.safe, entry.source, entry.destination]
+        ? ["files", "import", "--safe", entry.safe, ...entry.sources.flatMap((source) => ["--source", source]), "--name", name()]
+        : ["files", "export", "--safe", entry.safe, ...entry.sources.flatMap((source) => ["--path", source]), "--destination", entry.destination, "--name", name()]
       const epoch = ++copyEpoch
       const approval = { requested: false }
       decision = approval
       const copy = props.runtime.files.start({ args: [...args, "--operation", entry.id, "--opening", opened.nonce],
         identity: { operation_id: entry.id, safe_id: entry.safe, opening: entry.opening }, direction: entry.kind,
-        name: entry.kind === "import" ? name() : path.basename(entry.source),
+        name: name(), sources: entry.sources,
       }, (event) => {
         if (stopped || epoch !== copyEpoch) return
+        if (event.event === "mapping") setCopyMappings((entries) => [...entries, ...event.entries])
         if (event.event === "review") { setCopyReview(event); setCopyStage("review") }
         if (event.event === "progress") { setCopied(event.bytes); setCopyStage(event.phase) }
         if (event.event === "finished") setCopyStage("reconciling")
@@ -209,9 +215,15 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
     setPage("menu"); setSelected(0)
   }
 
+  function continueSelection() {
+    if (!sources().length) return
+    setName(sources().length === 1 ? path.basename(sources()[0]!) : operation() === "import" ? "Imported files" : "Exported files")
+    setPage(operation() === "import" || sources().length > 1 ? "name" : "destination")
+  }
+
   const actions = () => [
-    { name: "Import", description: "Choose one local file or folder. A verified copy is published into this Safe's writable workspace.", action: "Choose source", disabled: props.blocked, run: () => { setOperation("import"); setPage("source") } },
-    { name: "Export", description: "Choose a file or folder under workspace or imports, then a destination on this computer.", action: "Choose Safe files", disabled: props.blocked, run: () => { void props.run(["safe", "open", props.safe]).then((ok) => { if (ok) { setOperation("export"); setPage("guest") } }) } },
+    { name: "Import", description: "Choose local files or folders across directories. A verified copy is published into this Safe's writable workspace.", action: "Choose source", disabled: props.blocked, run: () => { setOperation("import"); setSources([]); setPage("source") } },
+    { name: "Export", description: "Choose files or folders under workspace and imports, then a destination on this computer.", action: "Choose Safe files", disabled: props.blocked, run: () => { void props.run(["safe", "open", props.safe]).then((ok) => { if (ok) { setOperation("export"); setSources([]); setPage("guest") } }) } },
     { name: "Transfers and recovery", description: "Inspect this manager's recorded operation IDs. Verify an uncertain outcome, publish verified staging without copying again, or explicitly discard incomplete staging.", action: "Inspect transfers", run: () => { setSelected(0); setPage("records") } },
   ]
   const label = () => observed()?.state === "published" ? "Copy completed and verified."
@@ -241,6 +253,13 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
   useKeyboard((key) => {
     if (key.defaultPrevented) return
     if (page() === "transfer" && key.name === "escape") { key.preventDefault(); void cancelCopy(); return }
+    if (page() === "transfer" && ["pageup", "pagedown", "home", "end"].includes(key.name)) {
+      key.preventDefault()
+      if (key.name === "home") reviewScroll?.scrollTo(0)
+      if (key.name === "end") reviewScroll?.scrollTo(reviewScroll.scrollHeight)
+      if (key.name === "pageup" || key.name === "pagedown") reviewScroll?.scrollBy((key.name === "pageup" ? -1 : 1) * Math.max(1, (reviewScroll?.viewport.height ?? 2) - 1))
+      return
+    }
     if (working()) return
     if (key.name === "escape" && ["menu", "records", "outcome"].includes(page())) { key.preventDefault(); back(); return }
     if (page() !== "outcome") return
@@ -255,12 +274,12 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       <text fg={theme.text.muted}>Agents running in another terminal keep working. Files are shared by agents in this Safe.</text>
     </Show>
     <Show when={page() === "records"}><Menu title="File transfers" description="The latest 32 operations stay in this manager's RAM. No automatic retries. Keep an operation ID for CLI inspection after closing the manager."
-      items={records().map((entry) => ({ name: `${entry.kind === "import" ? "Import" : "Export"} ${path.basename(entry.source)}`, badge: entry.id.slice(0, 8), description: `Operation ${entry.id}\nFrom ${entry.source}\nTo ${entry.destination}`, action: "Inspect outcome", run: () => { void inspect(entry) } }))}
+      items={records().map((entry) => ({ name: `${entry.kind === "import" ? "Import" : "Export"} ${entry.sources.length === 1 ? path.basename(entry.sources[0]!) : `${entry.sources.length} items`}`, badge: entry.id.slice(0, 8), description: `Operation ${entry.id}\nFrom ${entry.sources.join("\n")}\nTo ${entry.destination}`, action: "Inspect outcome", run: () => { void inspect(entry) } }))}
       selected={selected()} change={setSelected} focused disabled={working()} choose={(index) => { const entry = records()[index]; if (entry) void inspect(entry) }} back={back} empty="No operations recorded in this manager yet." /></Show>
     <Show when={page() === "outcome"}><PageHeader title="Copy outcome" description={description()} />
       <scrollbox flexGrow={1} minHeight={0}><box flexDirection="column" gap={1}>
         <text fg={observed()?.state === "published" ? theme.feedback.success : theme.feedback.warning}>{label()}</text>
-        <text fg={theme.text.muted}>{`From · ${current()?.source}\nTo · ${current()?.destination}`}</text>
+        <text fg={theme.text.muted}>{`From · ${current()?.sources.join("\n")}\nTo · ${current()?.destination}`}</text>
         <Show when={observed()?.receipt}>{(receipt) => <text fg={theme.text.muted}>{`Manifest entries · ${receipt().entries} · ${receipt().bytes.toLocaleString("en-US")} B\nSHA-256 ${receipt().manifest_sha256}`}</text>}</Show>
         <Show when={observed()?.state === "published"}><text fg={theme.text.muted}>Recorded publication receipt. Later changes to destination files are not checked.</text></Show>
         <Show when={observed()?.source_opening && observed()?.source_opening !== observed()?.opening}><text fg={theme.feedback.info}>This copy belongs to an earlier opening. Its status was checked against the current Safe opening.</text></Show>
@@ -278,23 +297,26 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       description: `${description()}\nDestination · ${current()?.destination}\n${page() === "recover" ? "Confirm publication using the verified copy. No source files are copied again; an existing destination is never overwritten." : "Remove only this operation's private staging. Published files and other operations are kept."}`,
       fields: [], submit: page() === "recover" ? "Publish verified copy" : "Discard private staging", run: async () => {},
     }} cancel={back} submit={() => { void execute() }} /></Show>
-    <Show when={page() === "source" || page() === "destination"}><LocalChooser directoryOnly={page() === "destination"} back={back} choose={(value) => {
-      if (page() === "source") { setSource(value); setName(path.basename(value)); setPage("name"); return }
+    <Show when={page() === "source" || page() === "destination"}><LocalChooser directoryOnly={page() === "destination"} back={back}
+      selection={page() === "source" ? { paths: sources(), change: setSources, continue: continueSelection } : undefined} choose={(value) => {
       setDestination(value); void beginCopy()
     }} /></Show>
-    <Show when={page() === "guest"}><GuestChooser safe={props.safe} runtime={props.runtime} back={back} choose={(value) => { setSource(value); setPage("destination") }} /></Show>
-    <Show when={page() === "name"}><FormView form={{ title: "Name the imported copy", description: `Source on this computer · ${source()}`, fields: [{ id: "name", label: "Workspace name", value: name(), validate: (value) => !value || unsafePathText.test(value) || value.includes("/") || value.includes("\\") || value === "." || value === ".." || Buffer.byteLength(value) > 255 ? "Choose a single file or folder name." : undefined }], submit: "Review copy", run: async () => {} }} cancel={back} submit={(values) => { setName(values.name); void beginCopy() }} /></Show>
+    <Show when={page() === "guest"}><GuestChooser safe={props.safe} runtime={props.runtime} back={back} selection={{ paths: sources(), change: setSources, continue: continueSelection }} /></Show>
+    <Show when={page() === "name"}><FormView form={{ title: sources().length > 1 ? "Name the collection" : "Name the imported copy", description: `${sources().length > 1 ? "One folder will contain all selected items. Destination names and overlaps are reviewed next.\n" : "Source on this computer · "}${sources().join("\n")}`, fields: [{ id: "name", label: operation() === "import" ? "Workspace name" : "Export folder name", value: name(), validate: (value) => !value || unsafePathText.test(value) || value.includes("/") || value.includes("\\") || value === "." || value === ".." || Buffer.byteLength(value) > 255 ? "Choose a single file or folder name." : undefined }], submit: operation() === "import" ? "Review copy" : "Choose destination", run: async () => {} }} cancel={back} submit={(values) => { setName(values.name); if (operation() === "export") { setPage("destination"); return }; void beginCopy() }} /></Show>
     <Show when={page() === "transfer"}><PageHeader title={copyStage() === "review" ? operation() === "import" ? "Confirm import" : "Confirm export" : copyStage() === "copying" ? "Copying files" : copyStage() === "finalizing" ? "Finalizing copy" : copyStage() === "cancelling" ? "Cancelling copy" : "Preparing copy"} description={description()} />
-      <scrollbox flexGrow={1} minHeight={0}><box flexDirection="column" gap={1}>
-        <text fg={theme.text.muted}>{`From · ${current()?.source}\nTo · ${current()?.destination}`}</text>
+      <Show when={copyStage() === "copying" || copyStage() === "finalizing"}><text flexShrink={0} fg={theme.feedback.info}>{`${copied().toLocaleString("en-US")} B / ${copyReview()?.summary.bytes.toLocaleString("en-US") ?? "?"} B transferred`}</text></Show>
+      <Show when={copyStage() === "finalizing"}><text flexShrink={0} fg={theme.text.muted}>All payload bytes were sent. Verification and publication are still in progress.</text></Show>
+      <scrollbox ref={(value: ScrollBoxRenderable) => { reviewScroll = value }} flexGrow={1} minHeight={0}><box flexDirection="column" gap={1}>
+        <text fg={theme.text.muted}>{`From · ${sources().length === 1 ? current()?.sources[0] : `${sources().length} selected items`}\nTo · ${current()?.destination}`}</text>
+        <Show when={copyReview() && copyStage() === "review"}><text fg={theme.text.base}><b>Destination names · PageUp / PageDown to scroll</b></text>
+          <For each={copyMappings()}>{(mapping) => <text fg={mapping.covered_by === null ? theme.text.base : theme.text.muted}>{`${mapping.input_index + 1}. ${current()?.sources[mapping.input_index]}\n   → ${mapping.covered_by === null ? `${name()}${sources().length === 1 ? "" : `/${mapping.alias}`}` : `Included in selection ${mapping.covered_by + 1}`}`}</text>}</For>
+        </Show>
         <Show when={copyReview()}>{(review) => <>
           <text fg={theme.text.base}>{`${review().summary.files.toLocaleString("en-US")} selected files · ${review().summary.directories.toLocaleString("en-US")} selected folders\n${review().summary.bytes.toLocaleString("en-US")} B total · ${review().summary.entries.toLocaleString("en-US")} manifest entries`}</text>
           <text fg={theme.text.muted}>{`Manifest SHA-256\n${review().summary.manifest_sha256}`}</text>
         </>}</Show>
         <Show when={copyStage() === "review"}><text fg={theme.feedback.info}>These counts cover the recursive selection. File contents are not transferred until you approve this manifest.</text></Show>
         <Show when={copyStage() === "review" && current()?.kind === "export"}><text fg={theme.text.muted}>Exported copies use the destination filesystem's protection.</text></Show>
-        <Show when={copyStage() === "copying" || copyStage() === "finalizing"}><text fg={theme.feedback.info}>{`${copied().toLocaleString("en-US")} B / ${copyReview()?.summary.bytes.toLocaleString("en-US") ?? "?"} B transferred`}</text></Show>
-        <Show when={copyStage() === "finalizing"}><text fg={theme.text.muted}>All payload bytes were sent. Verification and publication are still in progress.</text></Show>
         <Show when={copyStage() === "cancelling" || copyStage() === "reconciling"}><text fg={theme.feedback.warning}>Waiting for the owned copy process and checking its recorded outcome. A destination may already have been published.</text></Show>
       </box></scrollbox>
       <ActionBar focused disabled={working() || ["cancelling", "reconciling"].includes(copyStage() ?? "")} actions={[
@@ -309,7 +331,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
   </box>
 }
 
-export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolean; title?: string; initialDirectory?: string; choose: (value: string) => void; back: () => void }) {
+export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolean; title?: string; initialDirectory?: string; selection?: FileSelection; choose: (value: string) => void; back: () => void }) {
   const [current, setCurrent] = createSignal(props.initialDirectory ?? process.cwd())
   const [entries, setEntries] = createSignal<{ name: string; directory: boolean; bytes: number }[]>([])
   const [selected, setSelected] = createSignal(0)
@@ -317,7 +339,7 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
   const [total, setTotal] = createSignal(0)
   const [error, setError] = createSignal("")
   const [working, setWorking] = createSignal(false)
-  const [view, setView] = createSignal<"browse" | "path" | "review">("browse")
+  const [view, setView] = createSignal<"browse" | "path" | "review" | "basket">("browse")
   const [entered, setEntered] = createSignal("")
   const [candidate, setCandidate] = createSignal<{ path: string; directory: boolean; bytes: number }>()
   let stopped = false
@@ -325,7 +347,17 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
   function enterPath() { setError(""); setView("path") }
   function cancelPath() { setCandidate(undefined); setError(""); setView("browse") }
   function browseCandidate() { const value = candidate(); if (!value?.directory || working()) return; setView("browse"); void load(value.path) }
-  function useCandidate() { const value = candidate(); if (!value || working() || props.filesOnly && value.directory) return; props.choose(value.path) }
+  function updateSelection(paths: string[]) {
+    const error = selectionError(paths)
+    if (error) { setError(error); return false }
+    props.selection?.change(paths); setError(""); return true
+  }
+  function toggle(value: string) {
+    const selection = props.selection
+    if (!selection) { props.choose(value); return true }
+    return updateSelection(selection.paths.includes(value) ? selection.paths.filter((path) => path !== value) : [...selection.paths, value])
+  }
+  function useCandidate() { const value = candidate(); if (!value || working() || props.filesOnly && value.directory) return; if (toggle(value.path) && props.selection) cancelPath() }
 
   async function inspect(value: string) {
     if (working()) return
@@ -349,7 +381,7 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
     const entry = entries()[index]
     if (!entry) return
     if (entry.directory) { void load(path.join(current(), entry.name)); return }
-    props.choose(path.join(current(), entry.name))
+    toggle(path.join(current(), entry.name))
   }
 
   async function load(next: string, start = 0) {
@@ -374,26 +406,42 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
   useKeyboard((key) => {
     if (key.defaultPrevented || working()) return
     if (view() === "path") return
+    if (view() === "basket") return
     if (view() === "review") {
       if (key.name === "b" && candidate()?.directory) { key.preventDefault(); browseCandidate() }
       return
     }
     if (key.name === "escape") { key.preventDefault(); props.back(); return }
     if (key.name === "p") { key.preventDefault(); enterPath(); return }
+    if (key.name === "b" && props.selection) { key.preventDefault(); setView("basket"); return }
+    if (key.name === "c" && props.selection?.paths.length) { key.preventDefault(); props.selection.continue(); return }
     if (key.name === "backspace") { key.preventDefault(); void load(path.dirname(current())); return }
     if (key.name === "." && props.directoryOnly) { key.preventDefault(); props.choose(current()); return }
-    if (key.name === "space") { key.preventDefault(); const entry = entries()[selected()]; if (entry && (!props.filesOnly || !entry.directory)) props.choose(path.join(current(), entry.name)); return }
+    if (key.name === "." && props.selection) { key.preventDefault(); toggle(current()); return }
+    if (key.name === "space" && !props.selection) { key.preventDefault(); const entry = entries()[selected()]; if (entry && (!props.filesOnly || !entry.directory)) props.choose(path.join(current(), entry.name)); return }
     if (key.name === "pagedown" && offset() + 100 < total()) { key.preventDefault(); void load(current(), offset() + 100) }
     if (key.name === "pageup" && offset()) { key.preventDefault(); void load(current(), Math.max(0, offset() - 100)) }
   })
   return <box flexGrow={1} minHeight={0} flexDirection="column">
+    <Show when={view() === "basket" && props.selection}><SelectionBasket selection={props.selection!} back={() => setView("browse")} /></Show>
     <Show when={view() === "path"}><FormView form={{ title: "Enter local path", description: "Paste one path, local file:// URL or terminal-dropped path. POSIX quoting is accepted without shell expansion. Nothing is copied until you choose and review it.",
       fields: [{ id: "path", label: "File or directory on this computer", value: entered(), validate: (value) => !value || unsafePathText.test(value) ? "Enter one path without control characters or line breaks." : undefined }],
       submit: "Inspect path", run: async () => {} }} cancel={cancelPath} submit={(values) => { void inspect(values.path) }} /></Show>
     <Show when={view() === "review" && candidate()}><FormView form={{ title: "Review local path", description: `${candidate()?.path}\n${candidate()?.directory ? "Directory" : `Regular file · ${candidate()?.bytes.toLocaleString("en-US")} B`}\n${props.filesOnly && candidate()?.directory ? "This operation accepts files. Browse this folder to choose one." : "Choose this path to continue to the operation's review. No copy has started."}`,
       fields: [], submit: props.filesOnly && candidate()?.directory ? "Browse folder" : candidate()?.directory ? "Choose folder" : "Choose file", run: async () => {} }} cancel={cancelPath} submit={() => { if (props.filesOnly && candidate()?.directory) { browseCandidate(); return }; useCandidate() }} /></Show>
     <Show when={view() === "review" && candidate()?.directory && !props.filesOnly}><ActionBar actions={[{ title: "Browse folder", key: "B", disabled: working(), run: browseCandidate }]} /></Show>
-    <Show when={view() === "browse"}><Menu title={props.title ?? (props.directoryOnly ? "Choose destination directory" : "Choose a local file or folder")} description={`${current()}\n${props.filesOnly ? "Space chooses a file" : "Space chooses an entry"} · Enter opens folders · ${total()} entries`} selected={selected()} change={setSelected} focused disabled={working()}
+    <Show when={view() === "browse" && props.selection}><PageHeader title="Choose local files" description="Select files or folders across directories and pages. Enter opens folders; Space adds or removes an item." />
+      <FilePicker currentDir={current()} entries={entries().map((entry) => ({ ...entry, path: path.join(current(), entry.name) }))} selected={props.selection!.paths} focused busy={working()}
+        next={offset() + 100 < total()} previous={offset() > 0} onNavigate={(next) => { void load(next) }} onChange={updateSelection}
+        onNext={() => { void load(current(), offset() + 100) }} onPrevious={() => { void load(current(), Math.max(0, offset() - 100)) }} onBack={props.back} />
+      <ActionBar actions={[
+        { title: "Enter path", key: "P", run: enterPath },
+        { title: `Selected items (${props.selection!.paths.length})`, key: "B", run: () => setView("basket") },
+        { title: "Select this folder", key: ".", run: () => toggle(current()) },
+        { title: "Continue", key: "C", disabled: !props.selection!.paths.length, run: props.selection!.continue },
+      ]} />
+    </Show>
+    <Show when={view() === "browse" && !props.selection}><Menu title={props.title ?? (props.directoryOnly ? "Choose destination directory" : "Choose a local file or folder")} description={`${current()}\n${props.filesOnly ? "Space chooses a file" : "Space chooses an entry"} · Enter opens folders · ${total()} entries`} selected={selected()} change={setSelected} focused disabled={working()}
     items={entries().map((entry, index) => ({ name: `${entry.name}${entry.directory ? "/" : ""}`, badge: entry.directory ? "Folder" : `${entry.bytes.toLocaleString("en-US")} B`, description: "", run: () => choose(index) }))}
     choose={choose}
     toolbar={[
@@ -441,11 +489,12 @@ function terminalPath(input: string) {
   return words[0]
 }
 
-function GuestChooser(props: { safe: string; runtime: NativeRuntime; choose: (value: string) => void; back: () => void }) {
+export function GuestChooser(props: { safe: string; runtime: NativeRuntime; selection: FileSelection; back: () => void }) {
   const [page, setPage] = createSignal<z.infer<typeof directory>>({ path: "", entries: [], next_cursor: null })
   const [cursors, setCursors] = createSignal<string[]>([])
   const [working, setWorking] = createSignal(false)
   const [error, setError] = createSignal("")
+  const [basket, setBasket] = createSignal(false)
   let stopped = false
   async function load(path: string, history: string[] = []) {
     if (working()) return
@@ -458,12 +507,19 @@ function GuestChooser(props: { safe: string; runtime: NativeRuntime; choose: (va
   }
   onMount(() => { void load("") })
   onCleanup(() => { stopped = true })
+  useKeyboard((key) => {
+    if (key.defaultPrevented || working() || basket()) return
+    if (key.name === "b") { key.preventDefault(); setBasket(true) }
+    if (key.name === "c" && props.selection.paths.length) { key.preventDefault(); props.selection.continue() }
+  })
   return <box flexGrow={1} minHeight={0} flexDirection="column" gap={1}>
-    <PageHeader title="Choose Safe files" description="Browse workspace or imports. Space selects a file or directory for export." />
-    <FilePicker currentDir={page().path} entries={page().entries.map((entry) => ({ ...entry, directory: entry.kind === "directory" }))} selected={[]} focused busy={working()}
-      next={!!page().next_cursor} previous={!!cursors().length} onNavigate={(path) => { void load(path) }} onChange={(paths) => { if (!paths[0]) return; if (!paths[0].includes("/")) { void load(paths[0]); return }; props.choose(paths[0]) }}
+    <Show when={basket()}><SelectionBasket selection={props.selection} back={() => setBasket(false)} /></Show>
+    <Show when={!basket()}><PageHeader title="Choose Safe files" description="Select files or folders across workspace and imports. Space selects; continue when your selection is ready." />
+    <FilePicker currentDir={page().path} entries={page().entries.map((entry) => ({ ...entry, directory: entry.kind === "directory" }))} selected={props.selection.paths} focused busy={working()}
+      next={!!page().next_cursor} previous={!!cursors().length} onNavigate={(path) => { void load(path) }} onChange={(paths) => { const error = selectionError(paths); if (error) { setError(error); return }; props.selection.change(paths); setError("") }}
       onNext={() => { const cursor = page().next_cursor; if (cursor) void load(page().path, [...cursors(), cursor]) }}
       onPrevious={() => { void load(page().path, cursors().slice(0, -1)) }} onBack={props.back} />
+    <ActionBar actions={[{ title: `Selected items (${props.selection.paths.length})`, key: "B", run: () => setBasket(true) }, { title: "Continue", key: "C", disabled: !props.selection.paths.length, run: props.selection.continue }]} /></Show>
     <Show when={error()}><text fg={theme.feedback.warning}>{error()}</text></Show>
     <Show when={working()}><BusyModal text="Reading Safe files" /></Show>
   </box>

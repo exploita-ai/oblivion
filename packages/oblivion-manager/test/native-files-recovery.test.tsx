@@ -18,7 +18,7 @@ async function fixture() {
   const [nonce, setNonce] = createSignal(opening)
   const [blocked, setBlocked] = createSignal<string>()
   const transfers = createFileTransfers()
-  transfers.remember({ id: operation, safe, opening, kind: "export", source: "workspace/project", destination: "/tmp/explicit-export" })
+  transfers.remember({ id: operation, safe, opening, kind: "export", sources: ["workspace/project"], destination: "/tmp/explicit-export" })
   const commands: string[][] = []
   const queries: string[][] = []
   let response: FileOutcome = { operation_id: operation, safe_id: safe, opening, source_opening: opening, state: "ready", receipt, can_recover: true, can_discard: true }
@@ -182,7 +182,7 @@ test("operation IDs and destinations survive leaving Files but are explicitly cl
 
 test("recent copy metadata remains bounded and clears when its manager owner locks", () => {
   const transfers = createFileTransfers()
-  for (let index = 0; index < 40; index++) transfers.remember({ id: index.toString(16).padStart(32, "0"), safe, opening, kind: "export", source: "workspace/project", destination: "/tmp/explicit-export" })
+  for (let index = 0; index < 40; index++) transfers.remember({ id: index.toString(16).padStart(32, "0"), safe, opening, kind: "export", sources: ["workspace/project"], destination: "/tmp/explicit-export" })
   expect(transfers.entries()).toHaveLength(32)
   expect(transfers.entries()[0]?.id).toBe((39).toString(16).padStart(32, "0"))
   transfers.clear()

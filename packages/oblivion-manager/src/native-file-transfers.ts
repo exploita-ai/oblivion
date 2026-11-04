@@ -18,7 +18,7 @@ export const fileOutcome = z.object({
 })
 
 // Paths stay only in this manager's memory, never in a desktop profile or log.
-export type FileTransfer = { id: string; safe: string; opening: string; kind: "import" | "export"; source: string; destination: string }
+export type FileTransfer = { id: string; safe: string; opening: string; kind: "import" | "export"; sources: string[]; destination: string }
 export type FileOutcome = z.infer<typeof fileOutcome>
 
 export function createFileTransfers() {

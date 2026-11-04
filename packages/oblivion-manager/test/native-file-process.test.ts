@@ -14,14 +14,21 @@ async function fixture() {
   await writeFile(script, `
 const mode=process.argv[2];const identity=JSON.parse(process.argv[3]);const digest="f".repeat(64)
 const total=mode==="empty"?0:12
-const review={event:"review",identity,direction:"import",name:"città.txt",summary:{manifest_sha256:digest,entries:1,files:1,directories:0,bytes:total}}
+const multi=mode.startsWith("multi")
+const mappings=multi?[{input_index:0,alias:null,covered_by:4},{input_index:1,alias:"same.txt",covered_by:null},{input_index:2,alias:"same~2.txt",covered_by:null},{input_index:3,alias:"città.txt",covered_by:null},{input_index:4,alias:"parent",covered_by:null}]:[{input_index:0,alias:"città.txt",covered_by:null}]
+if(mode==="multi-bad-nfc")mappings[3].alias="e\\u0301.txt"
+if(mode==="multi-bad-owner"){mappings[4].alias=null;mappings[4].covered_by=0}
+const selected=multi?"selection":"città.txt";const mapping_sha256=new Bun.CryptoHasher("sha256").update(JSON.stringify([selected,mappings.map(m=>[m.input_index,m.alias,m.covered_by])])).digest("hex");const reviewed_mapping=mode==="multi-bad-digest"?"e".repeat(64):mapping_sha256
+const review={event:"review",identity,direction:mode.includes("export")?"export":"import",name:multi?"Collection":"città.txt",summary:{manifest_sha256:digest,mapping_sha256:reviewed_mapping,entries:mode==="export-wrong-count"?2:multi?5:1,files:multi?4:1,directories:0,bytes:total}}
 async function emit(value){await Bun.stdout.write(JSON.stringify(value)+"\\n")}
 if(mode==="ignore")process.on("SIGTERM",()=>{})
 if(mode==="early"){await emit({event:"finished",identity,outcome:"interrupted",receipt:null});process.exit(0)}
+for(let start=0;start<mappings.length;start+=4){if(mode==="multi-incomplete"&&start)break;await emit({event:"mapping",identity,start:mode==="multi-bad-page"&&start?3:start,total:mappings.length,selected,entries:mappings.slice(start,start+4),mapping_sha256:reviewed_mapping})}
 if(mode==="oversize")await Bun.stdout.write("x".repeat(4096)+"\\n")
 else if(mode==="wrong-identity")await emit({...review,identity:{...identity,safe_id:"d".repeat(32)}})
 else if(mode==="truncated"){await Bun.stdout.write(JSON.stringify(review));process.exit(0)}
 else{const bytes=new TextEncoder().encode(JSON.stringify(review)+"\\n");const split=bytes.indexOf(195)+1;await Bun.stdout.write(bytes.subarray(0,split));await Bun.stdout.write(bytes.subarray(split))}
+if(mode==="mapping-after-review")await emit({event:"mapping",identity,start:0,total:1,selected,entries:mappings,mapping_sha256})
 if(mode==="ignore")setInterval(()=>{},1000)
 const reader=Bun.stdin.stream().getReader();let pending=""
 while(true){const chunk=await reader.read();if(chunk.done)break;pending+=new TextDecoder().decode(chunk.value);let end
@@ -32,10 +39,10 @@ if(input.action!=="approve"||input.manifest_sha256!==digest)process.exit(8)
 if(mode==="backwards"){await emit({event:"progress",identity,phase:"copying",bytes:8,total_bytes:12});await emit({event:"progress",identity,phase:"copying",bytes:7,total_bytes:12});continue}
 await emit({event:"progress",identity,phase:"copying",bytes:total?5:0,total_bytes:total})
 await emit({event:"progress",identity,phase:"finalizing",bytes:total,total_bytes:total})
-await emit({event:"finished",identity,outcome:"completed",receipt:{id:identity.operation_id,manifest_sha256:mode==="wrong-receipt"?"e".repeat(64):digest,entries:1,bytes:total}});process.exit(0)
+await emit({event:"finished",identity,outcome:"completed",receipt:{id:identity.operation_id,manifest_sha256:mode==="wrong-receipt"?"e".repeat(64):digest,entries:review.summary.entries,bytes:total}});process.exit(0)
 }}
 `)
-  return { root, request(mode: string, selected = identity): FileCopyRequest { return { args: [script, mode, JSON.stringify(selected)], identity: selected, direction: "import", name: "città.txt" } } }
+  return { root, request(mode: string, selected = identity): FileCopyRequest { return { args: [script, mode, JSON.stringify(selected)], identity: selected, direction: mode.includes("export") ? "export" : "import", name: mode.startsWith("multi") ? "Collection" : "città.txt", sources: mode.startsWith("multi") ? ["/a/child", "/a/same.txt", "/b/same.txt", "/c/città.txt", "/a"] : ["/tmp/città.txt"] } } }
 }
 
 function observer() {
@@ -51,14 +58,14 @@ test.each(["normal", "empty"])("a real child reviews before approval and drains 
   const copy = client.start(source.request(mode), seen.event)
   try {
     await seen.review
-    expect(seen.events.map((event) => event.event)).toEqual(["review"])
+    expect(seen.events.map((event) => event.event)).toEqual(["mapping", "review"])
     await expect(copy.approve("e".repeat(64))).rejects.toThrow("exact copy")
-    expect(seen.events).toHaveLength(1)
+    expect(seen.events).toHaveLength(2)
     await copy.approve(digest)
     const result = await copy.done
     expect(result.code).toBe(0)
     expect(result.finished?.outcome).toBe("completed")
-    expect(seen.events.map((event) => event.event)).toEqual(["review", "progress", "progress", "finished"])
+    expect(seen.events.map((event) => event.event)).toEqual(["mapping", "review", "progress", "progress", "finished"])
     expect(result.finished?.receipt?.bytes).toBe(mode === "empty" ? 0 : 12)
   } finally { await client.close(); await rm(source.root, { recursive: true }) }
 })
@@ -77,7 +84,7 @@ test("Cancel closes the owned child's input before any payload approval", async 
   } finally { await client.close(); await rm(source.root, { recursive: true }) }
 })
 
-test.each(["oversize", "wrong-identity", "truncated", "backwards", "wrong-receipt"])("invalid %s events reap the child and leave the outcome uncertain", async (mode) => {
+test.each(["oversize", "wrong-identity", "truncated", "backwards", "wrong-receipt", "multi-incomplete", "multi-bad-page", "multi-bad-owner", "multi-bad-digest", "multi-bad-nfc", "mapping-after-review", "export-wrong-count"])("invalid %s events reap the child and leave the outcome uncertain", async (mode) => {
   const source = await fixture()
   const client = createNativeFileClient(process.execPath)
   const seen = observer()
@@ -118,7 +125,7 @@ test("bounded cancellation escalates only the exact owned child while another co
     expect(timers[1]?.delay).toBe(2_000)
     timers[1]!.fire()
     await stopping
-    expect(second.events).toHaveLength(1)
+    expect(second.events).toHaveLength(2)
     await other.approve(digest)
     expect((await other.done).finished?.outcome).toBe("completed")
   } finally { await client.close(); await rm(source.root, { recursive: true }) }
@@ -137,5 +144,25 @@ test("manager exit closes and reaps every pending copy and cannot start another 
     expect((await one.done).finished?.outcome).toBe("cancelled-before-copy")
     expect((await two.done).finished?.outcome).toBe("cancelled-before-copy")
     expect(() => client.start(source.request("normal"), () => {})).toThrow("closing")
+  } finally { await client.close(); await rm(source.root, { recursive: true }) }
+})
+
+
+test.each(["multi", "multi-export"])("paged mappings cover every source, accept a later owner, and bind aliases before collection approval (%s)", async (mode) => {
+  const source = await fixture()
+  const client = createNativeFileClient(process.execPath)
+  const seen = observer()
+  const copy = client.start(source.request(mode), seen.event)
+  try {
+    await seen.review
+    expect(seen.events.map((event) => event.event)).toEqual(["mapping", "mapping", "review"])
+    const pages = seen.events.filter((event) => event.event === "mapping")
+    expect(pages.flatMap((page) => page.entries)).toEqual([
+      { input_index: 0, alias: null, covered_by: 4 }, { input_index: 1, alias: "same.txt", covered_by: null },
+      { input_index: 2, alias: "same~2.txt", covered_by: null }, { input_index: 3, alias: "città.txt", covered_by: null },
+      { input_index: 4, alias: "parent", covered_by: null },
+    ])
+    await copy.approve(digest)
+    expect((await copy.done).finished?.receipt?.entries).toBe(5)
   } finally { await client.close(); await rm(source.root, { recursive: true }) }
 })

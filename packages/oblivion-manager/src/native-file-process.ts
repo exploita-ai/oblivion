@@ -1,4 +1,4 @@
-import { fileEvent, type FileEvent, type FileFinished, type FileReview, type NativeFileClient, type RunningFileCopy } from "./native-file-events"
+import { fileEvent, type FileEvent, type FileFinished, type FileMappingEntry, type FileReview, type NativeFileClient, type RunningFileCopy } from "./native-file-events"
 
 // The protocol cap includes its newline. Keep at most one partial line in RAM.
 const lineLimit = 4096
@@ -18,6 +18,9 @@ export function createNativeFileClient(launcher: string, schedule: Schedule = (m
       let settled = false
       void child.exited.then(() => { exited = true; if (settled) active.delete(handle) })
       let reviewed: FileReview | undefined
+      const mappings: FileMappingEntry[] = []
+      let mappingDigest: string | undefined
+      let mappingSelected: string | undefined
       let completed: FileFinished | undefined
       let approved = false
       let cancelling = false
@@ -49,8 +52,18 @@ export function createNativeFileClient(launcher: string, schedule: Schedule = (m
 
       function accept(value: FileEvent) {
         if (completed || value.identity.operation_id !== request.identity.operation_id || value.identity.safe_id !== request.identity.safe_id || value.identity.opening !== request.identity.opening) throw new Error("File copy identity changed.")
+        if (value.event === "mapping") {
+          if (reviewed || approved || value.start !== mappings.length || value.total !== request.sources.length || mappingSelected && value.selected !== mappingSelected || mappingDigest && value.mapping_sha256 !== mappingDigest) throw new Error("File copy mapping changed.")
+          mappingDigest = value.mapping_sha256
+          mappingSelected = value.selected
+          mappings.push(...value.entries)
+        }
         if (value.event === "review") {
-          if (reviewed || approved || value.direction !== request.direction || value.name !== request.name) throw new Error("File copy review changed.")
+          if (reviewed || approved || value.direction !== request.direction || value.name !== request.name || mappings.length !== request.sources.length || !mappingDigest || value.summary.mapping_sha256 !== mappingDigest) throw new Error("File copy review changed.")
+          if (mappingSelected !== (mappings.length === 1 ? mappings[0]?.alias : "selection") || value.summary.entries - value.summary.files - value.summary.directories !== (mappings.length === 1 ? 0 : 1)) throw new Error("File copy selection changed.")
+          if (mappings.some((entry) => entry.covered_by !== null && (entry.covered_by >= mappings.length || mappings[entry.covered_by]?.alias === null))) throw new Error("File copy mapping is incomplete.")
+          if (new Set(mappings.filter((entry) => entry.alias !== null).map((entry) => entry.alias)).size !== mappings.filter((entry) => entry.alias !== null).length) throw new Error("File copy mapping has duplicate destinations.")
+          if (new Bun.CryptoHasher("sha256").update(JSON.stringify([mappingSelected, mappings.map((entry) => [entry.input_index, entry.alias, entry.covered_by])])).digest("hex") !== mappingDigest) throw new Error("File copy mapping digest changed.")
           reviewed = value
         }
         if (value.event === "progress") {

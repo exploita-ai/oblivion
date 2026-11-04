@@ -1,5 +1,5 @@
 // Adapted from termcn's MIT OpenTUI FilePicker. See LICENSE and PROVENANCE.md.
-// Solid port: directory metadata is supplied by the VM, never node:fs on the host.
+// Solid port: callers supply metadata; this component never opens a filesystem.
 import { useKeyboard } from "@opentui/solid"
 import { createMemo, createSignal, Show } from "solid-js"
 import { palette, theme } from "../../theme"
@@ -23,7 +23,7 @@ export function FilePicker(props: {
   onBack: () => void
 }) {
   const [cursor, setCursor] = createSignal(0)
-  const parentEntry = () => ({ name: "..", path: props.currentDir.split("/").slice(0, -1).join("/"), directory: true, bytes: 0 })
+  const parentEntry = () => ({ name: "..", path: props.currentDir.split("/").slice(0, -1).join("/") || (props.currentDir.startsWith("/") ? "/" : ""), directory: true, bytes: 0 })
   const allEntries = createMemo(() => [...(props.currentDir ? [parentEntry()] : []), ...props.entries])
   const selected = () => new Set(props.selected)
 
@@ -44,7 +44,7 @@ export function FilePicker(props: {
 
   return <box flexGrow={1} flexShrink={1} flexBasis={0} minWidth={0} minHeight={4} flexDirection="column">
     <box height={2} flexShrink={0} border={["bottom"]} borderColor={props.focused ? theme.border.focused : theme.border.base} paddingLeft={1} paddingRight={1}>
-      <text fg={theme.text.base}><b>/{props.currentDir}</b></text>
+      <text fg={theme.text.base}><b>{props.currentDir.startsWith("/") ? props.currentDir : `/${props.currentDir}`}</b></text>
     </box>
     <SelectList theme={palette} focused={props.focused} disabled={props.busy} selected={cursor()} onFocus={props.onFocus}
       items={[
