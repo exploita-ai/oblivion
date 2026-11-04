@@ -10,8 +10,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
+mod file_commands;
 
-const HELP: &str = "Oblivion — isolated, encrypted workspaces for coding agents\n\n  oblivion                         Open the manager\n  oblivion init                    Create encrypted storage\n  oblivion unlock                  Unlock encrypted storage\n  oblivion safes                   List Safes\n  oblivion run [OPTIONS] AGENT [AGENT_ARGUMENTS...]\n  oblivion close SAFE               Close and lock one Safe\n  oblivion lock                     Lock Oblivion and all Safes\n\nRun options (before the agent)\n  --safe NAME                      Open or reuse an existing Safe\n  --name NAME                      Create a new named Safe\n  --ephemeral                      Create a RAM-only Safe\n  --tor                            Route through Tor\n  -x, --proxy socks5h://[USER:PASS@]IP:PORT\n  --policy open-internet|strict|offline\n\nAgents: codex, claude, opencode2\nAll arguments after the agent are passed unchanged inside the Safe.\n";
+const HELP: &str = "Oblivion — isolated, encrypted workspaces for coding agents\n\n  oblivion                         Open the manager\n  oblivion init                    Create encrypted storage\n  oblivion unlock                  Unlock encrypted storage\n  oblivion safes                   List Safes\n  oblivion run [OPTIONS] AGENT [AGENT_ARGUMENTS...]\n  oblivion close SAFE               Close and lock one Safe\n  oblivion lock                     Lock Oblivion and all Safes\n  oblivion files import --safe SAFE SOURCE [--name NAME]\n  oblivion files export --safe SAFE workspace/PATH DESTINATION\n\nRun options (before the agent)\n  --safe NAME                      Open or reuse an existing Safe\n  --name NAME                      Create a new named Safe\n  --ephemeral                      Create a RAM-only Safe\n  --tor                            Route through Tor\n  -x, --proxy socks5h://[USER:PASS@]IP:PORT\n  --policy open-internet|strict|offline\n\nAgents: codex, claude, opencode2\nAll arguments after the agent are passed unchanged inside the Safe.\n";
 
 static SIGNAL: AtomicI32 = AtomicI32::new(0);
 extern "C" fn signal(value: i32) {
@@ -23,7 +24,7 @@ fn main() {
     #[cfg(target_os = "macos")]
     let result = if std::env::args_os()
         .nth(1)
-        .is_some_and(|arg| matches!(arg.to_str(), Some("run" | "close" | "lock")))
+        .is_some_and(|arg| matches!(arg.to_str(), Some("run" | "files" | "close" | "lock")))
         && std::env::var_os("OBLIVION_CONTROL_SOCKET").is_some()
     {
         oblivion_host::native_runtime::stop_if_idle().and(result)
@@ -169,6 +170,7 @@ fn run() -> control::Result<i32> {
             Ok(0)
         }
         "run" => launch(&args[1..]),
+        "files" => file_commands::run(&args[1..]),
         _ => Err("Unknown command. Run oblivion --help.".into()),
     }
 }
@@ -329,9 +331,15 @@ fn decode(value: &str) -> control::Result<String> {
 }
 
 fn find_safe(state: &Status, name: &str) -> control::Result<Option<String>> {
-    let ids: Vec<_> = state
+    let ids: std::collections::BTreeSet<_> = state
         .sessions
         .iter()
+        .chain(
+            state
+                .open_sessions
+                .iter()
+                .filter_map(|safe| safe.id.as_ref()),
+        )
         .filter(|id| {
             id.as_str() == name
                 || state
@@ -340,9 +348,9 @@ fn find_safe(state: &Status, name: &str) -> control::Result<Option<String>> {
                     .is_some_and(|title| title == name)
         })
         .collect();
-    match ids.as_slice() {
-        [] => Ok(None),
-        [id] => Ok(Some((*id).clone())),
+    match ids.len() {
+        0 => Ok(None),
+        1 => Ok(ids.first().map(|id| (*id).clone())),
         _ => Err("Ambiguous Safe name. Use its full identifier.".into()),
     }
 }
@@ -547,7 +555,7 @@ fn new_password(label: &str) -> control::Result<Zeroizing<Vec<u8>>> {
 }
 
 fn attach(id: &str, options: Options) -> control::Result<i32> {
-    let (mut stream, lease, client) = control::attach_agent(id)?;
+    let (mut stream, lease, client) = control::attach_client("agent-attach", id)?;
     let tty = unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 };
     let mut saved = unsafe { std::mem::zeroed() };
     if tty && unsafe { libc::tcgetattr(0, &mut saved) } != 0 {

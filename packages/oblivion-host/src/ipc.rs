@@ -29,6 +29,7 @@ enum Operation {
     StartChat,
     StartAgent,
     AgentAttach,
+    FileAttach,
     AgentRelease,
     ShutdownRuntime,
     ShutdownIdle,
@@ -252,16 +253,17 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
     channel
         .read_exact(&mut secret)
         .map_err(|_| Error("incomplete_secret"))?;
-    if matches!(request.operation, Operation::AgentAttach) {
+    if matches!(request.operation, Operation::AgentAttach | Operation::FileAttach) {
         let _lock = lock_named("storage.lock")?;
         require(!crate::storage::recovery_required()?, "recovery_required")?;
         let (session, mode) = crate::storage::session_info()?.ok_or(Error("session_not_open"))?;
-        require(mode == "agent" && request.expected_session.as_deref() == Some(&session), "session_changed")?;
+        require((mode == "agent" || matches!(request.operation, Operation::FileAttach) && matches!(mode.as_str(), "documents" | "chat"))
+            && request.expected_session.as_deref() == Some(&session), "session_changed")?;
         let id = crate::storage::random_id()?;
         let clients = Path::new(&oblivion_host::scope::current().runtime()).join("agent-clients");
         fs::create_dir_all(&clients).map_err(|_| Error("client_register_failed"))?;
         fs::write(clients.join(&id), b"").map_err(|_| Error("client_register_failed"))?;
-        let console = match crate::vm::agent_port(&id) {
+        let console = match if matches!(request.operation, Operation::FileAttach) { crate::vm::file_port(&id) } else { crate::vm::agent_port(&id) } {
             Ok(port) => {
                 let mut ready = [0; 6];
                 let result = Channel::new(&port, Duration::from_secs(60)).read_exact(&mut ready);
@@ -349,7 +351,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32) -> Result<Response> 
         Operation::NetworkPolicy => "network-policy",
         Operation::Transfers => "transfers",
         Operation::Onion => "onion",
-        Operation::Console | Operation::Terminal | Operation::AgentAttach => unreachable!(),
+        Operation::Console | Operation::Terminal | Operation::AgentAttach | Operation::FileAttach => unreachable!(),
     };
     let mut command =
         Command::new(std::env::current_exe().map_err(|_| Error("executable_unavailable"))?);

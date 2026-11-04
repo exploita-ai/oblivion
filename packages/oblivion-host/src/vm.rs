@@ -801,6 +801,10 @@ pub fn copy_port(id: &str, export: bool) -> Result<UnixStream> {
     session_port(id, if export { "export" } else { "copy" })
 }
 
+pub fn file_port(id: &str) -> Result<UnixStream> {
+    session_port(id, "file")
+}
+
 pub fn agent_port(id: &str) -> Result<UnixStream> {
     session_port(id, "agent")
 }

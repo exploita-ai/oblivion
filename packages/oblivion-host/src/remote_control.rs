@@ -7,11 +7,11 @@ use crate::control::Result;
 use serde::Deserialize;
 use serde_json::json;
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,13 +28,38 @@ pub fn request(
     secret: &[u8],
     expected: Option<&str>,
 ) -> Result<String> {
-    let stream = connect(path, operation, session, secret, expected)?;
+    let stream = connect(
+        path,
+        operation,
+        session,
+        secret,
+        expected,
+        Duration::from_secs(10),
+    )?;
     read_response(&stream, operation)
 }
 
-pub fn attach_agent(path: &Path, expected: &str) -> Result<(UnixStream, String)> {
-    let stream = connect(path, "agent-attach", None, &[], Some(expected))?;
-    let client = read_response(&stream, "agent-attach")?;
+/// A startup probe shares one short deadline across connection and response.
+/// Normal control operations retain their full operation-specific budgets.
+pub fn probe(path: &Path, budget: Duration) -> Result<String> {
+    let deadline = Instant::now() + budget;
+    let stream = connect(path, "status", None, &[], None, budget)?;
+    read_response_with_budget(&stream, remaining(deadline)?)
+}
+
+pub fn attach(path: &Path, operation: &str, expected: &str) -> Result<(UnixStream, String)> {
+    if !matches!(operation, "agent-attach" | "file-attach") {
+        return Err("invalid_attachment".into());
+    }
+    let stream = connect(
+        path,
+        operation,
+        None,
+        &[],
+        Some(expected),
+        Duration::from_secs(10),
+    )?;
+    let client = read_response(&stream, operation)?;
     if client.len() != 32 || !client.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("invalid_client_id".into());
     }
@@ -51,7 +76,9 @@ fn connect(
     session: Option<&str>,
     secret: &[u8],
     expected: Option<&str>,
+    budget: Duration,
 ) -> Result<UnixStream> {
+    let deadline = Instant::now() + budget;
     if secret.len() > 4096 {
         return Err("secret_too_large".into());
     }
@@ -59,7 +86,7 @@ fn connect(
     if !metadata.file_type().is_socket() || metadata.permissions().mode() & 0o077 != 0 {
         return Err("untrusted_runtime_socket".into());
     }
-    let stream = UnixStream::connect(path)?;
+    let stream = connect_socket(path, remaining(deadline)?)?;
     #[cfg(target_os = "macos")]
     unsafe {
         let mut uid = 0;
@@ -95,7 +122,7 @@ fn connect(
     if header.len() > 1024 {
         return Err("header_too_large".into());
     }
-    let mut channel = Channel::new(&stream, Duration::from_secs(10));
+    let mut channel = Channel::new(&stream, remaining(deadline)?);
     channel.write_all(&(header.len() as u32).to_be_bytes())?;
     channel.write_all(&header)?;
     channel.write_all(secret)?;
@@ -103,14 +130,18 @@ fn connect(
 }
 
 fn read_response(stream: &UnixStream, operation: &str) -> Result<String> {
-    let mut channel = Channel::new(
+    read_response_with_budget(
         stream,
         Duration::from_secs(if operation == "session-storage" {
             1800
         } else {
             120
         }),
-    );
+    )
+}
+
+fn read_response_with_budget(stream: &UnixStream, budget: Duration) -> Result<String> {
+    let mut channel = Channel::new(stream, budget);
     let mut length = [0; 4];
     channel.read_exact(&mut length)?;
     let length = u32::from_be_bytes(length) as usize;
@@ -132,4 +163,81 @@ fn read_response(stream: &UnixStream, operation: &str) -> Result<String> {
             .into());
     }
     Ok(response.output)
+}
+
+fn remaining(deadline: Instant) -> std::io::Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|value| !value.is_zero())
+        .ok_or_else(|| std::io::ErrorKind::TimedOut.into())
+}
+
+fn connect_socket(path: &Path, budget: Duration) -> std::io::Result<UnixStream> {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.is_empty() || bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    address.sun_family = libc::AF_UNIX as _;
+    #[cfg(target_os = "macos")]
+    {
+        address.sun_len = std::mem::size_of::<libc::sockaddr_un>() as _;
+    }
+    for (target, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *target = *byte as _;
+    }
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    stream.set_nonblocking(true)?;
+    let deadline = Instant::now() + budget;
+    if unsafe {
+        libc::connect(
+            fd,
+            (&address as *const libc::sockaddr_un).cast(),
+            std::mem::size_of_val(&address) as _,
+        )
+    } != 0
+    {
+        let error = std::io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::EINPROGRESS) | Some(libc::EWOULDBLOCK)
+        ) {
+            return Err(error);
+        }
+        loop {
+            let mut event = libc::pollfd {
+                fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let millis = remaining(deadline)?
+                .as_millis()
+                .max(1)
+                .min(i32::MAX as u128) as i32;
+            let ready = unsafe { libc::poll(&mut event, 1, millis) };
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if ready == 0 {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            if let Some(error) = stream.take_error()? {
+                return Err(error);
+            }
+            break;
+        }
+    }
+    stream.set_nonblocking(false)?;
+    Ok(stream)
 }

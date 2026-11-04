@@ -162,7 +162,7 @@ def serve_client(remote):
             timeout = 1800 if operation == "session-storage" else 120
             local.settimeout(timeout)
             remote.settimeout(timeout)
-            if operation == "agent-attach":
+            if operation in ("agent-attach", "file-attach"):
                 guest, rejection = descriptor(local)
                 if guest is None:
                     response(remote, rejection)

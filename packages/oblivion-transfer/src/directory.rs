@@ -145,6 +145,27 @@ impl Directory {
         Ok(())
     }
 
+    /// Publish a verified entry without replacing an existing destination,
+    /// including an empty directory created concurrently by the agent.
+    pub fn move_exclusive(&self, from: &str, destination: &Self, to: &str) -> io::Result<()> {
+        let from = component(from)?;
+        let to = component(to)?;
+        #[cfg(target_os = "linux")]
+        let result = unsafe {
+            libc::renameat2(self.0.as_raw_fd(), from.as_ptr(), destination.0.as_raw_fd(), to.as_ptr(), libc::RENAME_NOREPLACE)
+        };
+        #[cfg(target_os = "macos")]
+        let result = unsafe {
+            libc::renameatx_np(self.0.as_raw_fd(), from.as_ptr(), destination.0.as_raw_fd(), to.as_ptr(), libc::RENAME_EXCL)
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let result = return Err(io::Error::from(io::ErrorKind::Unsupported));
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub fn names(&self, limit: usize) -> io::Result<Vec<String>> {
         let mut names = Vec::new();
         self.visit(|name| {
@@ -246,4 +267,26 @@ fn component(name: &str) -> io::Result<CString> {
         "invalid_component",
     )?;
     CString::new(name).map_err(|_| invalid("invalid_component"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Directory;
+
+    #[test]
+    fn exclusive_move_cannot_replace_an_existing_empty_directory() {
+        let root = std::env::temp_dir().join(format!("oblivion-exclusive-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&root).unwrap();
+        let directory = Directory::open(&root).unwrap();
+        directory.create_directory("source").unwrap();
+        directory.create_directory("destination").unwrap();
+        assert_eq!(directory.move_exclusive("source", &directory, "destination").unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(root.join("source").is_dir());
+        assert!(root.join("destination").is_dir());
+        directory.move_exclusive("source", &directory, "unused").unwrap();
+        assert!(!root.join("source").exists());
+        assert!(root.join("unused").is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -42,6 +42,32 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
+    if args.first().is_some_and(|role| role.starts_with("stream-")) {
+        let role = args[0].as_str();
+        let expected = match role {
+            "stream-send" | "stream-recover" => 4,
+            "stream-receive" => 5,
+            "stream-download" => 7,
+            _ => return Err("invalid_arguments".into()),
+        };
+        if args.len() != expected { return Err("invalid_arguments".into()); }
+        let receipt = if role == "stream-recover" {
+            oblivion_transfer::stream::recover_directory(Path::new(&args[1]), Path::new(&args[2]), &args[3])?
+        } else {
+            let budget: u64 = args.last().ok_or("invalid_arguments")?.parse()?;
+            if !(1..=3_600_000).contains(&budget) { return Err("invalid_deadline".into()); }
+            let mut channel = Channel::new(runtime::inherited(3)?, Duration::from_millis(budget))?;
+            let limits = oblivion_transfer::Limits { entries: oblivion_transfer::MAX_ENTRIES, bytes: oblivion_transfer::MAX_DOCUMENT_BYTES };
+            match role {
+                "stream-send" => oblivion_transfer::stream::send_path(&mut channel, Path::new(&args[1]), limits, &args[2])?,
+                "stream-receive" => oblivion_transfer::stream::receive_directory(&mut channel, Path::new(&args[1]), Path::new(&args[2]), &args[3], limits)?,
+                "stream-download" => oblivion_transfer::stream::download(&mut channel, &args[1], Path::new(&args[2]), Path::new(&args[3]), &args[4], limits, &args[5])?,
+                _ => unreachable!(),
+            }
+        };
+        println!("{}", serde_json::to_string(&receipt)?);
+        return Ok(());
+    }
     let import = args
         .first()
         .is_some_and(|role| matches!(role.as_str(), "import" | "recover"));

@@ -6,6 +6,7 @@ pub mod endpoint;
 pub mod onion_file;
 pub mod recovery;
 pub mod relay;
+pub mod stream;
 
 use directory::Directory;
 use serde::{Deserialize, Serialize};

@@ -16,17 +16,18 @@ struct Response {
 }
 
 pub fn protect() -> Result<()> {
-    #[cfg(target_os = "linux")]
     unsafe {
         let limit = libc::rlimit {
             rlim_cur: 0,
             rlim_max: 0,
         };
-        if libc::setrlimit(libc::RLIMIT_CORE, &limit) != 0
-            || libc::prctl(libc::PR_SET_DUMPABLE, 0) != 0
-        {
+        if libc::setrlimit(libc::RLIMIT_CORE, &limit) != 0 {
             return Err("dump_protection_failed".into());
         }
+    }
+    #[cfg(target_os = "linux")]
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } != 0 {
+        return Err("dump_protection_failed".into());
     }
     Ok(())
 }
@@ -86,7 +87,7 @@ fn connect_expected(
     channel.write_all(&(header.len() as u32).to_be_bytes())?;
     channel.write_all(&header)?;
     channel.write_all(secret)?;
-    if operation != "agent-attach" {
+    if !matches!(operation, "agent-attach" | "file-attach") {
         stream.shutdown(std::net::Shutdown::Write)?;
     }
     Ok(stream)
@@ -152,13 +153,13 @@ fn descriptor(operation: &str) -> Result<UnixStream> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn attach_agent(expected: &str) -> Result<(UnixStream, UnixStream, String)> {
+pub fn attach_client(operation: &str, expected: &str) -> Result<(UnixStream, UnixStream, String)> {
     if let Some(path) = std::env::var_os("OBLIVION_CONTROL_SOCKET") {
         let (stream, client) =
-            crate::remote_control::attach_agent(std::path::Path::new(&path), expected)?;
+            crate::remote_control::attach(std::path::Path::new(&path), operation, expected)?;
         return Ok((stream.try_clone()?, stream, client));
     }
-    let stream = connect_expected("agent-attach", None, &[], Some(expected))?;
+    let stream = connect_expected(operation, None, &[], Some(expected))?;
     let channel = Channel::new(&stream, Duration::from_secs(120));
     let console = receive_descriptor(&stream, &channel)?;
     // This connection is a lease. EOF releases this client and locks the Safe
@@ -216,10 +217,10 @@ pub fn terminal() -> Result<UnixStream> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn attach_agent(expected: &str) -> Result<(UnixStream, UnixStream, String)> {
+pub fn attach_client(operation: &str, expected: &str) -> Result<(UnixStream, UnixStream, String)> {
     let path = std::env::var_os("OBLIVION_CONTROL_SOCKET").ok_or("native_runtime_required")?;
     let (stream, client) =
-        crate::remote_control::attach_agent(std::path::Path::new(&path), expected)?;
+        crate::remote_control::attach(std::path::Path::new(&path), operation, expected)?;
     Ok((stream.try_clone()?, stream, client))
 }
 
