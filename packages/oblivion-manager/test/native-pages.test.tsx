@@ -33,7 +33,10 @@ test("network settings require an explicit offline open and target the selected 
 
 test.each([false, true])("network footer expires positive route observations (stale=%s)", async (stale) => {
   const fixture = nativePreview(() => {})
-  const state = { ...await fixture.status(), network_status: { label: "TOR READY" as const, direct_blocked: true, host_link: "CONNECTED" as const, age_ms: 0 } }
+  await fixture.run(["unlock"])
+  await fixture.run(["safe", "open", (await fixture.status()).sessions[0]])
+  const opened = await fixture.status()
+  const state = { ...opened, open_sessions: opened.open_sessions.map((entry) => ({ ...entry, mode: "agent" })), network_status: { label: "TOR READY" as const, direct_blocked: true, host_link: "CONNECTED" as const, age_ms: 0 } }
   const app = await testRender(() => <NativeNetworkIndicator safe={state.sessions[0]} host={state} hostReceived={performance.now() - (stale ? 11000 : 0)} observation={{ safe: state.sessions[0], state, received: performance.now() - (stale ? 11000 : 0) }} />, { width: 80, height: 24 })
   try {
     await app.renderOnce()

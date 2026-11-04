@@ -7,6 +7,21 @@ import { nativeStatus, type NativeRuntime, type NativeStatus } from "./native-co
 import { theme } from "./theme"
 
 export type NetworkObservation = { safe: string; state: NativeStatus; received: number }
+
+export function scopedNetworkObservation(observation: NetworkObservation | undefined, safe: string | undefined, host: NativeStatus | undefined, now: number) {
+  if (!observation || !safe || observation.safe !== safe || !host?.app_open || !observation.state.app_open
+    || host.recovery_required || observation.state.recovery_required || host.idle_lock.host?.closing || !host.idle_lock.host
+    || observation.state.idle_lock.host?.closing
+    || host.idle_lock.host.nonce !== observation.state.idle_lock.host?.nonce
+    || now - observation.received + (observation.state.network_status?.age_ms ?? 10_001) > 10_000) return undefined
+  const current = host.idle_lock.safes.find((entry) => entry.opening.safe_id === safe)
+  const reported = observation.state.idle_lock.safes.find((entry) => entry.opening.safe_id === safe)
+  const active = host.open_sessions.find((entry) => entry.id === safe)
+  if (!current || current.closing || !reported || reported.closing || !active || active.recovery_required
+    || active.slot !== current.opening.slot || current.opening.slot !== reported.opening.slot
+    || current.opening.nonce !== reported.opening.nonce) return undefined
+  return observation.state
+}
 const policies = [
   { id: "open-internet", value: "open", name: "Open Internet", description: "Allow TCP to public destinations through this Safe's Tor or SOCKS5 route. Explicit deny rules still apply." },
   { id: "strict", value: "strict", name: "Strict", description: "Restrict this Safe to destinations permitted by its gateway rules, through its protected route." },
@@ -99,15 +114,18 @@ export function NativeNetworkIndicator(props: { observation?: NetworkObservation
   const [now, setNow] = createSignal(performance.now())
   const timer = setInterval(() => setNow(performance.now()), 1000)
   onCleanup(() => clearInterval(timer))
-  const fresh = () => !!props.observation && props.observation.safe === props.safe && now() - props.observation.received + (props.observation.state.network_status?.age_ms ?? 10_001) <= 10_000
-  const protectedRoute = (label: string) => fresh() && props.observation!.state.network_status?.label === label && props.observation!.state.network_status?.direct_blocked && props.observation!.state.network_status?.host_link === "CONNECTED"
+  const current = () => scopedNetworkObservation(props.observation, props.safe, props.host, now())
+  const policy = () => policies.find((entry) => entry.value === current()?.safe_access.current)?.name
+  const protectedRoute = (label: string) => props.host?.open_sessions.some((entry) => entry.id === props.safe && entry.mode === "agent")
+    && current()?.open_sessions.some((entry) => entry.id === props.safe && entry.mode === "agent" && !entry.recovery_required)
+    && current()?.network_status?.label === label && current()?.network_status?.direct_blocked && current()?.network_status?.host_link === "CONNECTED"
   const host = () => now() - props.hostReceived + (props.host?.network_status?.age_ms ?? 10_001) <= 10_000 ? props.host?.network_status?.host_link : undefined
-  return <box flexDirection="row" gap={2}>
+  return <box flexDirection="row" gap={2} flexShrink={0}>
     <For each={[
       { name: "Network", mark: host() === "CONNECTED" ? "+" : host() === "OFFLINE" ? " " : "?" },
       { name: "Tor", mark: protectedRoute("TOR READY") ? "+" : " " },
       { name: "SOCKS5", mark: protectedRoute("SOCKS5 READY") ? "+" : " " },
-    ]}>{(indicator) => <box flexDirection="row" gap={1}><text fg={theme.text.muted}>{indicator.name}</text><text fg={indicator.mark === "+" ? theme.feedback.success : indicator.mark === "?" ? theme.feedback.warning : theme.text.muted}>[{indicator.mark}]</text></box>}</For>
+    ]}>{(indicator) => <box flexDirection="row" gap={1}><text fg={theme.text.muted}>{indicator.name}</text><text fg={indicator.mark === "+" ? theme.feedback.success : indicator.mark === "?" ? theme.feedback.warning : theme.text.muted}>[{indicator.mark}]</text><Show when={indicator.name === "Network" && policy()}>{(value) => <text fg={theme.text.base}>· {value()}</text>}</Show></box>}</For>
   </box>
 }
 

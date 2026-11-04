@@ -6,7 +6,7 @@ export function requestedAgentName(agent: NativeStatus["agent_safes"][number]["a
   return agent === "codex" ? "Codex" : agent === "claude" ? "Claude Code" : "OpenCode 2"
 }
 
-export function SafeInspector(props: { state: NativeStatus; id: string; blocked?: string; launch: (agent: NativeStatus["agent_safes"][number]["agent"]) => void; choose: () => void; back: () => void }) {
+export function SafeInspector(props: { state: NativeStatus; id: string; blocked?: string; task: () => void; launch: (agent: NativeStatus["agent_safes"][number]["agent"]) => void; choose: () => void; back: () => void }) {
   const [selected, setSelected] = createSignal(0)
   const record = () => props.state.agent_safes.find((entry) => entry.id === props.id)
   const opened = () => props.state.open_sessions.find((entry) => entry.id === props.id)
@@ -18,7 +18,9 @@ export function SafeInspector(props: { state: NativeStatus; id: string; blocked?
   const current = () => !known() ? "Not in current catalog" : props.state.recovery_required || opened()?.recovery_required ? "Recovery required" : opened() ? `Open · ${opened()!.mode === "documents" ? "Files VM" : "Native workspace VM"}`
     : record()?.state === "failed" ? "Creation failed" : record()?.state === "recovery-required" ? "Recovery required" : "Closed"
   const items = () => [
-    ...(record() ? [{ name: "Open requested agent", description: props.blocked ? "This creation record cannot start an interactive client." : `Open ${requestedAgentName(record()!.agent)} interactively. The stored task is not submitted and no login is delegated.`,
+    ...(record() ? [{ name: "Review saved task", description: "Open this Safe offline and read the exact saved task before execution. Opening the review does not submit it.",
+      disabled: props.blocked, action: "Open task review", run: () => { if (!props.blocked) props.task() } }] : []),
+    ...(record() ? [{ name: "Open requested agent", description: props.blocked ? "This creation record cannot start an interactive client." : `Open ${requestedAgentName(record()!.agent)} interactively. The stored task is not submitted. Native login controls remain available if needed.`,
       disabled: props.blocked, action: "Open requested agent", run: () => { if (!props.blocked && record()) props.launch(record()!.agent) } }] : []),
     { name: record() ? "Choose another agent" : "Choose an agent", description: "Choose a different official client in this Safe.", disabled: props.blocked, action: "Choose agent", run: () => { if (!props.blocked) props.choose() } },
   ]

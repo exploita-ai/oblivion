@@ -102,6 +102,7 @@ export async function reportNativeActivity(launcher: string, input: z.infer<type
 
 export function nativePreview(exit: () => void, initial: Partial<NativeStatus> = {}): NativeRuntime {
   const ids = ["0123456789abcdef0123456789abcdef", "abcdef0123456789abcdef0123456789"]
+  const tasks = new Map<string, { attempts: number; request: string; state: "running" | "cancelled" }>()
   let current: NativeStatus = {
     app_open: false, app_mode: "locked",
     safe_access: { current: "open", saved: null, temporary: false },
@@ -120,6 +121,16 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
     async activity() {},
     async status() { return current },
     async query(args) {
+      if (args[0] === "safe" && args[1] === "task") {
+        const origin = current.agent_safes.find((record) => record.id === args[3])
+        if (!origin || !current.open_sessions.some((opened) => opened.id === origin.id)) throw new Error("Open the preview Safe to review its task.")
+        const attempt = tasks.get(origin.id)
+        const status = { version: 1, safe_id: origin.id, agent: origin.agent, request_id: "e".repeat(32),
+          attempt_request_id: attempt?.request ?? null, attempts: attempt?.attempts ?? 0, attempt_limit: 16,
+          phase: attempt ? "submitted" : "not-started", job: attempt ? { job_id: "a".repeat(32), request_id: attempt.request, agent: origin.agent, state: attempt.state, native_chat_id: null, reason: null } : null,
+          can_start: !attempt, can_retry: attempt?.state === "cancelled" && attempt.attempts < 16, can_cancel: attempt?.state === "running", blocked: null }
+        return args[2] === "review" ? { status, task: "Preview task: inspect the workspace and describe the project. This local preview does not submit a task or start an agent." } : status
+      }
       if (args[0] === "share" && args[1] === "imports") return []
       if (args[0] === "network") return { ...current, network_status: { label: "NOT STARTED", direct_blocked: false, host_link: "STATUS UNKNOWN", age_ms: 0 }, safe_access: { current: "open", saved: null, temporary: false } }
       if (args[0] === "files" && args[1] === "list") {
@@ -129,6 +140,12 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
       throw new Error("Preview data is unavailable for this operation.")
     },
     async run(args) {
+      if (args[0] === "safe" && args[1] === "task") {
+        const previous = tasks.get(args[3])
+        if (args[2] === "start" && !previous) tasks.set(args[3], { attempts: 1, request: "e".repeat(32), state: "running" })
+        if (args[2] === "retry" && previous?.state === "cancelled" && previous.attempts < 16) tasks.set(args[3], { attempts: previous.attempts + 1, request: (previous.attempts + 1).toString(16).padStart(32, "0"), state: "running" })
+        if (args[2] === "cancel" && previous) tasks.set(args[3], { ...previous, state: "cancelled" })
+      }
       if (args[0] === "init") current = { ...current, general_present: !args.includes("--reset-incomplete"), general_incomplete: false, persistence: current.persistence ? { ...current.persistence, present: !args.includes("--reset-incomplete"), incomplete: false } : null }
       if (args[0] === "unlock" || args[0] === "ephemeral") current = { ...current, app_open: true, app_mode: args[0] === "ephemeral" ? "ram-only" : args[1] === "--read-only" ? "read-only" : "persistent", general_open: args[0] !== "ephemeral", general_readonly: args[0] === "unlock" && args[1] === "--read-only", idle_lock: { ...current.idle_lock, writable: args[0] === "unlock" && args[1] !== "--read-only", host: { nonce: "c".repeat(32), remaining_seconds: 1800, closing: false } } }
       if (args[0] === "lock") current = { ...current, app_open: false, app_mode: "locked", general_open: false, general_readonly: false, open_sessions: [], idle_lock: { ...current.idle_lock, writable: false, host: null, safes: [] } }

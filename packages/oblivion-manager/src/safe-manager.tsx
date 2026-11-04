@@ -7,13 +7,14 @@ import { Menu, type MenuItem } from "./menu"
 import { FormView } from "./form"
 import { palette, theme } from "./theme"
 import { capacity, nativeStatus, type NativeOverlay, type NativeRuntime, type NativeStatus, type StoragePlan } from "./native-control"
-import { NativeNetwork, NativeNetworkIndicator, NativeSystem, type NetworkObservation } from "./native-network"
+import { NativeNetwork, NativeNetworkIndicator, NativeSystem, scopedNetworkObservation, type NetworkObservation } from "./native-network"
 import { NativeFiles } from "./native-files"
 import { NativeIdle } from "./native-idle"
 import { NativeStorage, storageUnavailable } from "./native-storage"
 import { NativeShare, type ShareSelection } from "./native-share"
 import { NativeImports } from "./native-imports"
 import { requestedAgentName, SafeInspector } from "./safe-inspector"
+import { NativeTask } from "./native-task"
 
 const agents = [
   { id: "codex", name: "Codex", description: "Open the official Codex CLI. Its login, tools and conversation history stay inside this Safe." },
@@ -30,11 +31,12 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
   const [attached, setAttached] = createSignal(false)
   const [selected, setSelected] = createSignal(0)
   const [area, setArea] = createSignal<"list" | "actions">("list")
-  const [page, setPage] = createSignal<"safes" | "name" | "agents" | "lock" | "settings" | "system" | "network" | "files" | "rename" | "grow" | "idle" | "storage" | "share" | "imports" | "inspect">(props.overlay?.page ?? "safes")
+  const [page, setPage] = createSignal<"safes" | "name" | "agents" | "lock" | "settings" | "system" | "network" | "files" | "rename" | "grow" | "idle" | "storage" | "share" | "imports" | "inspect" | "task">(props.overlay?.page ?? "safes")
   const [sharing, setSharing] = createSignal<ShareSelection>()
   const [storageReview, setStorageReview] = createSignal<{ plan: StoragePlan | null; reset: boolean }>()
   const [context, setContext] = createSignal<string | undefined>(props.overlay?.safe)
   const [observed, setObserved] = createSignal<NetworkObservation>()
+  const [now, setNow] = createSignal(performance.now())
   const [hostReceived, setHostReceived] = createSignal(props.initial ? props.initialReceived ?? performance.now() : 0)
   const [target, setTarget] = createSignal<string>()
   const [safeName, setSafeName] = createSignal<string>()
@@ -124,6 +126,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
   async function execute(args: string[], message?: string, returnToSafes = true): Promise<number> {
     if (attached() || busy()) return 1
     setAttached(true)
+    setObserved(undefined)
     setError("")
     setNotice("")
     try {
@@ -163,6 +166,15 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
   function inspect(id: string) {
     if (attached() || busy()) return
     setContext(id); setPage("inspect"); setArea("list"); setSelected(0)
+  }
+
+  async function reviewTask(id: string) {
+    if (openingBlocked(id) || attached() || busy()) return
+    setContext(id)
+    // Explicit offline ownership keeps the Safe open when the login client
+    // exits; merely switching pages never submits the saved task.
+    const code = await execute(["safe", "open", id], undefined, false)
+    if (code === 0 && !openingBlocked(id)) { setPage("task"); setSelected(0); setArea("list") }
   }
 
   function backFromAgents() {
@@ -308,7 +320,8 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
   onMount(() => {
     if (!props.initial) void refresh()
     const timer = setInterval(() => { void refresh() }, 5000)
-    onCleanup(() => clearInterval(timer))
+    const clock = setInterval(() => setNow(performance.now()), 1000)
+    onCleanup(() => { clearInterval(timer); clearInterval(clock) })
   })
   onCleanup(() => { stopped = true })
 
@@ -325,14 +338,14 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
     if (key.name === "f7" && state()?.app_open) { key.preventDefault(); section("files"); return }
     if (key.name === "f9" && state()?.app_open) { key.preventDefault(); section("network"); return }
     if (key.name === "escape") {
-      if (["files", "network", "rename", "grow", "idle", "storage", "share", "imports"].includes(page())) return
+      if (["files", "network", "rename", "grow", "idle", "storage", "share", "imports", "task"].includes(page())) return
       key.preventDefault()
       if (page() === "agents") { backFromAgents(); return }
       if (page() !== "safes") { section("safes"); return }
       lock(true)
       return
     }
-    if (["name", "files", "network", "rename", "grow", "idle", "storage", "share", "imports"].includes(page())) return
+    if (["name", "files", "network", "rename", "grow", "idle", "storage", "share", "imports", "task"].includes(page())) return
     if (key.name === "r" && ["safes", "inspect"].includes(page())) { key.preventDefault(); void refresh(); return }
     if (key.name === "tab" && toolbar().length) { key.preventDefault(); setArea((value) => value === "list" ? "actions" : "list"); return }
     if (page() === "safes" && state()?.app_open) {
@@ -356,13 +369,14 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
         { title: "Safes", id: "safes" as const, key: "F1" },
         { title: "Settings", id: "settings" as const, key: "F2" },
         { title: "System", id: "system" as const, key: "F3" },
-      ]}>{(item) => <ActionItem theme={palette} modern flush variant={(page() === item.id || item.id === "settings" && ["network", "rename", "grow", "idle", "imports"].includes(page()) || item.id === "safes" && ["name", "agents", "files", "share", "inspect"].includes(page())) ? "primary" : "secondary"}
+      ]}>{(item) => <ActionItem theme={palette} modern flush variant={(page() === item.id || item.id === "settings" && ["network", "rename", "grow", "idle", "imports"].includes(page()) || item.id === "safes" && ["name", "agents", "files", "share", "inspect", "task"].includes(page())) ? "primary" : "secondary"}
         action={{ title: item.title, key: item.key, disabled: attached() || busy() || item.id === "settings" && !state()?.app_open, onTrigger: () => section(item.id) }} />}</For></box></Show>
       <text fg={theme.text.muted}>{props.overlay ? "Safe panel" : props.preview ? "Preview" : state()?.app_open ? state()?.app_mode === "ram-only" ? "Ephemeral mode" : state()?.app_mode === "read-only" ? "Read-only archive" : `${active().length} active Safe(s)` : "Privacy layer"}</text>
     </box>
     <box flexGrow={1} minHeight={0} flexDirection="column" paddingLeft={spacious() ? 5 : 2} paddingRight={spacious() ? 5 : 2} paddingTop={spacious() ? 2 : 1} paddingBottom={1}>
       <Show when={page() === "system"}><NativeSystem state={state()} /></Show>
-      <Show when={page() === "inspect" && context() && state()}><SafeInspector state={state()!} id={context()!} blocked={openingBlocked(context()!)} launch={(agent) => { if (!openingBlocked(context()!)) void execute(["run", "--safe", context()!, agent]) }} choose={() => chooseAgent(context())} back={() => section("safes")} /></Show>
+      <Show when={page() === "inspect" && context() && state()}><SafeInspector state={state()!} id={context()!} blocked={openingBlocked(context()!)} task={() => { void reviewTask(context()!) }} launch={(agent) => { if (!openingBlocked(context()!)) void execute(["run", "--safe", context()!, agent]) }} choose={() => chooseAgent(context())} back={() => section("safes")} /></Show>
+      <Show when={page() === "task" && context() && state()}><NativeTask runtime={props.runtime} state={state()!} safe={context()!} name={safeTitle()} policy={scopedNetworkObservation(observed(), context(), state(), now())?.safe_access.current} blocked={openingBlocked(context()!)} run={(args) => execute(args, undefined, false)} back={() => inspect(context()!)} /></Show>
       <Show when={page() === "imports"}><NativeImports runtime={props.runtime} writable={state()?.app_mode === "persistent" && !hostClosing()} run={(args) => execute(args, undefined, false)} back={() => section("settings")} /></Show>
       <Show when={page() === "share" && sharing()} keyed>{(selection) => <NativeShare
         selection={selection.operation === "import" ? selection : selection.scope === "all" ? { ...selection, count: state()?.sessions.length ?? 0, closed: !active().length }
@@ -393,7 +407,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
       <Show when={state()?.idle_lock.last_error}><text flexShrink={0} fg={theme.feedback.warning}>Automatic lock requires recovery: {state()?.idle_lock.last_error}</text></Show>
       <Show when={error() || notice()}><text flexShrink={0} fg={error() ? theme.feedback.error : theme.feedback.info}>{error() || notice()}</text></Show>
     </box>
-    <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2} paddingTop={spacious() ? 1 : 0} paddingBottom={spacious() ? 1 : 0} border={["top"]} borderColor={theme.border.base}>
+    <box flexShrink={0} flexDirection="row" flexWrap="wrap" columnGap={2} justifyContent="space-between" paddingLeft={2} paddingRight={2} paddingTop={spacious() ? 1 : 0} paddingBottom={spacious() ? 1 : 0} border={["top"]} borderColor={theme.border.base}>
       <NativeNetworkIndicator observation={observed()} safe={safe()} host={state()} hostReceived={hostReceived()} />
       <ActionBar actions={props.overlay ? [{ title: "Back to agent", key: "Esc", run: () => { void leave() } }] : state()?.app_open ? [
         { title: "Lock Safe", key: "L", disabled: !selectedOpen() || hostClosing() || safeClosing(safe()), run: () => {
