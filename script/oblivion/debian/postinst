@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+case "$1" in
+    configure)
+        . /usr/share/debconf/confmodule
+        db_get oblivion-stack/manager-user
+        manager=$RET
+        db_stop
+        /usr/bin/python3 -I -B /usr/lib/oblivion/debian/configure.py "$manager"
+        systemd-sysusers /usr/lib/sysusers.d/oblivion.conf
+        systemd-tmpfiles --create /etc/tmpfiles.d/oblivion.conf
+        deb-systemd-helper unmask oblivion-controller.service >/dev/null || true
+        if deb-systemd-helper --quiet was-enabled oblivion-controller.service; then
+            deb-systemd-helper enable oblivion-controller.service >/dev/null
+        fi
+        if [ -d /run/systemd/system ]; then
+            systemctl --system daemon-reload
+            deb-systemd-invoke start oblivion-controller.service
+        fi
+        ;;
+esac

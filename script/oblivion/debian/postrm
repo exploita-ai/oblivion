@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+case "$1" in
+    remove)
+        deb-systemd-helper mask oblivion-controller.service >/dev/null || true
+        ;;
+    purge)
+        deb-systemd-helper purge oblivion-controller.service >/dev/null || true
+        deb-systemd-helper unmask oblivion-controller.service >/dev/null || true
+        if [ -f /usr/share/debconf/confmodule ]; then
+            . /usr/share/debconf/confmodule
+            db_purge
+        fi
+        ;;
+esac
+if [ -d /run/systemd/system ]; then systemctl --system daemon-reload; fi
+# Encrypted archives, generated app configuration and fixed service identities
+# are deliberately retained, including purge. Never recycle their ownership.

@@ -22,10 +22,12 @@ def install(agent, architecture, lock, root, verify):
     version = lock["agents"][agent]["version"]
     source = lock["agents"][agent]["architectures"][architecture]
     target = root / "usr/lib/oblivion/agents" / agent
+    native = root / "usr/lib/oblivion/agents/bin" / agent
     entrypoint = root / "usr/bin" / agent
-    if target.exists() or entrypoint.exists() or entrypoint.is_symlink():
+    if target.exists() or native.exists() or native.is_symlink() or entrypoint.exists() or entrypoint.is_symlink():
         raise ValueError(f"Refusing to replace an existing {agent} installation")
     target.parent.mkdir(parents=True, exist_ok=True)
+    native.parent.mkdir(parents=True, exist_ok=True)
     entrypoint.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f".{agent}-build-", dir=target.parent) as directory:
         work = Path(directory)
@@ -60,8 +62,10 @@ def install(agent, architecture, lock, root, verify):
                 raise ValueError(f"{agent} version output differs from the lock")
         package.rename(target)
         try:
-            entrypoint.symlink_to(Path("../lib/oblivion/agents") / agent / source["executable"])
+            native.symlink_to(Path("..") / agent / source["executable"])
+            entrypoint.symlink_to(Path("../lib/oblivion/guest/agent-wrapper.sh"))
         except OSError:
+            native.unlink(missing_ok=True)
             shutil.rmtree(target)
             raise
     print(f"Installed {agent} {version} ({architecture}), upstream SHA-512 verified")

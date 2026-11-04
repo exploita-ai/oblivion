@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+case "$1" in
+    remove|upgrade|deconfigure)
+        if [ -d /run/systemd/system ]; then
+            deb-systemd-invoke stop oblivion-controller.service
+            if systemctl --system is-active --quiet oblivion-controller.service; then
+                echo 'Oblivion controller is still active; package removal was stopped.' >&2
+                exit 1
+            fi
+            # Refuse removal if any owned VM/mapping cannot be closed safely.
+            /usr/bin/oblivion-storage --config /etc/oblivion/controller.json recover
+        elif [ -e /run/oblivion ]; then
+            echo 'Oblivion state exists without a running service manager; recover it before removal.' >&2
+            exit 1
+        else
+            for device in /dev/mapper/oblivion-*; do
+                if [ -e "$device" ]; then
+                    echo 'Oblivion mappings remain open; recover them before removal.' >&2
+                    exit 1
+                fi
+            done
+        fi
+        ;;
+esac

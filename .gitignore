@@ -10,7 +10,6 @@ ts-dist
 .turbo
 .typecheck-profiles
 /result
-/opencode.json
 target
 .cache
 tmp/

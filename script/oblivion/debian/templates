@@ -1,0 +1,5 @@
+Template: oblivion-stack/manager-user
+Type: string
+Description: Existing local account allowed to control Oblivion:
+ Enter the name of one existing non-root account. Only that account may use
+ the privileged controller. This does not grant sudo or change OS settings.

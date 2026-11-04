@@ -35,6 +35,23 @@ def initramfs(path):
             "module_count": sum(name.endswith((".ko", ".ko.xz", ".ko.zst", ".ko.gz")) for name in entries)}
 
 
+def match_package_manifest(manifest, role, packages):
+    if role not in ("host", "session", "gateway", "import", "export", "onion-gateway", "onion-file"):
+        raise ValueError("Unknown inventory role")
+    width = 2 if role == "host" else 4
+    expected = set()
+    for line in manifest.read_text().splitlines():
+        columns = tuple(line.split("\t"))
+        if len(columns) != width or not all(columns) or columns in expected:
+            raise ValueError(f"Invalid current {role} package manifest")
+        expected.add(columns)
+    actual = {(package["name"], package["version"]) if role == "host" else
+              (package["name"], package["version"], package["source_name"], package["source_version"])
+              for package in packages}
+    if expected != actual:
+        raise ValueError(f"Package manifest differs from immutable {role} image")
+
+
 def inventory(image, role, work, manifests):
     print(f"Inventory: {role}", flush=True)
     entries = []
@@ -49,23 +66,21 @@ def inventory(image, role, work, manifests):
     admin = work / role
     admin.mkdir()
     cat(image, "var/lib/dpkg/status", admin / "status")
-    fields = "${Package}\t${Version}\t${Architecture}\t${Installed-Size}\t${Essential}\t${Status}\t${Depends}\t${Pre-Depends}\t${Recommends}\n"
+    fields = "${Package}\t${Version}\t${Architecture}\t${Installed-Size}\t${Essential}\t${Status}\t${Depends}\t${Pre-Depends}\t${Recommends}\t${source:Package}\t${source:Version}\n"
     packages = []
     for line in run("dpkg-query", f"--admindir={admin}", "-W", f"-f={fields}").splitlines():
-        name, version, architecture, size, essential, status, depends, predepends, recommends = line.split("\t")
+        name, version, architecture, size, essential, status, depends, predepends, recommends, source_name, source_version = line.split("\t")
         if status != "install ok installed":
             continue
         packages.append({"name": name, "version": version, "architecture": architecture,
                          "installed_kib": int(size or 0), "essential": essential == "yes",
-                         "depends": depends, "pre_depends": predepends, "recommends": recommends})
+                         "depends": depends, "pre_depends": predepends, "recommends": recommends,
+                         "source_name": source_name, "source_version": source_version})
     packages.sort(key=lambda package: (-package["installed_kib"], package["name"]))
     manifest = manifests / f"{role}-packages.tsv"
     matched = None
     if manifest.is_file():
-        expected = {tuple(line.split("\t")) for line in manifest.read_text().splitlines()}
-        actual = {(package["name"], package["version"]) for package in packages}
-        if expected != actual:
-            raise ValueError(f"Package manifest differs from immutable {role} image")
+        match_package_manifest(manifest, role, packages)
         matched = True
     files = [entry for entry in entries if entry["mode"].startswith("-")]
     groups = defaultdict(int)

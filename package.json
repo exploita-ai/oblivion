@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "bun run --cwd packages/oblivion-manager dev",
     "build:iso": "sh script/oblivion/build-stack.sh",
+    "build:deb": "sh script/oblivion/build-deb.sh",
     "vm:disk": "python3 script/oblivion/prepare-vm-disk.py",
     "lint": "oxlint packages/oblivion-manager packages/oblivion-tools packages/theme packages/tui-kit script/upgrade-opentui.ts",
     "typecheck": "bun turbo typecheck --concurrency=3",

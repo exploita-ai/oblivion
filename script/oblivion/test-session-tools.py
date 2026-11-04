@@ -223,28 +223,6 @@ print('analysis-ok')
         self.assertIn(b"Pages:           1", self.command("pdfinfo", "sample.pdf", cwd=work).stdout)
         self.assertIn(b"Oblivion PDF fixture", self.command("pdftotext", "sample.pdf", "-", cwd=work).stdout)
 
-    @unittest.skipUnless(Path("/usr/bin/oblivion").is_file(), "Run the session-tools-chat-test image to include the compiled client")
-    def test_compiled_chat_start_loads_the_tool_instructions(self):
-        work = self.root / "chat-start"
-        work.mkdir()
-        capability = Path("/run/oblivion-api")
-        capability.mkdir(mode=0o700)
-        (capability / "token").write_text("a" * 64)
-        (capability / "provider").write_text("abliteration-ai")
-        environment = self.environment | {
-            "HOME": str(work / "home"), "XDG_CONFIG_HOME": str(work / "config"),
-            "XDG_DATA_HOME": str(work / "data"), "XDG_STATE_HOME": str(work / "state"),
-            "OPENCODE_CONFIG_DIR": str(work / "config"),
-            "OPENCODE_DISABLE_PROJECT_CONFIG": "1", "OPENCODE_DISABLE_CLAUDE_CODE": "1",
-            "OPENCODE_DISABLE_MODELS_FETCH": "1", "OPENCODE_DISABLE_FILEWATCHER": "1", "OPENCODE_DISABLE_FFF": "1",
-        }
-        # The public API CLI starts the real standalone server, inheriting the
-        # exact production launcher configuration; no test-specific launch mode.
-        entries = json.loads(self.command("/bin/sh", str(GUEST / "chat.sh"), "api", "GET", "/api/config", env=environment, cwd=work).stdout)
-        instructions = [path for entry in entries if entry["type"] == "document" for path in entry["info"].get("instructions", [])]
-        self.assertIn("/usr/lib/oblivion/session-tools.md", instructions)
-        self.assertTrue((work / "data/opencode/oblivion.db").is_file())
-
     def test_https_proxy_for_curl_python_node_git_npm_and_pip(self):
         work = self.root / "https"
         work.mkdir()

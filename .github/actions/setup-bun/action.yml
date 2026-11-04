@@ -12,8 +12,7 @@ inputs:
 runs:
   using: "composite"
   steps:
-    # node-gyp@latest (invoked via bunx for native install scripts) requires Node >=22;
-    # some runner images ship an older system Node on PATH
+    # The MCP bundle tests run in the real Node runtime used by native agents.
     - name: Setup Node
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
       with:
@@ -58,10 +57,6 @@ runs:
       with:
         path: ${{ steps.cache.outputs.dir }}
         key: ${{ runner.os }}-${{ runner.arch }}-bun-${{ steps.cache.outputs.version }}-${{ hashFiles('bun.lock', 'patches/**') }}
-
-    - name: Install setuptools for distutils compatibility
-      run: python3 -m pip install setuptools || pip install setuptools || true
-      shell: bash
 
     - name: Install dependencies
       run: bun install --frozen-lockfile ${{ inputs.install-flags }}

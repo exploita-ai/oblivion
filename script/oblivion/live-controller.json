@@ -2,10 +2,10 @@
   "general_image": "/persist/oblivion/general.luks",
   "general_mib": 2048,
   "session_mib": 512,
+  "ephemeral_mib": 512,
   "pbkdf_memory_kib": 262144,
   "manager_uid": 1000,
   "usb_persistence": true,
-  "network_profiles": true,
   "gateway_network": true,
   "vm": {
     "root": "/usr/lib/oblivion/vm/qemu-root",
@@ -56,6 +56,5 @@
       "memory_mib": 1152,
       "cpus": 1
     }
-  },
-  "manage_os_preferences": true
+  }
 }

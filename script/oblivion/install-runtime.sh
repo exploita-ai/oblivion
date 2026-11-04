@@ -44,7 +44,7 @@ for unit in oblivion-controller oblivion-manager oblivion-recover; do
         echo "missing runtime service: $unit" >&2; exit 1;
     }
 done
-for binary in oblivion oblivion-storage oblivion-control oblivion-console oblivion-copy oblivion-manager; do
+for binary in oblivion oblivion-storage oblivion-control oblivion-copy oblivion-manager; do
     [ -f "$source_root/usr/bin/$binary" ] && [ -x "$source_root/usr/bin/$binary" ] || {
         echo "missing runtime binary: $binary" >&2; exit 1;
     }
@@ -66,6 +66,10 @@ destination = pathlib.Path(sys.argv[3]) / 'etc/oblivion/controller.json'
 if destination.exists():
     installed = json.loads(destination.read_text())
     assert installed['manager_uid'] == int(sys.argv[2]), 'installed manager UID differs'
+installation = pathlib.Path(sys.argv[3]) / 'etc/oblivion/installation.json'
+if installation.exists():
+    assert not installation.is_symlink(), 'installation profile must be a regular file'
+    assert json.loads(installation.read_text()) == {'version': 1, 'mode': 'direct-controller'}, 'incompatible installation profile'
 if sys.argv[3] == '/':
     pwd.getpwuid(int(sys.argv[2]))
     identities = [(1100, 'oblivion-vm'), (1101, 'oblivion-gateway-vm'),
@@ -95,7 +99,7 @@ install -d -m 0755 "$target_root/usr/bin" "$target_root/usr/lib/oblivion" \
     "$target_root/usr/lib/systemd/system" "$target_root/usr/lib/sysusers.d" \
     "$target_root/etc/oblivion" "$target_root/etc/systemd/system/oblivion-manager.service.d"
 install -d -m 0700 "$target_root/var/lib/oblivion"
-for binary in oblivion oblivion-storage oblivion-control oblivion-console oblivion-copy oblivion-manager; do
+for binary in oblivion oblivion-storage oblivion-control oblivion-copy oblivion-manager; do
     install -m 0755 "$source_root/usr/bin/$binary" "$target_root/usr/bin/$binary"
 done
 cp -a "$source_root/usr/lib/oblivion/." "$target_root/usr/lib/oblivion/"
@@ -104,7 +108,7 @@ cp -a "$source_root/usr/lib/oblivion/." "$target_root/usr/lib/oblivion/"
 # private gateway boundary.
 for unit in "$source_root"/etc/systemd/system/oblivion-*.service; do
     case "$(basename "$unit")" in
-        oblivion-controller.service|oblivion-manager.service|oblivion-recover.service|oblivion-runtime-prepare.service|oblivion-control-relay.service|oblivion-gateway-host*.service|oblivion-transfer-host*.service|oblivion-onion-host*.service)
+        oblivion-controller.service|oblivion-manager.service|oblivion-recover.service|oblivion-runtime-prepare.service|oblivion-runtime-auth.service|oblivion-control-relay.service|oblivion-gateway-host*.service|oblivion-transfer-host*.service|oblivion-onion-host*.service)
             install -m 0644 "$unit" "$target_root/usr/lib/systemd/system/$(basename "$unit")"
             ;;
     esac
@@ -124,7 +128,6 @@ destination = target / 'etc/oblivion/controller.json'
 if not destination.exists():
     config = json.loads((source / 'etc/oblivion/controller.json').read_text())
     config.update(manager_uid=int(sys.argv[3]), usb_persistence=False,
-                  network_profiles=False, manage_os_preferences=False,
                   general_image='/var/lib/oblivion/general.luks')
     fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, 'w') as output:
@@ -133,6 +136,12 @@ if not destination.exists():
 else:
     config = json.loads(destination.read_text())
     assert config['manager_uid'] == int(sys.argv[3]), 'installed manager UID differs'
+installation = target / 'etc/oblivion/installation.json'
+if not installation.exists():
+    fd = os.open(installation, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, 'w') as output:
+        json.dump({'version': 1, 'mode': 'direct-controller'}, output)
+        output.write('\n')
 PY
 cat > "$target_root/etc/systemd/system/oblivion-manager.service.d/user.conf" <<EOF
 [Service]

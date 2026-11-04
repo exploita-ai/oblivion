@@ -1,0 +1,2 @@
+Filename				Type		Size		Used		Priority
+/fixture-swap			file		1024		0		-2

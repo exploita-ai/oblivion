@@ -3,26 +3,8 @@ name: Oblivion checks
 on:
   push:
     branches: [dev, main]
-    paths:
-      - "packages/**"
-      - "script/**"
-      - "package.json"
-      - "bun.lock"
-      - ".gitleaks.toml"
-      - ".github/actions/setup-bun/**"
-      - ".github/workflows/oblivion-check.yml"
-      - ".github/workflows/oblivion-release.yml"
   pull_request:
     branches: [dev, main]
-    paths:
-      - "packages/**"
-      - "script/**"
-      - "package.json"
-      - "bun.lock"
-      - ".gitleaks.toml"
-      - ".github/actions/setup-bun/**"
-      - ".github/workflows/oblivion-check.yml"
-      - ".github/workflows/oblivion-release.yml"
   workflow_dispatch:
 
 permissions:
@@ -47,444 +29,16 @@ jobs:
           ghcr.io/gitleaks/gitleaks@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9
           detect --source=/repo --no-git --redact --config=/repo/.gitleaks.toml --exit-code=1
 
-  vm-clipboard:
-    name: Confined Wayland clipboard ${{ matrix.arch }}
+  javascript:
+    name: Manager and native tools (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         include:
+          - { arch: x64, runner: ubuntu-24.04 }
           - { arch: arm64, runner: ubuntu-24.04-arm }
-          - { arch: amd64, runner: ubuntu-24.04 }
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - name: Build pinned clipboard protocol and compositor components
-        run: |
-          mkdir -p artifacts/ci/clipboard
-          docker buildx build --platform linux/${{ matrix.arch }} --progress plain --load \
-            --file script/oblivion/Dockerfile.vm-lab --target clipboard-test \
-            --tag oblivion-clipboard-test . 2>&1 | tee artifacts/ci/clipboard/build.log
-      - name: Exercise actual Wayland selection with an isolated daemon peer
-        run: |
-          docker run --rm --network none --read-only --cap-drop ALL \
-            --security-opt no-new-privileges --pids-limit 64 --memory 512m --memory-swap 512m \
-            --ulimit core=0 \
-            --tmpfs /run/oblivion-display:rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=1104,gid=1104 \
-            --tmpfs /run/oblivion-clipboard-broker:rw,nosuid,nodev,noexec,size=1m,mode=0700,uid=1104,gid=1104 \
-            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777 \
-            oblivion-clipboard-test 2>&1 | tee artifacts/ci/clipboard/wayland.log
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: oblivion-clipboard-${{ matrix.arch }}-${{ github.sha }}
-          path: artifacts/ci/clipboard/
-          retention-days: 7
-
-  onion-host-native:
-    name: Onion host profiles and uplink ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { arch: arm64, runner: ubuntu-24.04-arm, qemu_package: qemu-system-arm }
-          - { arch: amd64, runner: ubuntu-24.04, qemu_package: qemu-system-x86 }
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - name: Install the pinned compiler and platform QEMU
-        run: |
-          rustup toolchain install 1.85.0 --profile minimal
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ matrix.qemu_package }}
-      - name: Exercise actual profile files and the machine-less private Ethernet uplink
-        working-directory: packages/oblivion-host
-        run: |
-          mkdir -p ../../artifacts/ci/onion-host
-          cargo +1.85.0 test --locked --test tor_profile --test onion_uplink --test onion_vm --test onion --test onion_task --test onion_copy -- --include-ignored \
-            2>&1 | tee ../../artifacts/ci/onion-host/tests.log
-          cargo +1.85.0 test --locked --bin oblivion-storage \
-            2>&1 | tee ../../artifacts/ci/onion-host/owner-tests.log
-          cargo +1.85.0 check --locked --all-targets --features lab-emulation \
-            2>&1 | tee ../../artifacts/ci/onion-host/check.log
-          rustc +1.85.0 --version > ../../artifacts/ci/onion-host/rustc.txt
-      - name: Record the tested controller sources
-        run: |
-          sha256sum packages/oblivion-host/Cargo.toml packages/oblivion-host/Cargo.lock \
-            packages/oblivion-host/src/tor_profile.rs packages/oblivion-host/src/onion_uplink.rs \
-            packages/oblivion-host/src/onion.rs packages/oblivion-host/src/onion_vm.rs \
-            packages/oblivion-host/src/onion_host.rs packages/oblivion-host/src/onion_task.rs \
-            packages/oblivion-host/src/onion_copy.rs \
-            packages/oblivion-host/src/vm.rs \
-            packages/oblivion-host/src/main.rs packages/oblivion-host/src/ipc.rs packages/oblivion-host/src/client.rs \
-            packages/oblivion-host/src/storage.rs packages/oblivion-host/src/gateway.rs \
-            packages/oblivion-host/tests/tor_profile.rs packages/oblivion-host/tests/onion_uplink.rs \
-            packages/oblivion-host/tests/onion.rs packages/oblivion-host/tests/onion_vm.rs \
-            packages/oblivion-host/tests/onion_task.rs packages/oblivion-host/tests/onion_copy.rs \
-            packages/oblivion-host/host/oblivion-onion-host.service script/oblivion/live-setup.sh \
-            > artifacts/ci/onion-host/sources.sha256
-          if [ '${{ matrix.arch }}' = arm64 ]; then
-            qemu-system-aarch64 --version > artifacts/ci/onion-host/qemu.txt
-          else
-            qemu-system-x86_64 --version > artifacts/ci/onion-host/qemu.txt
-          fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: oblivion-onion-host-${{ matrix.arch }}-${{ github.sha }}
-          path: artifacts/ci/onion-host/
-          retention-days: 7
-          if-no-files-found: error
-
-  onionshare-files:
-    name: OnionShare confined components ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
-    # ARM64 also boots six software-emulated guests after the native builds.
-    # Keep the per-operation deadlines; allow time for the complete job.
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { arch: arm64, runner: ubuntu-24.04-arm }
-          - { arch: amd64, runner: ubuntu-24.04 }
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - name: Build locked upstream OnionShare and retain dependency licenses
-        run: |
-          mkdir -p artifacts/ci/onionshare
-          docker buildx build --platform linux/${{ matrix.arch }} --progress plain \
-            -f script/oblivion/Dockerfile.vm-lab --target onionshare-test \
-            --load -t oblivion-onionshare-test . 2>&1 | tee artifacts/ci/onionshare/build.log
-      - name: Exercise real share/receive, quotas, malformed uploads and teardown
-        run: |
-          docker run --rm --network none --read-only --cap-drop ALL \
-            --security-opt no-new-privileges --pids-limit 96 --memory 512m --memory-swap 512m \
-            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777 \
-            --tmpfs /run/oblivion-onion:rw,nosuid,nodev,noexec,size=96m,mode=0700,uid=1000,gid=1000 \
-            oblivion-onionshare-test 2>&1 | tee artifacts/ci/onionshare/test.log
-      - name: Record the tested sources and third-party inventory
-        run: |
-          docker run --rm --network none --read-only --entrypoint /usr/bin/python3 \
-            oblivion-onionshare-test -B -c \
-            'from pathlib import Path; print(Path("/opt/oblivion-onionshare/inventory.json").read_text(), end="")' \
-            > artifacts/ci/onionshare/inventory.json
-          sha256sum packages/oblivion-onion/service.py packages/oblivion-onion/LICENSE \
-            script/oblivion/onionshare-source.json script/oblivion/onionshare-requirements.lock \
-            script/oblivion/onionshare-licenses.json script/oblivion/install-onionshare.py \
-            script/oblivion/test-onionshare.py > artifacts/ci/onionshare/sources.sha256
-      - name: Build the actual Tor ownership laboratory and gateway unit checks
-        run: |
-          docker buildx build --platform linux/${{ matrix.arch }} --progress plain \
-            -f script/oblivion/Dockerfile.vm-lab --target onion-tor-test \
-            --load -t oblivion-onion-tor-test . 2>&1 | tee artifacts/ci/onionshare/tor-build.log
-      - name: Create private services and stop Tor on revoke, disconnect and SIGKILL
-        run: |
-          docker run --rm --network none --read-only --cap-drop ALL \
-            --cap-add SETUID --cap-add SETGID --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add KILL \
-            --security-opt no-new-privileges --pids-limit 96 --memory 256m --memory-swap 256m --ulimit core=0 \
-            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777 \
-            --tmpfs /run/tor:rw,nosuid,nodev,noexec,size=2m,mode=0700,uid=1200,gid=1200 \
-            --tmpfs /var/lib/tor:rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=1200,gid=1200 \
-            oblivion-onion-tor-test 2>&1 | tee artifacts/ci/onionshare/tor-test.log
-          sha256sum packages/oblivion-gateway/Cargo.toml packages/oblivion-gateway/Cargo.lock \
-            packages/oblivion-gateway/src/tor.rs packages/oblivion-gateway/src/network.rs \
-            packages/oblivion-gateway/src/onion_main.rs packages/oblivion-gateway/src/onion_network.rs \
-            packages/oblivion-gateway/src/onion_supervisor.rs packages/oblivion-gateway/examples/onion-probe.rs \
-            packages/oblivion-gateway/guest/onion/* script/oblivion/test-onion-tor.py \
-            script/oblivion/run-onion-lab.py script/oblivion/vm-onion-fixture.py \
-            > artifacts/ci/onionshare/tor-sources.sha256
-      - name: Build the production Tor transfer gateway and disposable control image
-        if: matrix.arch == 'arm64'
-        run: >-
-          docker buildx build --platform linux/arm64 --progress plain
-          -f script/oblivion/Dockerfile.vm-lab --target onion-control-artifacts
-          --output type=local,dest=artifacts/ci/onionshare/control-image .
-      - name: Exercise systemd, private virtio control and crash cleanup in the real guest
-        if: matrix.arch == 'arm64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-arm
-          python3 -B script/oblivion/run-onion-lab.py --accelerator tcg \
-            --image artifacts/ci/onionshare/control-image --output artifacts/ci/onionshare/control-results
-      - name: Remove reconstructible guest files from the evidence upload
-        if: always() && matrix.arch == 'arm64'
-        run: |
-          rm -f artifacts/ci/onionshare/control-image/kernel artifacts/ci/onionshare/control-image/initrd \
-            artifacts/ci/onionshare/control-image/gateway.squashfs artifacts/ci/onionshare/control-image/laboratory.squashfs
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: oblivion-onionshare-${{ matrix.arch }}-${{ github.sha }}
-          path: artifacts/ci/onionshare/
-          retention-days: 7
-          if-no-files-found: error
-
-  onionshare-file-vm:
-    name: OnionShare isolated file VM ARM64 (${{ matrix.group }})
-    runs-on: ubuntu-24.04-arm
-    # Keep cold-boot file lifecycles and full-size backups in separate jobs.
-    # Together they exceed 35 minutes under TCG; per-operation limits stay fixed.
-    timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        group: [files, backups]
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - name: Build and test the compiled copy endpoints and file controller
-        run: >-
-          docker buildx build --platform linux/arm64 --progress plain
-          -f script/oblivion/Dockerfile.transfer
-          --output type=local,dest=artifacts/ci/transfer .
-      - name: Build the production file VM and separate diagnostic peers
-        run: >-
-          docker buildx build --platform linux/arm64 --progress plain
-          -f script/oblivion/Dockerfile.vm-lab --target onion-file-artifacts
-          --output type=local,dest=artifacts/ci/onion-file/image .
-      - name: Exercise read-only sharing, receive approval, copy and crash cleanup
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-arm
-          python3 -B script/oblivion/run-onion-file-lab.py --accelerator tcg \
-            --group ${{ matrix.group }} \
-            --image artifacts/ci/onion-file/image --output artifacts/ci/onion-file/results
-      - name: Remove reconstructible guest files from the evidence upload
-        if: always()
-        run: |
-          rm -f artifacts/ci/onion-file/image/kernel artifacts/ci/onion-file/image/initrd \
-            artifacts/ci/onion-file/image/peer-initrd artifacts/ci/onion-file/image/file.squashfs \
-            artifacts/ci/onion-file/image/laboratory.squashfs artifacts/ci/onion-file/image/peer.squashfs \
-            artifacts/ci/transfer/oblivion-copy artifacts/ci/transfer/oblivion-copy-relay \
-            artifacts/ci/transfer/oblivion-onion-file
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: oblivion-onion-file-arm64-${{ matrix.group }}-${{ github.sha }}
-          path: |
-            artifacts/ci/onion-file/
-            artifacts/ci/transfer/
-          retention-days: 7
-          if-no-files-found: error
-
-  onion-owner-vm:
-    name: Onion transfer owner and encrypted session lifecycle x86
-    runs-on: ubuntu-24.04
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - name: Require KVM for the disposable host
-        run: |
-          test "$(uname -m)" = x86_64
-          test -c /dev/kvm
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 libarchive-tools
-          sudo usermod -a -G kvm "$(id -un)"
-          sg kvm -c 'test -r /dev/kvm && test -w /dev/kvm'
-      - name: Build the controller, private transfer guests and synthetic host
-        run: |
-          docker buildx build --platform linux/amd64 --progress plain \
-            -f script/oblivion/Dockerfile.transfer \
-            --output type=local,dest=artifacts/ci/transfer .
-          docker buildx build --platform linux/amd64 --progress plain \
-            -f script/oblivion/Dockerfile.vm-lab --target host-artifacts \
-            --output type=local,dest=artifacts/ci/onion-owner/host .
-          docker buildx build --platform linux/amd64 --progress plain \
-            -f script/oblivion/Dockerfile.vm-lab --target artifacts \
-            --build-arg HOST=tui-host --build-arg GUEST=guest \
-            --output type=local,dest=artifacts/ci/onion-owner/image .
-          docker buildx build --platform linux/amd64 --progress plain \
-            -f script/oblivion/Dockerfile.vm-lab --target onion-control-artifacts \
-            --output type=local,dest=artifacts/ci/onion-owner/gateway .
-          docker buildx build --platform linux/amd64 --progress plain \
-            -f script/oblivion/Dockerfile.vm-lab --target onion-file-artifacts \
-            --output type=local,dest=artifacts/ci/onion-owner/file .
-      - name: Exercise manager IPC, namespaces, cancellation, crashes, expiry and lock
-        # The outer host uses KVM; nested guests explicitly use laboratory TCG.
-        # No uplink is attached and this is not a public Tor recipient test.
-        run: >-
-          sg kvm -c 'python3 -B script/oblivion/run-vm-lab.py
-          --architecture x86_64 --accelerator kvm --onion-host
-          --image artifacts/ci/onion-owner/image
-          --services-bundle artifacts/ci/onion-owner/host
-          --gateway-image artifacts/ci/onion-owner/gateway
-          --onion-file-image artifacts/ci/onion-owner/file
-          --output artifacts/ci/onion-owner/results'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: oblivion-onion-owner-x86-${{ github.sha }}
-          path: |
-            artifacts/ci/onion-owner/results/*.json
-            artifacts/ci/onion-owner/results/*.log
-            artifacts/ci/onion-owner/**/SHA256SUMS
-            artifacts/ci/onion-owner/**/sources.sha256
-          retention-days: 7
-          if-no-files-found: error
-
-  multisession-vm:
-    name: Concurrent encrypted sessions and private gateways x86
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - name: Prepare the disposable host
-        run: |
-          test -c /dev/kvm
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 libarchive-tools
-          sudo usermod -a -G kvm "$(id -un)"
-      - name: Build synthetic sessions and real controller/gateway services
-        run: >-
-          docker buildx build --platform linux/amd64 --progress plain
-          -f script/oblivion/Dockerfile.vm-lab --target multisession-artifacts
-          --build-arg GUEST=multisession-guest
-          --output type=local,dest=artifacts/ci/multisession/image .
-      - name: Exercise simultaneous volumes, credentials, traffic and independent shutdown
-        # No external NIC or public provider. Inner guests use laboratory TCG.
-        run: >-
-          sg kvm -c 'python3 -B script/oblivion/run-vm-lab.py
-          --architecture x86_64 --accelerator kvm --multisession
-          --image artifacts/ci/multisession/image
-          --output artifacts/ci/multisession/results'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: oblivion-multisession-x86-${{ github.sha }}
-          path: |
-            artifacts/ci/multisession/results/*.json
-            artifacts/ci/multisession/results/*.log
-            artifacts/ci/multisession/image/SHA256SUMS
-            artifacts/ci/multisession/image/sources.sha256
-          retention-days: 7
-          if-no-files-found: error
-
-  manager-import:
-    name: Manager USB import/export lifecycle x86
-    runs-on: ubuntu-24.04
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - name: Build manager and isolated import/export environments
-        run: >-
-          docker buildx build --platform linux/amd64 --progress plain
-          -f script/oblivion/Dockerfile.vm-lab --target artifacts
-          --build-arg HOST=export-host
-          --build-arg GUEST=manager-import-guest
-          --output type=local,dest=artifacts/ci/import-image .
-      - name: Install the VM laboratory
-        run: |
-          test -c /dev/kvm
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 libarchive-tools
-          sudo usermod -a -G kvm "$(id -un)"
-          sg kvm -c 'test -r /dev/kvm && test -w /dev/kvm'
-      - name: Import, export, recover and exercise filesystem failures through the manager
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        # The outer host uses KVM; both inner VMs use explicit laboratory TCG.
-        run: >-
-          sg kvm -c 'python3 script/oblivion/run-vm-lab.py
-          --architecture x86_64 --accelerator kvm
-          --image artifacts/ci/import-image --output artifacts/ci/import-results'
-      - name: Back up, restore and cancel closed encrypted sessions
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: >-
-          sg kvm -c 'python3 script/oblivion/run-vm-lab.py
-          --architecture x86_64 --accelerator kvm --refresh-import-test --backup-only
-          --image artifacts/ci/import-image --output artifacts/ci/backup-results'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: oblivion-manager-import-x86-${{ github.sha }}
-          path: |
-            artifacts/ci/import-results/*.json
-            artifacts/ci/import-results/*.log
-            artifacts/ci/backup-results/*.json
-            artifacts/ci/backup-results/*.log
-            artifacts/ci/import-image/SHA256SUMS
-            artifacts/ci/import-image/sources.sha256
-          retention-days: 7
-          if-no-files-found: error
-
-  transfer:
-    name: File copy engine ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { arch: arm64, qemu: aarch64, runner: ubuntu-24.04-arm }
-          - { arch: amd64, qemu: x86_64, runner: ubuntu-24.04 }
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - name: Copy real files through streams and reject hostile inputs
-        run: >-
-          docker buildx build --platform linux/${{ matrix.arch }} --progress plain
-          -f script/oblivion/Dockerfile.transfer
-          --output type=local,dest=artifacts/ci/transfer .
-      - name: Build the isolated transfer guests and synthetic source disk
-        run: >-
-          docker buildx build --platform linux/${{ matrix.arch }} --progress plain
-          -f script/oblivion/Dockerfile.vm-lab --target transfer-vm-artifacts
-          --build-arg COPY_BINARY=artifacts/ci/transfer/oblivion-copy
-          --output type=local,dest=artifacts/ci/transfer-image .
-      - name: Install the VM laboratory
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-system-x86
-      - name: Copy through private VM ports and revoke on cancellation or VM death
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: >-
-          python3 script/oblivion/run-transfer-vm-lab.py
-          --architecture ${{ matrix.qemu }} --accelerator tcg
-          --image artifacts/ci/transfer-image --bundle artifacts/ci/transfer
-          --output artifacts/ci/transfer-results
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: oblivion-transfer-${{ matrix.arch }}-${{ github.sha }}
-          path: |
-            artifacts/ci/transfer/
-            artifacts/ci/transfer-results/*.json
-            artifacts/ci/transfer-results/*.log
-            artifacts/ci/transfer-image/SHA256SUMS
-            artifacts/ci/transfer-image/sources.sha256
-            artifacts/ci/transfer-image/endpoint.sha256
-          retention-days: 7
-          if-no-files-found: error
-
-  repository:
-    name: Repository checks
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -494,474 +48,168 @@ jobs:
         run: bun run check
       - name: Official TypeScript compiler
         run: bun run typecheck:tsc
-      - name: Check the synthetic stream and web tools peer
-        working-directory: script/oblivion
-        run: PYTHONDONTWRITEBYTECODE=1 python3 test-stream-fixture.py
-      - name: Check interactive and headless guest consoles
-        working-directory: script/oblivion
-        run: PYTHONDONTWRITEBYTECODE=1 python3 test-console.py
-      - name: Check encrypted-session metadata and SQLite preservation
-        run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/test-session-backup.py
-      - name: Check session terminal windows and reattachment
+      - name: Run each retained workspace suite
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends tmux
-          PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/test-session-terminal.py
-      - name: Compile the real chat client with the Oblivion profile
-        working-directory: packages/cli
-        env:
-          OPENCODE_CHANNEL: oblivion-ci
-          TURBO_TELEMETRY_DISABLED: "1"
-        run: >-
-          bun run script/build.ts --single --skip-install --skip-web-ui --oblivion
-          --outdir="$GITHUB_WORKSPACE/artifacts/oblivion-build"
-      - name: Record and package the compiled client
+          for package in oblivion-manager oblivion-tools theme tui-kit; do
+            (cd "packages/$package" && bun test --timeout 30000)
+          done
+      - name: Build production manager and MCP bundles
         run: |
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-          root = Path("artifacts/oblivion-build")
-          with (root / "cli-linux-arm64/bin/opencode").open("rb") as binary:
-              digest = hashlib.file_digest(binary, "sha256").hexdigest()
-          (root / "build-evidence.json").write_text(json.dumps({
-              "source_commit": os.environ["GITHUB_SHA"], "profile": "oblivion",
-              "binary_sha256": digest, "scope": "CI laboratory build, not a signed release"
-          }, indent=2) + "\n")
-          PY
-          mkdir -p artifacts/ci
-          tar -czf artifacts/ci/cli.tar.gz -C artifacts/oblivion-build \
-            cli-linux-arm64/bin/opencode build-evidence.json
-          printf '%s\n' "$GITHUB_SHA" > artifacts/ci/source-commit.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          bun run --cwd packages/oblivion-tools build
+          bun run --cwd packages/oblivion-manager build --target=bun-linux-${{ matrix.arch }}
+      - name: Preserve current-source bundles
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: oblivion-cli-arm64-${{ github.sha }}
+          name: oblivion-native-ui-${{ matrix.arch }}-${{ github.sha }}
           path: |
-            artifacts/ci/cli.tar.gz
-            artifacts/ci/source-commit.txt
+            artifacts/oblivion-manager/bun-linux-${{ matrix.arch }}/
+            packages/oblivion-tools/dist/server.mjs
           retention-days: 7
           if-no-files-found: error
           compression-level: 0
 
   linux:
-    name: Debian ARM64 builds
-    runs-on: ubuntu-24.04-arm
+    name: Native Linux code and local protocols (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
-    outputs:
-      network: ${{ steps.scope.outputs.network }}
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - name: Select affected VM suites
-        id: scope
-        env:
-          BASE_SHA: ${{ github.event.before || github.event.pull_request.base.sha || '' }}
-        run: |
-          python3 - <<'PY'
-          import os
-          import re
-          import subprocess
-          from pathlib import Path
-
-          def network_configuration(source):
-              before, host, after = source.partition("\n  host:\n")
-              host_jobs, network, after = after.partition("\n  network:\n")
-              if any(job != "host-x64" for job in re.findall(r"(?m)^  ([\w-]+):$", host_jobs)):
-                  return None
-              return before + network + after if host and network else None
-
-          base = os.environ["BASE_SHA"]
-          network = True
-          # Unknown history and changes outside host drivers/jobs run the matrix.
-          host_only = {"script/oblivion/vm-services-test.py", "script/oblivion/run-vm-lab.py",
-                       "script/oblivion/run-tui-boot-lab.py", "script/oblivion/vm-session-network-test.py"}
-          if re.fullmatch(r"[0-9a-f]{40}", base) and base != "0" * 40:
-              fetched = subprocess.run(["git", "fetch", "--no-tags", "--depth=1", "origin", base], capture_output=True, timeout=30)
-              if fetched.returncode == 0:
-                  paths = subprocess.check_output(["git", "diff", "--name-only", "-z", base, "HEAD"]).decode().split("\0")
-                  relevant = [path for path in paths if path and path not in host_only and not path.startswith("docs/")]
-                  network = bool(relevant)
-                  workflow = ".github/workflows/oblivion-check.yml"
-                  if relevant == [workflow]:
-                      previous = subprocess.run(["git", "show", base + ":" + workflow], capture_output=True, text=True)
-                      before = network_configuration(previous.stdout) if previous.returncode == 0 else None
-                      after = network_configuration(Path(workflow).read_text())
-                      network = before is None or after is None or before != after
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write("network=" + str(network).lower() + "\n")
-          PY
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      # Existing Docker stages run locked Rust tests and compile the real
-      # Linux modules. Only public sources and synthetic fixtures are used.
-      - name: Host services and manager
-        run: >-
-          docker buildx build --platform linux/arm64 --progress plain
-          -f script/oblivion/Dockerfile.vm-lab --target host-artifacts
-          --output type=local,dest=artifacts/ci/host .
-      - name: Build the session tool fixtures
-        run: >-
-          docker buildx build --platform linux/arm64 --progress plain
-          -f script/oblivion/Dockerfile.vm-lab --target session-tools-test
-          --load -t oblivion-session-tools-test .
-      - name: Exercise tools, scoped caches and authenticated HTTPS proxies
-        run: >-
-          docker run --rm --network none --read-only --cap-drop ALL
-          --security-opt no-new-privileges
-          --tmpfs /tmp:rw,nosuid,nodev,size=64m
-          --tmpfs /run:rw,nosuid,nodev,size=8m
-          --tmpfs /vault:rw,nosuid,nodev,uid=1000,gid=1000,mode=0700,size=256m
-          oblivion-session-tools-test
-      - name: Gateway and transport laboratory image
-        run: >-
-          docker buildx build --platform linux/arm64 --progress plain
-          -f script/oblivion/Dockerfile.vm-lab --target transport-network-artifacts
-          --output type=local,dest=artifacts/ci/transport .
-      - name: Standalone gateway bundle
-        run: >-
-          docker buildx build --platform linux/arm64 --progress plain
-          -f script/oblivion/Dockerfile.vm-lab --target gateway-artifacts
-          --output type=local,dest=artifacts/ci/gateway .
-      - name: Package verified build outputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          for component in host gateway transport; do
-            (cd "artifacts/ci/$component" && sha256sum --check SHA256SUMS)
-            tar -czf "artifacts/ci/$component.tar.gz" -C "artifacts/ci/$component" .
-          done
-          printf '%s\n' "$GITHUB_SHA" > artifacts/ci/source-commit.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: oblivion-host-arm64-${{ github.sha }}
-          path: |
-            artifacts/ci/host.tar.gz
-            artifacts/ci/source-commit.txt
-          retention-days: 7
-          if-no-files-found: error
-          compression-level: 0
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: oblivion-gateway-arm64-${{ github.sha }}
-          path: |
-            artifacts/ci/gateway.tar.gz
-            artifacts/ci/source-commit.txt
-          retention-days: 7
-          if-no-files-found: error
-          compression-level: 0
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: oblivion-transport-lab-arm64-${{ github.sha }}
-          path: |
-            artifacts/ci/transport.tar.gz
-            artifacts/ci/source-commit.txt
-          retention-days: 7
-          if-no-files-found: error
-          compression-level: 0
-
-  host:
-    name: ARM64 compiled chat boot
-    needs: [repository, linux]
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: oblivion-cli-arm64-${{ github.sha }}
-          path: artifacts/ci/cli-input
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: oblivion-gateway-arm64-${{ github.sha }}
-          path: artifacts/ci/gateway-input
-      - name: Verify and unpack current-commit inputs
-        run: |
-          test "$(cat artifacts/ci/cli-input/source-commit.txt)" = "$GITHUB_SHA"
-          test "$(cat artifacts/ci/gateway-input/source-commit.txt)" = "$GITHUB_SHA"
-          mkdir -p artifacts/oblivion-build
-          tar -xzf artifacts/ci/cli-input/cli.tar.gz -C artifacts/oblivion-build
-          mkdir -p artifacts/ci/gateway
-          tar -xzf artifacts/ci/gateway-input/gateway.tar.gz -C artifacts/ci/gateway
-          (cd artifacts/ci/gateway && sha256sum --check SHA256SUMS)
-      - name: Build the host and real chat guest laboratory
-        run: >-
-          docker buildx build --platform linux/arm64 --progress plain
-          -f script/oblivion/Dockerfile.vm-lab --target artifacts
-          --build-arg HOST=tui-host --build-arg GUEST=tui-guest
-          --build-arg OPENCODE_BUILD_EVIDENCE=artifacts/oblivion-build/build-evidence.json
-          --output type=local,dest=artifacts/ci/host-image .
-      - name: Build the compiled chat and tools integration fixture
-        run: >-
-          docker buildx build --platform linux/arm64 --progress plain
-          -f script/oblivion/Dockerfile.vm-lab --target session-tools-chat-test
-          --load -t oblivion-session-tools-chat-test .
-      - name: Verify chat startup, tool inventory and HTTPS clients together
-        run: >-
-          docker run --rm --network none --read-only --cap-drop ALL
-          --security-opt no-new-privileges
-          --tmpfs /tmp:rw,nosuid,nodev,size=64m
-          --tmpfs /run:rw,nosuid,nodev,uid=1000,gid=1000,mode=0700,size=8m
-          --tmpfs /vault:rw,nosuid,nodev,uid=1000,gid=1000,mode=0700,size=256m
-          oblivion-session-tools-chat-test
-      - name: Seed and reopen the native backup conversation fixture
-        run: |
-          docker run --rm --network none --read-only --cap-drop ALL \
-            --security-opt no-new-privileges \
-            --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=256m \
-            --tmpfs /vault:rw,nosuid,nodev,uid=1000,gid=1000,mode=0700,size=128m \
-            --mount "type=bind,source=$GITHUB_WORKSPACE/script/oblivion/vm-backup-chat-probe.py,target=/probe.py,readonly" \
-            --entrypoint /bin/sh oblivion-session-tools-chat-test -c 'set -e
-          mkdir /vault/workspace
-          python3 -B /probe.py seed
-          python3 -B /probe.py verify'
-      - name: Install the VM laboratory tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-arm libarchive-tools squashfs-tools e2fsprogs
-      - name: Boot the compiled chat without nested emulation
-        run: >-
-          python3 -u script/oblivion/run-tui-boot-lab.py
-          --image artifacts/ci/host-image --output artifacts/ci/tui-boot
-      - name: Exercise gateway policies and private activation in a swap-free VM
-        run: >-
-          python3 -u script/oblivion/run-vm-lab.py
-          --arch aarch64 --accel tcg
-          --image artifacts/ci/host-image --gateway-bundle artifacts/ci/gateway
-          --output artifacts/ci/gateway-results
-      - name: Retain synthetic ARM64 boot evidence, including failures
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: oblivion-tui-arm64-evidence-${{ github.sha }}
-          path: |
-            artifacts/ci/tui-boot/summary.json
-            artifacts/ci/tui-boot/serial.log
-            artifacts/ci/gateway-results/summary.json
-            artifacts/ci/gateway-results/serial.log
-            artifacts/ci/gateway/SHA256SUMS
-            artifacts/ci/gateway/sources.sha256
-            artifacts/ci/host-image/SHA256SUMS
-            artifacts/ci/host-image/sources.sha256
-            artifacts/oblivion-build/build-evidence.json
-          retention-days: 7
-          if-no-files-found: warn
-
-  host-x64:
-    name: x86 host LUKS, manager and SOCKS streams
-    needs: repository
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - name: Require hardware acceleration for the laboratory host
-        run: |
-          test "$(uname -m)" = x86_64
-          test -c /dev/kvm
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 libarchive-tools squashfs-tools e2fsprogs
-          sudo usermod -a -G kvm "$(id -un)"
-          sg kvm -c 'test -r /dev/kvm && test -w /dev/kvm'
-      - uses: ./.github/actions/setup-bun
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - name: Compile the x86 chat client with the Oblivion profile
-        working-directory: packages/cli
-        env:
-          OPENCODE_CHANNEL: oblivion-ci
-          TURBO_TELEMETRY_DISABLED: "1"
-        run: >-
-          bun run script/build.ts --target=opencode-linux-x64-baseline --skip-install --skip-web-ui --oblivion
-          --outdir="$GITHUB_WORKSPACE/artifacts/oblivion-build"
-      - name: Record the compiled client provenance
-        run: |
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-          root = Path("artifacts/oblivion-build")
-          with (root / "cli-linux-x64-baseline/bin/opencode").open("rb") as binary:
-              digest = hashlib.file_digest(binary, "sha256").hexdigest()
-          (root / "build-evidence.json").write_text(json.dumps({
-              "source_commit": os.environ["GITHUB_SHA"], "profile": "oblivion",
-              "binary_sha256": digest, "architecture": "x86_64",
-              "scope": "CI laboratory build, not a signed release"
-          }, indent=2) + "\n")
-          PY
-      - name: Build the x86 host bundle and real chat guest
-        run: |
-          docker buildx build --platform linux/amd64 --progress plain \
-            -f script/oblivion/Dockerfile.vm-lab --target host-artifacts \
-            --output type=local,dest=artifacts/ci/host .
-          docker buildx build --platform linux/amd64 --progress plain \
-            -f script/oblivion/Dockerfile.vm-lab --target artifacts \
-            --build-arg HOST=stream-host --build-arg GUEST=tui-guest \
-            --build-arg OPENCODE_BINARY=artifacts/oblivion-build/cli-linux-x64-baseline/bin/opencode \
-            --build-arg OPENCODE_BUILD_EVIDENCE=artifacts/oblivion-build/build-evidence.json \
-            --output type=local,dest=artifacts/ci/host-image .
-      - name: Boot the compiled x86 chat
-        run: >-
-          sg kvm -c 'python3 -u script/oblivion/run-tui-boot-lab.py --architecture x86_64 --accelerator kvm
-          --image artifacts/ci/host-image --output artifacts/ci/tui-boot'
-      - name: Build the x86 session tool fixtures
-        run: >-
-          docker buildx build --platform linux/amd64 --progress plain
-          -f script/oblivion/Dockerfile.vm-lab --target session-tools-chat-test
-          --build-arg OPENCODE_BINARY=artifacts/oblivion-build/cli-linux-x64-baseline/bin/opencode
-          --load -t oblivion-session-tools-test .
-      - name: Exercise x86 tools and authenticated HTTPS proxies
-        run: >-
-          docker run --rm --network none --read-only --cap-drop ALL
-          --security-opt no-new-privileges
-          --tmpfs /tmp:rw,nosuid,nodev,size=64m
-          --tmpfs /run:rw,nosuid,nodev,uid=1000,gid=1000,mode=0700,size=8m
-          --tmpfs /vault:rw,nosuid,nodev,uid=1000,gid=1000,mode=0700,size=256m
-          oblivion-session-tools-test
-      - name: Check native x86 backup conversations before VM portability tests
-        run: |
-          docker run --rm --network none --read-only --cap-drop ALL \
-            --security-opt no-new-privileges \
-            --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=256m \
-            --tmpfs /vault:rw,nosuid,nodev,uid=1000,gid=1000,mode=0700,size=128m \
-            --mount "type=bind,source=$GITHUB_WORKSPACE/script/oblivion/vm-backup-chat-probe.py,target=/probe.py,readonly" \
-            --entrypoint /bin/sh oblivion-session-tools-test -c 'set -e
-          mkdir /vault/workspace
-          python3 -B /probe.py seed
-          python3 -B /probe.py verify'
-      - name: Exercise protected profiles and trusted manager
-        # KVM accelerates the Debian host. Its dedicated session VM still uses
-        # the explicit lab-only TCG backend; this is not a production KVM proof.
-        run: >-
-          sg kvm -c 'python3 -u script/oblivion/run-vm-lab.py --architecture x86_64 --accelerator kvm
-          --image artifacts/ci/host-image --services-bundle artifacts/ci/host
-          --output artifacts/ci/host-results'
-      - name: Build current-client session and external SOCKS gateway
-        run: >-
-          docker buildx build --platform linux/amd64 --progress plain
-          -f script/oblivion/Dockerfile.vm-lab --target stream-artifacts
-          --build-arg STREAM_GATEWAY=stream-gateway-base
-          --build-arg OPENCODE_BINARY=artifacts/oblivion-build/cli-linux-x64-baseline/bin/opencode
-          --build-arg OPENCODE_BUILD_EVIDENCE=artifacts/oblivion-build/build-evidence.json
-          --output type=local,dest=artifacts/ci/stream-images .
-      - name: Exercise saved SOCKS transport through real encrypted sessions
-        run: >-
-          sg kvm -c 'python3 -u script/oblivion/run-vm-lab.py --architecture x86_64 --accelerator kvm
-          --image artifacts/ci/host-image --services-bundle artifacts/ci/host
-          --gateway-image artifacts/ci/stream-images/gateway
-          --session-image artifacts/ci/stream-images/session --stream --stream-socks
-          --output artifacts/ci/stream-results'
-      - name: Retain synthetic x86 host evidence, including failures
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: oblivion-host-x64-evidence-${{ github.sha }}
-          path: |
-            artifacts/ci/tui-boot/summary.json
-            artifacts/ci/tui-boot/serial.log
-            artifacts/ci/host-results/summary.json
-            artifacts/ci/host-results/serial.log
-            artifacts/ci/stream-results/summary.json
-            artifacts/ci/stream-results/serial.log
-            artifacts/ci/stream-results/webtools-outside.pcap
-            artifacts/ci/stream-images/gateway/SHA256SUMS
-            artifacts/ci/stream-images/gateway/stream.json
-            artifacts/ci/stream-images/gateway/trust.diff
-            artifacts/ci/stream-images/session/SHA256SUMS
-            artifacts/ci/stream-images/session/build-evidence.json
-            artifacts/ci/stream-images/session/opencode.sha256
-            artifacts/ci/host-image/SHA256SUMS
-            artifacts/ci/host-image/sources.sha256
-            artifacts/ci/host/SHA256SUMS
-            artifacts/ci/host/sources.sha256
-            artifacts/oblivion-build/build-evidence.json
-          retention-days: 7
-          if-no-files-found: warn
-
-  network:
-    name: Network ${{ matrix.kind }} ${{ matrix.authentication }} ${{ matrix.fault }}
-    needs: linux
-    if: needs.linux.outputs.network == 'true'
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
     strategy:
       fail-fast: false
-      max-parallel: 6
       matrix:
         include:
-          - { kind: socks, authentication: required, fault: revoke }
-          - { kind: socks, authentication: required, fault: egress-crash }
-          - { kind: socks, authentication: required, fault: broker-crash }
-          - { kind: socks, authentication: required, fault: supervisor-crash }
-          - { kind: socks, authentication: required, fault: control-disconnect }
-          - { kind: socks, authentication: required, fault: reconfigure }
-          - { kind: socks, authentication: none, fault: revoke }
-          - { kind: socks, authentication: none, fault: egress-crash }
-          - { kind: socks, authentication: none, fault: broker-crash }
-          - { kind: socks, authentication: none, fault: supervisor-crash }
-          - { kind: socks, authentication: none, fault: control-disconnect }
-          - { kind: socks, authentication: none, fault: reconfigure }
-          - { kind: tools, authentication: required, fault: revoke }
-          - { kind: tools, authentication: none, fault: revoke }
-          - { kind: tools, authentication: required, fault: tools-crash }
-          - { kind: tools, authentication: required, fault: egress-crash }
-          - { kind: tor, authentication: isolation, fault: disconnect }
-          - { kind: tor, authentication: isolation, fault: shutdown }
-          - { kind: tor, authentication: isolation, fault: malformed }
-          - { kind: tor, authentication: isolation, fault: oversized }
-          - { kind: tor, authentication: isolation, fault: partial }
-          - { kind: tor, authentication: isolation, fault: duplicate-grant }
-          - { kind: tor, authentication: isolation, fault: supervisor-crash }
-          - { kind: tor, authentication: isolation, fault: broker-crash }
-          - { kind: tor, authentication: isolation, fault: egress-crash }
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: oblivion-transport-lab-arm64-${{ github.sha }}
-          path: artifacts/ci
-      - name: Verify build provenance and image checksums
+      - name: Install the pinned compiler and native build tools
         run: |
-          test "$(cat artifacts/ci/source-commit.txt)" = "$GITHUB_SHA"
-          mkdir artifacts/ci/transport
-          tar -xzf artifacts/ci/transport.tar.gz -C artifacts/ci/transport
-          cd artifacts/ci/transport
-          sha256sum --check SHA256SUMS
-      - name: Install software-emulated VM laboratory
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-arm
-      - name: Exercise transport and lifecycle fault in fresh VMs
-        shell: bash
-        env:
-          TEST_KIND: ${{ matrix.kind }}
-          TEST_AUTHENTICATION: ${{ matrix.authentication }}
-          TEST_FAULT: ${{ matrix.fault }}
-        run: |
-          set -euo pipefail
-          if [ "$TEST_KIND" = socks ] || [ "$TEST_KIND" = tools ]; then
-            tools=()
-            if [ "$TEST_KIND" = tools ]; then tools=(--tools); fi
-            timeout --kill-after=20s 240s python3 -u script/oblivion/run-transport-lab.py \
-              --accelerator tcg --image artifacts/ci/transport \
-              --output artifacts/ci/results/case \
-              --authentication "$TEST_AUTHENTICATION" --fault "$TEST_FAULT" "${tools[@]}"
-          else
-            timeout --kill-after=20s 240s python3 -u script/oblivion/run-network-lab.py \
-              --accelerator tcg --image artifacts/ci/transport \
-              --output artifacts/ci/results/case --control-fault "$TEST_FAULT"
-          fi
-      - name: Retain synthetic VM evidence, including failures
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake make g++ perl libclang-dev python3
+      - name: Cache Rust dependencies and build outputs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          name: oblivion-network-evidence-${{ matrix.kind }}-${{ matrix.authentication }}-${{ matrix.fault }}-${{ github.sha }}
           path: |
-            artifacts/ci/results/**/*.json
-            artifacts/ci/results/**/*.pcap
-            artifacts/ci/results/**/*.log
-            artifacts/ci/source-commit.txt
-          retention-days: 7
-          if-no-files-found: warn
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/oblivion-*/target
+          key: rust-linux-${{ matrix.arch }}-1.88.0-${{ hashFiles('packages/oblivion-*/Cargo.lock') }}
+      - name: Compile current controller and launcher
+        working-directory: packages/oblivion-host
+        run: |
+          cargo check --locked --lib --bins
+          cargo check --locked --lib --bins --features lab-emulation
+          cargo test --locked --lib --bin oblivion --bin oblivion-storage
+          cargo test --locked --test safe_admin --test managed --test terminal_screen --test workspace --test share_control --test channel
+      - name: Exercise real local PTY and scoped control protocols
+        working-directory: packages/oblivion-host
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/activity-client.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/native-overlay.py
+          # The real relay accepts the Safe UID 1000 or root; hosted runners
+          # may use another UID, which would skip its peer-credential fixture.
+          sudo -n env PYTHONDONTWRITEBYTECODE=1 python3 tests/safe-tools-relay.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/managed-job.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/agent-channel.py
+      - name: Check native agent configuration preservation
+        working-directory: packages/oblivion-host/guest/native-tools
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_configure
+      - name: Prepare the isolated native workspace fixture
+        run: |
+          docker build --tag oblivion-native-guest-fixture - <<'DOCKERFILE'
+          FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+          RUN apt-get update && apt-get install -y --no-install-recommends python3 tmux bash util-linux \
+              && rm -rf /var/lib/apt/lists/*
+          DOCKERFILE
+      - name: Exercise actual tmux panes and native agent wrappers offline
+        working-directory: packages/oblivion-host
+        run: sh tests/workspace-guest.sh oblivion-native-guest-fixture
+      - name: Verify Share publication and RAM-child authority in isolated root state
+        working-directory: packages/oblivion-host
+        run: |
+          test_binary=$(cargo test --locked --bin oblivion-storage --no-run --message-format=json | python3 -c '
+          import json, sys
+          artifacts = [json.loads(line) for line in sys.stdin]
+          binaries = [item["executable"] for item in artifacts if item.get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == "oblivion-storage" and item.get("profile", {}).get("test") and item.get("executable")]
+          assert len(binaries) == 1, "expected one current storage test executable"
+          print(binaries[0])')
+          test -x "$test_binary"
+          for fixture in share_import::tests::atomic_collection_publish_and_abort_keep_existing_safes_untouched share_import::tests::retained_request_nonce_expires_at_the_real_host_opening_authorization_boundary agent_safe_tests::closed_ram_child_is_counted_once_and_parent_close_fences_private_lookup; do
+            docker run --rm --network none --tmpfs /run:rw,nosuid,nodev,noexec,size=16m \
+              --mount "type=bind,src=$test_binary,dst=/storage-tests,readonly" \
+              --env OBLIVION_SHARE_IMPORT_TEST=1 --env OBLIVION_SHARE_IMPORT_AUTH_TEST=1 --env OBLIVION_RAM_CHILD_TEST=1 \
+              oblivion-native-guest-fixture /storage-tests --ignored --exact "$fixture"
+          done
+      - name: Verify development Debian package install and data-preserving removal
+        run: sh script/oblivion/test-deb.sh
+      - name: Check portable history without native credentials
+        working-directory: packages/oblivion-history
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Compile and test the Linux desktop helper
+        working-directory: packages/oblivion-native-linux
+        run: |
+          cargo check --locked --all-targets
+          cargo test --locked
+      - name: Compile and test the gateway and bounded transfer libraries
+        run: |
+          for package in oblivion-gateway oblivion-transfer oblivion-transport oblivion-tor-state; do
+            (cd "packages/$package" && cargo check --locked --lib --bins && cargo test --locked --lib)
+          done
+          (cd packages/oblivion-transfer && cargo test --locked --offline --test approved --test share && cargo build --locked --offline --bin oblivion-copy)
+      - name: Verify Share guest streams with the real copy endpoint
+        working-directory: packages/oblivion-history
+        env:
+          OBLIVION_COPY_TEST_BINARY: ${{ github.workspace }}/packages/oblivion-transfer/target/debug/oblivion-copy
+        run: |
+          test -x "$OBLIVION_COPY_TEST_BINARY"
+          sudo -n env PYTHONDONTWRITEBYTECODE=1 OBLIVION_COPY_TEST_BINARY="$OBLIVION_COPY_TEST_BINARY" \
+            python3 -m unittest discover -s tests -p 'test_share_*.py' -v
+      - name: Verify the portable Share container in release mode
+        working-directory: packages/oblivion-share
+        run: cargo test --locked --release --test container
+      - name: Record acceptance scope
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SCOPE'
+          These jobs compile current native sources and exercise local protocol fixtures.
+          They do not qualify nested virtualization, encrypted Safe lifecycle, real Tor
+          routing, provider login or physical media. Those remain a separate manual
+          acceptance gate on supported Mac/Linux hardware; no TCG fallback or synthetic
+          guest substitutes for that gate.
+          SCOPE
+
+  macos:
+    name: Native macOS launcher and Virtualization.framework helper
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust compiler
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+      - name: Compile and test the desktop launcher
+        working-directory: packages/oblivion-host
+        run: |
+          cargo check --locked --lib --bin oblivion
+          cargo test --locked --lib --bin oblivion
+          cargo test --locked --test managed --test terminal_screen --test workspace --test share_control --test channel
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/activity-client.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/native-overlay.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/managed-job.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/agent-channel.py
+      - name: Compile the actual Apple helper
+        working-directory: packages/oblivion-native
+        run: swift build --configuration release
+      - name: Check portable history without native credentials
+        working-directory: packages/oblivion-history
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Verify the portable Share container in release mode
+        working-directory: packages/oblivion-share
+        run: cargo test --locked --release --test container
+      - name: Record acceptance scope
+        run: |
+          echo 'Compilation does not qualify Apple nested virtualization. A real supported Apple Silicon Mac with the required macOS release must pass the manual VM acceptance gate.' >> "$GITHUB_STEP_SUMMARY"

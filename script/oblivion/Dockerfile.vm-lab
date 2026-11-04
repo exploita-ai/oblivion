@@ -1,8 +1,3 @@
-ARG GUEST=guest
-ARG HOST=host
-ARG STREAM_GATEWAY=stream-gateway
-ARG TERMINAL_GUEST=guest
-
 FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS stream-tls-fixture
 RUN apt-get update && apt-get install -y --no-install-recommends openssl \
     && rm -rf /var/lib/apt/lists/* && mkdir /fixture \
@@ -89,15 +84,17 @@ WORKDIR /build
 COPY packages/oblivion-tor-state/ /oblivion-tor-state/
 COPY packages/oblivion-transport/ /oblivion-transport/
 COPY packages/oblivion-transfer/ /oblivion-transfer/
+COPY packages/oblivion-share/ /oblivion-share/
+COPY packages/oblivion-history/ /oblivion-history/
 COPY packages/oblivion-host/ ./
 RUN cargo test --locked && cargo build --locked --release --bins --examples && cp target/release/oblivion-storage /tmp/oblivion-storage \
     && cargo build --locked --release --features lab-emulation --bin oblivion-storage
 RUN cd /oblivion-transfer && cargo test --locked && cargo build --locked --release --bins
 RUN mkdir /bundle && cp /oblivion-transfer/target/release/oblivion-copy /oblivion-transfer/target/release/oblivion-onion-file /bundle/ && cp /tmp/oblivion-storage /bundle/oblivion-storage \
     && cp target/release/oblivion-storage /bundle/oblivion-storage-lab \
-    && cp target/release/oblivion target/release/oblivion-control target/release/oblivion-manager target/release/oblivion-console target/release/oblivion-display /bundle/ \
+    && cp target/release/oblivion target/release/oblivion-control target/release/oblivion-display /bundle/ \
     && cp host/*.service /bundle/ \
-    && find Cargo.toml Cargo.lock src tests host ../oblivion-transfer/Cargo.toml ../oblivion-transfer/Cargo.lock ../oblivion-transfer/src ../oblivion-tor-state/Cargo.toml ../oblivion-tor-state/src ../oblivion-transport/Cargo.toml ../oblivion-transport/src -type f -print0 | sort -z | xargs -0 sha256sum > /bundle/sources.sha256 \
+    && find Cargo.toml Cargo.lock src tests host ../oblivion-transfer/Cargo.toml ../oblivion-transfer/Cargo.lock ../oblivion-transfer/src ../oblivion-share/Cargo.toml ../oblivion-share/Cargo.lock ../oblivion-share/src ../oblivion-tor-state/Cargo.toml ../oblivion-tor-state/src ../oblivion-transport/Cargo.toml ../oblivion-transport/src -type f -print0 | sort -z | xargs -0 sha256sum > /bundle/sources.sha256 \
     && cd /bundle && sha256sum oblivion-* sources.sha256 > SHA256SUMS
 
 # Small development bundle, overlaid only in the disposable laboratory's RAM.
@@ -139,26 +136,7 @@ RUN groupadd --gid 1000 oblivion && useradd --uid 1000 --gid 1000 --no-create-ho
 RUN passwd -l root && mkdir -p /vault /usr/libexec
 COPY --from=compiler /bundle/oblivion-copy /usr/bin/oblivion-copy
 COPY packages/oblivion-host/guest/ /usr/lib/oblivion/guest/
-COPY script/oblivion/vm-guest-fixture.sh /usr/libexec/oblivion
 RUN sh /usr/lib/oblivion/guest/install.sh
-
-FROM guest AS manager-import-guest
-RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
-COPY script/oblivion/vm-import-seed.py /usr/lib/oblivion/lab/import-seed.py
-# This fixture uses hvc0 for its synthetic command loop, so lifecycle probes
-# need the real shell on hvc1 even during a simulated chat. Production chat
-# uses one tmux workspace on hvc0 and enables hvc1 only in Documents mode.
-RUN mkdir -p /etc/systemd/system/oblivion-vault.service.d \
-    && sed -i '/ConditionKernelCommandLine=oblivion.documents=1/d' /etc/systemd/system/oblivion-terminal.service \
-    && printf '[Service]\nExecStartPost=/usr/bin/python3 /usr/lib/oblivion/lab/import-seed.py\n' > /etc/systemd/system/oblivion-vault.service.d/lab.conf
-
-# A synthetic command loop with the production vault and private network setup.
-# No OpenCode server or public provider is used by the concurrency lifecycle test.
-FROM guest AS multisession-guest
-RUN apt-get update && apt-get install -y --no-install-recommends iproute2 nftables \
-    && rm -rf /var/lib/apt/lists/* \
-    && sed -i '/ConditionKernelCommandLine=!oblivion.documents=1/d; s/oblivion-chat-server.service/oblivion-session-network.service/g' /etc/systemd/system/oblivion-conversation.service \
-    && systemctl disable oblivion-chat-server.service oblivion-terminal.service
 
 FROM os AS import-guest
 COPY --from=compiler /bundle/oblivion-copy /usr/bin/oblivion-copy
@@ -332,170 +310,6 @@ COPY script/oblivion/test-session-tools.py /usr/lib/oblivion/test-session-tools.
 USER 1000:1000
 ENTRYPOINT ["/usr/bin/python3", "-B", "/usr/lib/oblivion/test-session-tools.py"]
 
-FROM session-tools AS opencode-guest
-ARG TARGETARCH
-ARG OPENCODE_BUILD_EVIDENCE=artifacts/oblivion-build/build-evidence.json
-ARG OPENCODE_BINARY=artifacts/oblivion-build/cli-linux-arm64/bin/opencode
-RUN case "$TARGETARCH" in arm64|amd64) ;; *) exit 1;; esac
-COPY ${OPENCODE_BINARY} /usr/bin/oblivion
-COPY ${OPENCODE_BUILD_EVIDENCE} /usr/lib/oblivion/build-evidence.json
-COPY script/oblivion/vm-chat-probe.py /usr/libexec/oblivion-chat-probe
-RUN python3 -c 'import hashlib,json; from pathlib import Path; assert hashlib.sha256(Path("/usr/bin/oblivion").read_bytes()).hexdigest() == json.loads(Path("/usr/lib/oblivion/build-evidence.json").read_text())["binary_sha256"]'
-
-FROM opencode-guest AS session-tools-chat-test
-COPY --from=session-tools-test --chown=1000:1000 /fixture/ /fixture/
-COPY --from=session-tools-test /usr/lib/oblivion/test-session-tools.py /usr/lib/oblivion/test-session-tools.py
-USER 1000:1000
-ENTRYPOINT ["/usr/bin/python3", "-B", "/usr/lib/oblivion/test-session-tools.py"]
-
-FROM opencode-guest AS growth-guest
-COPY script/oblivion/vm-growth-guest.py /usr/lib/oblivion/vm-growth-guest.py
-RUN mkdir -p /etc/systemd/system/oblivion-resize.service.d \
-    && printf '[Service]\nExecStart=\nExecStart=/usr/bin/python3 -B /usr/lib/oblivion/vm-growth-guest.py\n' > /etc/systemd/system/oblivion-resize.service.d/lab.conf
-
-# Native chat/database portability probes never enter a production session.
-FROM opencode-guest AS backup-chat-guest
-COPY script/oblivion/vm-backup-chat-probe.py /usr/lib/oblivion/vm-backup-chat-probe.py
-RUN touch /usr/lib/oblivion/backup-chat-lab
-
-FROM opencode-guest AS tui-guest
-COPY script/oblivion/vm-tui-guest.py /usr/libexec/oblivion
-RUN chmod 0755 /usr/libexec/oblivion
-
-FROM opencode-guest AS conversation-guest
-COPY packages/oblivion-host/guest/conversation.sh /usr/libexec/oblivion
-RUN chmod 0755 /usr/libexec/oblivion
-
-# Same network setup and compiled OpenCode, with an unprivileged console probe
-# instead of the interactive entrypoint. No synthetic provider in this guest.
-FROM conversation-guest AS session-network-guest
-COPY script/oblivion/vm-session-network-guest.py /usr/libexec/oblivion
-# Build-local fixture certificate, trusted only by the web-tool probe subprocess.
-COPY --from=stream-tls-fixture /fixture/ca.pem /usr/lib/oblivion-stream-fixture/cert.pem
-RUN chmod 0755 /usr/libexec/oblivion
-
-# UI iteration bundle: replace only immutable session software in a disposable
-# lab's RAM. The encrypted archive and all session volumes stay untouched.
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS conversation-pack
-RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools && rm -rf /var/lib/apt/lists/*
-RUN --mount=type=bind,from=conversation-guest,source=/,target=/guest,ro \
-    mkdir /out && cp /guest/boot/vmlinuz-* /out/kernel && cp /guest/boot/initrd.img-* /out/initrd \
-    && mksquashfs /guest /out/root.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
-    && cp /guest/usr/lib/oblivion/build-evidence.json /out/build-evidence.json \
-    && cd /out && sha256sum * > SHA256SUMS
-
-FROM scratch AS conversation-artifacts
-COPY --from=conversation-pack /out/ /
-
-# Offline terminal acceptance uses the actual session filesystem and services,
-# without an agent binary, provider key or virtual network interface.
-FROM ${TERMINAL_GUEST} AS terminal-session
-COPY script/oblivion/test-session-admin.py /usr/lib/oblivion/lab/test-session-admin.py
-
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS terminal-pack
-RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools e2fsprogs && rm -rf /var/lib/apt/lists/*
-RUN --mount=type=bind,from=terminal-session,source=/,target=/guest,ro \
-    mkdir /out && cp /guest/boot/vmlinuz-* /out/kernel && cp /guest/boot/initrd.img-* /out/initrd \
-    && mksquashfs /guest /out/root.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
-    && truncate -s 64M /out/vault.raw && mkfs.ext4 -q -m 0 -E lazy_itable_init=0,lazy_journal_init=0 /out/vault.raw \
-    && cd /out && sha256sum * > SHA256SUMS
-
-FROM scratch AS terminal-artifacts
-COPY --from=terminal-pack /out/ /
-
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS session-network-pack
-RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools && rm -rf /var/lib/apt/lists/*
-COPY packages/oblivion-host/guest/ /sources/guest/
-COPY script/oblivion/vm-session-network-guest.py /sources/lab/
-COPY --from=stream-tls-fixture /fixture/ca.pem /sources/lab/stream-cert.pem
-RUN --mount=type=bind,from=session-network-guest,source=/,target=/guest,ro \
-    mkdir /out && cp /guest/boot/vmlinuz-* /out/kernel && cp /guest/boot/initrd.img-* /out/initrd \
-    && mksquashfs /guest /out/session.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
-    && cd /sources && find . -type f -print0 | sort -z | xargs -0 sha256sum > /out/sources.sha256 \
-    && sha256sum /guest/usr/bin/oblivion > /out/opencode.sha256 \
-    && cd /out && sha256sum * > SHA256SUMS
-
-FROM scratch AS session-network-artifacts
-COPY --from=session-network-pack /out/ /
-
-FROM ${GUEST} AS selected-guest
-
-FROM os AS host
-ARG TARGETARCH
-RUN apt-get update && apt-get install -y --no-install-recommends cryptsetup-bin dmsetup python3 nftables iproute2 \
-    $(if [ "$TARGETARCH" = arm64 ]; then printf qemu-system-arm; else printf qemu-system-x86; fi) \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 1000 oblivion-manager \
-    && useradd --uid 1000 --gid 1000 --no-create-home --home-dir /run/oblivion-manager --shell /usr/sbin/nologin oblivion-manager \
-    && groupadd --gid 1100 oblivion-vm && useradd --uid 1100 --gid 1100 --no-create-home --shell /usr/sbin/nologin oblivion-vm \
-    && groupadd --gid 1101 oblivion-gateway-vm && useradd --uid 1101 --gid 1101 --no-create-home --shell /usr/sbin/nologin oblivion-gateway-vm \
-    && groupadd --gid 1102 oblivion-import-vm && useradd --uid 1102 --gid 1102 --no-create-home --shell /usr/sbin/nologin oblivion-import-vm \
-    && groupadd --gid 1103 oblivion-export-vm && useradd --uid 1103 --gid 1103 --no-create-home --shell /usr/sbin/nologin oblivion-export-vm \
-    && groupadd --gid 1105 oblivion-onion-gateway-vm && useradd --uid 1105 --gid 1105 --no-create-home --shell /usr/sbin/nologin oblivion-onion-gateway-vm \
-    && groupadd --gid 1106 oblivion-onion-file-vm && useradd --uid 1106 --gid 1106 --no-create-home --shell /usr/sbin/nologin oblivion-onion-file-vm \
-    && passwd -l root
-COPY --from=compiler /tmp/oblivion-storage /usr/bin/oblivion-storage
-COPY --from=compiler /build/target/release/oblivion-storage /usr/bin/oblivion-storage-lab
-COPY --from=compiler /build/target/release/oblivion-control /usr/bin/oblivion-control
-COPY --from=compiler /build/target/release/oblivion-manager /usr/bin/oblivion-manager
-COPY --from=compiler /bundle/oblivion-copy /usr/bin/oblivion-copy
-COPY packages/oblivion-host/host/*@.service /etc/systemd/system/
-COPY script/oblivion/session-identities.sh /tmp/session-identities
-RUN sh /tmp/session-identities && rm /tmp/session-identities
-COPY script/oblivion/vm-lab-test.py /usr/libexec/oblivion-vm-test
-COPY script/oblivion/vm-host-setup.sh /tmp/setup
-RUN sh /tmp/setup && rm /tmp/setup
-
-FROM host AS manager-host
-COPY script/oblivion/vm-manager-test.py /usr/libexec/oblivion-vm-test
-RUN touch /usr/lib/oblivion/vm/manager-lab
-
-FROM host AS growth-host
-COPY script/oblivion/vm-growth-test.py /usr/libexec/oblivion-vm-test
-
-FROM manager-host AS import-host
-COPY --from=compiler /build/target/release/oblivion-console /usr/bin/oblivion-console
-COPY --from=compiler /build/target/release/examples/viewport-probe /usr/libexec/oblivion-viewport-probe
-COPY script/oblivion/vm-import-test.py /usr/libexec/oblivion-vm-test
-RUN touch /usr/lib/oblivion/vm/import-lab
-
-FROM import-host AS export-host
-RUN apt-get update && apt-get install -y --no-install-recommends dosfstools exfatprogs && rm -rf /var/lib/apt/lists/*
-RUN touch /usr/lib/oblivion/vm/export-lab
-
-FROM manager-host AS tui-host
-RUN apt-get update && apt-get install -y --no-install-recommends python3-pyte python3-pil fonts-dejavu-core curl && rm -rf /var/lib/apt/lists/*
-COPY script/oblivion/vm-tui-test.py /usr/libexec/oblivion-vm-test
-RUN touch /usr/lib/oblivion/vm/tui-lab
-
-# Synthetic proxy/provider outside the gateway VM, inside the offline lab host.
-FROM tui-host AS stream-host
-COPY script/oblivion/vm-stream-provider.py /usr/lib/oblivion-stream-fixture/provider.py
-COPY --from=stream-tls-fixture /fixture/cert.pem /usr/lib/oblivion-stream-fixture/cert.pem
-COPY --from=stream-tls-fixture /fixture/key.pem /usr/lib/oblivion-stream-fixture/key.pem
-
-FROM ${HOST} AS selected-host
-
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS pack
-RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools e2fsprogs && rm -rf /var/lib/apt/lists/*
-COPY --from=selected-guest / /guest/
-COPY --from=selected-host / /host/
-COPY --from=import-guest / /import/
-COPY --from=export-guest / /export/
-COPY --from=compiler /bundle/oblivion-transfer-host.service /host/etc/systemd/system/oblivion-transfer-host.service
-COPY packages/oblivion-host/ /sources/packages/oblivion-host/
-COPY packages/oblivion-tor-state/ /sources/packages/oblivion-tor-state/
-COPY packages/oblivion-transport/ /sources/packages/oblivion-transport/
-COPY packages/oblivion-transfer/ /sources/packages/oblivion-transfer/
-COPY script/oblivion/ /sources/script/oblivion/
-COPY script/oblivion/vm-lab-pack.sh /pack
-RUN sh /pack
-
-FROM scratch AS artifacts
-COPY --from=pack /out/ /
-
-# Component-only gateway bundle. Reuse the compiler layers without exporting a
-# large development image; run the inherited-FD tests in the swap-free VM.
 FROM rust-toolchain AS gateway-compiler
 WORKDIR /gateway
 ENV CARGO_TARGET_DIR=/tmp/target
@@ -503,8 +317,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 COPY packages/oblivion-tor-state/ /oblivion-tor-state/
 COPY packages/oblivion-transport/ /oblivion-transport/
 COPY packages/oblivion-gateway/Cargo.toml packages/oblivion-gateway/Cargo.lock ./
-COPY packages/oblivion-gateway/build.rs ./
-COPY packages/core/src/models-dev/snapshot.txt /core/src/models-dev/snapshot.txt
 COPY packages/oblivion-gateway/.cargo/ .cargo/
 RUN cargo fetch --locked
 COPY packages/oblivion-gateway/src/ src/
@@ -512,12 +324,11 @@ COPY packages/oblivion-gateway/examples/ examples/
 COPY packages/oblivion-gateway/guest/firewall.nft guest/firewall.nft
 COPY packages/oblivion-gateway/guest/onion/ guest/onion/
 COPY packages/oblivion-gateway/tests/ tests/
-COPY packages/oblivion-host/guest/chat-database.py packages/oblivion-host/guest/chat-export.py packages/oblivion-host/guest/session-backup.py script/oblivion/test-chat-database.py script/oblivion/test-chat-export.py script/oblivion/test-session-backup.py script/oblivion/test-host-firewall.py script/oblivion/host-firewall.nft /gateway/
+COPY script/oblivion/test-host-firewall.py script/oblivion/host-firewall.nft /gateway/
 RUN --network=none cargo test --locked --offline --lib --features lab-emulation \
     && cargo test --locked --offline --features lab-emulation --bin oblivion-gateway-control --bin oblivion-onion-gateway \
     && cargo test --locked --offline --no-run --features lab-emulation \
-    && mkdir /gateway-bundle && cp chat-database.py chat-export.py session-backup.py test-chat-database.py test-chat-export.py test-session-backup.py test-host-firewall.py host-firewall.nft /gateway-bundle/ \
-    && cp /tmp/target/debug/oblivion-api /gateway-bundle/oblivion-api-lab \
+    && mkdir /gateway-bundle && cp test-host-firewall.py host-firewall.nft /gateway-bundle/ \
     && cp /tmp/target/debug/oblivion-egress /gateway-bundle/oblivion-egress-lab \
     && cp /tmp/target/debug/oblivion-tools /gateway-bundle/oblivion-tools-lab \
     && cp /tmp/target/debug/oblivion-web /gateway-bundle/oblivion-web-lab \
@@ -525,7 +336,6 @@ RUN --network=none cargo test --locked --offline --lib --features lab-emulation 
     && cp $(find /tmp/target/debug/deps -type f -name 'oblivion_gateway-*' -executable) /gateway-bundle/gateway-tests \
     && cp $(find /tmp/target/debug/deps -type f -name 'activation-*' -executable) /gateway-bundle/activation-tests \
     && cargo build --locked --offline --bins \
-    && cp /tmp/target/debug/oblivion-api /gateway-bundle/oblivion-api \
     && cp /tmp/target/debug/oblivion-gateway-control /gateway-bundle/oblivion-gateway-control \
     && cp /tmp/target/debug/oblivion-egress /gateway-bundle/oblivion-egress \
     && cp /tmp/target/debug/oblivion-tools /gateway-bundle/oblivion-tools \
@@ -533,7 +343,7 @@ RUN --network=none cargo test --locked --offline --lib --features lab-emulation 
     && cp /tmp/target/debug/oblivion-rotation /gateway-bundle/oblivion-rotation \
     && cp /tmp/target/debug/oblivion-onion-gateway /gateway-bundle/oblivion-onion-gateway \
     && strip /gateway-bundle/oblivion-* /gateway-bundle/*-tests \
-    && find Cargo.toml Cargo.lock build.rs .cargo src tests examples guest/firewall.nft guest/onion chat-database.py chat-export.py session-backup.py test-chat-database.py test-chat-export.py test-session-backup.py test-host-firewall.py host-firewall.nft ../core/src/models-dev/snapshot.txt ../oblivion-tor-state/Cargo.toml ../oblivion-tor-state/src ../oblivion-transport/Cargo.toml ../oblivion-transport/src -type f -print0 | sort -z | xargs -0 sha256sum > /gateway-bundle/sources.sha256 \
+    && find Cargo.toml Cargo.lock .cargo src tests examples guest/firewall.nft guest/onion test-host-firewall.py host-firewall.nft ../oblivion-tor-state/Cargo.toml ../oblivion-tor-state/src ../oblivion-transport/Cargo.toml ../oblivion-transport/src -type f -print0 | sort -z | xargs -0 sha256sum > /gateway-bundle/sources.sha256 \
     && rustc --version > /gateway-bundle/compiler.txt \
     && cd /gateway-bundle && sha256sum * > SHA256SUMS
 
@@ -559,7 +369,6 @@ FROM os AS gateway-system
 RUN apt-get update && apt-get install -y --no-install-recommends tor nftables iproute2 \
     && rm -rf /var/lib/apt/lists/*
 COPY packages/oblivion-gateway/guest/ /gateway-config/
-COPY --from=gateway-compiler /gateway-bundle/oblivion-api /usr/bin/oblivion-api
 COPY --from=gateway-compiler /gateway-bundle/oblivion-gateway-control /usr/bin/oblivion-gateway-control
 COPY --from=gateway-compiler /gateway-bundle/oblivion-egress /usr/bin/oblivion-egress
 COPY --from=gateway-compiler /gateway-bundle/oblivion-tools /usr/bin/oblivion-tools
@@ -616,140 +425,17 @@ USER 1000:1000
 ENTRYPOINT ["/usr/bin/python3", "-B", "/usr/lib/oblivion/vm-onion-recipient.py"]
 
 # Diagnostics exist only in this separate laboratory image.
-FROM gateway-system AS gateway-network-lab
-RUN apt-get update && apt-get install -y --no-install-recommends python3 curl \
-    && rm -rf /var/lib/apt/lists/*
-COPY script/oblivion/vm-network-fixture.py /usr/libexec/oblivion-network-fixture
-COPY script/oblivion/vm-rotation-fixture.py /usr/libexec/oblivion-rotation-fixture.py
-COPY script/oblivion/vm-network-setup.sh /tmp/network-setup
-RUN sh /tmp/network-setup && rm /tmp/network-setup
-
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS gateway-network-pack
-RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools && rm -rf /var/lib/apt/lists/*
-COPY packages/oblivion-gateway/guest/ /sources/guest/
-COPY script/oblivion/vm-network-fixture.py script/oblivion/vm-rotation-fixture.py script/oblivion/vm-network-setup.sh /sources/lab/
-COPY --from=gateway-compiler /gateway-bundle/sources.sha256 /sources/broker.sha256
-RUN --mount=type=bind,from=gateway-system,source=/,target=/gateway,ro \
-    --mount=type=bind,from=gateway-network-lab,source=/,target=/lab,ro \
-    mkdir /out \
-    && cp /gateway/boot/vmlinuz-* /out/kernel \
-    && cp /gateway/boot/initrd.img-* /out/initrd \
-    && mksquashfs /gateway /out/gateway.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
-    && mksquashfs /lab /out/laboratory.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
-    && chroot /gateway dpkg-query -W -f='${Package}\t${Version}\n' > /out/gateway-packages.tsv \
-    && chroot /lab dpkg-query -W -f='${Package}\t${Version}\n' > /out/lab-packages.tsv \
-    && cd /sources && find . -type f -print0 | sort -z | xargs -0 sha256sum > /out/sources.sha256 \
-    && cp broker.sha256 /out/broker-sources.sha256 \
-    && cd /out && sha256sum * > SHA256SUMS
-
-FROM scratch AS gateway-network-artifacts
-COPY --from=gateway-network-pack /out/ /
-
-# Lab-only trust overlay. Retain the exact diff; neither production stage above
-# uses this binary or certificate. Runtime activation/hardening stay unchanged.
-FROM gateway-compiler AS stream-compiler
-COPY --from=stream-tls-fixture /fixture/ca.pem /fixture/ca.pem
-RUN test "$(grep -cF '.https_only(true)' src/broker.rs)" = 1 \
-    && cp src/broker.rs /tmp/production-broker.rs \
-    && sed -i '/\.https_only(true)/a\            .add_root_certificate(reqwest::Certificate::from_pem(include_bytes!("/fixture/ca.pem")).expect("laboratory certificate"))' src/broker.rs \
-    && mkdir /stream-bundle \
-    && (diff -u /tmp/production-broker.rs src/broker.rs > /stream-bundle/trust.diff; test "$?" = 1) \
-    && test "$(grep -cF '.emulation(Emulation::weighted_random())' src/web.rs)" = 1 \
-    && cp src/web.rs /tmp/production-web.rs \
-    && sed -i '/.emulation(Emulation::weighted_random())/a\            .tls_cert_store(wreq::tls::trust::CertStore::from_pem_stack(include_bytes!("/fixture/ca.pem")).expect("laboratory certificate"))' src/web.rs \
-    && (diff -u /tmp/production-web.rs src/web.rs >> /stream-bundle/trust.diff; test "$?" = 1) \
-    && cargo build --locked --offline --bin oblivion-api --bin oblivion-web \
-    && cp /tmp/target/debug/oblivion-api /stream-bundle/oblivion-api \
-    && cp /tmp/target/debug/oblivion-web /stream-bundle/oblivion-web \
-    && strip /stream-bundle/oblivion-api /stream-bundle/oblivion-web
-
-FROM gateway-network-lab AS stream-gateway-base
-COPY --from=stream-compiler /stream-bundle/oblivion-api /usr/bin/oblivion-api
-COPY --from=stream-compiler /stream-bundle/oblivion-web /usr/bin/oblivion-web
-COPY --from=stream-compiler /stream-bundle/trust.diff /usr/lib/oblivion-stream-fixture/trust.diff
-COPY --from=stream-tls-fixture /fixture/cert.pem /usr/lib/oblivion-stream-fixture/cert.pem
-COPY --from=stream-tls-fixture /fixture/key.pem /usr/lib/oblivion-stream-fixture/key.pem
-COPY script/oblivion/vm-stream-provider.py /usr/lib/oblivion-stream-fixture/provider.py
-
-FROM stream-gateway-base AS stream-gateway
-COPY script/oblivion/vm-stream-provider.service /etc/systemd/system/oblivion-stream-provider.service
-RUN sed -i 's/^SocksPort .*/SocksPort 0/' /etc/oblivion/torrc \
-    && mkdir -p /etc/systemd/system/oblivion-gateway.target.wants \
-    && ln -s /etc/systemd/system/oblivion-stream-provider.service /etc/systemd/system/oblivion-gateway.target.wants/
-
-FROM session-network-guest AS stream-session
-
-FROM ${STREAM_GATEWAY} AS selected-stream-gateway
-
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS stream-pack
-RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools && rm -rf /var/lib/apt/lists/*
-COPY --from=stream-tls-fixture /fixture/ /fixture/
-RUN --mount=type=bind,from=selected-stream-gateway,source=/,target=/gateway,ro \
-    --mount=type=bind,from=stream-session,source=/,target=/session,ro \
-    mkdir -p /stream-out/gateway /stream-out/session \
-    && cp /gateway/boot/vmlinuz-* /stream-out/gateway/kernel \
-    && cp /gateway/boot/initrd.img-* /stream-out/gateway/initrd \
-    && cp /session/boot/vmlinuz-* /stream-out/session/kernel \
-    && cp /session/boot/initrd.img-* /stream-out/session/initrd \
-    && mksquashfs /gateway /stream-out/gateway/gateway.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
-    && mksquashfs /session /stream-out/session/session.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
-    && chroot /gateway python3 -c 'import hashlib,json; from pathlib import Path; print(json.dumps({key:hashlib.sha256(Path(path).read_bytes()).hexdigest() for key,path in {"provider_sha256":"/usr/lib/oblivion-stream-fixture/provider.py","api_sha256":"/usr/bin/oblivion-api","certificate_sha256":"/usr/lib/oblivion-stream-fixture/cert.pem","trust_diff_sha256":"/usr/lib/oblivion-stream-fixture/trust.diff"}.items()}))' > /stream-out/gateway/stream.json \
-    && cp /gateway/usr/lib/oblivion-stream-fixture/trust.diff /stream-out/gateway/ \
-    && cp /fixture/cert.pem /stream-out/gateway/fixture-cert.pem \
-    && cp /fixture/key.pem /stream-out/gateway/fixture-key.pem \
-    && cp /fixture/ca.pem /stream-out/gateway/fixture-ca.pem \
-    && cp /session/usr/lib/oblivion/build-evidence.json /stream-out/session/ \
-    && sha256sum /session/usr/bin/oblivion > /stream-out/session/opencode.sha256 \
-    && cd /stream-out/gateway && sha256sum * > SHA256SUMS \
-    && cd /stream-out/session && sha256sum * > SHA256SUMS
-
-FROM scratch AS stream-artifacts
-COPY --from=stream-pack /stream-out/ /
-
-# Reuse a previously verified session image while changing gateway-only fixtures.
-FROM scratch AS stream-gateway-artifacts
-COPY --from=stream-pack /stream-out/gateway/ /
-
-# Transport integration lab: the production supervisor/connector/firewall with
-# a lab-only API trust root. No local synthetic SOCKS service is auto-started.
-FROM gateway-network-lab AS transport-network-lab
-COPY --from=stream-compiler /stream-bundle/oblivion-api /usr/bin/oblivion-api
-COPY --from=stream-compiler /stream-bundle/trust.diff /usr/lib/oblivion-transport-fixture/trust.diff
-COPY --from=stream-tls-fixture /fixture/ca.pem /usr/lib/oblivion-transport-fixture/cert.pem
-
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS transport-network-pack
-RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools && rm -rf /var/lib/apt/lists/*
-COPY --from=stream-tls-fixture /fixture/ /fixture/
-COPY packages/oblivion-gateway/guest/ /sources/guest/
-COPY script/oblivion/vm-network-fixture.py script/oblivion/vm-rotation-fixture.py script/oblivion/vm-network-setup.sh /sources/lab/
-COPY --from=gateway-compiler /gateway-bundle/sources.sha256 /sources/broker.sha256
-RUN --mount=type=bind,from=transport-network-lab,source=/,target=/lab,ro \
-    mkdir /out && cp /lab/boot/vmlinuz-* /out/kernel && cp /lab/boot/initrd.img-* /out/initrd \
-    && mksquashfs /lab /out/laboratory.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
-    && cp /lab/usr/lib/oblivion-transport-fixture/trust.diff /out/trust.diff \
-    && cp /fixture/cert.pem /out/fixture-cert.pem \
-    && cp /fixture/key.pem /out/fixture-key.pem \
-    && cp /fixture/ca.pem /out/fixture-ca.pem \
-    && sha256sum /lab/usr/bin/oblivion-api /lab/usr/bin/oblivion-egress /lab/usr/bin/oblivion-tools /lab/usr/bin/oblivion-web /lab/usr/bin/oblivion-rotation /lab/usr/bin/oblivion-gateway-control > /out/binaries.sha256 \
-    && cd /sources && find . -type f -print0 | sort -z | xargs -0 sha256sum > /out/sources.sha256 \
-    && cp broker.sha256 /out/broker-sources.sha256 \
-    && cd /out && sha256sum * > SHA256SUMS
-
-FROM scratch AS transport-network-artifacts
-COPY --from=transport-network-pack /out/ /
-
-# The live target never selects a laboratory host, guest or trust overlay.
-FROM session-tools AS live-session
-ARG OPENCODE_BINARY=artifacts/oblivion-beta-iso/client/cli-linux-x64-baseline/bin/opencode
-ARG OPENCODE_BUILD_EVIDENCE=artifacts/oblivion-beta-iso/client-evidence.json
-COPY ${OPENCODE_BINARY} /usr/bin/oblivion
-COPY ${OPENCODE_BUILD_EVIDENCE} /usr/lib/oblivion/build-evidence.json
-COPY packages/oblivion-host/guest/conversation.sh /usr/libexec/oblivion
-RUN chmod 0755 /usr/libexec/oblivion \
-    && python3 -c 'import hashlib,json; from pathlib import Path; assert hashlib.sha256(Path("/usr/bin/oblivion").read_bytes()).hexdigest() == json.loads(Path("/usr/lib/oblivion/build-evidence.json").read_text())["binary_sha256"]'
-
 FROM os AS live-host-base
 ARG TARGETARCH
+ARG OBLIVION_HOST_KERNEL_VERSION=""
+# Native Mac qualification can select an official Debian backports kernel.
+# Guest kernels and the rest of the runtime keep their own package manifests.
+RUN if [ -n "$OBLIVION_HOST_KERNEL_VERSION" ]; then \
+        original_kernels=$(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' | tr '\n' ' '); \
+        printf 'deb https://deb.debian.org/debian trixie-backports main\n' > /etc/apt/sources.list.d/oblivion-kernel.list; \
+        apt-get update && apt-get install -y --no-install-recommends -t trixie-backports "linux-image-$TARGETARCH=$OBLIVION_HOST_KERNEL_VERSION" \
+        && apt-get purge -y $original_kernels && rm -rf /var/lib/apt/lists/*; \
+    fi
 ARG MANAGER_BINARY=artifacts/oblivion-manager/bun-linux-x64/oblivion-manager
 ARG MANAGER_ASSETS=artifacts/oblivion-manager/bun-linux-x64/assets
 RUN case "$TARGETARCH" in arm64|amd64) ;; *) exit 1;; esac \
@@ -761,7 +447,7 @@ RUN case "$TARGETARCH" in arm64|amd64) ;; *) exit 1;; esac \
     libwlroots-0.18 foot seatd fonts-dejavu-mono libxkbcommon-tools libpciaccess0 \
     firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211 firmware-mediatek \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=compiler /bundle/oblivion /bundle/oblivion-storage /bundle/oblivion-control /bundle/oblivion-console /bundle/oblivion-display /bundle/oblivion-copy /usr/bin/
+COPY --from=compiler /bundle/oblivion /bundle/oblivion-storage /bundle/oblivion-control /bundle/oblivion-display /bundle/oblivion-copy /usr/bin/
 COPY --from=cage-build /out/oblivion-cage /usr/bin/
 COPY --from=cage-build /out/LICENSE /out/oblivion.patch /out/cage-source.sha256 /usr/share/doc/oblivion-display/
 COPY --from=clipboard-compiler /clipboard/target/release/oblivion-clipboard /usr/bin/
@@ -772,9 +458,10 @@ COPY --from=clipboard-broker /out/package.control /out/SHA256SUMS /usr/share/doc
 COPY --from=vbox-clipboard /out/ /usr/lib/oblivion/virtualbox/
 COPY ${MANAGER_BINARY} /usr/bin/oblivion-manager
 COPY ${MANAGER_ASSETS} /usr/lib/oblivion/manager/
-COPY packages/oblivion-host/host/ /etc/systemd/system/
+COPY packages/oblivion-host/host/*.service /etc/systemd/system/
 COPY packages/oblivion-host/host/control-relay.py /usr/lib/oblivion/control-relay.py
 COPY packages/oblivion-host/host/runtime-prepare.py /usr/lib/oblivion/host/runtime-prepare.py
+COPY packages/oblivion-host/host/runtime-auth.py /usr/lib/oblivion/host/runtime-auth.py
 COPY packages/oblivion-host/host/oblivion-runtime-generator /usr/lib/systemd/system-generators/oblivion-runtime-generator
 COPY script/oblivion/live-setup.sh /tmp/live-setup
 COPY script/oblivion/session-identities.sh /tmp/session-identities
@@ -788,148 +475,76 @@ RUN sh /tmp/display-setup && rm /tmp/display-setup \
     && LANG=C.UTF-8 foot --log-level=info --check-config --config=/etc/oblivion/foot.ini \
     && test ! -x /usr/bin/Xwayland
 
-# Generate from the exact installed host data; Python is a build dependency only.
-FROM live-host-base AS settings-catalog-build
-RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
-COPY script/oblivion/settings-catalog.py /tmp/settings-catalog.py
-RUN python3 /tmp/settings-catalog.py
-
 FROM live-host-base AS live-host
-COPY --from=settings-catalog-build /usr/share/oblivion/settings-catalog.json /usr/share/oblivion/settings-catalog.json
 
 FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS live-pack-tools
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
     squashfs-tools $(if [ "$TARGETARCH" = arm64 ]; then printf grub-efi-arm64-bin; else printf 'grub-pc-bin grub-efi-amd64-bin'; fi) grub-common xorriso mtools python3 \
     && rm -rf /var/lib/apt/lists/*
-FROM live-pack-tools AS live-pack
-ARG OBLIVION_IMAGE_NAME=oblivion-development
-COPY --from=live-host / /host/
-COPY --from=live-session / /session/
-COPY --from=gateway-system / /gateway/
-COPY --from=import-guest / /import/
-COPY --from=export-guest / /export/
-COPY --from=onion-gateway-system / /onion-gateway/
-COPY --from=live-onion-file / /onion-file/
-COPY --from=compiler /bundle/sources.sha256 /sources/host-sources.sha256
-COPY --from=gateway-compiler /gateway-bundle/sources.sha256 /sources/gateway-sources.sha256
-COPY --from=clipboard-compiler /clipboard/sources.sha256 /sources/clipboard-sources.sha256
-COPY script/oblivion/live-* script/oblivion/settings-catalog.py script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/Dockerfile.vm-lab /sources/
-COPY script/oblivion/display/ /sources/display/
-RUN OBLIVION_IMAGE_NAME="$OBLIVION_IMAGE_NAME" sh /sources/live-pack.sh
-
-FROM scratch AS beta-iso
-COPY --from=live-pack /out/ /
-
-# Explicitly separate diagnostic distribution. Never selected by beta-iso.
-FROM live-host AS hardware-host
-RUN sed -i 's/^Components: main$/Components: main non-free-firmware/' /etc/apt/sources.list.d/debian.sources \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    network-manager wpasupplicant openssh-server sudo nftables python3 pciutils usbutils rfkill \
-    firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211 firmware-mediatek \
-    && rm -rf /var/lib/apt/lists/*
-RUN apt-get update && apt-get install -y --no-install-recommends iproute2 \
-    && rm -rf /var/lib/apt/lists/*
-COPY script/oblivion/hardware/ /usr/lib/oblivion/hardware/
-COPY artifacts/oblivion-hardware-iso/authorized_key.pub /etc/oblivion/hardware/authorized_key.pub
-RUN sh /usr/lib/oblivion/hardware/install.sh
-COPY packages/oblivion-gateway/guest/resolv.conf /etc/resolv.conf
-COPY script/oblivion/hardware/hosts /etc/hosts
-COPY script/oblivion/hardware/hostname /etc/hostname
-
-FROM live-pack-tools AS hardware-pack
-ARG BASE_ISO_SHA256
-COPY --from=hardware-host / /host/
-COPY --from=compiler /bundle/sources.sha256 /sources/host-sources.sha256
-COPY script/oblivion/hardware/ /sources/hardware/
-COPY script/oblivion/hardware-pack.sh script/oblivion/Dockerfile.vm-lab script/oblivion/live-* script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf /sources/
-COPY script/oblivion/display/ /sources/display/
-RUN --mount=type=bind,source=artifacts/oblivion-beta-iso/image/oblivion-development-amd64.iso,target=/base.iso,ro \
-    printf '%s  /base.iso\n' "$BASE_ISO_SHA256" | sha256sum -c - \
-    && sh /sources/hardware-pack.sh
-
-FROM scratch AS hardware-iso
-COPY --from=hardware-pack /out/ /
-
-# Fresh guests plus operator diagnostics for a development-only image.
-# Unlike hardware-pack, this target never reuses guests from an older ISO.
-FROM live-pack-tools AS diagnostic-pack
-COPY --from=hardware-host / /host/
-COPY --from=live-session / /session/
-COPY --from=gateway-system / /gateway/
-COPY --from=import-guest / /import/
-COPY --from=export-guest / /export/
-COPY --from=onion-gateway-system / /onion-gateway/
-COPY --from=live-onion-file / /onion-file/
-COPY --from=compiler /bundle/sources.sha256 /sources/host-sources.sha256
-COPY --from=gateway-compiler /gateway-bundle/sources.sha256 /sources/gateway-sources.sha256
-COPY script/oblivion/live-* script/oblivion/settings-catalog.py script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/Dockerfile.vm-lab /sources/
-COPY script/oblivion/display/ /sources/display/
-COPY script/oblivion/hardware/ /sources/hardware/
-RUN sh /sources/live-pack.sh
-
-FROM scratch AS diagnostic-iso
-COPY --from=diagnostic-pack /out/ /
-
-# Storage-only USB lifecycle lab. The runner attaches a disposable copy of a
-# real ISO as writable USB; no physical device or host filesystem is exposed.
-FROM host AS persistence-host
-RUN apt-get update && apt-get install -y --no-install-recommends fdisk network-manager python3-pyte \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /etc/NetworkManager/conf.d /run/live/medium \
-    && printf '[main]\nplugins=keyfile\n[keyfile]\npath=/run/NetworkManager/system-connections\n[connectivity]\nenabled=false\n' > /etc/NetworkManager/conf.d/80-oblivion.conf \
-    && systemctl enable NetworkManager.service \
-    && systemctl mask NetworkManager-wait-online.service \
-    && printf 'usb_storage\nxhci_pci\niso9660\n' >> /etc/initramfs-tools/modules \
-    && update-initramfs -u -k all
-COPY script/oblivion/vm-persistence-test.py /usr/libexec/oblivion-vm-test
-
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS persistence-pack
-RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools && rm -rf /var/lib/apt/lists/*
-COPY --from=compiler /bundle/ /out/host/
-COPY script/oblivion/vm-persistence-test.py /out/
-RUN --mount=type=bind,from=persistence-host,source=/,target=/host,ro \
-    cp /host/boot/vmlinuz-* /out/kernel && cp /host/boot/initrd.img-* /out/initrd \
-    && mksquashfs /host /out/host.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
-    && chroot /host dpkg-query -W -f='${Package}\t${Version}\n' > /out/packages.tsv \
-    && cd /out && sha256sum kernel initrd host.squashfs packages.tsv vm-persistence-test.py > SHA256SUMS
-
-FROM scratch AS persistence-artifacts
-COPY --from=persistence-pack /out/ /
-
-# Disposable integration test with simultaneous, separately encrypted VM pairs.
-FROM stream-gateway AS multisession-gateway
-RUN sed -i 's|provider.py$|provider.py --multisession|' /etc/systemd/system/oblivion-stream-provider.service
-
-FROM pack AS multisession-pack
-COPY packages/oblivion-host/host/oblivion-gateway-host.service /host/etc/systemd/system/
-COPY script/oblivion/vm-multisession-test.py /host/usr/libexec/oblivion-vm-test
-RUN --mount=type=bind,from=multisession-gateway,source=/,target=/gateway,ro \
-    mksquashfs /gateway /host/usr/lib/oblivion/vm/multisession-gateway.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*' \
-    && rm /out/host.squashfs /out/SHA256SUMS \
-    && mksquashfs /host /out/host.squashfs -noappend -comp zstd -processors 2 -quiet \
-    && cd /out && sha256sum * > SHA256SUMS
-
-FROM scratch AS multisession-artifacts
-COPY --from=multisession-pack /out/ /
-
-# Official-client runtime used by the headless privacy stack. No fork binary or
-# automatic chat server enters this guest image.
 FROM session-tools AS stack-session
 ARG TARGETARCH
 ARG OBLIVION_AGENTS="codex claude opencode2"
+COPY packages/oblivion-history/ /usr/lib/oblivion/history/
+COPY packages/oblivion-tools/dist/server.mjs /usr/lib/oblivion/tools/server.mjs
+COPY packages/oblivion-host/guest/native-tools/codex.toml /etc/codex/config.toml
 COPY script/oblivion/install-agents.py script/oblivion/install-agents.json /build/agents/
 RUN python3 /build/agents/install-agents.py "$TARGETARCH" / $OBLIVION_AGENTS --verify \
-    && systemctl disable oblivion-chat-server.service oblivion-conversation.service oblivion-terminal.service \
-    && rm -f /usr/bin/chat /usr/libexec/oblivion \
-       /etc/systemd/system/oblivion-chat-server.service \
-       /etc/systemd/system/oblivion-conversation.service \
-       /etc/systemd/system/oblivion-terminal.service \
-       /usr/lib/oblivion/guest/chat-client.sh /usr/lib/oblivion/guest/chat-server.sh \
-       /usr/lib/oblivion/guest/chat-environment.sh /usr/lib/oblivion/guest/chat-ready.py \
-       /usr/lib/oblivion/guest/conversation.sh \
     && cp /build/agents/install-agents.json /usr/lib/oblivion/build-evidence.json \
     && rm -rf /build/agents
+
+# Direct-controller Debian packaging deliberately excludes Live OS configuration.
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS debian-runtime-source
+ARG TARGETARCH
+ARG MANAGER_BINARY=artifacts/oblivion-manager/bun-linux-x64/oblivion-manager
+ARG MANAGER_ASSETS=artifacts/oblivion-manager/bun-linux-x64/assets
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    systemd python3 cryptsetup-bin dmsetup e2fsprogs util-linux mount fdisk udev debconf \
+    $(if [ "$TARGETARCH" = arm64 ]; then printf qemu-system-arm; else printf qemu-system-x86; fi) \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=compiler /bundle/oblivion /bundle/oblivion-storage /bundle/oblivion-control /bundle/oblivion-copy /usr/bin/
+COPY ${MANAGER_BINARY} /usr/bin/oblivion-manager
+COPY ${MANAGER_ASSETS} /usr/lib/oblivion/manager/
+COPY packages/oblivion-host/host/*.service /etc/systemd/system/
+COPY script/oblivion/live-controller.json /etc/oblivion/controller.json
+COPY LICENSE NOTICE /usr/share/doc/oblivion-stack/
+
+FROM debian-runtime-source AS debian-package-build
+ARG TARGETARCH
+ARG OBLIVION_DEB_VERSION
+ARG OBLIVION_SOURCE_REVISION
+ARG OBLIVION_SOURCE_DIRTY
+RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools dpkg-dev libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=stack-session / /roles/session/
+COPY --from=gateway-system / /roles/gateway/
+COPY --from=import-guest / /roles/import/
+COPY --from=export-guest / /roles/export/
+COPY --from=onion-gateway-system / /roles/onion-gateway/
+COPY --from=live-onion-file / /roles/onion-file/
+COPY --from=compiler /bundle/sources.sha256 /usr/share/doc/oblivion-stack/build/host-sources.sha256
+COPY --from=gateway-compiler /gateway-bundle/sources.sha256 /usr/share/doc/oblivion-stack/build/gateway-sources.sha256
+COPY script/oblivion/pack-vm-assets.sh /pack-vm-assets.sh
+COPY script/oblivion/debian/ /packaging/
+COPY script/oblivion/build-deb.sh script/oblivion/Dockerfile.vm-lab script/oblivion/Dockerfile.vm-lab.dockerignore /packaging-build-inputs/
+COPY packages/oblivion-host/guest/ /packaging-runtime-inputs/safe-guest/
+COPY packages/oblivion-history/oblivion_history/ /packaging-runtime-inputs/history/
+COPY packages/oblivion-tools/dist/server.mjs /packaging-runtime-inputs/tools/server.mjs
+COPY packages/oblivion-manager/src/ /packaging-runtime-inputs/manager/src/
+COPY packages/oblivion-manager/script/build.ts packages/oblivion-manager/package.json /packaging-runtime-inputs/manager/
+COPY packages/theme/src/ /packaging-runtime-inputs/theme/
+COPY packages/tui-kit/src/ /packaging-runtime-inputs/tui-kit/
+COPY package.json bun.lock /packaging-runtime-inputs/workspace/
+COPY script/oblivion/install-agents.py script/oblivion/install-agents.json script/oblivion/session-node.json script/oblivion/install-session-node.py script/oblivion/session-packages.txt script/oblivion/session-analysis.lock script/oblivion/session-analysis-licenses.json script/oblivion/install-session-analysis.py script/oblivion/onionshare-source.json script/oblivion/onionshare-requirements.lock script/oblivion/install-onionshare.py /packaging-runtime-inputs/locks/
+RUN sh /pack-vm-assets.sh / /roles /usr/share/doc/oblivion-stack/build \
+    && cp /roles/session/usr/lib/oblivion/build-evidence.json /usr/share/doc/oblivion-stack/build/client-evidence.json \
+    && python3 -c 'import json,os,pathlib; pathlib.Path("/usr/share/doc/oblivion-stack/build/inputs.json").write_text(json.dumps({"format":"oblivion-debian-build","version":1,"revision":os.environ["OBLIVION_SOURCE_REVISION"],"dirty":os.environ["OBLIVION_SOURCE_DIRTY"]=="true","architecture":os.environ["TARGETARCH"],"development_only":True})+"\n")' \
+    && sha256sum /packaging/* /packaging-build-inputs/* /pack-vm-assets.sh > /usr/share/doc/oblivion-stack/build/packaging-sources.sha256 \
+    && (cd /packaging-runtime-inputs && find . -type f -print0 | sort -z | xargs -0 sha256sum) > /usr/share/doc/oblivion-stack/build/runtime-sources.sha256 \
+    && python3 -B /packaging/build-package.py --source / --architecture "$TARGETARCH" --version "$OBLIVION_DEB_VERSION" --output /out
+
+FROM scratch AS debian-package-artifacts
+COPY --from=debian-package-build /out/ /
 
 FROM live-pack-tools AS stack-pack
 ARG OBLIVION_IMAGE_NAME=oblivion-stack-development
@@ -942,7 +557,7 @@ COPY --from=onion-gateway-system / /onion-gateway/
 COPY --from=live-onion-file / /onion-file/
 COPY --from=compiler /bundle/sources.sha256 /sources/host-sources.sha256
 COPY --from=gateway-compiler /gateway-bundle/sources.sha256 /sources/gateway-sources.sha256
-COPY script/oblivion/live-* script/oblivion/settings-catalog.py script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/Dockerfile.vm-lab /sources/
+COPY script/oblivion/live-* script/oblivion/pack-vm-assets.sh script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/Dockerfile.vm-lab /sources/
 RUN OBLIVION_IMAGE_NAME="$OBLIVION_IMAGE_NAME" sh /sources/live-pack.sh
 
 FROM scratch AS stack-runtime-iso

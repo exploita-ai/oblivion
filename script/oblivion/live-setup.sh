@@ -9,12 +9,15 @@ for entry in '1100 oblivion-vm' '1101 oblivion-gateway-vm' '1102 oblivion-import
 done
 passwd -l root
 chmod 0600 /etc/oblivion/controller.json
+printf '{"version":1,"mode":"direct-controller"}\n' > /etc/oblivion/installation.json
+chmod 0644 /etc/oblivion/installation.json
 mkdir -p /persist /etc/systemd/system/oblivion-manager.service.d /etc/modules-load.d
 mkdir -p /etc/network
 # Keep the base network configuration explicit even without ifupdown.
 printf 'auto lo\niface lo inet loopback\n' > /etc/network/interfaces
 # The live controller discovers the data partition on its own boot USB.
-# Keep the legacy file destination readonly: never fall back to a RAM archive.
+# Keep the unavailable file destination read-only: a storage failure never
+# silently selects a RAM archive.
 printf 'tmpfs /persist tmpfs ro,nosuid,nodev,noexec,size=4k,mode=0700 0 0\n' >> /etc/fstab
 cat > /etc/systemd/system/oblivion-manager.service.d/live.conf <<'EOF'
 [Service]
@@ -37,28 +40,14 @@ connection.mdns=0
 connection.llmnr=0
 ipv6.method=disabled
 EOF
-cat > /usr/lib/oblivion/network-menu.sh <<'EOF'
-#!/bin/sh
-while :; do
-    clear
-    printf '\033[35mOBLIVION - NETWORK\033[0m\n\n'
-    printf 'Alt+F1: return to the manager.\n'
-    printf 'After connecting, choose Network > Save network profiles in the manager.\n'
-    printf 'Unsaved network settings remain in RAM until shutdown.\n\n'
-    printf '[Enter] Configure Wi-Fi / Ethernet\n'
-    read -r answer || exit
-    nmtui
-done
-EOF
-chmod 0755 /usr/lib/oblivion/network-menu.sh
 cat > /etc/systemd/system/oblivion-network-console.service <<'EOF'
 [Unit]
-Description=Oblivion local network configuration
+Description=Debian network configuration
 After=NetworkManager.service
 Wants=NetworkManager.service
 Conflicts=getty@tty2.service
 [Service]
-ExecStart=/usr/lib/oblivion/network-menu.sh
+ExecStart=/usr/bin/nmtui
 Restart=always
 RestartSec=2
 StandardInput=tty-force
