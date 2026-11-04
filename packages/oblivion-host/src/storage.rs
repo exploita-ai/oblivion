@@ -1516,15 +1516,9 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 return result;
             }
             require(config.gateway.is_some(), "gateway_not_configured")?;
-            config.admit_agent(true)?;
-            if matches!(crate::gateway::state()?.as_str(), "inactive" | "failed") {
-                crate::gateway::start(false)?;
-            }
-            require(crate::gateway::state()? == "active", "gateway_not_ready")?;
-            crate::gateway::ready()?;
             let vm = config.vm.as_ref().ok_or(Error("vm_not_configured"))?;
             let tools = session_policy(&id, access)?;
-            write_session_info(&id, "starting")?;
+            config.prepare_agent_gateway(&id)?;
             let result = (|| {
                 crate::vm::stop(false)?;
                 let token = crate::gateway::prepare()?;
@@ -4742,6 +4736,31 @@ impl Config {
             self.gateway.as_ref().map_or(0, crate::vm::Config::reservation_mib)
         } else { 0 };
         self.admit_memory(self.reserved_mib(&opened)?, additional, additional, "insufficient_gateway_memory")
+    }
+
+    fn prepare_agent_gateway(&self, id: &str) -> Result<()> {
+        // Documents keeps its offline VM until capacity and the transport are
+        // ready. A failed preflight must release any partly started gateway.
+        let result = (|| {
+            self.admit_agent(true)?;
+            if matches!(crate::gateway::state()?.as_str(), "inactive" | "failed") {
+                crate::gateway::start(false)?;
+            }
+            require(crate::gateway::state()? == "active", "gateway_not_ready")?;
+            crate::gateway::ready()?;
+            write_session_info(id, "starting")
+        })();
+        if let Err(error) = result {
+            // The native launcher retries asynchronous guest/Tor bootstrap.
+            // Keep its reservation and offline Documents VM while it waits.
+            if error.0 == "gateway_not_ready" { return Err(error); }
+            if let Err(cleanup) = crate::gateway::shutdown() {
+                write_key_file("session-recovery-required", b"1")?;
+                return Err(cleanup);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn reserved_mib(&self, opened: &[OpenSession]) -> Result<u64> {
