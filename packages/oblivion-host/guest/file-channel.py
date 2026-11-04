@@ -35,13 +35,18 @@ def command(fd):
     value = json.loads(read(size))
     if not isinstance(value, dict):
         raise ValueError("invalid_file_request")
-    if value.get("operation") == "import" and set(value) == {"operation", "name"}:
-        name = value["name"]
-        if not isinstance(name, str) or not name or len(name.encode()) > 255 or any(char in name for char in "/\\\0") or name in (".", ".."):
-            raise ValueError("invalid_import_name")
-        return ["/usr/bin/oblivion-copy", "stream-receive", "/vault/home/.oblivion-file-staging", "/vault/workspace", name, "3600000"]
+    operation = value.get("operation")
+    if operation in ("import", "status", "recover", "discard"):
+        expected = {"operation", "id", "safe_id", "opening"} | ({"name"} if operation == "import" else set())
+        if set(value) != expected or any(not isinstance(value[key], str) or not re.fullmatch(r"[0-9a-f]{32}", value[key]) for key in ("id", "safe_id", "opening")):
+            raise ValueError("invalid_file_request")
+        if operation == "import":
+            name = value["name"]
+            if not isinstance(name, str) or not name or len(name.encode()) > 255 or any(char in name for char in "/\\\0") or name in (".", ".."):
+                raise ValueError("invalid_import_name")
+        return (["/usr/bin/oblivion-copy", "native-files", "/vault/home/.oblivion-file-staging", "/vault/workspace", "3600000"], json.dumps(value).encode())
     if value.get("operation") == "export" and set(value) == {"operation", "root"} and value["root"] in ("workspace", "imports"):
-        return ["/usr/bin/oblivion-copy", "send", "/vault/" + value["root"], "3600000"]
+        return (["/usr/bin/oblivion-copy", "send", "/vault/" + value["root"], "3600000"], None)
     raise ValueError("invalid_file_request")
 
 
@@ -61,11 +66,13 @@ def main():
             # Opening the guest port precedes this acknowledgement. QEMU must
             # not discard the initial request while systemd starts the worker.
             stream.write(b"ready\n")
-            args = command(fd)
+            args, metadata = command(fd)
+            if metadata is not None:
+                os.makedirs("/vault/home/.oblivion-file-staging", mode=0o700, exist_ok=True)
             if fd != 3:
                 os.dup2(fd, 3)
             os.set_inheritable(3, True)
-            result = subprocess.run(args, pass_fds=(3,), stdin=subprocess.DEVNULL,
+            result = subprocess.run(args, input=metadata, pass_fds=(3,),
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                     check=False)
             if result.returncode == 0:

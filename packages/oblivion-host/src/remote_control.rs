@@ -57,6 +57,10 @@ pub fn attach(path: &Path, operation: &str, expected: &str) -> Result<(UnixStrea
 }
 
 pub fn attach_scoped(path: &Path, operation: &str, session: Option<&str>, expected: Option<&str>) -> Result<(UnixStream, String)> {
+    attach_scoped_with_secret(path, operation, session, expected, &[])
+}
+
+pub fn attach_scoped_with_secret(path: &Path, operation: &str, session: Option<&str>, expected: Option<&str>, secret: &[u8]) -> Result<(UnixStream, String)> {
     if !matches!(operation, "agent-attach" | "file-attach" | "share-attach" | "share-import-attach" | "share-export-lease" | "backup-attach") {
         return Err("invalid_attachment".into());
     }
@@ -64,7 +68,7 @@ pub fn attach_scoped(path: &Path, operation: &str, session: Option<&str>, expect
         path,
         operation,
         session,
-        &[],
+        secret,
         expected,
         Duration::from_secs(10),
     )?;

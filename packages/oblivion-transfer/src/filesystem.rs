@@ -86,11 +86,14 @@ impl Selection {
     }
 
     pub fn prepare(root: &Path, paths: &[String], limits: Limits) -> io::Result<Self> {
+        Self::prepare_at(Directory::open(root)?, paths, limits)
+    }
+
+    pub(crate) fn prepare_at(root: Directory, paths: &[String], limits: Limits) -> io::Result<Self> {
         require(
             limits.entries > 0 && limits.entries <= MAX_ENTRIES,
             "invalid_entry_limit",
         )?;
-        let root = Directory::open(root)?;
         let mut entries = Vec::new();
         let mut files = Vec::new();
         let mut bytes = 0;
@@ -222,8 +225,11 @@ pub fn receive(
     root: &Path,
     id: &str,
 ) -> io::Result<Receipt> {
+    receive_at(reader, manifest, &Directory::open(root)?, id)
+}
+
+pub(crate) fn receive_at(reader: &mut impl Read, manifest: &Manifest, root: &Directory, id: &str) -> io::Result<Receipt> {
     validate_id(id)?;
-    let root = Directory::open(root)?;
     root.require_private()?;
     let transaction = root.create_directory(id)?;
     let result = receive_transaction(reader, manifest, &transaction);

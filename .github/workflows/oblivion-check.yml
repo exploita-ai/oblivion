@@ -132,7 +132,7 @@ jobs:
           cargo check --locked --lib --bins
           cargo check --locked --lib --bins --features lab-emulation
           cargo test --locked --lib --bin oblivion --bin oblivion-storage
-          cargo test --locked --test safe_admin --test delegation --test backup_cli --test managed --test terminal_screen --test workspace --test share_control --test channel
+          cargo test --locked --test safe_admin --test delegation --test backup_cli --test file_attachment --test managed --test terminal_screen --test workspace --test share_control --test channel
       - name: Exercise the portable private wire
         working-directory: packages/oblivion-wire
         run: cargo test --locked
@@ -141,6 +141,7 @@ jobs:
       - name: Exercise real local PTY and scoped control protocols
         working-directory: packages/oblivion-host
         run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/file-channel.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/activity-client.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/native-overlay.py
           # The real relay accepts the Safe UID 1000 or root; hosted runners
@@ -275,7 +276,8 @@ jobs:
         run: |
           cargo check --locked --lib --bin oblivion
           cargo test --locked --lib --bin oblivion
-          cargo test --locked --test managed --test delegation --test backup_cli --test terminal_screen --test workspace --test share_control --test channel
+          cargo test --locked --test managed --test delegation --test backup_cli --test file_attachment --test terminal_screen --test workspace --test share_control --test channel
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/file-channel.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/activity-client.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/native-overlay.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/managed-job.py
@@ -289,9 +291,9 @@ jobs:
         run: cargo test --locked
       - name: Verify native bundle pairing and distribution inventory
         run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
-      - name: Verify ciphertext-only personal copy streams
+      - name: Verify native file reconciliation and ciphertext-only personal copies
         working-directory: packages/oblivion-transfer
-        run: cargo test --locked --test personal_copy
+        run: cargo test --locked --test personal_copy --test native_files --test stream
       - name: Check native per-agent Share without source credentials
         working-directory: packages/oblivion-history
         run: |

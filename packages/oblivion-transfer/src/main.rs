@@ -15,6 +15,17 @@ fn main() {
 fn execute() -> Result<(), Box<dyn std::error::Error>> {
     runtime::harden()?;
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|role| role == "native-files") {
+        if args.len() != 4 || !Path::new(&args[1]).is_absolute() || !Path::new(&args[2]).is_absolute() { return Err("invalid_arguments".into()); }
+        let budget: u64 = args[3].parse()?;
+        if !(1..=3_600_000).contains(&budget) { return Err("invalid_deadline".into()); }
+        let mut input = Vec::new(); std::io::stdin().take(4097).read_to_end(&mut input)?;
+        if input.len() > 4096 { return Err("invalid_file_request".into()); }
+        let request = serde_json::from_slice(&input)?;
+        let mut channel = Channel::new(runtime::inherited(3)?, Duration::from_millis(budget))?;
+        oblivion_transfer::stream::operations::serve(&mut channel, Path::new(&args[1]), Path::new(&args[2]), request)?;
+        return Ok(());
+    }
     if args.first().is_some_and(|role| matches!(role.as_str(), "share-send" | "share-receive")) {
         let send = args[0] == "share-send";
         if args.len() != if send { 3 } else { 4 } { return Err("invalid_arguments".into()); }
@@ -54,32 +65,6 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
         if &released != b"released\n" {
             return Err("invalid_release".into());
         }
-        return Ok(());
-    }
-    if args.first().is_some_and(|role| role.starts_with("stream-")) {
-        let role = args[0].as_str();
-        let expected = match role {
-            "stream-send" | "stream-recover" => 4,
-            "stream-receive" => 5,
-            "stream-download" => 7,
-            _ => return Err("invalid_arguments".into()),
-        };
-        if args.len() != expected { return Err("invalid_arguments".into()); }
-        let receipt = if role == "stream-recover" {
-            oblivion_transfer::stream::recover_directory(Path::new(&args[1]), Path::new(&args[2]), &args[3])?
-        } else {
-            let budget: u64 = args.last().ok_or("invalid_arguments")?.parse()?;
-            if !(1..=3_600_000).contains(&budget) { return Err("invalid_deadline".into()); }
-            let mut channel = Channel::new(runtime::inherited(3)?, Duration::from_millis(budget))?;
-            let limits = oblivion_transfer::Limits { entries: oblivion_transfer::MAX_ENTRIES, bytes: oblivion_transfer::MAX_DOCUMENT_BYTES };
-            match role {
-                "stream-send" => oblivion_transfer::stream::send_path(&mut channel, Path::new(&args[1]), limits, &args[2])?,
-                "stream-receive" => oblivion_transfer::stream::receive_directory(&mut channel, Path::new(&args[1]), Path::new(&args[2]), &args[3], limits)?,
-                "stream-download" => oblivion_transfer::stream::download(&mut channel, &args[1], Path::new(&args[2]), Path::new(&args[3]), &args[4], limits, &args[5])?,
-                _ => unreachable!(),
-            }
-        };
-        println!("{}", serde_json::to_string(&receipt)?);
         return Ok(());
     }
     let import = args

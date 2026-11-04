@@ -151,24 +151,28 @@ fn response(channel: Channel<'_>) -> Result<String> {
 
 #[cfg(target_os = "linux")]
 pub fn attach_client(operation: &str, expected: &str) -> Result<(UnixStream, UnixStream, String)> {
-    attach_scoped(operation, None, Some(expected))
+    attach_scoped(operation, None, Some(expected), &[])
 }
 
 pub fn attach_export(id: &str) -> Result<(UnixStream, UnixStream, String)> {
-    attach_scoped("share-export-lease", Some(id), None)
+    attach_scoped("share-export-lease", Some(id), None, &[])
+}
+
+pub fn attach_file(opening: &crate::autolock::Opening) -> Result<(UnixStream, UnixStream, String)> {
+    attach_scoped("file-attach", None, Some(&opening.safe_id), &serde_json::to_vec(opening)?)
 }
 
 pub fn attach_backup(transaction: &str) -> Result<(UnixStream, UnixStream, String)> {
-    attach_scoped("backup-attach", Some(transaction), None)
+    attach_scoped("backup-attach", Some(transaction), None, &[])
 }
 
 #[cfg(target_os = "linux")]
-fn attach_scoped(operation: &str, session: Option<&str>, expected: Option<&str>) -> Result<(UnixStream, UnixStream, String)> {
+fn attach_scoped(operation: &str, session: Option<&str>, expected: Option<&str>, secret: &[u8]) -> Result<(UnixStream, UnixStream, String)> {
     if let Some(path) = std::env::var_os("OBLIVION_CONTROL_SOCKET") {
-        let (stream, client) = crate::remote_control::attach_scoped(std::path::Path::new(&path), operation, session, expected)?;
+        let (stream, client) = crate::remote_control::attach_scoped_with_secret(std::path::Path::new(&path), operation, session, expected, secret)?;
         return Ok((stream.try_clone()?, stream, client));
     }
-    let stream = connect_expected(operation, session, &[], expected)?;
+    let stream = connect_expected(operation, session, secret, expected)?;
     let channel = Channel::new(&stream, Duration::from_secs(120));
     let console = receive_descriptor(&stream, &channel)?;
     // The control connection owns the attachment until EOF, independently of
@@ -220,14 +224,14 @@ fn receive_descriptor(stream: &UnixStream, channel: &Channel<'_>) -> Result<Unix
 
 #[cfg(not(target_os = "linux"))]
 pub fn attach_client(operation: &str, expected: &str) -> Result<(UnixStream, UnixStream, String)> {
-    attach_scoped(operation, None, Some(expected))
+    attach_scoped(operation, None, Some(expected), &[])
 }
 
 #[cfg(not(target_os = "linux"))]
-fn attach_scoped(operation: &str, session: Option<&str>, expected: Option<&str>) -> Result<(UnixStream, UnixStream, String)> {
+fn attach_scoped(operation: &str, session: Option<&str>, expected: Option<&str>, secret: &[u8]) -> Result<(UnixStream, UnixStream, String)> {
     let path = std::env::var_os("OBLIVION_CONTROL_SOCKET").ok_or("native_runtime_required")?;
     let (stream, client) =
-        crate::remote_control::attach_scoped(std::path::Path::new(&path), operation, session, expected)?;
+        crate::remote_control::attach_scoped_with_secret(std::path::Path::new(&path), operation, session, expected, secret)?;
     Ok((stream.try_clone()?, stream, client))
 }
 

@@ -537,6 +537,18 @@ fn tool_worker(config: &Path, families: &Families, tools: &Arc<crate::safe_tools
     Ok(value)
 }
 
+fn file_opening(session: &str, slot: oblivion_host::scope::Slot, secret: &[u8], snapshot: &crate::idle_controller::Snapshot) -> Result<oblivion_host::autolock::Opening> {
+    let opening: oblivion_host::autolock::Opening = serde_json::from_slice(secret).map_err(|_| Error("invalid_file_opening"))?;
+    crate::storage::validate_id(&opening.nonce)?;
+    require(opening.slot == slot && opening.safe_id == session && snapshot.safes.contains(&opening), "session_changed")?;
+    let host = snapshot.host.as_deref().ok_or(Error("idle_opening_changed"))?;
+    require(!snapshot.fences.iter().any(|fence| match fence {
+        crate::idle_controller::Target::Host { nonce } => nonce == host,
+        crate::idle_controller::Target::Safe { opening: fenced } => fenced == &opening,
+    }), "idle_opening_changed")?;
+    Ok(opening)
+}
+
 fn insert_delivery(value: &mut serde_json::Value, parent: &crate::safe_tools::Context, child: &str) -> Result<()> {
     value.as_object_mut().ok_or(Error("invalid_safe_tools_response"))?.insert("delivery".into(),
         serde_json::to_value(crate::child_runner::registry().get(parent, child)?).map_err(|_| Error("encode_failed"))?);
@@ -1021,6 +1033,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
             | Operation::RenameSession
             | Operation::SessionStorage
             | Operation::OpenDocuments
+            | Operation::FileAttach
             | Operation::ChildTaskStart
             | Operation::ChildTaskRetry
             | Operation::ChildTaskCancel
@@ -1171,6 +1184,12 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         require((mode == "agent" || matches!(request.operation, Operation::FileAttach) && mode == "documents")
             && request.expected_session.as_deref() == Some(&session), "session_changed")?;
         crate::storage::require_safe_branch_open(&session)?;
+        if matches!(request.operation, Operation::FileAttach) {
+            let snapshot = crate::storage::idle_snapshot()?;
+            let opening = file_opening(&session, request.slot, &secret, &snapshot)?;
+            let host = snapshot.host.ok_or(Error("idle_opening_changed"))?;
+            crate::storage::require_current_idle_activity(&oblivion_host::autolock::Activity { host, safe: Some(opening) })?;
+        }
         let id = crate::storage::random_id()?;
         let clients = Path::new(&oblivion_host::scope::current().runtime()).join("agent-clients");
         fs::create_dir_all(&clients).map_err(|_| Error("client_register_failed"))?;
@@ -1766,5 +1785,29 @@ mod family_tests {
         let result = tool_output(process, Zeroizing::new(Vec::new()), started + Duration::from_millis(40));
         assert!(matches!(result, Err(Error("safe_tool_outcome_unknown"))));
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+}
+
+#[cfg(test)]
+mod file_opening_tests {
+    use super::*;
+    #[test]
+    fn file_admission_requires_exact_current_safe_opening_and_no_closing_fence() {
+        use oblivion_host::autolock::Opening;
+        use crate::idle_controller::{Snapshot, Target};
+        let opening = Opening { slot: Default::default(), safe_id: "a".repeat(32), nonce: "b".repeat(32) };
+        let bytes = serde_json::to_vec(&opening).unwrap();
+        let mut snapshot = Snapshot { host: Some("c".repeat(32)), safes: vec![opening.clone()], fences: vec![], general_open: true, writable: true };
+        assert_eq!(file_opening(&opening.safe_id, opening.slot, &bytes, &snapshot).unwrap_or_else(|error| panic!("{}", error.0)), opening);
+        assert!(file_opening(&"d".repeat(32), opening.slot, &bytes, &snapshot).is_err());
+        assert!(file_opening(&opening.safe_id, oblivion_host::scope::Slot::try_from(1).unwrap(), &bytes, &snapshot).is_err());
+        let mut stale = opening.clone(); stale.nonce = "d".repeat(32);
+        assert!(file_opening(&opening.safe_id, opening.slot, &serde_json::to_vec(&stale).unwrap(), &snapshot).is_err());
+        snapshot.fences = vec![Target::Host { nonce: "c".repeat(32) }];
+        assert!(file_opening(&opening.safe_id, opening.slot, &bytes, &snapshot).is_err());
+        snapshot.fences = vec![Target::Safe { opening: opening.clone() }];
+        assert!(file_opening(&opening.safe_id, opening.slot, &bytes, &snapshot).is_err());
+        snapshot.fences.clear(); snapshot.host = None;
+        assert!(file_opening(&opening.safe_id, opening.slot, &bytes, &snapshot).is_err());
     }
 }

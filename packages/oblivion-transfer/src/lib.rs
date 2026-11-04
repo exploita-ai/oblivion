@@ -6,6 +6,7 @@ pub mod channel;
 #[cfg(unix)]
 mod directory;
 pub mod endpoint;
+pub mod native_files;
 #[cfg(unix)]
 mod filesystem;
 #[cfg(target_os = "linux")]
@@ -167,7 +168,6 @@ pub fn relay_payload(reader: &mut impl Read, writer: &mut impl Write, manifest: 
     writer.write_all(END)
 }
 
-#[cfg(unix)]
 fn validate_id(id: &str) -> io::Result<()> {
     require(
         id.len() == 32

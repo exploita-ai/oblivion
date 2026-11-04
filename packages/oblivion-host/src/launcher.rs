@@ -65,6 +65,11 @@ Files
   oblivion files list --safe SAFE [workspace/PATH] --json
   oblivion files import --safe SAFE SOURCE [--name NAME]
   oblivion files export --safe SAFE workspace/PATH DESTINATION
+  oblivion files status --safe SAFE --operation ID [--destination DIR] --json
+  oblivion files recover --safe SAFE --operation ID [--destination DIR]
+  oblivion files discard --safe SAFE --operation ID [--destination DIR]
+  Copy commands accept --operation ID; exports reconcile only inside DIR.
+  Discard removes private incomplete staging, never published files.
 
 Personal backup (complete encrypted Safe, including saved logins)
   oblivion backup export --safe SAFE FILE
