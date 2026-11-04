@@ -2843,6 +2843,9 @@ impl Config {
         let vm = self.vm.as_ref().ok_or(Error("vm_not_configured"))?;
         vm.validate()?;
         let path = Path::new(MOUNT).join(format!("sessions/{id}.pending"));
+        let bytes = trusted_file(&path)?.metadata().map_err(|_| Error("metadata_failed"))?.len();
+        require(bytes % MIB == 0, "invalid_session_size")?;
+        oblivion_host::volume::size(bytes / MIB).map_err(Error)?;
         self.admit_family()?;
         let credential = safe_credential(&path, None, secret)?;
         require(!persistent_safe_path(&credential.token.safe_id)?.try_exists().map_err(|_| Error("image_check_failed"))?, "safe_already_exists")?;

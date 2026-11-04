@@ -37,6 +37,7 @@ thread_local! {
 #[serde(tag = "operation", rename_all = "kebab-case", deny_unknown_fields)]
 enum FamilyRequest {
     BackupStop,
+    BackupDiscard { transaction: String },
     Retain { safe_id: String, family_id: String },
     Lookup { safe_id: String },
     ChildLookup { child_id: String },
@@ -159,6 +160,17 @@ pub(crate) fn stop_backups() -> Result<bool> {
     })
 }
 
+pub(crate) fn allow_backup_discard(transaction: &str) -> Result<()> {
+    WORKER_CHANNEL.with(|binding| {
+        let binding = binding.borrow();
+        let stream = binding.as_ref().ok_or(Error("trusted_backup_channel_required"))?;
+        let mut channel = Channel::new(stream, Duration::from_secs(10));
+        family_write(&mut channel, &FamilyRequest::BackupDiscard { transaction: transaction.into() })?;
+        let allowed: bool = family_read(&mut channel)?;
+        require(allowed, "backup_active")
+    })
+}
+
 pub(crate) fn export_capability(export_id: &str, safe_id: &str, family_id: &str) -> Result<Option<Capability>> {
     WORKER_CHANNEL.with(|binding| {
         let binding = binding.borrow();
@@ -247,6 +259,10 @@ fn serve_families(stream: UnixStream, families: Families, slot: u8) -> Result<()
             FamilyRequest::BackupStop => {
                 let metadata = crate::backup_host::stop_all();
                 family_write(&mut channel, &BackupStopped { owners_closed: crate::backup_host::owners_closed()?, metadata_ok: metadata.is_ok() })?;
+            }
+            FamilyRequest::BackupDiscard { transaction } => {
+                let allowed = oblivion_host::scope::within(slot.try_into().map_err(Error)?, || crate::backup_host::can_discard(&transaction)).is_ok();
+                family_write(&mut channel, &allowed)?;
             }
             FamilyRequest::ChildLookup { child_id } => {
                 let parent = crate::storage::child_family_source(&child_id)?;
@@ -1568,7 +1584,28 @@ mod family_tests {
             // report metadata recovery after closing its encrypted archive.
             assert!(!stop_backups().unwrap_or_else(|error| panic!("{}", error.0)));
         });
-        assert_eq!(fs::read(file).unwrap(), b"{broken-metadata");
+        assert_eq!(fs::read(&file).unwrap(), b"{broken-metadata");
+        fs::remove_file(file).unwrap();
+        let transaction = "b".repeat(32);
+        for directory in ["/run/oblivion/general/personal-backups", "/run/oblivion/general/sessions"] {
+            fs::DirBuilder::new().recursive(true).mode(0o700).create(directory).unwrap();
+        }
+        let record = format!("/run/oblivion/general/personal-backups/{transaction}.json");
+        fs::write(&record, serde_json::to_vec(&serde_json::json!({"version":1,"host_opening":"1".repeat(32),
+            "created":0,"maximum":32*1024*1024,"entry":{"transaction":transaction,"slot":0,"kind":"import","safe_id":null,
+            "bytes":null,"outcome":"copying","active":true},"source":null,"receipt":null})).unwrap()).unwrap();
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
+        let pending = format!("/run/oblivion/general/sessions/{transaction}.pending");
+        fs::write(&pending, b"interrupted opaque payload").unwrap();
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+        let original = format!("/run/oblivion/general/sessions/{}.luks", "c".repeat(32));
+        fs::write(&original, b"unrelated original data").unwrap();
+        fs::set_permissions(&original, fs::Permissions::from_mode(0o600)).unwrap();
+        // A stale active bit survives a cold restart, but it is not a PID.
+        // The resident daemon proves absence of ownership over private FD3.
+        worker(&families, 0, || crate::backup_host::discard(&transaction).unwrap_or_else(|error| panic!("{}", error.0)));
+        assert!(!Path::new(&pending).exists() && !Path::new(&record).exists());
+        assert_eq!(fs::read(original).unwrap(), b"unrelated original data");
     }
 
     #[test]

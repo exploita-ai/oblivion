@@ -183,17 +183,21 @@ pub(crate) fn attach(id: &str) -> Result<(UnixStream, String)> {
 
 fn spawn_copy(file: File, id: &str, kind: backup::Kind, maximum: u64, executable: &Path) -> Result<(UnixStream, Copy)> {
     let (client, worker) = UnixStream::pair().map_err(|_| Error("backup_channel_failed"))?;
+    let owner = unsafe { libc::syscall(libc::SYS_pidfd_open, std::process::id(), 0) } as i32;
+    require(owner >= 0, "backup_owner_unavailable")?;
+    let owner = unsafe { OwnedFd::from_raw_fd(owner) };
+    let owner = duplicate(owner.as_raw_fd())?;
     let file = duplicate(file.as_raw_fd())?;
     let worker = duplicate(worker.as_raw_fd())?;
     let mut command = Command::new(executable);
     command.args(["--backup-copy", if kind == backup::Kind::Export { "export" } else { "import" }, id, &maximum.to_string()])
         .env_clear().current_dir("/").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     unsafe { command.pre_exec(move || {
-        if libc::dup2(file.as_raw_fd(), 4) < 0 || libc::dup2(worker.as_raw_fd(), 5) < 0 { return Err(std::io::Error::last_os_error()) }
+        if libc::dup2(file.as_raw_fd(), 4) < 0 || libc::dup2(worker.as_raw_fd(), 5) < 0 || libc::dup2(owner.as_raw_fd(), 6) < 0 { return Err(std::io::Error::last_os_error()) }
         // A copy is not a formatter: it must not inherit storage.lock or the
         // controller's daemon lock, otherwise status/Lock would deadlock.
         if libc::syscall(libc::SYS_close_range, 3u32, 3u32, libc::CLOSE_RANGE_CLOEXEC) != 0
-            || libc::syscall(libc::SYS_close_range, 6u32, u32::MAX, libc::CLOSE_RANGE_CLOEXEC) != 0 { return Err(std::io::Error::last_os_error()) }
+            || libc::syscall(libc::SYS_close_range, 7u32, u32::MAX, libc::CLOSE_RANGE_CLOEXEC) != 0 { return Err(std::io::Error::last_os_error()) }
         Ok(())
     }); }
     let child = command.spawn().map_err(|_| Error("backup_worker_failed"))?;
@@ -341,12 +345,25 @@ pub(crate) fn committed(id: &str, safe_id: &str) -> Result<()> {
 }
 
 pub(crate) fn discard(id: &str) -> Result<()> {
+    // A persisted active bit is not process ownership after a daemon restart.
+    // Only the resident controller can prove that this transaction has no PID.
+    crate::ipc::allow_backup_discard(id)?;
     let record = read(id)?;
     require(record.entry.slot == scope::current(), "backup_slot_changed")?;
-    require(!record.entry.active && !copies().lock().map_err(|_| Error("backup_registry_failed"))?.contains_key(id), "backup_active")?;
     require(record.entry.outcome != backup::Outcome::Committed && crate::storage::committed_personal_restore(id)?.is_none(), "restore_already_committed")?;
     if record.entry.kind == backup::Kind::Import { crate::storage::discard_personal_restore(id)?; }
     fs::remove_file(path(id, record.entry.kind)).map_err(|_| Error("backup_record_failed"))?;
+    Ok(())
+}
+
+pub(crate) fn can_discard(id: &str) -> Result<()> {
+    let record = read(id)?;
+    require(record.entry.slot == scope::current(), "backup_slot_changed")?;
+    let mut registry = copies().lock().map_err(|_| Error("backup_registry_failed"))?;
+    if let Some(copy) = registry.get_mut(id) {
+        require(copy.child.try_wait().map_err(|_| Error("backup_cleanup_required"))?.is_some(), "backup_active")?;
+        registry.remove(id);
+    }
     Ok(())
 }
 
@@ -367,9 +384,21 @@ pub(crate) fn copy_worker(args: &[String]) -> Result<()> {
     unsafe {
         require(libc::geteuid() == 0 && libc::fcntl(4, libc::F_SETFD, libc::FD_CLOEXEC) == 0
             && libc::fcntl(5, libc::F_SETFD, libc::FD_CLOEXEC) == 0
+            && libc::fcntl(6, libc::F_SETFD, libc::FD_CLOEXEC) == 0
             && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0, "invalid_backup_worker")?;
     }
     oblivion_host::control::protect().map_err(|_| Error("dump_protection_failed"))?;
+    let owner = unsafe { OwnedFd::from_raw_fd(6) };
+    // A process pidfd survives the short IPC creator thread. Monitor the whole
+    // daemon even during hashing, which does not poll the transfer channel.
+    std::thread::spawn(move || {
+        let mut event = libc::pollfd { fd: owner.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        loop {
+            let result = unsafe { libc::poll(&mut event, 1, -1) };
+            if result < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted { continue }
+            unsafe { libc::_exit(1); }
+        }
+    });
     let file = unsafe { File::from_raw_fd(4) };
     let socket = unsafe { File::from_raw_fd(5) };
     let mut channel = oblivion_transfer::channel::Channel::new(socket, Duration::from_secs(3600)).map_err(|_| Error("backup_channel_failed"))?;
@@ -389,6 +418,7 @@ fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader};
 
     fn record() -> Record {
         Record { version: 1, host_opening: "1".repeat(32), created: now(), maximum: oblivion_transfer::MAX_ENCRYPTED_VOLUME_BYTES,
@@ -438,6 +468,7 @@ mod tests {
             }
         };
         assert!(matches!(require_safe_available(record.entry.safe_id.as_deref().unwrap()), Err(Error("backup_active"))));
+        assert!(matches!(can_discard(&record.entry.transaction), Err(Error("backup_active"))));
         assert!(require_safe_available(&"4".repeat(32)).is_ok());
         let mut channel = oblivion_transfer::channel::Channel::new(File::from(OwnedFd::from(client)), Duration::from_secs(10)).unwrap();
         endpoint::write_message(&mut channel, &endpoint::OfferRequest { id: record.entry.transaction.clone(),
@@ -460,5 +491,61 @@ mod tests {
         assert_eq!(fs::metadata(source).unwrap().len(), record.maximum);
         assert!(read(&record.entry.transaction).unwrap_or_else(|error| panic!("{}", error.0)).entry.outcome == backup::Outcome::Cancelled);
         drop(lock);
+        let mut supervisor = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "backup_host::tests::supervisor_fixture", "--ignored", "--nocapture", "--test-threads=1"])
+            .env("OBLIVION_BACKUP_SUPERVISOR_HELPER", "1").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        let stdout = supervisor.stdout.take().unwrap();
+        let mut lines = BufReader::new(oblivion_transfer::channel::Channel::new(File::from(OwnedFd::from(stdout)), Duration::from_secs(3)).unwrap().take(4096));
+        let child = loop {
+            let mut line = String::new();
+            assert!(lines.read_line(&mut line).unwrap() > 0, "supervisor failed before spawning its copy");
+            if let Some((_, pid)) = line.split_once("BACKUP_WORKER ") { break pid.trim().parse::<i32>().unwrap() }
+        };
+        let owner = unsafe { libc::syscall(libc::SYS_pidfd_open, child, 0) } as i32;
+        assert!(owner >= 0);
+        let owner = unsafe { OwnedFd::from_raw_fd(owner) };
+        supervisor.kill().unwrap();
+        supervisor.wait().unwrap();
+        let mut closed = libc::pollfd { fd: owner.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let observed = unsafe { libc::poll(&mut closed, 1, 3000) };
+        if observed != 1 || closed.revents & libc::POLLIN == 0 {
+            unsafe { libc::syscall(libc::SYS_pidfd_send_signal, owner.as_raw_fd(), libc::SIGKILL, std::ptr::null::<libc::siginfo_t>(), 0); }
+        }
+        assert_eq!(observed, 1, "orphaned copy retained its source descriptor");
+        assert_ne!(closed.revents & libc::POLLIN, 0);
+        // In a test container PID1 may adopt the finished orphan. This does not
+        // scan processes or affect the pidfd proof when init reaps it instead.
+        unsafe { libc::waitpid(child, std::ptr::null_mut(), libc::WNOHANG); }
+    }
+
+    #[test]
+    #[ignore = "internal subprocess fixture; run only through the revocation test"]
+    fn supervisor_fixture() {
+        assert_eq!(std::env::var("OBLIVION_BACKUP_SUPERVISOR_HELPER").as_deref(), Ok("1"));
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        let executable = std::env::var_os("OBLIVION_BACKUP_WORKER_BINARY").unwrap();
+        let id = "5".repeat(32);
+        let maximum = oblivion_transfer::MAX_ENCRYPTED_VOLUME_BYTES;
+        let child_id = id.clone();
+        let (client, mut copy) = std::thread::spawn(move || spawn_copy(
+            trusted_file(&Path::new(GENERAL).join("sessions/source.luks")).unwrap_or_else(|error| panic!("{}", error.0)),
+            &child_id, backup::Kind::Export, maximum, Path::new(&executable)).unwrap_or_else(|error| panic!("{}", error.0))).join().unwrap();
+        let mut channel = oblivion_transfer::channel::Channel::new(File::from(OwnedFd::from(client)), Duration::from_secs(10)).unwrap();
+        endpoint::write_message(&mut channel, &endpoint::OfferRequest { id, limits: oblivion_transfer::Limits { entries: 1, bytes: maximum },
+            paths: vec![oblivion_transfer::ENCRYPTED_VOLUME_NAME.into()] }).unwrap();
+        assert!(copy.child.try_wait().unwrap().is_none(), "copy died with its ephemeral creator thread");
+        let cpu = || fs::read_to_string(format!("/proc/{}/stat", copy.child.id())).unwrap().split_whitespace().nth(13).unwrap().parse::<u64>().unwrap();
+        let initial = cpu();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while cpu() < initial + 3 {
+            assert!(Instant::now() < deadline, "supervised copy never began hashing");
+            std::thread::yield_now();
+        }
+        println!("BACKUP_WORKER {}", copy.child.id());
+        std::io::stdout().flush().unwrap();
+        let _ = std::io::stdin().read_exact(&mut [0]);
+        drop(channel);
+        let _ = copy.child.kill();
+        let _ = copy.child.wait();
     }
 }
