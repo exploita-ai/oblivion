@@ -170,7 +170,7 @@ jobs:
           print(binaries[0])')
           test -x "$test_binary"
           for fixture in family_rotation_host::tests::interrupted_rewrap_fences_family_and_recovers_original_keys_and_standalone_child family_rotation_host::tests::unknown_member_header_prevents_every_write_and_explicit_rollback_restores_all; do
-            docker run --rm --network none --tmpfs /run:rw,nosuid,nodev,noexec,size=16m \
+            docker run --rm --network none --tmpfs /run:rw,nosuid,nodev,noexec,size=256m \
               --mount "type=bind,src=$test_binary,dst=/storage-tests,readonly" \
               --env OBLIVION_FAMILY_ROTATION_TEST=1 \
               oblivion-native-guest-fixture /bin/sh -ec '
