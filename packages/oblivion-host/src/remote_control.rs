@@ -48,15 +48,19 @@ pub fn probe(path: &Path, budget: Duration) -> Result<String> {
 }
 
 pub fn attach(path: &Path, operation: &str, expected: &str) -> Result<(UnixStream, String)> {
-    if !matches!(operation, "agent-attach" | "file-attach") {
+    attach_scoped(path, operation, None, Some(expected))
+}
+
+pub fn attach_scoped(path: &Path, operation: &str, session: Option<&str>, expected: Option<&str>) -> Result<(UnixStream, String)> {
+    if !matches!(operation, "agent-attach" | "file-attach" | "share-attach" | "share-import-attach" | "share-export-lease") {
         return Err("invalid_attachment".into());
     }
     let stream = connect(
         path,
         operation,
-        None,
+        session,
         &[],
-        Some(expected),
+        expected,
         Duration::from_secs(10),
     )?;
     let client = read_response(&stream, operation)?;
@@ -79,7 +83,7 @@ fn connect(
     budget: Duration,
 ) -> Result<UnixStream> {
     let deadline = Instant::now() + budget;
-    if secret.len() > 4096 {
+    if secret.len() > if operation == "share-import-begin" { oblivion_share::manifest::MAX_METADATA + 4096 } else { 4096 } {
         return Err("secret_too_large".into());
     }
     let metadata = std::fs::symlink_metadata(path)?;
@@ -134,6 +138,8 @@ fn read_response(stream: &UnixStream, operation: &str) -> Result<String> {
         stream,
         Duration::from_secs(if operation == "session-storage" {
             1800
+        } else if matches!(operation, "egress" | "proxy-profiles" | "start-agent" | "open-child-documents") {
+            210
         } else {
             120
         }),

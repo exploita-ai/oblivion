@@ -3,11 +3,21 @@ mod debug;
 #[cfg(target_os = "linux")]
 mod gateway;
 #[cfg(target_os = "linux")]
-mod host_network;
-#[cfg(target_os = "linux")]
-mod host_settings;
+mod safe_access_store;
 #[cfg(target_os = "linux")]
 mod ipc;
+#[cfg(target_os = "linux")]
+mod safe_tools;
+#[cfg(target_os = "linux")]
+mod chat_jobs;
+#[cfg(target_os = "linux")]
+mod idle_controller;
+#[cfg(target_os = "linux")]
+mod share_host;
+#[cfg(target_os = "linux")]
+mod share_import;
+#[cfg(target_os = "linux")]
+mod share_export;
 #[cfg(target_os = "linux")]
 mod onion_host;
 #[cfg(target_os = "linux")]
@@ -23,6 +33,10 @@ mod vm;
 
 #[cfg(target_os = "linux")]
 fn main() {
+    if let Err(error) = ipc::init_worker_channel() {
+        eprintln!("{}", error.0);
+        std::process::exit(1);
+    }
     if let Err(error) = storage::main() {
         // Never print subprocess output, request bodies, passwords or decrypted paths.
         eprintln!("{}", error.0);

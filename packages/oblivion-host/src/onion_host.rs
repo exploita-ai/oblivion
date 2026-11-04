@@ -409,7 +409,7 @@ pub fn serve(config: &Config, uid: u32) -> Result<()> {
     if !job.backup {
         require(
             crate::storage::session_info()?.is_some_and(|(id, mode)| {
-                id == job.session && matches!(mode.as_str(), "documents" | "chat")
+                id == job.session && matches!(mode.as_str(), "documents" | "agent")
             }),
             "session_not_open",
         )?;

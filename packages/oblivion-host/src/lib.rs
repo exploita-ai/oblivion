@@ -1,17 +1,15 @@
-pub mod backup;
+pub mod autolock;
+pub mod activity;
 pub mod agent;
 pub mod channel;
-pub mod chat_export;
-pub mod chat_screen;
-pub mod connections;
 pub mod control;
 pub mod diagnostics;
 #[cfg(target_os = "linux")]
 pub mod display;
 pub mod egress;
-pub mod keys;
+pub mod family;
 pub mod network;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod native_runtime;
 pub mod onion;
 pub mod onion_copy;
@@ -19,12 +17,17 @@ pub mod onion_task;
 pub mod onion_uplink;
 pub mod onion_vm;
 pub mod persistence;
+pub mod proxy_profiles;
 pub mod session_title;
-pub mod settings;
-pub mod terminal;
+pub mod safe_access;
+pub mod sharing;
+pub mod terminal_screen;
+pub mod terminal_guard;
 pub mod tor_profile;
 pub mod transfers;
 pub mod volume;
 
 pub mod remote_control;
 pub mod scope;
+pub mod safe_admin;
+pub mod managed;

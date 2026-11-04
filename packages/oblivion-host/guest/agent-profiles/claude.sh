@@ -8,3 +8,4 @@ export CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1
 unset CLAUDE_CODE_ENABLE_TELEMETRY CLAUDE_CODE_ENHANCED_TELEMETRY_BETA
 unset CLAUDE_CODE_ENABLE_FEEDBACK_SURVEY_FOR_OTEL
 initialize_agent_config /usr/lib/oblivion/guest/agent-profiles/claude.json "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+/usr/bin/python3 -B /usr/lib/oblivion/guest/native-tools/configure.py claude

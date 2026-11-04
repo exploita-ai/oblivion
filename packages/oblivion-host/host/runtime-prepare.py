@@ -6,6 +6,7 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import uuid
 
 
 def run(*arguments):
@@ -16,6 +17,11 @@ def run(*arguments):
 def prepare():
     if os.geteuid() != 0 or 'oblivion.runtime=1' not in Path('/proc/cmdline').read_text().split():
         raise RuntimeError('native_runtime_required')
+    arguments = Path('/proc/cmdline').read_text().split()
+    identities = [value.split('=', 1)[1] for value in arguments if value.startswith('oblivion.runtime-id=')]
+    if len(identities) != 1 or len(identities[0]) != 32 or any(char not in '0123456789abcdef' for char in identities[0]):
+        raise RuntimeError('runtime_identity_required')
+    identity = uuid.UUID(hex=identities[0])
     device = Path('/dev/vdb')
     metadata = device.lstat()
     if not stat.S_ISBLK(metadata.st_mode):
@@ -39,21 +45,18 @@ def prepare():
                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                            stderr=subprocess.DEVNULL, check=False)
     if probe.returncode == 2:
-        # A missing signature alone is insufficient authorization to format.
-        # Newly created sparse RAW disks read as zero across their full size.
+        # Creation is authorized by a per-install identity written only to the
+        # fresh dedicated RAW file by the launcher. An unrelated disk has no
+        # matching marker. No whole-disk read or cache-filling scan is required.
+        marker = f'OBLIVION-RUNTIME-1\n{identity.hex}\n'.encode()
         with device.open('rb', buffering=0) as disk:
-            observed = 0
-            while block := disk.read(4 * 1024**2):
-                if block.count(0) != len(block):
-                    raise RuntimeError('runtime_disk_is_not_empty')
-                os.posix_fadvise(disk.fileno(), observed, len(block), os.POSIX_FADV_DONTNEED)
-                observed += len(block)
-        if observed != size:
-            raise RuntimeError('runtime_disk_size_changed')
-        run('/usr/sbin/mkfs.ext4', '-q', '-m', '0', '-L', 'OBLIVION-RUNTIME', str(device))
+            first = disk.read(4096)
+        if first != marker + bytes(4096 - len(marker)):
+            raise RuntimeError('runtime_disk_identity_mismatch')
+        run('/usr/sbin/mkfs.ext4', '-q', '-m', '0', '-L', 'OBLIVION-RUNTIME', '-U', str(identity), str(device))
     elif probe.returncode == 0:
         values = dict(line.split('=', 1) for line in probe.stdout.decode().splitlines() if '=' in line)
-        if values.get('TYPE') != 'ext4' or values.get('LABEL') != 'OBLIVION-RUNTIME':
+        if values.get('TYPE') != 'ext4' or values.get('LABEL') != 'OBLIVION-RUNTIME' or values.get('UUID') != str(identity):
             raise RuntimeError('runtime_disk_identity_mismatch')
         checked = subprocess.run(['/usr/sbin/e2fsck', '-p', str(device)],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -67,8 +70,9 @@ def prepare():
     run('/usr/bin/mount', '-t', 'ext4', '-o', 'nodev,nosuid,noexec', str(device), str(destination))
     destination.chmod(0o700)
     config = json.loads(Path('/etc/oblivion/controller.json').read_text())
-    config.update(usb_persistence=False, network_profiles=False,
-                  manage_os_preferences=False, general_image=str(destination / 'general.luks'))
+    config.update(usb_persistence=False, general_image=str(destination / 'general.luks'),
+                  general_mib=min(1024 * 1024, size // (1024 * 1024) - 512),
+                  session_mib=2048, ephemeral_mib=512)
     runtime = Path('/run/oblivion-runtime')
     runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
     runtime.chmod(0o700)

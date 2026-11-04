@@ -1,6 +1,6 @@
 """One native CLI per hotplug port, with independent PTY or stdin/out/err pipes.
 
-The host sends u32be JSON length followed by {agent, argv, terminal}. Terminal
+The host sends u32be JSON length followed by a tagged agent or workspace request. Terminal
 is null for pipes or {rows, cols} for a PTY. Frames are u8 kind + u32be length
 + payload. Kinds: stdin=0, stdout=1, stderr=2, resize=3 (u16be rows, cols),
 exit=4 (i32be status), stdin EOF=5, signal=6 (i32be Linux signal number).
@@ -44,7 +44,16 @@ def request(fd):
     if not 0 < size <= LIMIT:
         raise ValueError("invalid_agent_request")
     value = json.loads(receive(size))
-    if not isinstance(value, dict) or set(value) != {"agent", "argv", "terminal"}:
+    if not isinstance(value, dict):
+        raise ValueError("invalid_agent_request")
+    if value.get("kind") == "workspace":
+        if set(value) != {"kind", "terminal"} or not isinstance(value["terminal"], dict):
+            raise ValueError("invalid_workspace_request")
+        terminal = value["terminal"]
+        if set(terminal) != {"rows", "cols"} or any(type(terminal[key]) is not int or not 1 <= terminal[key] <= 1000 for key in ("rows", "cols")):
+            raise ValueError("invalid_workspace_request")
+        return value
+    if set(value) != {"kind", "agent", "argv", "terminal", "managed"} or value["kind"] != "agent":
         raise ValueError("invalid_agent_request")
     if value["agent"] not in ("codex", "claude", "opencode2"):
         raise ValueError("invalid_agent_request")
@@ -58,6 +67,17 @@ def request(fd):
             raise ValueError("invalid_agent_request")
         if any(type(terminal[key]) is not int or not 1 <= terminal[key] <= 1000 for key in ("rows", "cols")):
             raise ValueError("invalid_agent_request")
+    managed = value["managed"]
+    if managed is not None:
+        if not isinstance(managed, dict) or value["terminal"] is not None or value["argv"]:
+            raise ValueError("invalid_managed_job")
+        if managed.get("operation") == "start" and set(managed) == {"operation", "job_id", "request_id", "task"}:
+            if not isinstance(managed["request_id"], str) or not re.fullmatch(r"[a-f0-9]{32}", managed["request_id"]) or not isinstance(managed["task"], str) or not managed["task"].strip() or len(managed["task"].encode()) > 16384 or "\0" in managed["task"]:
+                raise ValueError("invalid_managed_job")
+        elif managed != {"operation": "inspect", "job_id": managed.get("job_id")}:
+            raise ValueError("invalid_managed_job")
+        if not isinstance(managed["job_id"], str) or not re.fullmatch(r"[a-f0-9]{32}", managed["job_id"]):
+            raise ValueError("invalid_managed_job")
     return value
 
 
@@ -84,8 +104,15 @@ def run(fd, value):
     env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
     if terminal:
         env.update(TERM="xterm-256color", COLORTERM="truecolor")
+    managed = value.get("managed")
+    command = (["/usr/lib/oblivion/guest/shell-workspace.sh"] if value["kind"] == "workspace"
+               else ["/usr/lib/oblivion/guest/agent.sh", value["agent"], *value["argv"]])
+    if managed is not None:
+        command = ["/usr/bin/python3", "-B", "/usr/lib/oblivion/guest/managed-job.py", managed["operation"], managed["job_id"]]
+        if managed["operation"] == "start":
+            command.extend([value["agent"], managed["request_id"]])
     process = subprocess.Popen(
-        ["/usr/lib/oblivion/guest/agent.sh", value["agent"], *value["argv"]],
+        command,
         stdin=slave if terminal else subprocess.PIPE,
         stdout=slave if terminal else subprocess.PIPE,
         stderr=slave if terminal else subprocess.PIPE,
@@ -97,8 +124,8 @@ def run(fd, value):
     stdin = master if terminal else process.stdin.fileno()
     incoming = bytearray()
     outbound = bytearray()
-    pending_stdin = bytearray()
-    stdin_eof = False
+    pending_stdin = bytearray(managed["task"].encode() if managed is not None and managed["operation"] == "start" else b"")
+    stdin_eof = managed is not None
     registered = {}
     exit_queued = False
     os.set_blocking(fd, False)

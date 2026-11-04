@@ -5,7 +5,7 @@ pub const MIB: u64 = 1024 * 1024;
 pub const MAX_MIB: u64 = 1024 * 1024;
 pub const RESERVE_BYTES: u64 = 64 * MIB;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Request {
     Create {

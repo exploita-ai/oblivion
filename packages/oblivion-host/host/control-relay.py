@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Private VZ host-to-controller transport. No TCP listener or filesystem export.
+"""Private native host transport. No TCP listener or filesystem export.
 
 Request: u32be JSON length, JSON local-control header with version=1, then secret.
 Response: u32be JSON length, JSON local-control response. A successful agent-attach
@@ -9,6 +9,7 @@ The local controller connection remains open as the attachment's ownership lease
 
 import array
 import concurrent.futures
+import hmac
 import json
 import os
 import resource
@@ -16,14 +17,53 @@ import selectors
 import socket
 import struct
 import threading
+import stat
+from pathlib import Path
 
 CONTROL = "/run/oblivion-control.sock"
 PORT = 4050
 MAX_HEADER = 1024
 MAX_SECRET = 4096
+MAX_IMPORT_SECRET = 4 * 1024 * 1024 + 4096
 MAX_RESPONSE = 1024 * 1024
 MAX_BUFFER = 256 * 1024
 MAX_CLIENTS = 64
+AUTH_HELLO = b"OBLVCTL1"
+AUTH_ACK = b"OBLVAUT1"
+
+
+def runtime_token():
+    arguments = Path("/proc/cmdline").read_text().split()
+    selected = [value.split("=", 1)[1] for value in arguments if value.startswith("oblivion.runtime-backend=")]
+    if "oblivion.runtime=1" not in arguments or len(selected) != 1:
+        raise ValueError("runtime_backend_profile_required")
+    if selected[0] == "apple-vz":
+        return None
+    if selected[0] != "qemu-kvm":
+        raise ValueError("runtime_backend_profile_required")
+    fd = os.open("/run/oblivion-runtime-auth/control-token", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size != 32 or info.st_nlink != 1:
+            raise ValueError("private_runtime_token_required")
+        with os.fdopen(fd, "rb", closefd=False) as source:
+            token = bytearray(32)
+            if source.readinto(token) != 32:
+                token[:] = bytes(32)
+                raise ValueError("private_runtime_token_required")
+            return token
+    finally:
+        os.close(fd)
+
+
+def authenticate_linux(remote, token):
+    offered = exact(remote, len(AUTH_HELLO) + 32)
+    try:
+        if not hmac.compare_digest(memoryview(offered)[:len(AUTH_HELLO)], AUTH_HELLO) or not hmac.compare_digest(memoryview(offered)[len(AUTH_HELLO):], token):
+            raise ValueError("untrusted_runtime_client")
+        remote.sendall(AUTH_ACK)
+    finally:
+        offered[:] = bytes(len(offered))
 
 
 def exact(stream, size):
@@ -126,11 +166,15 @@ def bridge(remote, guest, lease):
                     pending.extend(data)
 
 
-def serve_client(remote):
+def serve_client(remote, token, controller=CONTROL):
     attached = False
+    authenticated = token is None
     secret = bytearray()
     try:
         remote.settimeout(10)
+        if token is not None:
+            authenticate_linux(remote, token)
+            authenticated = True
         length = struct.unpack("!I", exact(remote, 4))[0]
         if not 0 < length <= MAX_HEADER:
             raise ValueError("invalid_header_length")
@@ -139,19 +183,16 @@ def serve_client(remote):
             raise ValueError("invalid_protocol_version")
         del header["version"]
         size = header.get("secret_len")
-        if type(size) is not int or not 0 <= size <= MAX_SECRET:
+        if type(size) is not int or not 0 <= size <= (MAX_IMPORT_SECRET if header.get("operation") == "share-import-begin" else MAX_SECRET):
             raise ValueError("invalid_secret_length")
         operation = header.get("operation")
-        if operation in ("console", "terminal"):
-            error_response(remote, "remote_operation_unavailable")
-            return
         local_header = json.dumps(header, separators=(",", ":")).encode()
         if len(local_header) > MAX_HEADER:
             raise ValueError("invalid_header_length")
         secret = exact(remote, size)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as local:
             local.settimeout(10)
-            local.connect(CONTROL)
+            local.connect(controller)
             uid = struct.unpack("3i", local.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))[1]
             if uid != 0:
                 raise ValueError("untrusted_controller")
@@ -159,10 +200,10 @@ def serve_client(remote):
             local.sendall(local_header)
             local.sendall(secret)
             secret[:] = bytes(len(secret))
-            timeout = 1800 if operation == "session-storage" else 120
+            timeout = 1800 if operation == "session-storage" else 210 if operation in ("egress", "proxy-profiles", "start-agent", "open-child-documents") else 120
             local.settimeout(timeout)
             remote.settimeout(timeout)
-            if operation in ("agent-attach", "file-attach"):
+            if operation in ("agent-attach", "file-attach", "share-attach", "share-import-attach", "share-export-lease"):
                 guest, rejection = descriptor(local)
                 if guest is None:
                     response(remote, rejection)
@@ -177,7 +218,7 @@ def serve_client(remote):
     except (OSError, EOFError, ValueError, TypeError, struct.error):
         # No payloads, provider errors, argv or decrypted paths reach logs.
         # Once attached, framing belongs to the agent protocol exclusively.
-        if not attached:
+        if not attached and authenticated:
             try:
                 error_response(remote, "remote_control_failed")
             except OSError:
@@ -191,18 +232,19 @@ def main():
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     os.umask(0o077)
     active = threading.BoundedSemaphore(MAX_CLIENTS)
+    token = runtime_token()
     with socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM) as listener:
         listener.bind((socket.VMADDR_CID_ANY, PORT))
         listener.listen(MAX_CLIENTS)
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CLIENTS) as pool:
             while True:
                 remote, address = listener.accept()
-                # VZ's physical host has CID 2. Guest-local and other CIDs are
-                # rejected before reading any request or invoking the controller.
+                # CID2 identifies the hardware host, not its Unix user. Linux
+                # additionally proves its per-boot token before any v1 frame.
                 if address[0] != socket.VMADDR_CID_HOST or not active.acquire(blocking=False):
                     remote.close()
                     continue
-                future = pool.submit(serve_client, remote)
+                future = pool.submit(serve_client, remote, token)
                 future.add_done_callback(lambda _: active.release())
 
 

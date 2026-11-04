@@ -23,7 +23,7 @@ ExecStart=/usr/bin/oblivion-storage --config /run/oblivion-runtime/controller.js
 ExecStopPost=
 ExecStopPost=/usr/bin/oblivion-storage --config /run/oblivion-runtime/controller.json recover
 EOF
-for unit in oblivion-runtime-prepare.service oblivion-control-relay.service; do
+for unit in oblivion-runtime-prepare.service oblivion-runtime-auth.service oblivion-control-relay.service; do
     directory=/usr/lib/systemd/system
     [ ! -f "/etc/systemd/system/$unit" ] || directory=/etc/systemd/system
     ln -s "$directory/$unit" "$early/multi-user.target.wants/$unit"

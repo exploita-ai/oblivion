@@ -1,7 +1,7 @@
 [Unit]
 Description=Oblivion private native launcher transport
-Requires=oblivion-controller.service
-After=oblivion-controller.service
+Requires=oblivion-controller.service oblivion-runtime-auth.service
+After=oblivion-controller.service oblivion-runtime-auth.service
 ConditionVirtualization=vm
 ConditionKernelCommandLine=oblivion.runtime=1
 StartLimitIntervalSec=0

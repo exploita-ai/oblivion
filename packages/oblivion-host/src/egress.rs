@@ -70,6 +70,8 @@ impl Profile {
         self.transport.metadata()
     }
 
+    pub fn transport(&self) -> &Transport { &self.transport }
+
     pub fn into_transport(self) -> Transport {
         self.transport
     }

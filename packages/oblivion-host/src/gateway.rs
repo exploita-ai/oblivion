@@ -3,7 +3,6 @@ use crate::vm::{self, Role};
 use oblivion_host::channel::Channel;
 use oblivion_transport::Transport;
 use oblivion_transport::policy::Tools;
-use oblivion_transport::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -30,6 +29,9 @@ enum Request<'a> {
     Revoke {},
     Policy {
         tools: Tools,
+    },
+    TransportChange {
+        transport: Transport,
     },
     Check {},
     Observe {},
@@ -171,7 +173,7 @@ pub fn grant(token: &str, tools: Option<Tools>) -> Result<()> {
 // OnionShare has its own Tor gateway. Serialize its lifecycle with rotation
 // before starting any external transfer; an unacknowledged interlock fails shut.
 pub fn rotation_allowed(allowed: bool) -> Result<()> {
-    if crate::storage::session_info()?.is_some_and(|(_, mode)| mode == "chat") && state()? == "active" {
+    if crate::storage::session_info()?.is_some_and(|(_, mode)| mode == "agent") && state()? == "active" {
         if let Err(error) = request(&Request::RotationAllowed { allowed }, true) {
             destroy()?;
             return Err(error);
@@ -198,6 +200,35 @@ pub fn policy(tools: Tools) -> Result<()> {
     Ok(())
 }
 
+/// Reconfigure this Safe's existing gateway without replacing its Ethernet
+/// socket or the running agent VM. A confirmed failure leaves the route blocked
+/// and retryable. An ambiguous acknowledgement destroys the gateway.
+pub fn change_transport(transport: &Transport) -> Result<()> {
+    transport.validate().map_err(Error)?;
+    require(!crate::onion_host::prepared()?, "transfer_active")?;
+    require(state()? == "active", "gateway_unavailable")?;
+    let active = crate::storage::session_info()?.is_some_and(|(_, mode)| mode == "agent");
+    #[derive(Serialize)]
+    struct Change<'a> { operation: &'static str, transport: &'a Transport }
+    let bytes = Zeroizing::new(serde_json::to_vec(&Change { operation: "transport-change", transport })
+        .map_err(|_| Error("gateway_encode_failed"))?);
+    let result = (|| {
+        let stream = UnixStream::connect(&socket()).map_err(|_| Error("gateway_unavailable"))?;
+        peer(&stream, 0)?;
+        let mut channel = Channel::new(&stream, Duration::from_secs(180));
+        send(&mut channel, &bytes)?;
+        let status: Status = serde_json::from_slice(&receive(&mut channel)?)
+            .map_err(|_| Error("invalid_gateway_status"))?;
+        require(status.configured && status.active == active, "gateway_state_mismatch")?;
+        Ok(status.ok)
+    })();
+    match result {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Error("transport_change_blocked")),
+        Err(error) => { destroy()?; Err(error) }
+    }
+}
+
 pub fn ready() -> Result<()> {
     require(state()? == "active", "gateway_unavailable")?;
     request(&Request::Check {}, false)
@@ -222,7 +253,6 @@ fn request(request: &Request<'_>, active: bool) -> Result<()> {
 
 pub fn serve(
     config: &vm::Config,
-    key: Option<crate::storage::ApiKey>,
     transport: Transport,
     network: bool,
 ) -> Result<()> {
@@ -233,14 +263,14 @@ pub fn serve(
     let _lock = lock_named("gateway.lock")?;
     config.validate()?;
     config.start_role(Role::Gateway)?;
-    let result = connected(key, transport, network);
+    let result = connected(transport, network);
     let stopped = vm::stop_role(Role::Gateway, true);
     result?;
     stopped
 }
 
-fn connected(key: Option<crate::storage::ApiKey>, transport: Transport, network: bool) -> Result<()> {
-    let tor = matches!(transport, Transport::Tor {});
+fn connected(transport: Transport, network: bool) -> Result<()> {
+    let mut tor = matches!(transport, Transport::Tor {});
     let stream = UnixStream::connect(format!("{}/control.sock", Role::Gateway.runtime()))
         .map_err(|_| Error("gateway_channel_unavailable"))?;
     peer(&stream, oblivion_host::scope::uid(vm::GATEWAY_UID))?;
@@ -249,24 +279,11 @@ fn connected(key: Option<crate::storage::ApiKey>, transport: Transport, network:
     let ready: Ready = serde_json::from_slice(&receive(&mut channel)?)
         .map_err(|_| Error("invalid_gateway_ready"))?;
     require(ready.ready && ready.version == 1, "invalid_gateway_ready")?;
-    #[derive(Serialize)]
-    struct Configure<'a> {
-        operation: &'static str,
-        provider: Provider,
-        api_key: &'a str,
-        transport: &'a Transport,
-    }
-    let request = Zeroizing::new(match key.as_ref() {
-        Some(key) => serde_json::to_vec(&Configure {
-            operation: "configure", provider: key.provider, transport: &transport,
-            api_key: std::str::from_utf8(&key.secret).map_err(|_| Error("invalid_api_key"))?,
-        }),
-        None => serde_json::to_vec(&serde_json::json!({"operation":"configure-tools", "transport":&transport})),
-    }.map_err(|_| Error("gateway_encode_failed"))?);
+    let request = Zeroizing::new(serde_json::to_vec(&serde_json::json!({"operation":"configure-tools", "transport":&transport}))
+        .map_err(|_| Error("gateway_encode_failed"))?);
     let mut channel = Channel::new(&stream, Duration::from_secs(30));
     send(&mut channel, &request)?;
     drop(request);
-    drop(key);
     drop(transport);
     configured(&mut channel, false)?;
     // SOCKS does not read, import, checkpoint or mutate Tor's saved guards.
@@ -275,7 +292,7 @@ fn connected(key: Option<crate::storage::ApiKey>, transport: Transport, network:
     } else {
         None
     };
-    let writable = tor && crate::storage::tor_state_writable()?;
+    let writable = crate::storage::tor_state_writable()?;
     let bootstrapped = if tor {
         #[derive(Serialize)]
         struct Initialize<'a> {
@@ -309,6 +326,7 @@ fn connected(key: Option<crate::storage::ApiKey>, transport: Transport, network:
         .map_err(|_| Error("gateway_socket_failed"))?;
     crate::ipc::notify_ready()?;
     let mut active = false;
+    let mut transport_failed = false;
     let mut session = None;
     let mut checked = Instant::now();
     // Only privileged storage workers can request a grant or revocation.
@@ -339,6 +357,37 @@ fn connected(key: Option<crate::storage::ApiKey>, transport: Transport, network:
                         &serde_json::to_vec(&observation)
                             .map_err(|_| Error("gateway_encode_failed"))?,
                     )?;
+                    continue;
+                }
+                if let Request::TransportChange { transport: selected } = &request {
+                    require(network || matches!(selected, Transport::Tor {}), "external_proxy_requires_network")?;
+                    if matches!(selected, Transport::Tor {}) && saved.is_none() {
+                        saved = crate::storage::tor_state(oblivion_host::tor_profile::Purpose::Model)?;
+                    }
+                    #[derive(Serialize)]
+                    struct Change<'a> { operation: &'static str, transport: &'a Transport, state: Option<&'a str> }
+                    let bytes = Zeroizing::new(serde_json::to_vec(&Change {
+                        operation: "transport-change", transport: selected,
+                        state: saved.as_ref().map(oblivion_tor_state::State::as_str),
+                    }).map_err(|_| Error("gateway_encode_failed"))?);
+                    let mut private = Channel::new(&stream, Duration::from_secs(150));
+                    send(&mut private, &bytes)?;
+                    let status: Status = serde_json::from_slice(&receive(&mut private)?)
+                        .map_err(|_| Error("invalid_gateway_status"))?;
+                    require(status.configured && status.active == active, "gateway_state_mismatch")?;
+                    if status.ok {
+                        let had_tor = tor;
+                        tor = matches!(selected, Transport::Tor {});
+                        if had_tor || tor { checkpoint(&stream, &mut saved, writable, false)?; }
+                    }
+                    transport_failed = !status.ok;
+                    observed = observe(&stream)?;
+                    observed_at = Instant::now();
+                    checked = Instant::now();
+                    network_ready = status.ok && observed.isolated && observed.ready;
+                    send(&mut Channel::new(&client, Duration::from_secs(5)),
+                        &serde_json::to_vec(&serde_json::json!({"ok":status.ok,"configured":true,"active":active}))
+                            .map_err(|_| Error("gateway_encode_failed"))?)?;
                     continue;
                 }
                 if matches!(request, Request::Check {} | Request::Grant { .. })
@@ -381,7 +430,7 @@ fn connected(key: Option<crate::storage::ApiKey>, transport: Transport, network:
                         true
                     }
                     Request::Check {} => active,
-                    Request::Stop {} | Request::Observe {} => unreachable!(),
+                    Request::Stop {} | Request::Observe {} | Request::TransportChange { .. } => unreachable!(),
                 };
                 exchange(
                     &stream,
@@ -417,7 +466,7 @@ fn connected(key: Option<crate::storage::ApiKey>, transport: Transport, network:
         exchange(&stream, b"{\"operation\":\"status\"}", active)?;
         if checked.elapsed() >= Duration::from_secs(4) {
             checked = Instant::now();
-            let bootstrapped = if tor {
+            let bootstrapped = if tor && !transport_failed {
                 checkpoint(&stream, &mut saved, writable, false)?
             } else {
                 true

@@ -1,0 +1,35 @@
+[Unit]
+Description=Oblivion per-boot native control authentication
+ConditionVirtualization=vm
+ConditionKernelCommandLine=oblivion.runtime=1
+After=local-fs.target systemd-udev-trigger.service
+Before=oblivion-control-relay.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Group=1000
+ExecStart=/usr/bin/python3 -B /usr/lib/oblivion/host/runtime-auth.py
+RuntimeDirectory=oblivion-runtime-auth
+RuntimeDirectoryMode=0710
+TimeoutStartSec=65
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/oblivion-runtime-auth
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+StandardInput=null
+StandardOutput=null
+StandardError=null

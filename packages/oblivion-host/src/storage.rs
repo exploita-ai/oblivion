@@ -1,13 +1,12 @@
 use oblivion_host::scope;
-use oblivion_host::{egress, keys, network, persistence, settings, transfers};
+use oblivion_host::{egress, family, network, persistence, proxy_profiles, safe_access, transfers};
 use oblivion_transport::policy::{Access, Policy, Session, Tools};
-use oblivion_transport::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use zeroize::Zeroizing;
@@ -20,9 +19,485 @@ const MOUNT: &str = "/run/oblivion/general";
 const PROFILE: &str = "/run/oblivion/general/profile";
 const EPHEMERAL: &str = "/run/oblivion/ephemeral.luks";
 const MIB: u64 = 1024 * 1024;
+const RAM_PROFILE_RESERVE_MIB: u64 = 16;
+const CHILD_LIMIT: usize = 128;
+const CHILD_DIRECT_LIMIT: usize = 8;
+const CHILD_BRANCH_LIMIT: usize = 32;
+const CHILD_DEPTH_LIMIT: usize = 4;
+const CHILD_RECORD_LIMIT: usize = 24 * 1024;
+
+fn share_imports() -> crate::share_import::Repository {
+    crate::share_import::Repository::new(Path::new(MOUNT))
+}
+
+pub(crate) fn persistent_safe_import(id: &str) -> Result<Option<crate::share_import::Imported>> {
+    validate_id(id)?;
+    Ok(share_imports().imported()?.into_iter().find(|safe| safe.id == id))
+}
+
+pub(crate) fn persistent_safe_parents() -> Result<Vec<(String, String)>> {
+    Ok(safe_relations(&agent_safe_records()?)?.into_iter().map(|relation| (relation.id, relation.parent)).collect())
+}
+
+/// Two current origins share one Safe identity contract: ordinary volumes and
+/// atomically published portable collections. Pending imports are never read.
+pub(crate) fn persistent_safe_path(id: &str) -> Result<PathBuf> {
+    validate_id(id)?;
+    let ordinary = Path::new(MOUNT).join(format!("sessions/{id}.luks"));
+    if let Some(imported) = share_imports().imported()?.into_iter().find(|safe| safe.id == id) {
+        require(!ordinary.try_exists().map_err(|_| Error("image_check_failed"))?, "duplicate_safe_identity")?;
+        return Ok(imported.directory.join("volume.luks"));
+    }
+    Ok(ordinary)
+}
+
+pub(crate) fn persistent_safe_profile(id: &str) -> Result<PathBuf> {
+    validate_id(id)?;
+    Ok(match share_imports().imported()?.into_iter().find(|safe| safe.id == id) {
+        Some(imported) => imported.directory.join("profile"),
+        None => Path::new(PROFILE).join("sessions").join(id),
+    })
+}
+
+fn persistent_safe_title(id: &str) -> Result<PathBuf> {
+    validate_id(id)?;
+    Ok(match share_imports().imported()?.into_iter().find(|safe| safe.id == id) {
+        Some(imported) => imported.directory.join("title"),
+        None => Path::new(MOUNT).join(format!("sessions/{id}.title")),
+    })
+}
+
+fn default_ephemeral_mib() -> u64 { 512 }
 
 pub struct Error(pub &'static str);
 pub(crate) type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentSafeRequest {
+    agent: String,
+    task: Zeroizing<String>,
+    request_id: String,
+    creator_chat_id: Option<String>,
+}
+
+impl AgentSafeRequest {
+    fn validate(&self) -> Result<()> {
+        validate_id(&self.request_id)?;
+        require(matches!(self.agent.as_str(), "codex" | "claude" | "opencode2")
+            && !self.task.trim().is_empty() && self.task.len() <= 16384 && !self.task.contains('\0')
+            && self.creator_chat_id.as_ref().is_none_or(|id| !id.is_empty() && id.len() <= 256
+                && !id.chars().any(char::is_control)), "invalid_safe_child_request")
+    }
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum AgentSafeState {
+    Creating,
+    AwaitingStart,
+    Failed,
+    RecoveryRequired,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AgentSafeRecord {
+    version: u8,
+    id: String,
+    parent: String,
+    created_by_agent: bool,
+    agent: String,
+    creator_chat_id: Option<String>,
+    request_id: String,
+    // Only family-authorized future delivery can open this task. This General
+    // journal is separate from portable Share and raw inner-volume backups.
+    sealed_task: family::SealedTask,
+    ephemeral: bool,
+    mib: u64,
+    state: AgentSafeState,
+}
+
+#[derive(Serialize)]
+struct AgentSafeInfo {
+    id: String,
+    parent: String,
+    created_by_agent: bool,
+    agent: String,
+    creator_chat_id: Option<String>,
+    request_id: String,
+    ephemeral: bool,
+    mib: u64,
+    state: AgentSafeState,
+}
+
+#[derive(Serialize)]
+struct AgentSafeLimits {
+    direct_children: usize,
+    descendants: usize,
+    depth: usize,
+    records: usize,
+}
+
+impl AgentSafeRecord {
+    fn validate(&self) -> Result<()> {
+        validate_id(&self.id)?;
+        validate_id(&self.parent)?;
+        validate_id(&self.request_id)?;
+        oblivion_host::volume::size(self.mib).map_err(Error)?;
+        require(self.version == 1 && self.created_by_agent && self.id != self.parent
+            && matches!(self.agent.as_str(), "codex" | "claude" | "opencode2")
+            && self.creator_chat_id.as_ref().is_none_or(|id| !id.is_empty() && id.len() <= 256
+                && !id.chars().any(char::is_control)), "invalid_safe_provenance")
+    }
+
+    fn info(&self) -> AgentSafeInfo {
+        AgentSafeInfo {
+            id: self.id.clone(), parent: self.parent.clone(), created_by_agent: true,
+            agent: self.agent.clone(), creator_chat_id: self.creator_chat_id.clone(),
+            request_id: self.request_id.clone(), ephemeral: self.ephemeral, mib: self.mib,
+            // Seeing an unfinished journal outside its locked creation request
+            // is recovery work, never evidence that an agent is running.
+            state: if matches!(self.state, AgentSafeState::Creating) {
+                AgentSafeState::RecoveryRequired
+            } else { self.state },
+        }
+    }
+
+    fn directory(&self) -> PathBuf {
+        if self.ephemeral { Path::new(RUN).join("agent-safes/provenance") }
+        else { Path::new(PROFILE).join("safe-provenance") }
+    }
+
+    fn image(&self, pending: bool) -> PathBuf {
+        let directory = if self.ephemeral { Path::new(RUN).join("agent-safes/images") }
+            else { Path::new(MOUNT).join("sessions") };
+        directory.join(format!("{}.{}", self.id, if pending { "pending" } else { "luks" }))
+    }
+}
+
+fn private_directory(path: &Path, create: bool) -> Result<bool> {
+    if !path.try_exists().map_err(|_| Error("safe_profile_unavailable"))? {
+        if !create { return Ok(false) }
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(path)
+            .map_err(|_| Error("safe_profile_unavailable"))?;
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|_| Error("safe_profile_unavailable"))?;
+    require(metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o077 == 0, "unsafe_safe_profile")?;
+    Ok(true)
+}
+
+fn agent_safe_records() -> Result<Vec<AgentSafeRecord>> {
+    let mut records = Vec::new();
+    let mut directories = vec![(Path::new(RUN).join("agent-safes/provenance"), true)];
+    if mount_mode()? != MountMode::Closed {
+        directories.push((Path::new(PROFILE).join("safe-provenance"), false));
+    }
+    for (directory, ephemeral) in directories {
+        if !private_directory(&directory, false)? { continue }
+        let mut entries = 0;
+        for entry in fs::read_dir(&directory).map_err(|_| Error("safe_profile_unavailable"))? {
+            entries += 1;
+            require(entries <= CHILD_LIMIT * 2, "safe_provenance_limit")?;
+            let entry = entry.map_err(|_| Error("safe_profile_unavailable"))?;
+            let name = entry.file_name();
+            let name = name.to_str().ok_or(Error("invalid_safe_provenance"))?;
+            if name.ends_with(".pending") { continue }
+            let id = name.strip_suffix(".json").ok_or(Error("invalid_safe_provenance"))?;
+            validate_id(id)?;
+            let mut bytes = Zeroizing::new(Vec::new());
+            trusted_file(&entry.path())?.take(CHILD_RECORD_LIMIT as u64 + 1).read_to_end(&mut bytes)
+                .map_err(|_| Error("safe_profile_unavailable"))?;
+            require(bytes.len() <= CHILD_RECORD_LIMIT, "invalid_safe_provenance")?;
+            let record: AgentSafeRecord = serde_json::from_slice(&bytes).map_err(|_| Error("invalid_safe_provenance"))?;
+            record.validate()?;
+            require(record.id == id && record.ephemeral == ephemeral
+                && !records.iter().any(|existing: &AgentSafeRecord| existing.id == id), "invalid_safe_provenance")?;
+            records.push(record);
+            require(records.len() <= CHILD_LIMIT, "safe_provenance_limit")?;
+        }
+    }
+    records.sort_by(|left, right| left.id.cmp(&right.id));
+    for record in &records { safe_ancestors(&records, &record.id)?; }
+    Ok(records)
+}
+
+fn write_agent_safe(record: &AgentSafeRecord) -> Result<()> {
+    let directory = record.directory();
+    private_directory(&directory, true)?;
+    let pending = directory.join(format!("{}.pending", record.id));
+    let path = directory.join(format!("{}.json", record.id));
+    let bytes = Zeroizing::new(serde_json::to_vec(record).map_err(|_| Error("encode_failed"))?);
+    require(bytes.len() <= CHILD_RECORD_LIMIT, "invalid_safe_provenance")?;
+    for existing in [&pending, &path] {
+        if existing.try_exists().map_err(|_| Error("safe_profile_unavailable"))? { trusted_file(existing)?; }
+    }
+    let mut file = OpenOptions::new().write(true).create(true).truncate(true).mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&pending)
+        .map_err(|_| Error("safe_profile_write_failed"))?;
+    file.write_all(&bytes).and_then(|()| file.sync_all()).map_err(|_| Error("safe_profile_write_failed"))?;
+    fs::rename(&pending, &path).map_err(|_| Error("safe_profile_write_failed"))?;
+    sync_directory(&directory)
+}
+
+struct SafeRelation { id: String, parent: String }
+
+fn safe_relations(records: &[AgentSafeRecord]) -> Result<Vec<SafeRelation>> {
+    let mut relations: Vec<_> = records.iter().map(|record| SafeRelation { id: record.id.clone(), parent: record.parent.clone() }).collect();
+    for imported in share_imports().imported()? {
+        require(!records.iter().any(|record| record.id == imported.id), "duplicate_safe_identity")?;
+        if let Some(parent) = imported.parent { relations.push(SafeRelation { id: imported.id, parent }); }
+    }
+    Ok(relations)
+}
+
+fn safe_ancestors(records: &[AgentSafeRecord], id: &str) -> Result<Vec<String>> {
+    relation_ancestors(&safe_relations(records)?, id)
+}
+
+fn relation_ancestors(records: &[SafeRelation], id: &str) -> Result<Vec<String>> {
+    let mut ancestors = Vec::new();
+    let mut current = id;
+    while let Some(record) = records.iter().find(|record| record.id == current) {
+        require(record.parent != id && !ancestors.contains(&record.parent), "invalid_safe_provenance")?;
+        ancestors.push(record.parent.clone());
+        require(ancestors.len() <= CHILD_DEPTH_LIMIT, "safe_depth_limit")?;
+        current = &record.parent;
+    }
+    Ok(ancestors)
+}
+
+fn safe_branch(records: &[AgentSafeRecord], root: &str) -> Result<Vec<(String, usize)>> {
+    relation_branch(&safe_relations(records)?, root)
+}
+
+fn relation_branch(records: &[SafeRelation], root: &str) -> Result<Vec<(String, usize)>> {
+    let mut branch = vec![(root.to_string(), 0)];
+    for record in records {
+        if let Some(depth) = relation_ancestors(records, &record.id)?.iter().position(|parent| parent == root) {
+            branch.push((record.id.clone(), depth + 1));
+        }
+    }
+    branch.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+    Ok(branch)
+}
+
+fn validate_child_limits(records: &[AgentSafeRecord], parent: &str) -> Result<()> {
+    let relations = safe_relations(records)?;
+    let ancestors = relation_ancestors(&relations, parent)?;
+    require(records.len() < CHILD_LIMIT, "safe_provenance_limit")?;
+    require(relations.iter().filter(|record| record.parent == parent).count() < CHILD_DIRECT_LIMIT, "safe_child_limit")?;
+    require(ancestors.len() < CHILD_DEPTH_LIMIT, "safe_depth_limit")?;
+    for ancestor in ancestors.iter().map(String::as_str).chain(std::iter::once(parent)) {
+        require(relation_branch(&relations, ancestor)?.len() <= CHILD_BRANCH_LIMIT, "safe_branch_limit")?;
+    }
+    Ok(())
+}
+
+fn branch_latches() -> Result<Vec<(String, PathBuf)>> {
+    let directory = Path::new(RUN).join("closing-branches");
+    if !private_directory(&directory, false)? { return Ok(Vec::new()) }
+    let mut latches = Vec::new();
+    for entry in fs::read_dir(&directory).map_err(|_| Error("branch_latch_failed"))? {
+        require(latches.len() < 512, "branch_latch_failed")?;
+        let entry = entry.map_err(|_| Error("branch_latch_failed"))?;
+        let name = entry.file_name();
+        let (id, nonce) = name.to_str().and_then(|name| name.split_once('-')).ok_or(Error("branch_latch_failed"))?;
+        validate_id(id)?;
+        validate_id(nonce)?;
+        trusted_file(&entry.path())?;
+        latches.push((id.to_string(), entry.path()));
+    }
+    Ok(latches)
+}
+
+fn mark_branch_closing(id: &str) -> Result<PathBuf> {
+    validate_id(id)?;
+    let directory = Path::new(RUN).join("closing-branches");
+    private_directory(&directory, true)?;
+    let path = directory.join(format!("{id}-{}", random_id()?));
+    OpenOptions::new().write(true).create_new(true).mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&path)
+        .map_err(|_| Error("branch_latch_failed"))?;
+    Ok(path)
+}
+
+fn mark_recovery() -> Result<()> {
+    runtime()?;
+    OpenOptions::new().write(true).create(true).truncate(false).mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(RECOVERY)
+        .map_err(|_| Error("recovery_marker_failed"))?;
+    Ok(())
+}
+
+fn require_branch_open(records: &[AgentSafeRecord], id: &str) -> Result<()> {
+    let mut ancestry = safe_ancestors(records, id)?;
+    ancestry.push(id.to_string());
+    require(!branch_latches()?.iter().any(|(root, _)| ancestry.contains(root)), "safe_branch_closing")?;
+    for target in crate::idle_controller::fences()? {
+        if let crate::idle_controller::Target::Safe { opening } = target {
+            let current = scope::within(opening.slot, idle_opening)?;
+            let applies = if crate::share_host::is_maintenance(&opening)? { id == opening.safe_id } else { ancestry.contains(&opening.safe_id) };
+            require(!applies || current.as_ref() != Some(&opening), "safe_branch_closing")?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn require_safe_branch_open(id: &str) -> Result<()> {
+    require(!recovery_required()? && !runtime_record("session-recovery-required").exists(), "recovery_required")?;
+    require_branch_open(&agent_safe_records()?, id)
+}
+
+fn read_nonce(path: &Path) -> Result<Option<String>> {
+    if !path.try_exists().map_err(|_| Error("idle_opening_unavailable"))? { return Ok(None) }
+    let mut nonce = String::new();
+    trusted_file(path)?.take(33).read_to_string(&mut nonce).map_err(|_| Error("idle_opening_unavailable"))?;
+    validate_id(&nonce)?;
+    Ok(Some(nonce))
+}
+
+pub(crate) fn idle_opening() -> Result<Option<oblivion_host::autolock::Opening>> {
+    let Some((safe_id, _)) = session_info()? else { return Ok(None) };
+    let nonce = read_nonce(&runtime_record("opening-nonce"))?.ok_or(Error("idle_opening_unknown"))?;
+    Ok(Some(oblivion_host::autolock::Opening { slot: scope::current(), safe_id, nonce }))
+}
+
+fn ephemeral_child_id() -> Result<Option<String>> {
+    read_nonce(&runtime_record("ephemeral-child"))
+}
+
+fn ephemeral_session() -> Result<bool> {
+    Ok(Path::new(&scope::path(EPHEMERAL)).try_exists().map_err(|_| Error("ephemeral_check_failed"))?
+        || ephemeral_child_id()?.is_some())
+}
+
+fn available_ram_child<'a>(records: &'a [AgentSafeRecord], id: &str) -> Result<&'a AgentSafeRecord> {
+    let record = records.iter().find(|record| record.id == id).ok_or(Error("child_safe_not_found"))?;
+    require(record.ephemeral && matches!(record.state, AgentSafeState::AwaitingStart), "child_safe_not_available")?;
+    Ok(record)
+}
+
+/// Called through the private root worker channel while storage.lock is held.
+/// Neither a guest nor a frontend chooses the source slot or parent identity.
+pub(crate) fn child_family_source(child: &str) -> Result<oblivion_host::autolock::Opening> {
+    validate_id(child)?;
+    require(matches!(mount_mode()?, MountMode::ReadOnly | MountMode::RamOnly) && !recovery_required()?, "ephemeral_requires_ephemeral_mode")?;
+    let records = agent_safe_records()?;
+    let record = available_ram_child(&records, child)?;
+    require_branch_open(&records, child)?;
+    let parent = open_sessions()?.into_iter().find(|entry| entry.id.as_deref() == Some(&record.parent))
+        .ok_or(Error("parent_safe_not_open"))?;
+    scope::within(parent.slot, || {
+        require(!parent.recovery_required && matches!(parent.mode.as_deref(), Some("documents" | "agent"))
+            && ephemeral_session()? && !runtime_record("session-recovery-required").exists(), "parent_safe_not_open")?;
+        let owner = crate::vm::session_owner()?;
+        require(crate::safe_tools::owner_alive(&owner)?, "parent_safe_not_open")?;
+        idle_opening()?.ok_or(Error("parent_safe_not_open"))
+    })
+}
+
+pub(crate) fn require_current_idle_activity(activity: &oblivion_host::autolock::Activity) -> Result<()> {
+    require(read_nonce(&Path::new(RUN).join("host-opening"))?.as_deref() == Some(&activity.host)
+        && !recovery_required()?, "idle_opening_changed")?;
+    if let Some(opening) = &activity.safe {
+        scope::within(opening.slot, || -> Result<()> {
+            require(idle_opening()?.as_ref() == Some(opening), "idle_opening_changed")?;
+            require_safe_branch_open(&opening.safe_id)
+        })?;
+    }
+    Ok(())
+}
+
+/// Caller holds storage.lock. Observations never count as human activity.
+pub(crate) fn idle_snapshot() -> Result<crate::idle_controller::Snapshot> {
+    use crate::idle_controller::Target;
+    let mode = mount_mode()?;
+    let general_open = mapping_open("oblivion-general")? || matches!(mode, MountMode::ReadOnly | MountMode::ReadWrite);
+    let app_open = general_open || mode == MountMode::RamOnly;
+    let mut host = if app_open {
+        Some(read_nonce(&Path::new(RUN).join("host-opening"))?.ok_or(Error("idle_opening_unknown"))?)
+    } else { None };
+    let mut safes = Vec::new();
+    for entry in open_sessions()? {
+        let opening = scope::within(entry.slot, idle_opening)?.ok_or(Error("idle_opening_unknown"))?;
+        safes.push(opening);
+    }
+    let physical = safes.clone();
+    let mut fences = Vec::new();
+    let targets = crate::idle_controller::fences()?;
+    let records = if targets.iter().any(|target| matches!(target, Target::Safe { .. })) { agent_safe_records()? } else { Vec::new() };
+    let branches = branch_latches()?;
+    for target in targets {
+        let keep = match &target {
+            Target::Host { nonce } => {
+                if host.is_none() && !general_open && Path::new(RECOVERY).exists() { host = Some(nonce.clone()); }
+                host.as_deref() == Some(nonce)
+            }
+            Target::Safe { opening } => {
+                if physical.contains(opening) { true } else {
+                    let recovering = if crate::share_host::is_maintenance(opening)? {
+                        !physical.iter().any(|current| current.slot == opening.slot || current.safe_id == opening.safe_id)
+                    } else {
+                        let branch = safe_branch(&records, &opening.safe_id)?;
+                        !physical.iter().any(|current| current.safe_id == opening.safe_id)
+                            && branches.iter().any(|entry| entry.0 == opening.safe_id)
+                            && (physical.iter().any(|current| branch.iter().any(|entry| entry.0 == current.safe_id))
+                                || scope::within(opening.slot, || runtime_record("session-recovery-required").exists()))
+                    };
+                    if recovering { safes.push(opening.clone()); }
+                    recovering
+                }
+            }
+        };
+        if keep { fences.push(target) } else { crate::idle_controller::clear_fence(&target)?; }
+    }
+    let mut roots = Vec::new();
+    for target in &fences {
+        if let Target::Safe { opening } = target {
+            if !crate::share_host::is_maintenance(opening)? { roots.push(opening.safe_id.clone()); }
+        }
+    }
+    for current in &physical {
+        let mut ancestry = safe_ancestors(&records, &current.safe_id)?;
+        ancestry.push(current.safe_id.clone());
+        if roots.iter().any(|root| ancestry.contains(root))
+            && !fences.iter().any(|target| matches!(target, Target::Safe { opening } if opening == current)) {
+            fences.push(Target::Safe { opening: current.clone() });
+        }
+    }
+    Ok(crate::idle_controller::Snapshot { host, safes, fences, general_open, writable: mode == MountMode::ReadWrite })
+}
+
+fn discard_ephemeral_children() -> Result<()> {
+    let mut failure = None;
+    for record in &agent_safe_records()? {
+        let result = (|| {
+            let mapping = format!("oblivion-safe-create-{}", record.id);
+            if mapping_open(&mapping)? { crypt_close(&mapping)?; }
+            if record.ephemeral { discard_ephemeral_child(record)?; }
+            Ok(())
+        })();
+        if let Err(error) = result { failure = Some(error); }
+    }
+    if let Some(error) = failure { return Err(error) }
+    for (_, path) in branch_latches()? { fs::remove_file(path).map_err(|_| Error("branch_latch_failed"))?; }
+    Ok(())
+}
+
+fn discard_ephemeral_child(record: &AgentSafeRecord) -> Result<()> {
+    let mapping = format!("oblivion-safe-create-{}", record.id);
+    if mapping_open(&mapping)? { crypt_close(&mapping)?; }
+    for path in [record.image(true), record.image(false),
+        record.directory().join(format!("{}.json", record.id)),
+        record.directory().join(format!("{}.pending", record.id))] {
+        if path.try_exists().map_err(|_| Error("ephemeral_cleanup_failed"))? {
+            trusted_file(&path)?;
+            fs::remove_file(path).map_err(|_| Error("ephemeral_cleanup_failed"))?;
+        }
+    }
+    Ok(())
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +505,8 @@ struct Config {
     general_image: PathBuf,
     general_mib: u64,
     session_mib: u64,
+    #[serde(default = "default_ephemeral_mib")]
+    ephemeral_mib: u64,
     pbkdf_memory_kib: u32,
     manager_uid: u32,
     vm: Option<crate::vm::Config>,
@@ -41,17 +518,22 @@ struct Config {
     gateway_network: bool,
     #[serde(default)]
     usb_persistence: bool,
-    #[serde(default)]
-    network_profiles: bool,
-    #[serde(default)]
-    manage_os_preferences: bool,
     #[serde(skip)]
     usb: Option<crate::usb::Inspection>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentStart {
+    pub started: bool,
+    pub opening: oblivion_host::autolock::Opening,
 }
 
 #[derive(Serialize)]
 struct Status {
     slot: scope::Slot,
+    app_open: bool,
+    app_mode: MountMode,
     open_sessions: Vec<OpenSession>,
     session_slot_limit: u8,
     general_present: bool,
@@ -67,13 +549,12 @@ struct Status {
     incomplete_sessions: Vec<String>,
     available_bytes: Option<u64>,
     session_bytes: u64,
+    ephemeral_session_bytes: u64,
     session_sizes: std::collections::BTreeMap<String, u64>,
     pending_growth: Vec<String>,
     vm_state: Option<String>,
     laboratory_emulation: bool,
     recovery_required: bool,
-    api_key_present: Option<bool>,
-    api_keys: Option<keys::Status>,
     egress: Option<egress::Status>,
     network_policy: Option<network::Status>,
     gateway_state: Option<String>,
@@ -81,17 +562,25 @@ struct Status {
     gateway_network: bool,
     transfers_configured: bool,
     persistence: Option<persistence::Status>,
-    network_profiles_saved: Option<bool>,
-    settings: settings::Status,
+    safe_access: safe_access::Status,
     network_status: network::Observation,
-    connections: Option<oblivion_host::connections::Snapshot>,
     system: crate::system_info::Status,
     debug_available: bool,
+    agent_safes: Vec<AgentSafeInfo>,
+    safe_parents: Vec<oblivion_host::sharing::Parent>,
+    agent_safe_limits: AgentSafeLimits,
+    closing_branches: Vec<String>,
 }
 
 pub fn main() -> Result<()> {
     secure_process()?;
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(position) = args.iter().position(|value| value == "--family-channel") {
+        args.remove(position);
+    }
+    if let Some(position) = args.iter().position(|value| value == "--safe-tools-owner") {
+        args.remove(position);
+    }
     let slot = if let Some(position) = args.iter().position(|value| value == "--slot") {
         let value = args.get(position + 1).ok_or(Error("invalid_session_slot"))?
             .parse::<u8>().map_err(|_| Error("invalid_session_slot"))?;
@@ -154,6 +643,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
     }
     if args.len() == 3 && op == "gateway-host-run" {
         require(!recovery_required()?, "recovery_required")?;
+        require(!session_info()?.is_some_and(|entry| entry.1 == "share"), "safe_maintenance_active")?;
         require(mount_mode()? != MountMode::Closed, "general_not_open")?;
         let gateway = config
             .gateway
@@ -162,7 +652,6 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         let (saved, selected) = transport_profiles()?;
         return crate::gateway::serve(
             gateway,
-            if !runtime_record("native-agent").exists() && api_key_present()? { Some(read_api_key()?) } else { None },
             selected.unwrap_or(saved).into_transport(),
             config.gateway_network,
         );
@@ -171,7 +660,8 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         args.len()
             == if matches!(
                 op,
-                "open" | "enter" | "enter-documents" | "discard-session-pending" | "agent-release"
+                "open" | "enter" | "enter-documents" | "discard-session-pending" | "agent-release" | "branch-recover"
+                    | "open-child-documents" | "share-export-source-open" | "share-release" | "share-import-finish"
             ) {
                 4
             } else {
@@ -179,28 +669,49 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             },
         "usage",
     )?;
+    // A separate marker per request prevents a stale callback from clearing
+    // another valid close's latch. Its SafeID comes from the explicit callback,
+    // never the slot's potentially newer occupant.
+    let branch_latch = if matches!(op, "close" | "leave" | "force-leave") {
+        expected.map(mark_branch_closing).transpose()?
+    } else { None };
     // Latch before taking the operation lock: a worker may still be completing
     // when the manager dies. Its completion must not permit another opening.
     if matches!(op, "lock" | "recover") {
-        runtime()?;
-        OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(RECOVERY)
-            .map_err(|_| Error("recovery_marker_failed"))?;
+        mark_recovery()?;
     }
-    let _lock = if matches!(op, "lock" | "recover") {
+    let _lock = if matches!(op, "lock" | "recover" | "share-release" | "share-export-cancel" | "share-export-cleanup" | "share-import-finish" | "share-import-abort" | "share-import-discard") || branch_latch.is_some() {
         recovery_lock()?
     } else {
         lock()?
     };
     // A delayed view callback cannot operate on a new session which reused
     // its old slot. Verify under the same lock as the operation itself.
+    require(op != "share-export-source-open" || expected.is_some(), "expected_session_required")?;
+    require(!matches!(op, "share-import-open" | "share-import-finish") || expected.is_some(), "expected_session_required")?;
+    require(op != "open-child-documents" || expected == args.get(3).map(String::as_str), "expected_session_required")?;
     if let Some(id) = expected {
-        require(session_info()?.is_some_and(|info| info.0 == id), "session_changed")?;
+        if matches!(op, "share-export-source-open" | "open-child-documents") {
+            crate::share_host::require_closed_target(&args[3], id, session_info()?.as_ref().map(|entry| entry.0.as_str()))?;
+        } else if op == "share-import-open" {
+            require(session_info()?.is_none(), "session_changed")?;
+        } else if op != "idle-close" && !session_info()?.is_some_and(|info| info.0 == id) {
+            if let Some(path) = &branch_latch {
+                if path.try_exists().map_err(|_| Error("branch_latch_failed"))? {
+                    fs::remove_file(path).map_err(|_| Error("branch_latch_failed"))?;
+                }
+            }
+            return Err(Error("session_changed"));
+        }
+    }
+    if matches!(op, "safe-child-create" | "safe-tools-status" | "managed-release") {
+        require(expected.is_some() && crate::ipc::family_channel_available(), "trusted_safe_channel_required")?;
+        crate::ipc::require_tool_owner()?;
+    }
+    if session_info()?.is_some_and(|entry| entry.1 == "share") {
+        require(matches!(op, "status" | "share-release" | "share-export-cancel" | "share-export-cleanup" | "close" | "leave"
+            | "force-leave" | "lock" | "recover" | "idle-close" | "idle-lock" | "share-import-finish"
+            | "share-import-abort" | "share-import-discard" | "share-import-status"), "safe_maintenance_active")?;
     }
     // A broken transfer record must not prevent teardown from revoking the
     // current grant. Admission guards apply to new work, not close/recovery.
@@ -209,9 +720,18 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         "status"
             | "transfers"
             | "onion"
-            | "settings"
+            | "safe-access"
             | "network-policy"
             | "close"
+            | "close-idle"
+            | "idle-close"
+            | "idle-lock"
+            | "native-start-failed"
+            | "share-release"
+            | "share-export-cancel"
+            | "share-export-cleanup"
+            | "share-import-finish" | "share-import-abort" | "share-import-discard" | "share-import-status"
+            | "branch-recover"
             | "leave"
             | "force-leave"
             | "lock"
@@ -226,34 +746,248 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         op,
         "init-general"
             | "prepare-usb"
-            | "save-network"
             | "unlock"
-            | "unlock-ephemeral"
+            | "unlock-read-only"
+            | "enter-ram"
+            | "share-export-source-open"
+            | "share-import-begin" | "share-import-open" | "share-import-commit"
+            | "open-child-documents"
             | "create"
+            | "safe-child-create"
             | "rename-session"
             | "session-storage"
             | "open"
-            | "enter"
-            | "enter-ephemeral"
             | "enter-documents"
             | "enter-documents-ephemeral"
-            | "stop-chat"
-            | "start-chat"
             | "start-agent"
-            | "chat-ready"
             | "discard-general-pending"
             | "discard-session-pending"
-            | "set-api-key"
-            | "clear-api-key"
-            | "api-keys"
             | "egress"
+            | "proxy-profiles"
             | "network-policy"
-            | "settings"
-            | "connections"
+            | "safe-access"
     ) {
         require(!recovery_required()?, "recovery_required")?;
     }
     match op {
+        "open-child-documents" => {
+            require(crate::ipc::family_channel_available(), "trusted_safe_channel_required")?;
+            config.open_child_documents(&args[3])
+        }
+        "share-import-begin" => {
+            require(crate::ipc::family_channel_available(), "trusted_share_channel_required")?;
+            let request = crate::share_import::request::<oblivion_host::sharing::Begin>(oblivion_share::manifest::MAX_METADATA + 4096)?;
+            let begun = config.begin_share_import(request)?;
+            println!("{}", serde_json::to_string(&begun).map_err(|_| Error("encode_failed"))?);
+            Ok(())
+        }
+        "share-import-open" => {
+            require(crate::ipc::family_channel_available(), "trusted_share_channel_required")?;
+            let request = crate::share_import::request::<oblivion_host::sharing::Open>(4096)?;
+            let opening = config.open_share_import(request, expected.ok_or(Error("expected_session_required"))?)?;
+            println!("{}", serde_json::to_string(&opening).map_err(|_| Error("encode_failed"))?);
+            Ok(())
+        }
+        "share-import-finish" => {
+            require(crate::ipc::family_channel_available(), "trusted_share_channel_required")?;
+            config.finish_share_import(crate::share_import::request(4096)?, &args[3], expected.ok_or(Error("expected_session_required"))?)
+        }
+        "share-import-commit" => {
+            require(crate::ipc::family_channel_available(), "trusted_share_channel_required")?;
+            let committed = config.commit_share_import(crate::share_import::request(1024)?)?;
+            println!("{}", serde_json::to_string(&committed).map_err(|_| Error("encode_failed"))?);
+            Ok(())
+        }
+        "share-import-abort" => {
+            require(crate::ipc::family_channel_available(), "trusted_share_channel_required")?;
+            let request = crate::share_import::request::<oblivion_host::sharing::Abort>(1024)?;
+            let batch = share_imports().read(&request.transaction)?;
+            batch.authorize(&request.nonce)?;
+            config.discard_share_import(batch, true)
+        }
+        "share-import-discard" => {
+            require(crate::ipc::family_channel_available(), "trusted_share_channel_required")?;
+            let request = crate::share_import::request::<oblivion_host::sharing::Discard>(1024)?;
+            require(mount_mode()? == MountMode::ReadWrite, "general_not_writable")?;
+            match share_imports().read(&request.transaction) {
+                Ok(batch) => config.discard_share_import(batch, false),
+                Err(_) => share_imports().discard_initial_metadata(&request.transaction),
+            }
+        }
+        "share-import-status" => {
+            let status = if mount_mode()? == MountMode::Closed { Vec::new() } else { share_imports().status()? };
+            println!("{}", serde_json::to_string(&status).map_err(|_| Error("encode_failed"))?);
+            Ok(())
+        }
+        "share-export-source-open" => {
+            require(crate::ipc::family_channel_available(), "trusted_share_channel_required")?;
+            let request: crate::share_export::Open = serde_json::from_reader(std::io::stdin().take(4097))
+                .map_err(|_| Error("invalid_share_request"))?;
+            let metadata = config.open_export_share(&args[3], &request)?;
+            println!("{}", serde_json::to_string(&metadata).map_err(|_| Error("encode_failed"))?);
+            Ok(())
+        }
+        "share-export-cleanup" => {
+            require(crate::ipc::family_channel_available(), "trusted_share_channel_required")?;
+            let opening: oblivion_host::autolock::Opening = serde_json::from_reader(std::io::stdin().take(1025))
+                .map_err(|_| Error("invalid_share_release"))?;
+            require(expected == Some(opening.safe_id.as_str()) && idle_opening()?.as_ref() == Some(&opening)
+                && crate::share_host::is_maintenance(&opening)?, "session_changed")?;
+            require(config.close_slot(true)?, "share_cleanup_required")
+        }
+        "share-release" => {
+            require(expected.is_some() && crate::ipc::family_channel_available(), "trusted_share_channel_required")?;
+            let opening = crate::share_host::client(&args[3])?;
+            let mut bytes = Vec::new();
+            std::io::stdin().take(1025).read_to_end(&mut bytes).map_err(|_| Error("invalid_share_release"))?;
+            require(bytes.len() <= 1024, "invalid_share_release")?;
+            if !bytes.is_empty() {
+                let callback: oblivion_host::autolock::Opening = serde_json::from_slice(&bytes).map_err(|_| Error("invalid_share_release"))?;
+                require(callback == opening, "session_changed")?;
+            }
+            require(expected == Some(opening.safe_id.as_str()) && idle_opening()?.as_ref() == Some(&opening)
+                && session_info()?.is_some_and(|entry| entry.1 == "share"), "session_changed")?;
+            let _detached = crate::vm::remove_copy_port(&args[3]);
+            require(config.close_slot(false)?, "locked_without_tor_state")
+        }
+        "share-export-cancel" => {
+            require(expected.is_some() && crate::ipc::family_channel_available(), "trusted_share_channel_required")?;
+            let mut bytes = Vec::new();
+            std::io::stdin().take(1025).read_to_end(&mut bytes).map_err(|_| Error("invalid_share_release"))?;
+            require(!bytes.is_empty() && bytes.len() <= 1024, "invalid_share_release")?;
+            let opening: oblivion_host::autolock::Opening = serde_json::from_slice(&bytes).map_err(|_| Error("invalid_share_release"))?;
+            require(opening.slot == scope::current() && expected == Some(opening.safe_id.as_str())
+                && idle_opening()?.as_ref() == Some(&opening)
+                && session_info()?.is_some_and(|entry| entry.1 == "share"), "session_changed")?;
+            require(!crate::share_host::occupied()?, "share_attached")?;
+            require(config.close_slot(false)?, "locked_without_tor_state")
+        }
+        "idle-close" | "idle-lock" => {
+            require(crate::ipc::family_channel_available(), "trusted_idle_channel_required")?;
+            let mut bytes = Vec::new();
+            std::io::stdin().take(1025).read_to_end(&mut bytes).map_err(|_| Error("invalid_idle_request"))?;
+            require(bytes.len() <= 1024, "invalid_idle_request")?;
+            let target: crate::idle_controller::Target = serde_json::from_slice(&bytes).map_err(|_| Error("invalid_idle_request"))?;
+            target.validate()?;
+            require(crate::idle_controller::fenced(&target)?, "idle_opening_changed")?;
+            let result = match &target {
+                crate::idle_controller::Target::Host { nonce } => {
+                    require(op == "idle-lock" && expected.is_none(), "invalid_idle_request")?;
+                    let current = read_nonce(&Path::new(RUN).join("host-opening"))?;
+                    if current.as_deref() != Some(nonce) && !(current.is_none() && Path::new(RECOVERY).exists()) {
+                        crate::idle_controller::clear_fence(&target)?;
+                        return Err(Error("idle_opening_changed"));
+                    }
+                    mark_recovery()?;
+                    config.close_all()
+                }
+                crate::idle_controller::Target::Safe { opening } => {
+                    require(op == "idle-close" && opening.slot == scope::current()
+                        && expected == Some(opening.safe_id.as_str()), "invalid_idle_request")?;
+                    let current = idle_opening()?;
+                    if crate::share_host::is_maintenance(opening)? {
+                        if current.as_ref().is_some_and(|current| current != opening) {
+                            crate::idle_controller::clear_fence(&target)?;
+                            return Err(Error("idle_opening_changed"));
+                        }
+                        // A maintenance timeout owns this opening only. A
+                        // separately opened descendant keeps its own timer.
+                        let result = require(config.close_slot(true)?, "locked_without_tor_state");
+                        if result.is_ok() { crate::idle_controller::clear_fence(&target)?; }
+                        return result;
+                    }
+                    let recovering = !open_sessions()?.iter().any(|entry| entry.id.as_ref() == Some(&opening.safe_id))
+                        && branch_latches()?.iter().any(|entry| entry.0 == opening.safe_id);
+                    if current.as_ref() != Some(opening) && !recovering {
+                        crate::idle_controller::clear_fence(&target)?;
+                        return Err(Error("idle_opening_changed"));
+                    }
+                    require(config.close_branch_id(&opening.safe_id, true, None)?, "locked_without_tor_state")
+                }
+            };
+            if result.is_ok() { crate::idle_controller::clear_fence(&target)?; }
+            result
+        }
+        "proxy-profiles" => {
+            let mode = mount_mode()?;
+            require(mode != MountMode::Closed, "general_not_open")?;
+            let mut bytes = Zeroizing::new(Vec::new());
+            std::io::stdin().take(4097).read_to_end(&mut bytes)
+                .map_err(|_| Error("invalid_proxy_profile_command"))?;
+            let command = proxy_profiles::Command::decode(&bytes).map_err(Error)?;
+            let mut registry = proxy_profiles::Registry::new(
+                read_proxy_profile_archive(&Path::new(PROFILE).join("proxy-profiles.json"))?,
+                read_proxy_profile_archive(&Path::new(RUN).join("proxy-profiles.json"))?,
+            ).map_err(Error)?;
+            match registry.change(command, mode != MountMode::ReadWrite).map_err(Error)? {
+                proxy_profiles::Change::Unchanged => {}
+                proxy_profiles::Change::Saved => write_proxy_profile_archive(
+                    &Path::new(PROFILE).join("proxy-profiles.json"), registry.saved())?,
+                proxy_profiles::Change::Temporary => write_proxy_profile_archive(
+                    &Path::new(RUN).join("proxy-profiles.json"), registry.temporary())?,
+                proxy_profiles::Change::Select(transport) => {
+                    require(expected.is_some(), "expected_session_required")?;
+                    require(session_info()?.is_some(), "session_not_open")?;
+                    config.change_transport(if mode != MountMode::ReadWrite {
+                        egress::Command::Select { transport }
+                    } else { egress::Command::Save { transport } })?;
+                }
+            }
+            println!("{}", serde_json::to_string(&registry.status()).map_err(|_| Error("encode_failed"))?);
+            Ok(())
+        }
+        "safe-child-create" => {
+            require(expected.is_some() && crate::ipc::family_channel_available(), "trusted_safe_channel_required")?;
+            let mut bytes = Zeroizing::new(Vec::new());
+            std::io::stdin().take(CHILD_RECORD_LIMIT as u64 + 1).read_to_end(&mut bytes)
+                .map_err(|_| Error("invalid_safe_child_request"))?;
+            require(bytes.len() <= CHILD_RECORD_LIMIT, "invalid_safe_child_request")?;
+            let request: AgentSafeRequest = serde_json::from_slice(&bytes)
+                .map_err(|_| Error("invalid_safe_child_request"))?;
+            request.validate()?;
+            let child = config.create_agent_safe(request)?;
+            println!("{}", serde_json::to_string(&child).map_err(|_| Error("encode_failed"))?);
+            Ok(())
+        }
+        "safe-tools-status" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Selection { offset: u8 }
+            let mut bytes = Vec::new();
+            std::io::stdin().take(129).read_to_end(&mut bytes).map_err(|_| Error("invalid_safe_tools_request"))?;
+            require(bytes.len() <= 128, "invalid_safe_tools_request")?;
+            let selection: Selection = serde_json::from_slice(&bytes).map_err(|_| Error("invalid_safe_tools_request"))?;
+            require(usize::from(selection.offset) <= CHILD_BRANCH_LIMIT, "invalid_safe_tools_offset")?;
+            let (id, mode) = session_info()?.ok_or(Error("session_not_open"))?;
+            require(mode == "agent", "agent_safe_required")?;
+            let records = agent_safe_records()?;
+            let branch = safe_branch(&records, &id)?;
+            let mut ancestors = safe_ancestors(&records, &id)?;
+            ancestors.push(id.clone());
+            let children: Vec<_> = records.iter().filter(|record| record.id != id
+                && branch.iter().any(|entry| entry.0 == record.id)).collect();
+            let offset = usize::from(selection.offset);
+            println!("{}", serde_json::to_string(&serde_json::json!({
+                "safe_id":id,"mode":mode,
+                "children":children.iter().skip(offset).take(16).map(|record| record.info()).collect::<Vec<_>>(),
+                "next_offset":if offset + 16 < children.len() { Some(offset + 16) } else { None },
+                "limits":AgentSafeLimits { direct_children:CHILD_DIRECT_LIMIT,descendants:CHILD_BRANCH_LIMIT,depth:CHILD_DEPTH_LIMIT,records:CHILD_LIMIT },
+                "closing":recovery_required()? || branch_latches()?.iter().any(|entry| ancestors.contains(&entry.0)),
+            })).map_err(|_| Error("encode_failed"))?);
+            Ok(())
+        }
+        "branch-recover" => {
+            require(expected.is_none(), "unexpected_session_argument")?;
+            let root = &args[3];
+            validate_id(root)?;
+            let records = agent_safe_records()?;
+            let opened = open_sessions()?;
+            let known = records.iter().any(|record| record.id == *root || record.parent == *root)
+                || opened.iter().any(|entry| entry.id.as_ref() == Some(root))
+                || (mount_mode()? == MountMode::ReadWrite && sessions(".luks")?.contains(root));
+            require(known && branch_latches()?.iter().any(|entry| entry.0 == *root), "branch_recovery_unavailable")?;
+            require(config.close_branch_id(root, true, None)?, "locked_without_tor_state")
+        }
         "onion" => {
             let mut payload = Zeroizing::new(Vec::new());
             std::io::stdin()
@@ -272,7 +1006,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                     | oblivion_host::onion::Command::Prepare { .. }
             ) {
                 require(
-                    crate::host_settings::status(true)?.current.web_access != "offline",
+                    crate::safe_access_store::status(true)?.current != Access::Offline,
                     "network_offline",
                 )?;
             }
@@ -328,7 +1062,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                     )?;
                     let (id, mode) = session_info()?.ok_or(Error("session_not_open"))?;
                     require(
-                        matches!(mode.as_str(), "documents" | "chat") && !crate::vm::stopped()?,
+                        matches!(mode.as_str(), "documents" | "agent") && !crate::vm::stopped()?,
                         "session_not_open",
                     )?;
                     crate::onion_host::start(id, ttl_seconds, false)?
@@ -390,6 +1124,10 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             crate::usb::publish(&request.plan, config.general_mib * MIB)
         }
         "discard-general-pending" => {
+            let mut bytes = Vec::new();
+            std::io::stdin().take(1025).read_to_end(&mut bytes).map_err(|_| Error("invalid_usb_request"))?;
+            require(bytes.len() <= 1024, "invalid_usb_request")?;
+            let plan: Option<persistence::Plan> = serde_json::from_slice(&bytes).map_err(|_| Error("invalid_usb_request"))?;
             if config.usb_persistence {
                 require(
                     !mapping_open("oblivion-general")?
@@ -397,8 +1135,9 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                         && mount_mode()? == MountMode::Closed,
                     "volume_busy",
                 )?;
-                return crate::usb::discard(config.general_mib * MIB);
+                return crate::usb::discard(plan.as_ref().ok_or(Error("usb_confirmation_required"))?, config.general_mib * MIB);
             }
+            require(plan.is_none(), "usb_selection_changed")?;
             require(
                 !config
                     .general_image
@@ -424,15 +1163,11 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             )))?;
             discard_restore_record(&args[3])
         }
-        "unlock" | "unlock-ephemeral" => {
-            config.unlock(&password(false)?, op == "unlock-ephemeral")?;
-            if config.manage_os_preferences { crate::host_settings::restore()?; }
-            if config.network_profiles {
-                crate::host_network::restore()?;
-            }
-            clear_key_selection()?;
-            clear_key_file("api-keys.json")?;
-            clear_key_file("api-key-default")?;
+        "enter-ram" => config.enter_ram(),
+        "unlock" | "unlock-read-only" => {
+            config.unlock(&password(false)?, op == "unlock-read-only")?;
+            crate::idle_controller::clear_temporary()?;
+            clear_key_file("proxy-profiles.json")?;
             clear_transport_selection()?;
             clear_network_selection()?;
             Ok(())
@@ -452,7 +1187,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 }
                 oblivion_host::volume::Request::Discard { id } => discard_growth(&id),
                 oblivion_host::volume::Request::Usage {} => {
-                    let response = session_export(oblivion_host::chat_export::Request::Storage {})?;
+                    let response = session_admin(oblivion_host::safe_admin::Command::Usage {})?;
                     println!(
                         "{}",
                         serde_json::to_string(&response).map_err(|_| Error("encode_failed"))?
@@ -469,23 +1204,15 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             oblivion_host::session_title::validate(&command.title).map_err(Error)?;
             let mode = mount_mode()?;
             require(mode != MountMode::Closed, "general_not_open")?;
-            if mode == MountMode::ReadOnly {
+            if mode != MountMode::ReadWrite {
                 require(
                     session_info()?.is_some_and(|(id, _)| id == command.id),
                     "session_not_open",
                 )?;
                 return write_key_file("session-title", command.title.as_bytes());
             }
-            trusted_file(&Path::new(MOUNT).join(format!("sessions/{}.luks", command.id)))?;
+            trusted_file(&persistent_safe_path(&command.id)?)?;
             write_session_title(&command.id, &command.title)
-        }
-        "settings-catalog" => {
-            println!(
-                "{}",
-                serde_json::to_string(&crate::host_settings::catalog()?)
-                    .map_err(|_| Error("encode_failed"))?
-            );
-            Ok(())
         }
         "claim-intro" => {
             runtime()?;
@@ -531,12 +1258,38 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 .split_whitespace().any(|arg| arg == "oblivion.runtime=1"), "native_runtime_required")?;
             require(open_sessions()?.is_empty(), "runtime_busy")?;
             if op == "shutdown-idle" {
-                close_general()?;
-                clear_key_file("api-keys.json")?;
-                clear_key_file("api-key-default")?;
+                mark_recovery()?;
+                config.close_all()?;
             }
             require(mount_mode()? == MountMode::Closed, "runtime_busy")?;
             run("/usr/bin/systemctl", &["poweroff", "--no-block"], None)
+        }
+        "pin-safe" => {
+            require(!recovery_required()?, "recovery_required")?;
+            require(session_info()?.is_some() && !crate::vm::stopped()?, "session_not_open")?;
+            write_key_file("manual-owner", b"1")
+        }
+        "managed-release" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Lease { opening: oblivion_host::autolock::Opening, client: String }
+            let mut bytes = Vec::new();
+            std::io::stdin().take(1025).read_to_end(&mut bytes).map_err(|_| Error("invalid_managed_release"))?;
+            require(bytes.len() <= 1024, "invalid_managed_release")?;
+            let lease: Lease = serde_json::from_slice(&bytes).map_err(|_| Error("invalid_managed_release"))?;
+            validate_id(&lease.client)?;
+            require(lease.opening.slot == scope::current() && expected == Some(lease.opening.safe_id.as_str())
+                && idle_opening()?.as_ref() == Some(&lease.opening), "session_changed")?;
+            let clients = Path::new(&scope::current().runtime()).join("agent-clients");
+            let path = clients.join(&lease.client);
+            if path.exists() { fs::remove_file(path).map_err(|_| Error("client_release_failed"))?; }
+            crate::vm::remove_copy_port(&lease.client)?;
+            if !runtime_record("manual-owner").exists() && clients.exists()
+                && fs::read_dir(&clients).map_err(|_| Error("client_release_failed"))?.next().is_none() {
+                crate::ipc::release_family()?;
+                require(config.close_branch(false, None)?, "locked_without_tor_state")?;
+            }
+            Ok(())
         }
         "agent-release" => {
             validate_id(&args[3])?;
@@ -546,22 +1299,70 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 fs::remove_file(path).map_err(|_| Error("client_release_failed"))?;
             }
             crate::vm::remove_copy_port(&args[3])?;
-            if clients.exists() && fs::read_dir(&clients).map_err(|_| Error("client_release_failed"))?.next().is_none() {
-                require(config.close_slot(false)?, "locked_without_tor_state")?;
+            if !runtime_record("manual-owner").exists() && clients.exists() && fs::read_dir(&clients).map_err(|_| Error("client_release_failed"))?.next().is_none() {
+                crate::ipc::release_family()?;
+                require(config.close_branch(false, None)?, "locked_without_tor_state")?;
             }
             Ok(())
         }
+        "native-start-failed" => {
+            require(expected.is_some() && crate::ipc::family_channel_available(), "trusted_safe_channel_required")?;
+            let mut bytes = Vec::new();
+            std::io::stdin().take(1025).read_to_end(&mut bytes).map_err(|_| Error("invalid_agent_start"))?;
+            require(bytes.len() <= 1024, "invalid_agent_start")?;
+            let opening: oblivion_host::autolock::Opening = serde_json::from_slice(&bytes).map_err(|_| Error("invalid_agent_start"))?;
+            require(opening.slot == scope::current() && expected == Some(opening.safe_id.as_str())
+                && idle_opening()?.as_ref() == Some(&opening), "session_changed")?;
+            require(session_info()?.is_some_and(|entry| entry.1 == "agent"), "agent_not_running")?;
+            let clients = Path::new(&scope::current().runtime()).join("agent-clients");
+            require(!clients.exists() || fs::read_dir(clients).map_err(|_| Error("client_check_failed"))?.next().is_none(), "agent_clients_active")?;
+            write_key_file("session-recovery-required", b"1")?;
+            // No newly booted agent is handed to the user until its private
+            // tool channel is ready. Revoke first, then stop that pinned VM.
+            if config.gateway.is_some() { crate::gateway::revoke()?; }
+            if crate::ipc::tool_owner_alive()? {
+                crate::ipc::require_tool_owner()?;
+                crate::vm::stop(false)?;
+            }
+            require(!crate::ipc::tool_owner_alive()?, "original_vm_still_running")?;
+                    clear_key_file("native-offline")?;
+            let branch = require_branch_open(&agent_safe_records()?, &opening.safe_id);
+            if recovery_required()? || matches!(branch, Err(Error("safe_branch_closing"))) {
+                return require(config.close_slot(true)?, "locked_without_tor_state");
+            }
+            branch?;
+            config.vm.as_ref().ok_or(Error("vm_not_configured"))?.start_documents()?;
+            write_session_info(&opening.safe_id, "documents")?;
+            clear_key_file("session-recovery-required")
+        }
         "start-agent" => {
             let (id, mode) = session_info()?.ok_or(Error("session_not_open"))?;
-            if mode == "agent" { return Ok(()); }
+            let opening = idle_opening()?.ok_or(Error("idle_opening_unknown"))?;
+            if mode == "agent" {
+                println!("{}", serde_json::to_string(&AgentStart { started: false, opening }).map_err(|_| Error("encode_failed"))?);
+                return Ok(());
+            }
             require(mode == "documents", "documents_not_open")?;
+            let clients = Path::new(&scope::current().runtime()).join("agent-clients");
+            require(!clients.exists() || fs::read_dir(clients).map_err(|_| Error("client_check_failed"))?.next().is_none(), "transfer_active")?;
             require(!crate::onion_host::prepared()? && !crate::transfer_host::prepared()?, "transfer_active")?;
-            let access = Access::parse(&crate::host_settings::status(true)?.current.web_access).map_err(Error)?;
+            let access = crate::safe_access_store::status(true)?.current;
             if access == Access::Offline {
-                return write_session_info(&id, "agent");
+                config.admit_agent(false)?;
+                let vm = config.vm.as_ref().ok_or(Error("vm_not_configured"))?;
+                write_session_info(&id, "starting")?;
+                let result = (|| {
+                    crate::vm::stop(false)?;
+                    vm.start_agent_offline()?;
+                    write_key_file("native-offline", b"1")?;
+                    write_session_info(&id, "agent")
+                })();
+                if result.is_err() { recover_agent_start(&config)?; }
+                if result.is_ok() { println!("{}", serde_json::to_string(&AgentStart { started: true, opening }).map_err(|_| Error("encode_failed"))?); }
+                return result;
             }
             require(config.gateway.is_some(), "gateway_not_configured")?;
-            write_key_file("native-agent", b"1")?;
+            config.admit_agent(true)?;
             if matches!(crate::gateway::state()?.as_str(), "inactive" | "failed") {
                 crate::gateway::start(false)?;
             }
@@ -577,85 +1378,11 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 write_session_info(&id, "agent")
             })();
             if result.is_err() {
-                recover_chat(&config)?;
+                recover_agent_start(&config)?;
                 crate::gateway::shutdown()?;
             }
+            if result.is_ok() { println!("{}", serde_json::to_string(&AgentStart { started: true, opening }).map_err(|_| Error("encode_failed"))?); }
             result
-        }
-        "start-chat" => {
-            require(!crate::onion_host::prepared()?, "transfer_active")?;
-            require(
-                mapping_open("oblivion-session")?
-                    && session_info()?.is_some_and(|(_, mode)| mode == "documents"),
-                "documents_not_open",
-            )?;
-            require(!crate::transfer_host::prepared()?, "transfer_active")?;
-            let id = session_info()?.ok_or(Error("session_not_open"))?.0;
-            let vm = config.vm.as_ref().ok_or(Error("vm_not_configured"))?;
-            require(api_key_present()?, "api_key_missing")?;
-            if crate::gateway::state()? == "failed" {
-                crate::gateway::shutdown()?;
-                return Err(Error("gateway_start_failed"));
-            }
-            config.start_gateway(false)?;
-            if crate::gateway::state()? == "failed" {
-                crate::gateway::shutdown()?;
-                return Err(Error("gateway_start_failed"));
-            }
-            require(crate::gateway::state()? == "active", "gateway_not_ready")?;
-            crate::gateway::ready()?;
-            let provider = selected_provider()?;
-            let web_access = crate::host_settings::status(true)?.current.web_access;
-            let tools = Some(session_policy(
-                &id,
-                Access::parse(&web_access).map_err(Error)?,
-            )?);
-            // Block credential edits throughout the transition, including partial startup.
-            write_session_info(&id, "starting")?;
-            let result = (|| {
-                crate::vm::stop(false)?;
-                let token = crate::gateway::prepare()?;
-                vm.start(Some(&token), Some(provider), &web_access, tools)
-            })();
-            if result.is_err() {
-                recover_chat(&config)?;
-                return result;
-            }
-            Ok(())
-        }
-        "stop-chat" => {
-            require(!crate::onion_host::prepared()? && !crate::transfer_host::prepared()?, "transfer_active")?;
-            let (id, mode) = session_info()?.ok_or(Error("session_not_open"))?;
-            require(mode == "chat", "chat_not_running")?;
-            write_session_info(&id, "starting")?;
-            recover_chat(&config)?;
-            crate::gateway::shutdown()?;
-            Ok(())
-        }
-        "chat-ready" => {
-            require(
-                mapping_open("oblivion-session")? && !crate::vm::stopped()?,
-                "session_not_open",
-            )?;
-            let (id, mode) = session_info()?.ok_or(Error("session_not_open"))?;
-            require(mode == "starting", "chat_not_starting")?;
-            write_session_info(&id, "chat")
-        }
-        "chat-recover" => {
-            require(!crate::onion_host::prepared()?, "transfer_active")?;
-            recover_chat(&config)
-        }
-        "cancel-chat" => {
-            let (_, mode) = session_info()?.ok_or(Error("session_not_open"))?;
-            require(
-                matches!(mode.as_str(), "starting" | "documents"),
-                "chat_already_started",
-            )?;
-            if mode == "starting" {
-                recover_chat(&config)?;
-            }
-            crate::gateway::shutdown()?;
-            Ok(())
         }
         "browse" => {
             require(
@@ -715,18 +1442,6 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             );
             Ok(())
         }
-        "chat-export" => {
-            let request: oblivion_host::chat_export::Request =
-                serde_json::from_reader(std::io::stdin().take(4096))
-                    .map_err(|_| Error("invalid_chat_export_request"))?;
-            require(request.is_chat_export(), "invalid_chat_export_request")?;
-            let response = session_export(request)?;
-            println!(
-                "{}",
-                serde_json::to_string(&response).map_err(|_| Error("encode_failed"))?
-            );
-            Ok(())
-        }
         "diagnostics" => {
             let request: oblivion_host::diagnostics::Request =
                 serde_json::from_reader(std::io::stdin().take(1024))
@@ -735,127 +1450,17 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             let output = match request {
                 oblivion_host::diagnostics::Request::Preview => serde_json::to_string(&report),
                 oblivion_host::diagnostics::Request::Export => serde_json::to_string(
-                    &session_export(oblivion_host::chat_export::Request::Diagnostics { report })?,
+                    &session_admin(oblivion_host::safe_admin::Command::Diagnostics { report })?,
                 ),
             }
             .map_err(|_| Error("encode_failed"))?;
             println!("{output}");
             Ok(())
         }
-        "network-menu" => Err(Error("network_manager_required")),
-        "connections" => {
-            require(mount_mode()? != MountMode::Closed, "general_not_open")?;
-            require(credentials_editable()?, "session_must_be_closed")?;
-            let mut bytes = Zeroizing::new(Vec::new());
-            std::io::stdin()
-                .take(4097)
-                .read_to_end(&mut bytes)
-                .map_err(|_| Error("invalid_network_request"))?;
-            require(bytes.len() <= 4096, "invalid_network_request")?;
-            let command =
-                serde_json::from_slice(&bytes).map_err(|_| Error("invalid_network_request"))?;
-            crate::host_network::change(
-                command,
-                config.network_profiles && mount_mode()? == MountMode::ReadWrite,
-            )
-        }
-        "settings" => {
-            let mut bytes = Vec::new();
-            std::io::stdin()
-                .take(4097)
-                .read_to_end(&mut bytes)
-                .map_err(|_| Error("settings_read_failed"))?;
-            require(bytes.len() <= 4096, "invalid_settings")?;
-            let command: settings::Command =
-                serde_json::from_slice(&bytes).map_err(|_| Error("invalid_settings"))?;
-            if let settings::Command::Access { mode, save } = command {
-                return config.change_access(mode, save);
-            }
-            require(
-                open_sessions()?.is_empty() && crate::vm::stopped()?,
-                "session_must_be_closed",
-            )?;
-            match command {
-                settings::Command::Access { .. } => unreachable!(),
-                settings::Command::Apply { preferences } => {
-                    require(
-                        preferences.web_access
-                            == crate::host_settings::status(true)?.current.web_access,
-                        "use_global_network_settings",
-                    )?;
-                    crate::host_settings::apply(&preferences)
-                }
-                settings::Command::Save { preferences } => {
-                    require(
-                        preferences.web_access
-                            == crate::host_settings::status(true)?.current.web_access,
-                        "use_global_network_settings",
-                    )?;
-                    require(
-                        mount_mode()? == MountMode::ReadWrite,
-                        "general_not_writable",
-                    )?;
-                    crate::host_settings::save(&preferences)
-                }
-            }
-        }
-        "save-network" => {
-            require(config.network_profiles, "network_profiles_not_configured")?;
-            require(
-                mount_mode()? == MountMode::ReadWrite,
-                "general_not_writable",
-            )?;
-            require(
-                open_sessions()?.is_empty() && crate::vm::stopped()?,
-                "session_must_be_closed",
-            )?;
-            crate::host_network::save()
-        }
-        "set-api-key" | "clear-api-key" => {
-            require(
-                mount_mode()? == MountMode::ReadWrite,
-                "general_not_writable",
-            )?;
-            let status = read_keyring()?.status(key_selection()?);
-            let command = if op == "clear-api-key" {
-                status.selected.map(|id| keys::Command::Remove { id })
-            } else {
-                let bytes = password(false)?;
-                let key = Zeroizing::new(
-                    std::str::from_utf8(&bytes)
-                        .map_err(|_| Error("invalid_api_key"))?
-                        .to_owned(),
-                );
-                Some(if let Some(id) = status.selected {
-                    keys::Command::Replace { id, key }
-                } else {
-                    require(status.entries.is_empty(), "api_key_missing")?;
-                    keys::Command::Add {
-                        provider: Provider::AbliterationAi,
-                        name: "Predefinita".to_owned(),
-                        key,
-                    }
-                })
-            };
-            require(
-                open_sessions()?.is_empty() && crate::vm::stopped()?,
-                "session_must_be_closed",
-            )?;
-            if let Some(command) = command {
-                config.change_keys(command)?;
-            }
-            Ok(())
-        }
-        "api-keys" => {
-            let mut bytes = Zeroizing::new(Vec::new());
-            std::io::stdin()
-                .take(4097)
-                .read_to_end(&mut bytes)
-                .map_err(|_| Error("secret_read_failed"))?;
-            require(bytes.len() <= 4096, "invalid_secret_length")?;
-            let command =
-                serde_json::from_slice(&bytes).map_err(|_| Error("invalid_key_command"))?;
-            config.change_keys(command)
+        "safe-access" => {
+            let command: safe_access::Command = serde_json::from_slice(&password(false)?)
+                .map_err(|_| Error("invalid_safe_access"))?;
+            config.change_access(command.mode, command.save)
         }
         "egress" => {
             let mut bytes = Zeroizing::new(Vec::new());
@@ -1018,102 +1623,41 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             }
         }
         "open" => config.open(&args[3], &password(false)?),
-        "enter" | "enter-ephemeral" => {
-            let vm = config.vm.as_ref().ok_or(Error("vm_not_configured"))?;
-            vm.validate()?;
-            require(crate::vm::stopped()?, "vm_already_running")?;
-            let id = if op == "enter-ephemeral" {
-                random_id()?
-            } else {
-                args[3].clone()
-            };
-            if op == "enter-ephemeral" {
-                config.open_ephemeral()?;
-            } else {
-                config.open(&id, &password(false)?)?;
-            }
-            write_session_info(&id, "chat")?;
-            if config.gateway.is_some() {
-                config.start_gateway(true)?;
-                crate::gateway::ready()?;
-            }
-            let tools = if config.gateway.is_some() {
-                Some(session_policy(
-                    &id,
-                    Access::parse(&crate::host_settings::status(true)?.current.web_access)
-                        .map_err(Error)?,
-                )?)
-            } else {
-                None
-            };
-            let web_access = crate::host_settings::status(true)?.current.web_access;
-            // Failed startup keeps the vault interlocked until explicit leave/lock.
-            let result = (|| {
-                let token = if config.gateway.is_some() {
-                    Some(crate::gateway::prepare()?)
-                } else {
-                    None
-                };
-                let provider = if token.is_some() {
-                    Some(selected_provider()?)
-                } else {
-                    None
-                };
-                vm.start(
-                    token.as_deref().map(String::as_str),
-                    provider,
-                    &web_access,
-                    tools,
-                )
-            })();
-            if result.is_err() && config.gateway.is_some() {
-                crate::gateway::revoke()?;
-            }
-            result
+        "close" | "leave" | "force-leave" => require(config.close_branch(op == "force-leave", branch_latch.as_deref())?, "locked_without_tor_state"),
+        "close-idle" => {
+            require(expected.is_some(), "expected_session_required")?;
+            let clients = Path::new(&scope::current().runtime()).join("agent-clients");
+            let occupied = clients.try_exists().map_err(|_| Error("client_release_failed"))?
+                && fs::read_dir(&clients).map_err(|_| Error("client_release_failed"))?.next().is_some();
+            if occupied || runtime_record("manual-owner").exists() { return Ok(()) }
+            crate::ipc::release_family()?;
+            require(config.close_branch(false, None)?, "locked_without_tor_state")
         }
-        "close" | "leave" | "force-leave" => require(config.close_slot(op == "force-leave")?, "locked_without_tor_state"),
-        "lock" | "recover" => {
-            let mut failure = None;
-            let mut checkpoint = true;
-            for value in 0..scope::LIMIT {
-                let result = scope::within(scope::Slot::try_from(value).map_err(Error)?, || config.close_slot(true));
-                match result {
-                    Err(error) => failure = Some(error),
-                    Ok(saved) => checkpoint &= saved,
-                }
-            }
-            if let Some(error) = failure { return Err(error); }
-            close_general()?;
-            clear_key_file("api-keys.json")?;
-            clear_key_file("api-key-default")?;
-            scope::within(Default::default(), || -> Result<()> {
-                clear_key_selection()?;
-                clear_transport_selection()?;
-                clear_network_selection()
-            })?;
-            if recovery_required()? { fs::remove_file(RECOVERY).map_err(|_| Error("recovery_clear_failed"))?; }
-            require(checkpoint, "locked_without_tor_state")
-        }
+        "lock" | "recover" => config.close_all(),
         "status" => {
             let mode = mount_mode()?;
-            let api_keys = if mode == MountMode::Closed {
-                None
-            } else {
-                Some(read_keyring()?.status(key_selection()?))
-            };
             let status = Status {
                 slot: scope::current(),
+                app_open: mode != MountMode::Closed,
+                app_mode: mode,
                 open_sessions: open_sessions()?,
                 session_slot_limit: scope::LIMIT,
-                connections: crate::host_network::snapshot().ok(),
                 system: crate::system_info::status(),
                 debug_available: crate::debug::available(),
+                agent_safes: agent_safe_records()?.iter().map(AgentSafeRecord::info).collect(),
+                safe_parents: persistent_safe_parents()?.into_iter().map(|(id, parent)| oblivion_host::sharing::Parent { id, parent }).collect(),
+                agent_safe_limits: AgentSafeLimits { direct_children: CHILD_DIRECT_LIMIT,
+                    descendants: CHILD_BRANCH_LIMIT, depth: CHILD_DEPTH_LIMIT, records: CHILD_LIMIT },
+                closing_branches: {
+                    let mut roots: Vec<_> = branch_latches()?.into_iter().map(|entry| entry.0).collect();
+                    roots.sort(); roots.dedup(); roots
+                },
                 network_status: network_observation(
                     session_info()?.as_ref().map(|(_, mode)| mode.as_str()),
                 ),
                 session_mode: session_info()?.map(|(_, mode)| mode),
                 active_session: session_info()?.map(|(id, _)| id),
-                settings: crate::host_settings::status(mode != MountMode::Closed)?,
+                safe_access: crate::safe_access_store::status(mode != MountMode::Closed)?,
                 general_present: if let Some(usb) = &config.usb {
                     usb.status.present
                 } else {
@@ -1131,13 +1675,8 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                         .map_err(|_| Error("image_check_failed"))?
                 },
                 persistence: config.usb.as_ref().map(|usb| usb.status.clone()),
-                network_profiles_saved: if config.network_profiles && mode != MountMode::Closed {
-                    Some(crate::host_network::saved()?)
-                } else {
-                    None
-                },
                 general_open: mapping_open("oblivion-general")?,
-                general_mounted: mode != MountMode::Closed,
+                general_mounted: matches!(mode, MountMode::ReadOnly | MountMode::ReadWrite),
                 general_readonly: mode == MountMode::ReadOnly,
                 session_open: mapping_open("oblivion-session")?,
                 session_titles: session_titles(&mode)?,
@@ -1157,12 +1696,13 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                     None
                 },
                 session_bytes: config.session_mib * MIB,
+                ephemeral_session_bytes: config.ephemeral_mib * MIB,
                 session_sizes: if mode == MountMode::ReadWrite {
                     sessions(".luks")?
                         .into_iter()
                         .map(|id| {
                             let bytes = trusted_file(
-                                &Path::new(MOUNT).join(format!("sessions/{id}.luks")),
+                                &persistent_safe_path(&id)?,
                             )?
                             .metadata()
                             .map_err(|_| Error("image_check_failed"))?
@@ -1199,8 +1739,6 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 } else {
                     None
                 },
-                api_key_present: api_keys.as_ref().map(|keys| keys.selected.is_some()),
-                api_keys,
                 network_policy: {
                     let (saved, selected) = policy_profiles()?;
                     Some(network::Status::new(saved, selected))
@@ -1224,6 +1762,142 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
     }
 }
 
+impl Config {
+    fn begin_share_import(&self, request: oblivion_host::sharing::Begin) -> Result<oblivion_host::sharing::Begun> {
+        require(mount_mode()? == MountMode::ReadWrite, "general_not_writable")?;
+        let titles = session_titles(&MountMode::ReadWrite)?.into_values().collect();
+        let host = share_import_host()?.ok_or(Error("share_import_authority_expired"))?;
+        let batch = crate::share_import::Batch::new(request.package, request.metadata_sha256, titles, host)?;
+        require(sessions(".luks")?.len() + batch.destinations.len() <= oblivion_share::manifest::MAX_SAFES, "share_import_safe_limit")?;
+        require(available_bytes()? >= batch.bytes() + oblivion_host::volume::RESERVE_BYTES, "insufficient_import_space")?;
+        for destination in &batch.destinations {
+            require(!persistent_safe_path(&destination.safe_id)?.try_exists().map_err(|_| Error("image_check_failed"))?, "safe_already_exists")?;
+        }
+        share_imports().create(&batch)?;
+        Ok(batch.started())
+    }
+
+    fn open_share_import(&self, request: oblivion_host::sharing::Open, expected: &str) -> Result<oblivion_host::autolock::Opening> {
+        require(mount_mode()? == MountMode::ReadWrite, "general_not_writable")?;
+        require((16..=1024).contains(&request.password.len()), "invalid_password_length")?;
+        validate_id(&request.request_id)?;
+        let mut batch = share_imports().read(&request.transaction)?;
+        batch.authorize(&request.nonce)?;
+        let destination = batch.destination(&request.package_id)?;
+        require(destination.safe_id == expected && matches!(destination.progress, crate::share_import::Progress::Awaiting), "share_import_changed")?;
+        require(!mapping_open("oblivion-session")? && crate::vm::stopped()?, "safe_must_be_closed")?;
+        require(!open_sessions()?.iter().any(|entry| entry.id.as_deref() == Some(expected)), "session_already_open")?;
+        let vm = self.vm.as_ref().ok_or(Error("vm_not_configured"))?;
+        vm.validate()?;
+        self.admit_session(false)?;
+        self.admit_family()?;
+        let family_root = destination.family_root.clone();
+        let mib = destination.mib;
+        let path = share_imports().volume(&batch, destination);
+        let (descriptor, capability) = match batch.families.get(&family_root) {
+            Some(bytes) => {
+                let descriptor = family::Descriptor::decode(bytes).map_err(Error)?;
+                let capability = family::unlock_descriptor(&descriptor, request.password.as_bytes()).map_err(Error)?;
+                (descriptor, capability)
+            }
+            None => {
+                let (descriptor, capability) = family::new_family(request.password.as_bytes()).map_err(Error)?;
+                batch.families.insert(family_root, descriptor.encode().map_err(Error)?);
+                share_imports().write(&batch)?;
+                (descriptor, capability)
+            }
+        };
+        drop(request.password);
+        let credential = family::credential_for_safe(&capability, expected).map_err(Error)?;
+        drop(capability);
+        let result = (|| {
+            create_image(&path, mib)?;
+            format_safe(&path, credential.as_ref(), &descriptor, expected)?;
+            crypt_open_keyslot(&path, "oblivion-session", credential.as_ref(), false, Some(0))?;
+            drop(credential);
+            format_session()?;
+            write_key_file("opening-nonce", random_id()?.as_bytes())?;
+            write_key_file("session-info", &serde_json::to_vec(&(expected, "share")).map_err(|_| Error("encode_failed"))?)?;
+            let opening = idle_opening()?.ok_or(Error("idle_opening_unknown"))?;
+            crate::share_host::begin(&opening)?;
+            write_key_file("share-import", batch.transaction.as_bytes())?;
+            batch.receiving(&request.package_id, opening.clone(), request.request_id)?;
+            share_imports().write(&batch)?;
+            vm.start_share()?;
+            require(crate::vm::network_devices()? == 0, "unsafe_share_network")?;
+            Ok(opening)
+        })();
+        if result.is_err() { require(self.close_slot(true)?, "share_import_cleanup_required")?; }
+        result
+    }
+
+    fn finish_share_import(&self, request: oblivion_host::sharing::Finish, client: &str, expected: &str) -> Result<()> {
+        require(mount_mode()? == MountMode::ReadWrite, "general_not_writable")?;
+        let mut batch = share_imports().read(&request.transaction)?;
+        batch.authorize(&request.nonce)?;
+        let destination = batch.destination(&request.package_id)?;
+        let crate::share_import::Progress::Receiving { opening, .. } = &destination.progress else { return Err(Error("share_import_changed")) };
+        require(destination.safe_id == expected && crate::share_host::import_client(client)? == *opening
+            && idle_opening()?.as_ref() == Some(opening)
+            && crate::share_host::is_maintenance(opening)?, "share_import_changed")?;
+        // Validate the actual guest receipt before teardown, but persist Ready
+        // only after every guest/block owner is confirmed stopped.
+        batch.ready(&request.package_id, request.receipt)?;
+        require(self.close_slot(false)?, "share_import_cleanup_required")?;
+        share_imports().write(&batch)
+    }
+
+    fn commit_share_import(&self, request: oblivion_host::sharing::Commit) -> Result<oblivion_host::sharing::Committed> {
+        require(mount_mode()? == MountMode::ReadWrite, "general_not_writable")?;
+        let batch = share_imports().read(&request.transaction)?;
+        batch.authorize(&request.nonce)?;
+        batch.ready_to_publish(&request.metadata_sha256)?;
+        let opened = open_sessions()?;
+        let titles = session_titles(&MountMode::ReadWrite)?;
+        for destination in &batch.destinations {
+            require(!opened.iter().any(|entry| entry.id.as_deref() == Some(&destination.safe_id)), "share_import_busy")?;
+            require(!titles.values().any(|title| title == &destination.title), "share_import_title_conflict")?;
+            require(!persistent_safe_path(&destination.safe_id)?.try_exists().map_err(|_| Error("image_check_failed"))?, "safe_already_exists")?;
+        }
+        share_imports().commit(&batch, &request.metadata_sha256)?;
+        Ok(oblivion_host::sharing::Committed { transaction: batch.transaction.clone(),
+            metadata_sha256: batch.metadata_sha256.clone(), destinations: batch.choices() })
+    }
+
+    fn discard_share_import(&self, batch: crate::share_import::Batch, cancel: bool) -> Result<()> {
+        require(mount_mode()? == MountMode::ReadWrite, "general_not_writable")?;
+        let opened = open_sessions()?;
+        for destination in &batch.destinations {
+            if let crate::share_import::Progress::Receiving { opening, .. } = &destination.progress {
+                scope::within(opening.slot, || -> Result<()> {
+                    let current = idle_opening()?;
+                    if current.as_ref() == Some(opening) {
+                        require(cancel, "share_import_busy")?;
+                        let mut transaction = String::new();
+                        trusted_file(&runtime_record("share-import"))?.take(33).read_to_string(&mut transaction).map_err(|_| Error("share_import_changed"))?;
+                        require(transaction == batch.transaction && crate::share_host::is_maintenance(opening)?, "share_import_changed")?;
+                        require(self.close_slot(true)?, "share_import_cleanup_required")?;
+                    } else if current.is_none() {
+                        // An unidentified live owner is never assumed dead.
+                        require(!mapping_open("oblivion-session")? && crate::vm::stopped()?, "share_import_busy")?;
+                        if cancel && crate::share_host::is_maintenance(opening)? {
+                            // A previous close may have removed its nonce only
+                            // after stopping the VM/DM, then failed metadata cleanup.
+                            require(self.close_slot(true)?, "share_import_cleanup_required")?;
+                        } else { require(!crate::share_host::occupied()?, "share_import_busy")?; }
+                    } else {
+                        require(!opened.iter().any(|entry| entry.id.as_deref() == Some(&destination.safe_id)), "share_import_busy")?;
+                    }
+                    Ok(())
+                })?;
+            } else {
+                require(!opened.iter().any(|entry| entry.id.as_deref() == Some(&destination.safe_id)), "share_import_busy")?;
+            }
+        }
+        share_imports().discard(&batch.transaction)
+    }
+}
+
 fn session_policy(id: &str, access: Access) -> Result<Tools> {
     let (saved, selected) = policy_profiles()?;
     Ok(Tools {
@@ -1233,20 +1907,99 @@ fn session_policy(id: &str, access: Access) -> Result<Tools> {
     })
 }
 
+fn share_proxy_requirement(transport: Option<&egress::Profile>, unresolved: Option<&str>) -> Option<String> {
+    match transport {
+        Some(profile) => matches!(profile.transport(), oblivion_transport::Transport::Socks5 { .. }).then(|| "SOCKS5 proxy".to_owned()),
+        None => unresolved.map(str::to_owned),
+    }
+}
+
 impl Config {
+    fn open_export_share(&self, id: &str, request: &crate::share_export::Open) -> Result<crate::share_host::Metadata> {
+        self.open_share_using(id, || {
+            self.admit_session(false)?;
+            let path = persistent_safe_path(id)?;
+            let token = safe_family_token(&path)?;
+            require(token.safe_id == id, "safe_identity_mismatch")?;
+            let cached = crate::ipc::export_capability(&request.export_id, id, token.descriptor.family_id())?;
+            let capability = match cached {
+                Some(capability) => capability,
+                None => family::unlock_descriptor(&token.descriptor,
+                    request.password.as_ref().ok_or(Error("share_password_required"))?.as_bytes()).map_err(Error)?,
+            };
+            let key = family::credential_for_safe(&capability, id).map_err(Error)?;
+            crypt_open_keyslot(&path, "oblivion-session", key.as_ref(), false, Some(token.keyslot))?;
+            let opened = (|| {
+                write_key_file("opening-nonce", random_id()?.as_bytes())?;
+                write_session_info(id, "share")?;
+                crate::ipc::retain_export_capability(&request.export_id, id, &capability)?;
+                crate::ipc::export_opened(&request.export_id, &idle_opening()?.ok_or(Error("idle_opening_unknown"))?)
+            })();
+            if opened.is_err() { self.close_slot(true)?; }
+            opened
+        })
+    }
+
+    fn open_share_using(&self, id: &str, open: impl FnOnce() -> Result<()>) -> Result<crate::share_host::Metadata> {
+        validate_id(id)?;
+        require(mount_mode()? == MountMode::ReadWrite, "general_not_writable")?;
+        require(!mapping_open("oblivion-session")? && crate::vm::stopped()?, "safe_must_be_closed")?;
+        require(!open_sessions()?.iter().any(|entry| entry.id.as_deref() == Some(id)), "safe_must_be_closed")?;
+        let records = agent_safe_records()?;
+        require_branch_open(&records, id)?;
+        let title = session_titles(&MountMode::ReadWrite)?.remove(id).unwrap_or_else(|| "Untitled Safe".into());
+        let provenance = records.iter().find(|record| record.id == id);
+        let imported = persistent_safe_import(id)?;
+        let imported_provenance = imported.as_ref().and_then(|entry| entry.source.provenance.as_ref());
+        let profile = persistent_safe_profile(id)?;
+        let access = crate::safe_access_store::read_profile(&profile.join("access.json"))?.unwrap_or(Access::Open);
+        let transport = read_transport_profile(&profile.join("transport.json"))?;
+        let required_proxy = share_proxy_requirement(transport.as_ref(), imported.as_ref().and_then(|safe| safe.source.required_proxy.as_deref()));
+        let vm = self.vm.as_ref().ok_or(Error("vm_not_configured"))?;
+        vm.validate()?;
+        open()?;
+        let result = (|| {
+            // Maintenance owns no provider snapshot, transport grant, token,
+            // agent, terminal or source-writable OS overlay.
+            write_key_file("session-info", &serde_json::to_vec(&(id, "share")).map_err(|_| Error("encode_failed"))?)?;
+            crate::share_host::begin(&idle_opening()?.ok_or(Error("idle_opening_unknown"))?)?;
+            vm.start_share()?;
+            require(crate::vm::network_devices()? == 0, "unsafe_share_network")?;
+            Ok(crate::share_host::Metadata {
+                opening: idle_opening()?.ok_or(Error("idle_opening_unknown"))?, title,
+                created_by_agent: provenance.is_some_and(|record| record.created_by_agent)
+                    || imported_provenance.is_some_and(|record| record.created_by_agent),
+                requested_agent: provenance.map(|record| record.agent.clone()).or_else(|| imported_provenance
+                    .and_then(|record| record.requested_agent.as_ref()).map(|agent| match agent {
+                        oblivion_share::Agent::Codex => "codex", oblivion_share::Agent::Claude => "claude", oblivion_share::Agent::Opencode2 => "opencode2",
+                    }.to_owned())),
+                parent_not_included: provenance.is_some() || imported_provenance.is_some_and(|record| record.parent_not_included)
+                    || imported.as_ref().is_some_and(|entry| entry.parent.is_some()),
+                policy: match access { Access::Offline => "offline", Access::Strict => "strict", Access::Open => "open-internet" },
+                required_proxy,
+            })
+        })();
+        if result.is_err() { require(self.close_slot(true)?, "share_cleanup_required")?; }
+        result
+    }
     fn change_access(&self, access: Access, save: bool) -> Result<()> {
         require(mount_mode()? != MountMode::Closed, "general_not_open")?;
+        require(session_info()?.is_some(), "session_not_open")?;
         require(
             !save || mount_mode()? == MountMode::ReadWrite,
             "general_not_writable",
         )?;
         require(
             !session_info()?.is_some_and(|(_, mode)| mode == "starting"),
-            "chat_starting",
+            "agent_starting",
         )?;
+        // An offline native VM has no network device. Changing a label cannot
+        // attach an uplink or restart active agent processes behind the user.
+        require(access == Access::Offline || !runtime_record("native-offline").exists(),
+            "close_offline_safe_before_enabling_network")?;
         let gateway = crate::gateway::state()?;
         if gateway == "active" {
-            if let Some((id, _)) = session_info()?.filter(|(_, mode)| matches!(mode.as_str(), "chat" | "agent")) {
+            if let Some((id, _)) = session_info()?.filter(|(_, mode)| mode == "agent") {
                 crate::gateway::policy(session_policy(&id, access)?)?;
             } else {
                 crate::gateway::stop()?;
@@ -1258,7 +2011,7 @@ impl Config {
             // Separate OnionShare uplinks must obey the same global switch.
             require(crate::onion_host::shutdown()?, "onion_shutdown_unconfirmed")?;
         }
-        if let Err(error) = crate::host_settings::access(access, save) {
+        if let Err(error) = crate::safe_access_store::set(access, save) {
             crate::gateway::destroy()?;
             return Err(error);
         }
@@ -1270,7 +2023,7 @@ impl Config {
         require(mode != MountMode::Closed, "general_not_open")?;
         require(
             !session_info()?.is_some_and(|(_, mode)| mode == "starting"),
-            "chat_starting",
+            "agent_starting",
         )?;
         let (saved, selected) = policy_profiles()?;
         let restore = matches!(command, network::Command::Saved {});
@@ -1297,12 +2050,11 @@ impl Config {
         // Revoke existing tunnels before publishing the new rules. A failed
         // acknowledgement destroys the gateway instead of retaining old access.
         if crate::gateway::state()? == "active" {
-            if let Some((id, _)) = session_info()?.filter(|(_, mode)| matches!(mode.as_str(), "chat" | "agent")) {
+            if let Some((id, _)) = session_info()?.filter(|(_, mode)| mode == "agent") {
                 crate::gateway::policy(Tools {
                     session: Session::new(&id).map_err(Error)?,
                     policy: policy.clone(),
-                    access: Access::parse(&crate::host_settings::status(true)?.current.web_access)
-                        .map_err(Error)?,
+                    access: crate::safe_access_store::status(true)?.current,
                 })?;
             }
         }
@@ -1332,7 +2084,7 @@ impl Config {
             !save || mode == MountMode::ReadWrite,
             "general_not_writable",
         )?;
-        require(credentials_editable()?, "session_must_be_closed")?;
+        require(!session_info()?.is_some_and(|(_, mode)| mode == "starting"), "agent_starting")?;
         let (saved, _) = transport_profiles()?;
         let profile = match command {
             egress::Command::Save { transport } | egress::Command::Select { transport } => {
@@ -1348,8 +2100,14 @@ impl Config {
         // Close delegated connections before changing either stored or volatile
         // credentials. Any failed write leaves the gateway stopped.
         if self.gateway.is_some() {
-            crate::gateway::stop()?;
+            if session_info()?.is_some_and(|(_, mode)| mode == "agent")
+                && crate::gateway::state()? == "active" {
+                crate::gateway::change_transport(profile.transport())?;
+            } else {
+                crate::gateway::stop()?;
+            }
         }
+        let saved = (|| -> Result<()> {
         if temporary {
             write_transport_profile(
                 &runtime_record("transport-selection.json"),
@@ -1367,139 +2125,9 @@ impl Config {
             }
         }
         Ok(())
-    }
-
-    fn change_keys(&self, command: keys::Command) -> Result<()> {
-        let mode = mount_mode()?;
-        require(mode != MountMode::Closed, "general_not_open")?;
-        let mut keyring = read_keyring()?;
-        if let keys::Command::Replace { id, .. } | keys::Command::Remove { id } = &command {
-            for entry in open_sessions()? {
-                if !matches!(entry.mode.as_deref(), Some("chat" | "starting")) { continue; }
-                let selected = scope::within(entry.slot, || key_selection())?;
-                require(keyring.status(selected).selected.as_ref() != Some(id), "api_key_in_use")?;
-            }
-        }
-        let revoke = keyring.requires_revocation(&command, key_selection()?);
-        let temporary = match &command {
-            keys::Command::Temporary { .. } => true,
-            keys::Command::Replace { id, .. }
-            | keys::Command::Rename { id, .. }
-            | keys::Command::Remove { id } => keyring.temporary.key(id).is_some(),
-            _ => false,
-        };
-        require(
-            mode == MountMode::ReadWrite
-                || temporary
-                || matches!(
-                    command,
-                    keys::Command::Select { .. } | keys::Command::Default { .. }
-                ),
-            "general_not_writable",
-        )?;
-        require(credentials_editable()?, "session_must_be_closed")?;
-        if let keys::Command::Default { id } = &command {
-            require(keyring.key(id).is_some(), "api_key_missing")?;
-            if revoke && self.gateway.is_some() {
-                crate::gateway::stop()?;
-            }
-            if mode == MountMode::ReadOnly || keyring.temporary.key(id).is_some() {
-                return write_key_file("api-key-default", id.as_bytes());
-            }
-            keyring.saved.change(command).map_err(Error)?;
-            save_api_keys(&keyring.saved)?;
-            return clear_key_file("api-key-default");
-        }
-        let before = keyring.status(key_selection()?);
-        let selecting = matches!(command, keys::Command::Select { .. });
-        let selection = match command {
-            keys::Command::Select { id } => {
-                require(keyring.key(&id).is_some(), "api_key_missing")?;
-                Some(id)
-            }
-            keys::Command::Temporary {
-                provider,
-                name,
-                key,
-            } => {
-                keyring
-                    .temporary
-                    .change(keys::Command::Add {
-                        provider,
-                        name,
-                        key,
-                    })
-                    .map_err(Error)?;
-                let id = keyring
-                    .temporary
-                    .status(None)
-                    .entries
-                    .pop()
-                    .ok_or(Error("api_key_missing"))?
-                    .id;
-                require(keyring.saved.key(&id).is_none(), "key_id_exists")?;
-                Some(id)
-            }
-            command => {
-                if temporary {
-                    keyring.temporary.change(command).map_err(Error)?;
-                } else {
-                    keyring.saved.change(command).map_err(Error)?;
-                }
-                None
-            }
-        };
-        // Retrying an opening with the same key must not restart Tor bootstrap.
-        // Still record the explicit choice, independently of the saved default.
-        if let Some(id) = selection.as_deref() {
-            if before.selected.as_deref() == Some(id)
-                && (self.gateway.is_none()
-                    || (crate::gateway::state()? == "active"
-                        && crate::vm::state_role(crate::vm::Role::Gateway)? == "active"))
-            {
-                return write_key_selection(Some(id));
-            }
-        }
-        // No old credential remains delegated across a profile/selection change,
-        // including a failed write. Restart requires the selected key to exist.
-        if revoke && self.gateway.is_some() {
-            crate::gateway::stop()?;
-        }
-        if temporary {
-            write_key_file("api-keys.json", &keyring.temporary.encode().map_err(Error)?)?;
-        } else if !selecting {
-            save_api_keys(&keyring.saved)?;
-        }
-        if let Some(id) = selection {
-            write_key_selection(Some(&id))?;
-        } else if before.entries.is_empty() {
-            clear_key_selection()?;
-        } else if before
-            .selected
-            .as_ref()
-            .is_some_and(|id| keyring.key(id).is_none())
-        {
-            write_key_selection(None)?;
-        }
-        Ok(())
-    }
-
-    fn start_gateway(&self, wait: bool) -> Result<()> {
-        if session_info()?.is_some() {
-            let selected = read_keyring()?.status(key_selection()?).selected;
-            write_key_selection(selected.as_deref())?;
-        }
-        require(
-            crate::host_settings::status(true)?.current.web_access != "offline",
-            "network_offline",
-        )?;
-        if self.gateway.is_some()
-            && api_key_present()?
-            && matches!(crate::gateway::state()?.as_str(), "inactive" | "failed")
-        {
-            crate::gateway::start(wait)?;
-        }
-        Ok(())
+        })();
+        if saved.is_err() { crate::gateway::destroy()?; }
+        saved
     }
 
     fn read(path: &Path) -> Result<Self> {
@@ -1523,6 +2151,7 @@ impl Config {
             config.session_mib >= 128 && config.session_mib < config.general_mib,
             "invalid_session_size",
         )?;
+        require((128..=config.general_mib).contains(&config.ephemeral_mib), "invalid_ephemeral_size")?;
         require(
             (65536..=1048576).contains(&config.pbkdf_memory_kib),
             "invalid_kdf_memory",
@@ -1541,7 +2170,8 @@ impl Config {
 
     fn initialize(&self, secret: &[u8]) -> Result<()> {
         require(
-            !mapping_open("oblivion-general")? && !mapping_open("oblivion-session")?,
+            mount_mode()? == MountMode::Closed
+                && !mapping_open("oblivion-general")? && !mapping_open("oblivion-session")?,
             "volume_busy",
         )?;
         // Only a NEW regular file can be initialized. Physical devices and existing
@@ -1616,6 +2246,11 @@ impl Config {
             crypt_close("oblivion-general")?;
             return result;
         }
+        if let Err(error) = write_key_file("host-opening", random_id()?.as_bytes()) {
+            run("/usr/bin/umount", &[MOUNT], None)?;
+            crypt_close("oblivion-general")?;
+            return Err(error);
+        }
         if readonly {
             return Ok(());
         }
@@ -1624,6 +2259,18 @@ impl Config {
         fs::create_dir_all(format!("{MOUNT}/sessions")).map_err(|_| Error("directory_failed"))?;
         fs::create_dir_all(format!("{MOUNT}/profile")).map_err(|_| Error("directory_failed"))?;
         Ok(())
+    }
+
+    fn enter_ram(&self) -> Result<()> {
+        require(mount_mode()? == MountMode::Closed && !mapping_open("oblivion-general")?, "general_already_open")?;
+        require(open_sessions()?.is_empty() && physical_safe_owners_stopped()?, "runtime_busy")?;
+        self.admit_memory(0, RAM_PROFILE_RESERVE_MIB, RAM_PROFILE_RESERVE_MIB, "insufficient_ephemeral_memory")?;
+        for index in 0..scope::LIMIT {
+            scope::within(scope::Slot::try_from(index).map_err(Error)?, crate::ipc::release_family)?;
+        }
+        // This is an explicit application mode, never a recovery fallback for
+        // failed persistent storage. The physical archive remains untouched.
+        create_ram_profile()
     }
 
     fn create(&self, secret: &[u8], mib: u64) -> Result<()> {
@@ -1637,11 +2284,14 @@ impl Config {
             available_bytes()? >= bytes + oblivion_host::volume::RESERVE_BYTES,
             "insufficient_space",
         )?;
+        self.admit_family()?;
+        let (descriptor, capability) = family::new_family(secret).map_err(Error)?;
         let id = random_id()?;
         let path = PathBuf::from(format!("{MOUNT}/sessions/{id}.pending"));
         create_image(&path, mib)?;
-        self.format(&path, secret)?;
-        crypt_open(&path, "oblivion-session", secret, false)?;
+        let credential = family::credential_for_safe(&capability, &id).map_err(Error)?;
+        format_safe(&path, credential.as_ref(), &descriptor, &id)?;
+        crypt_open_keyslot(&path, "oblivion-session", credential.as_ref(), false, Some(0))?;
         let formatted = format_session();
         let closed = crypt_close("oblivion-session");
         formatted?;
@@ -1649,6 +2299,170 @@ impl Config {
         publish(&path, &PathBuf::from(format!("{MOUNT}/sessions/{id}.luks")))?;
         println!("{id}");
         Ok(())
+    }
+
+    fn admit_family(&self) -> Result<()> {
+        self.admit_memory(self.reserved_mib(&open_sessions()?)?, 0, 256, "insufficient_family_memory")
+    }
+
+    fn create_agent_safe(&self, request: AgentSafeRequest) -> Result<AgentSafeInfo> {
+        let (parent, mode) = session_info()?.ok_or(Error("session_not_open"))?;
+        require(mode == "agent" && mapping_open("oblivion-session")?
+            && !runtime_record("session-recovery-required").exists() && !crate::vm::stopped()?, "agent_safe_required")?;
+        let records = agent_safe_records()?;
+        require_branch_open(&records, &parent)?;
+        // An acknowledged request identifies its first child even if a caller
+        // retries with different text. It never allocates a second volume.
+        if let Some(existing) = records.iter().find(|record| record.parent == parent && record.request_id == request.request_id) {
+            return Ok(existing.info());
+        }
+        validate_child_limits(&records, &parent)?;
+        let ephemeral = ephemeral_session()?;
+        require(ephemeral || mount_mode()? == MountMode::ReadWrite, "general_not_writable")?;
+        let mib = if ephemeral { self.ephemeral_mib } else { self.session_mib };
+        let bytes = oblivion_host::volume::size(mib).map_err(Error)?;
+        if ephemeral {
+            let runtime = File::open(RUN).map_err(|_| Error("runtime_check_failed"))?;
+            let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+            require(unsafe { libc::fstatvfs(runtime.as_raw_fd(), stats.as_mut_ptr()) } == 0, "runtime_check_failed")?;
+            let stats = unsafe { stats.assume_init() };
+            require(stats.f_bavail.saturating_mul(stats.f_frsize) >= bytes + 16 * MIB, "insufficient_ephemeral_storage")?;
+            self.admit_memory(self.reserved_mib(&open_sessions()?)?, mib, mib, "insufficient_ephemeral_memory")?;
+            private_directory(&Path::new(RUN).join("agent-safes/images"), true)?;
+        } else {
+            require(available_bytes()? >= bytes + oblivion_host::volume::RESERVE_BYTES, "insufficient_space")?;
+        }
+        let capability = match crate::ipc::authorized_family(&parent)? {
+            Some(capability) => capability,
+            None if ephemeral => {
+                let mut secret = Zeroizing::new([0; 32]);
+                File::open("/dev/urandom").and_then(|mut random| random.read_exact(secret.as_mut()))
+                    .map_err(|_| Error("random_failed"))?;
+                let capability = family::Capability::from_root_secret(&random_id()?, secret).map_err(Error)?;
+                crate::ipc::retain_family(&parent, &capability)?;
+                capability
+            }
+            None => return Err(Error("family_not_authorized")),
+        };
+        let descriptor = if ephemeral { None } else {
+            let token = safe_family_token(&persistent_safe_path(&parent)?)?;
+            require(token.safe_id == parent && token.descriptor.family_id() == capability.family_id(), "safe_identity_mismatch")?;
+            Some(token.descriptor)
+        };
+        let id = random_id()?;
+        let sealed_task = family::SealedTask::seal(&capability, &family::TaskContext {
+            safe_id: &id, parent_id: &parent, request_id: &request.request_id, agent: &request.agent,
+        }, &request.task).map_err(Error)?;
+        drop(request.task);
+        let mut record = AgentSafeRecord {
+            version: 1, id, parent, created_by_agent: true,
+            agent: request.agent, creator_chat_id: request.creator_chat_id,
+            request_id: request.request_id, sealed_task,
+            ephemeral, mib, state: AgentSafeState::Creating,
+        };
+        write_agent_safe(&record)?;
+        let credential = family::credential_for_safe(&capability, &record.id).map_err(Error)?;
+        let mapping = format!("oblivion-safe-create-{}", record.id);
+        let result = (|| {
+            create_image(&record.image(true), mib)?;
+            if let Some(descriptor) = &descriptor {
+                format_safe(&record.image(true), credential.as_ref(), descriptor, &record.id)?;
+            } else {
+                format_derived_volume(&record.image(true), credential.as_ref())?;
+            }
+            crypt_open_keyslot(&record.image(true), &mapping, credential.as_ref(), false, Some(0))?;
+            let formatted = format_device(&format!("/dev/mapper/{mapping}"));
+            let closed = crypt_close(&mapping);
+            formatted?;
+            closed?;
+            publish(&record.image(true), &record.image(false))
+        })();
+        if let Err(error) = result {
+            let closed = if mapping_open(&mapping)? { crypt_close(&mapping) } else { Ok(()) };
+            record.state = if closed.is_ok() { AgentSafeState::Failed } else { AgentSafeState::RecoveryRequired };
+            if closed.is_ok() && record.image(true).exists() {
+                trusted_file(&record.image(true))?;
+                fs::remove_file(record.image(true)).map_err(|_| Error("child_cleanup_required"))?;
+            }
+            write_agent_safe(&record)?;
+            closed.map_err(|_| Error("child_cleanup_required"))?;
+            return Err(error);
+        }
+        record.state = AgentSafeState::AwaitingStart;
+        write_agent_safe(&record)?;
+        Ok(record.info())
+    }
+
+    fn close_branch(&self, force: bool, latch: Option<&Path>) -> Result<bool> {
+        let Some((root, _)) = session_info()? else { return self.close_slot(force) };
+        self.close_branch_id(&root, force, latch)
+    }
+
+    fn close_all(&self) -> Result<()> {
+        let mut failure = None;
+        let mut checkpoint = true;
+        for value in 0..scope::LIMIT {
+            match scope::within(scope::Slot::try_from(value).map_err(Error)?, || self.close_slot(true)) {
+                Err(error) => failure = Some(error),
+                Ok(saved) => checkpoint &= saved,
+            }
+        }
+        if let Some(error) = failure { return Err(error) }
+        if let Err(error) = discard_ephemeral_children() {
+            // Corrupt provenance cannot keep a fully stopped archive open.
+            // Preserve the recovery marker and return the metadata failure.
+            if physical_safe_owners_stopped()? { close_general()?; }
+            return Err(error);
+        }
+        close_general()?;
+        clear_key_file("proxy-profiles.json")?;
+        crate::idle_controller::clear_temporary()?;
+        scope::within(Default::default(), || -> Result<()> {
+            clear_transport_selection()?;
+            clear_network_selection()
+        })?;
+        if Path::new(RECOVERY).exists() {
+            fs::remove_file(RECOVERY).map_err(|_| Error("recovery_clear_failed"))?;
+        }
+        require(checkpoint, "locked_without_tor_state")
+    }
+
+    fn close_branch_id(&self, root: &str, force: bool, latch: Option<&Path>) -> Result<bool> {
+        if latch.is_none() { mark_branch_closing(&root)?; }
+        let records = agent_safe_records()?;
+        let branch = safe_branch(&records, &root)?;
+        let opened = open_sessions()?;
+        let mut failure = None;
+        let mut checkpoint = true;
+        for (id, _) in &branch {
+            for entry in opened.iter().filter(|entry| entry.id.as_ref() == Some(id)) {
+                match scope::within(entry.slot, || self.close_slot(force)) {
+                    Ok(saved) => checkpoint &= saved,
+                    Err(error) => failure = Some(error),
+                }
+            }
+            if let Some(record) = records.iter().find(|record| record.id == *id) {
+                let result = (|| { if record.ephemeral {
+                    // Never discard an ephemeral volume whose VM/mapping
+                    // failed to close. Other branch owners still get a turn.
+                    if opened.iter().any(|entry| entry.id.is_none() || entry.id.as_ref() == Some(id)
+                        && scope::within(entry.slot, || mapping_open("oblivion-session")).unwrap_or(true)) {
+                        Err(Error("child_cleanup_required"))
+                    } else { discard_ephemeral_child(record) }
+                } else {
+                    let mapping = format!("oblivion-safe-create-{}", record.id);
+                    if mapping_open(&mapping)? { crypt_close(&mapping) } else { Ok(()) }
+                } })();
+                if let Err(error) = result { failure = Some(error); }
+            }
+        }
+        if let Some(error) = failure { return Err(error) }
+        for (id, path) in branch_latches()? {
+            if branch.iter().any(|entry| entry.0 == id) {
+                fs::remove_file(path).map_err(|_| Error("branch_latch_failed"))?;
+            }
+        }
+        Ok(checkpoint)
     }
 
     fn grow(&self, id: &str, mib: u64, secret: &[u8]) -> Result<()> {
@@ -1661,8 +2475,8 @@ impl Config {
             oblivion_host::volume::growth(current, mib, available_bytes()?).map_err(Error)?;
         let vm = self.vm.as_ref().ok_or(Error("vm_not_configured"))?;
         vm.validate()?;
-        let path = Path::new(MOUNT).join(format!("sessions/{id}.luks"));
-        let candidate = Path::new(MOUNT).join(format!("sessions/{id}.growing"));
+        let path = persistent_safe_path(id)?;
+        let candidate = path.with_extension("growing");
         require(
             !candidate
                 .try_exists()
@@ -1670,7 +2484,9 @@ impl Config {
             "pending_session_growth",
         )?;
         // Reject a bad password before allocating or copying anything.
-        crypt_open(&path, "oblivion-session", secret, false)?;
+        self.admit_family()?;
+        let credential = safe_credential(&path, Some(id), secret)?;
+        crypt_open_keyslot(&path, "oblivion-session", credential.key.as_ref(), false, Some(credential.token.keyslot))?;
         crypt_close("oblivion-session")?;
         create_image(&candidate, mib)?;
         let result = (|| {
@@ -1685,7 +2501,8 @@ impl Config {
                 "growth_copy_failed",
             )?;
             copy.sync_all().map_err(|_| Error("sync_failed"))?;
-            crypt_open(&candidate, "oblivion-session", secret, false)?;
+            self.admit_memory(self.reserved_mib(&open_sessions()?)?, vm.reservation_mib(), vm.reservation_mib(), "insufficient_session_memory")?;
+            crypt_open_keyslot(&candidate, "oblivion-session", credential.key.as_ref(), false, Some(credential.token.keyslot))?;
             // Only the copy is exposed to the networkless maintenance guest.
             let resized = vm.resize_session(target);
             close_maintenance_session()?;
@@ -1722,29 +2539,30 @@ impl Config {
         closed_session_file(id)?;
         let vm = self.vm.as_ref().ok_or(Error("vm_not_configured"))?;
         vm.validate()?;
-        let metadata = oblivion_host::backup::Metadata {
-            format: "oblivion-session".into(),
+        let metadata = oblivion_host::safe_admin::Metadata {
+            format: "oblivion-safe".into(),
             version: 1,
-            original_id: id.into(),
+            safe_id: id.into(),
             title: session_titles(&MountMode::ReadWrite)?.remove(id),
+            history_version: 1,
         };
         let result = (|| {
             self.open(id, secret)?;
             write_session_info(id, "starting")?;
             vm.start_documents()?;
             write_session_info(id, "documents")?;
-            match session_export(oblivion_host::chat_export::Request::Checkpoint { metadata })? {
-                oblivion_host::chat_export::Response::Metadata { .. } => Ok(()),
-                oblivion_host::chat_export::Response::Rejected { error } => {
+            match session_admin(oblivion_host::safe_admin::Command::Checkpoint { metadata })? {
+                oblivion_host::safe_admin::Response::Metadata { .. } => Ok(()),
+                oblivion_host::safe_admin::Response::Rejected { error } => {
                     Err(Error(match error {
-                        oblivion_host::backup::Rejection::UnsupportedVersion => {
+                        oblivion_host::safe_admin::Rejection::UnsupportedVersion => {
                             "unsupported_backup_version"
                         }
-                        oblivion_host::backup::Rejection::InvalidMetadata => {
+                        oblivion_host::safe_admin::Rejection::InvalidMetadata => {
                             "invalid_backup_metadata"
                         }
-                        oblivion_host::backup::Rejection::InvalidDatabase => {
-                            "invalid_backup_database"
+                        oblivion_host::safe_admin::Rejection::InvalidCatalog => {
+                            "invalid_backup_catalog"
                         }
                     }))
                 }
@@ -1762,23 +2580,28 @@ impl Config {
         let vm = self.vm.as_ref().ok_or(Error("vm_not_configured"))?;
         vm.validate()?;
         let path = Path::new(MOUNT).join(format!("sessions/{id}.pending"));
+        self.admit_family()?;
+        let credential = safe_credential(&path, None, secret)?;
+        let destination = Path::new(MOUNT).join(format!("sessions/{}.luks", credential.token.safe_id));
+        require(!persistent_safe_path(&credential.token.safe_id)?.try_exists().map_err(|_| Error("image_check_failed"))?, "safe_already_exists")?;
         let result = (|| {
-            crypt_open(&path, "oblivion-session", secret, false)?;
-            write_session_info(id, "starting")?;
+            self.admit_memory(self.reserved_mib(&open_sessions()?)?, vm.reservation_mib(), vm.reservation_mib(), "insufficient_session_memory")?;
+            crypt_open_keyslot(&path, "oblivion-session", credential.key.as_ref(), false, Some(credential.token.keyslot))?;
+            write_session_info(&credential.token.safe_id, "starting")?;
             vm.start_documents()?;
-            write_session_info(id, "documents")?;
-            match session_export(oblivion_host::chat_export::Request::Inspect)? {
-                oblivion_host::chat_export::Response::Metadata { metadata } => Ok(metadata),
-                oblivion_host::chat_export::Response::Rejected { error } => {
+            write_session_info(&credential.token.safe_id, "documents")?;
+            match session_admin(oblivion_host::safe_admin::Command::Inspect {})? {
+                oblivion_host::safe_admin::Response::Metadata { metadata } => Ok(metadata),
+                oblivion_host::safe_admin::Response::Rejected { error } => {
                     Err(Error(match error {
-                        oblivion_host::backup::Rejection::UnsupportedVersion => {
+                        oblivion_host::safe_admin::Rejection::UnsupportedVersion => {
                             "unsupported_backup_version"
                         }
-                        oblivion_host::backup::Rejection::InvalidMetadata => {
+                        oblivion_host::safe_admin::Rejection::InvalidMetadata => {
                             "invalid_backup_metadata"
                         }
-                        oblivion_host::backup::Rejection::InvalidDatabase => {
-                            "invalid_backup_database"
+                        oblivion_host::safe_admin::Rejection::InvalidCatalog => {
+                            "invalid_backup_catalog"
                         }
                     }))
                 }
@@ -1787,17 +2610,60 @@ impl Config {
         })();
         close_maintenance_session()?;
         let metadata = result?;
+        require(metadata.safe_id == credential.token.safe_id, "invalid_backup_metadata")?;
         if let Some(title) = metadata.title {
-            write_session_title(id, &title)?;
+            write_session_title(&credential.token.safe_id, &title)?;
         }
-        publish(&path, &Path::new(MOUNT).join(format!("sessions/{id}.luks")))?;
-        discard_restore_record(id)
+        publish(&path, &destination)?;
+        discard_restore_record(id)?;
+        println!("{}", credential.token.safe_id);
+        Ok(())
+    }
+
+    fn open_child_documents(&self, id: &str) -> Result<()> {
+        require(matches!(mount_mode()?, MountMode::ReadOnly | MountMode::RamOnly), "ephemeral_requires_ephemeral_mode")?;
+        let records = agent_safe_records()?;
+        let record = available_ram_child(&records, id)?;
+        require_branch_open(&records, id)?;
+        require(!mapping_open("oblivion-session")? && crate::vm::stopped()?
+            && !runtime_record("session-info").exists() && !runtime_record("session-recovery-required").exists(), "safe_must_be_closed")?;
+        let opened = open_sessions()?;
+        require(!opened.iter().any(|entry| entry.id.as_deref() == Some(id)), "session_already_open")?;
+        require(!opened.iter().any(|entry| entry.recovery_required), "recovery_required")?;
+        runtime()?;
+        let path = record.image(false);
+        require(trusted_file(&path)?.metadata().map_err(|_| Error("metadata_failed"))?.len() == record.mib * MIB, "child_safe_volume_changed")?;
+        let vm = self.vm.as_ref().ok_or(Error("vm_not_configured"))?;
+        vm.validate()?;
+        // This encrypted RAM file is already reserved. Only another guest is
+        // new; never allocate, copy or format a replacement child volume.
+        let guest = vm.reservation_mib();
+        self.admit_memory(self.reserved_mib(&opened)?, guest, guest, "insufficient_ephemeral_memory")?;
+        let parent = child_family_source(id)?;
+        let capability = crate::ipc::authorized_child_family(id)?.ok_or(Error("parent_family_not_authorized"))?;
+        require(child_family_source(id)? == parent, "parent_safe_changed")?;
+        let credential = family::credential_for_safe(&capability, id).map_err(Error)?;
+        crypt_open_keyslot(&path, "oblivion-session", credential.as_ref(), false, Some(0))?;
+        drop(credential);
+        let result = (|| {
+            write_key_file("ephemeral-child", id.as_bytes())?;
+            write_key_file("opening-nonce", random_id()?.as_bytes())?;
+            crate::ipc::retain_family(id, &capability)?;
+            write_session_info(id, "starting")?;
+            vm.start_documents()?;
+            require(child_family_source(id)? == parent, "parent_safe_changed")?;
+            write_session_info(id, "documents")
+        })();
+        drop(capability);
+        if result.is_err() { require(self.close_slot(true)?, "child_cleanup_required")?; }
+        result
     }
 
     fn open_ephemeral(&self) -> Result<()> {
-        self.admit_session()?;
+        require(matches!(mount_mode()?, MountMode::ReadOnly | MountMode::RamOnly), "ephemeral_requires_ephemeral_mode")?;
+        self.admit_session(true)?;
         require(
-            mount_mode()? != MountMode::Closed && mapping_open("oblivion-general")?,
+            mount_mode()? != MountMode::Closed,
             "general_not_open",
         )?;
         require(!mapping_open("oblivion-session")?, "session_already_open")?;
@@ -1808,26 +2674,39 @@ impl Config {
         File::open("/dev/urandom")
             .and_then(|mut random| random.read_exact(&mut secret))
             .map_err(|_| Error("random_failed"))?;
-        create_image(Path::new(&scope::path(EPHEMERAL)), self.session_mib)?;
+        create_image(Path::new(&scope::path(EPHEMERAL)), self.ephemeral_mib)?;
         self.format(Path::new(&scope::path(EPHEMERAL)), &secret)?;
         crypt_open(Path::new(&scope::path(EPHEMERAL)), "oblivion-session", &secret, false)?;
         drop(secret);
+        write_key_file("opening-nonce", random_id()?.as_bytes())?;
         format_session()
     }
 
     fn open(&self, id: &str, secret: &[u8]) -> Result<()> {
         validate_id(id)?;
+        require_branch_open(&agent_safe_records()?, id)?;
         require(!open_sessions()?.iter().any(|entry| entry.id.as_deref() == Some(id)), "session_already_open")?;
-        self.admit_session()?;
+        self.admit_session(false)?;
         require(
             mount_mode()? == MountMode::ReadWrite && mapping_open("oblivion-general")?,
             "general_not_writable",
         )?;
         // Kernel mapping is the interlock, not a JSON state file that can become stale.
         require(!mapping_open("oblivion-session")?, "session_already_open")?;
-        let path = PathBuf::from(format!("{MOUNT}/sessions/{id}.luks"));
+        let path = persistent_safe_path(id)?;
         trusted_file(&path)?;
-        crypt_open(&path, "oblivion-session", secret, false)
+        self.admit_family()?;
+        let credential = safe_credential(&path, Some(id), secret)?;
+        crypt_open_keyslot(&path, "oblivion-session", credential.key.as_ref(), false, Some(credential.token.keyslot))?;
+        if let Err(error) = write_key_file("opening-nonce", random_id()?.as_bytes()) {
+            crypt_close("oblivion-session")?;
+            return Err(error);
+        }
+        if let Err(error) = crate::ipc::retain_family(id, &credential.capability) {
+            crypt_close("oblivion-session")?;
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn format(&self, path: &Path, secret: &[u8]) -> Result<()> {
@@ -1877,119 +2756,28 @@ fn profile_directory() -> Result<bool> {
     Ok(true)
 }
 
-fn read_api_keys() -> Result<keys::Archive> {
-    if !profile_directory()? {
-        return Ok(keys::Archive::empty());
-    }
-    for name in ["provider.keys.json", "abliteration.keys.json"] {
-        if let Some(archive) = read_key_archive(&Path::new(PROFILE).join(name))? {
-            return Ok(archive);
-        }
-    }
-    let path = Path::new(PROFILE).join("abliteration.key");
-    match fs::symlink_metadata(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(keys::Archive::empty());
-        }
-        Err(_) => return Err(Error("profile_unavailable")),
-        Ok(_) => {}
-    }
-    let mut key = Zeroizing::new(String::new());
-    trusted_file(&path)?
-        .take(1025)
-        .read_to_string(&mut key)
-        .map_err(|_| Error("invalid_api_key"))?;
-    keys::Archive::legacy(key).map_err(Error)
-}
-
-fn read_key_archive(path: &Path) -> Result<Option<keys::Archive>> {
-    match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(Error("profile_unavailable")),
-        Ok(_) => {}
+fn read_proxy_profile_archive(path: &Path) -> Result<proxy_profiles::Archive> {
+    if !path.try_exists().map_err(|_| Error("proxy_profile_unavailable"))? {
+        return Ok(proxy_profiles::Archive::empty());
     }
     let mut bytes = Zeroizing::new(Vec::new());
-    trusted_file(path)?
-        .take(keys::LIMIT as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| Error("profile_unavailable"))?;
-    keys::Archive::decode(&bytes).map(Some).map_err(Error)
+    trusted_file(path)?.take(proxy_profiles::LIMIT as u64 + 1).read_to_end(&mut bytes)
+        .map_err(|_| Error("proxy_profile_unavailable"))?;
+    proxy_profiles::Archive::decode(&bytes).map_err(Error)
 }
 
-fn read_keyring() -> Result<keys::Keyring> {
-    let mut keyring = keys::Keyring::new(
-        read_api_keys()?,
-        read_key_archive(&Path::new(RUN).join("api-keys.json"))?
-            .unwrap_or_else(keys::Archive::empty),
-    )
-    .map_err(Error)?;
-    keyring.default = key_reference("api-key-default")?;
-    Ok(keyring)
-}
-
-fn api_key_present() -> Result<bool> {
-    Ok(read_keyring()?.status(key_selection()?).selected.is_some())
-}
-
-pub(crate) struct ApiKey {
-    pub provider: Provider,
-    pub secret: Zeroizing<Vec<u8>>,
-}
-
-fn read_api_key() -> Result<ApiKey> {
-    let archive = read_keyring()?;
-    let id = archive
-        .status(key_selection()?)
-        .selected
-        .ok_or(Error("api_key_missing"))?;
-    Ok(ApiKey {
-        provider: archive.provider(&id).ok_or(Error("api_key_missing"))?,
-        secret: Zeroizing::new(
-            archive
-                .key(&id)
-                .ok_or(Error("api_key_missing"))?
-                .as_bytes()
-                .to_vec(),
-        ),
-    })
-}
-
-fn selected_provider() -> Result<Provider> {
-    let keyring = read_keyring()?;
-    let id = keyring
-        .status(key_selection()?)
-        .selected
-        .ok_or(Error("api_key_missing"))?;
-    keyring.provider(&id).ok_or(Error("api_key_missing"))
-}
-
-// Absence uses the saved default. An empty selection explicitly disables it;
-// removing a selected key must never silently select another account.
-fn key_selection() -> Result<Option<Option<String>>> {
-    key_reference("api-key-selection")
-}
-
-fn key_reference(name: &str) -> Result<Option<Option<String>>> {
-    let path = runtime_record(name);
-    match fs::symlink_metadata(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(Error("selection_unavailable")),
-        Ok(_) => {}
+fn write_proxy_profile_archive(path: &Path, archive: &proxy_profiles::Archive) -> Result<()> {
+    let bytes = archive.encode().map_err(Error)?;
+    let pending = path.with_extension("json.pending");
+    for existing in [path, &pending] {
+        if existing.try_exists().map_err(|_| Error("proxy_profile_unavailable"))? { trusted_file(existing)?; }
     }
-    let mut id = String::new();
-    trusted_file(&path)?
-        .take(33)
-        .read_to_string(&mut id)
-        .map_err(|_| Error("selection_unavailable"))?;
-    require(
-        id.is_empty() || keys::valid_id(&id),
-        "invalid_key_selection",
-    )?;
-    Ok(Some(if id.is_empty() { None } else { Some(id) }))
-}
-
-fn clear_key_selection() -> Result<()> {
-    clear_key_file("api-key-selection")
+    let mut file = OpenOptions::new().write(true).create(true).truncate(true).mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&pending)
+        .map_err(|_| Error("proxy_profile_write_failed"))?;
+    file.write_all(&bytes).and_then(|()| file.sync_all()).map_err(|_| Error("proxy_profile_write_failed"))?;
+    fs::rename(&pending, path).map_err(|_| Error("proxy_profile_write_failed"))?;
+    sync_directory(path.parent().ok_or(Error("invalid_path"))?)
 }
 
 fn clear_key_file(name: &str) -> Result<()> {
@@ -2004,10 +2792,6 @@ fn clear_key_file(name: &str) -> Result<()> {
         fs::remove_file(path).map_err(|_| Error("selection_write_failed"))?;
     }
     Ok(())
-}
-
-fn write_key_selection(id: Option<&str>) -> Result<()> {
-    write_key_file("api-key-selection", id.unwrap_or("").as_bytes())
 }
 
 fn write_key_file(name: &str, bytes: &[u8]) -> Result<()> {
@@ -2222,62 +3006,16 @@ pub(crate) fn save_tor_state(
     oblivion_host::tor_profile::save(&network_profile()?, purpose, state).map_err(Error)
 }
 
-fn save_api_keys(archive: &keys::Archive) -> Result<()> {
-    let directory = Path::new(PROFILE);
-    let path = directory.join("provider.keys.json");
-    let pending = directory.join("provider.keys.json.pending");
-    let mut legacy = Vec::new();
-    for name in [
-        "abliteration.key",
-        "abliteration.key.pending",
-        "abliteration.keys.json",
-        "abliteration.keys.json.pending",
-    ] {
-        let file = directory.join(name);
-        match fs::symlink_metadata(&file) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(Error("profile_unavailable")),
-            Ok(_) => {
-                trusted_file(&file)?;
-                legacy.push(file);
-            }
-        }
-    }
-    match fs::symlink_metadata(&pending) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(Error("profile_unavailable")),
-        Ok(_) => {
-            trusted_file(&pending)?;
-            fs::remove_file(&pending).map_err(|_| Error("profile_write_failed"))?;
-        }
-    }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&pending)
-        .map_err(|_| Error("profile_write_failed"))?;
-    file.write_all(&archive.encode().map_err(Error)?)
-        .and_then(|()| file.sync_all())
-        .map_err(|_| Error("profile_write_failed"))?;
-    fs::rename(pending, path).map_err(|_| Error("profile_write_failed"))?;
-    sync_directory(directory)?;
-    // The versioned archive is authoritative even if cleanup is interrupted.
-    // Publish and fsync it before removing any legacy credential.
-    for file in legacy {
-        fs::remove_file(file).map_err(|_| Error("profile_write_failed"))?;
-    }
-    sync_directory(directory)
-}
-
 fn close_session() -> Result<()> {
+    // Closing revokes family creation authority even if device cleanup fails.
+    crate::ipc::release_family()?;
     clear_key_file("session-title")?;
     if mapping_open("oblivion-session")? {
         // No deferred removal: a live guest/block handle keeps the interlock.
         crypt_close("oblivion-session")?;
     }
     require(!mapping_open("oblivion-session")?, "session_still_open")?;
+    clear_key_file("opening-nonce")?;
     if Path::new(&scope::path(EPHEMERAL))
         .try_exists()
         .map_err(|_| Error("ephemeral_check_failed"))?
@@ -2285,6 +3023,7 @@ fn close_session() -> Result<()> {
         trusted_file(Path::new(&scope::path(EPHEMERAL)))?;
         fs::remove_file(scope::path(EPHEMERAL)).map_err(|_| Error("ephemeral_cleanup_failed"))?;
     }
+    clear_key_file("ephemeral-child")?;
     Ok(())
 }
 
@@ -2292,7 +3031,7 @@ pub(crate) fn closed_session_file(id: &str) -> Result<File> {
     validate_id(id)?;
     require(!open_sessions()?.iter().any(|entry| entry.id.as_deref() == Some(id)), "session_already_open")?;
     closed_archive()?;
-    trusted_file(&Path::new(MOUNT).join(format!("sessions/{id}.luks")))
+    trusted_file(&persistent_safe_path(id)?)
 }
 
 fn closed_archive() -> Result<()> {
@@ -2449,10 +3188,14 @@ fn close_maintenance_session() -> Result<()> {
 
 fn discard_growth(id: &str) -> Result<()> {
     closed_session_file(id)?;
-    discard_pending(&Path::new(MOUNT).join(format!("sessions/{id}.growing")))
+    discard_pending(&persistent_safe_path(id)?.with_extension("growing"))
 }
 
 fn format_session() -> Result<()> {
+    format_device(&scope::path(SESSION))
+}
+
+fn format_device(device: &str) -> Result<()> {
     // The host formats the block device but never mounts a session filesystem.
     run(
         "/usr/sbin/mkfs.ext4",
@@ -2462,7 +3205,7 @@ fn format_session() -> Result<()> {
             "0",
             "-E",
             "lazy_itable_init=0,lazy_journal_init=0",
-            &scope::path(SESSION),
+            device,
         ],
         None,
     )
@@ -2470,6 +3213,19 @@ fn format_session() -> Result<()> {
 
 fn close_general() -> Result<()> {
     close_session()?;
+    if mount_mode()? == MountMode::RamOnly {
+        require(!mapping_open("oblivion-general")? && physical_safe_owners_stopped()?, "runtime_busy")?;
+        // Every Safe owner is gone before application metadata or its mode
+        // marker disappears. This tree is exclusively on verified /run tmpfs.
+        for entry in fs::read_dir(MOUNT).map_err(|_| Error("ram_profile_cleanup_failed"))? {
+            let entry = entry.map_err(|_| Error("ram_profile_cleanup_failed"))?;
+            if entry.file_type().map_err(|_| Error("ram_profile_cleanup_failed"))?.is_dir() {
+                fs::remove_dir_all(entry.path()).map_err(|_| Error("ram_profile_cleanup_failed"))?;
+            } else { fs::remove_file(entry.path()).map_err(|_| Error("ram_profile_cleanup_failed"))?; }
+        }
+        clear_key_file("ram-only")?;
+        return clear_key_file("host-opening");
+    }
     if mount_mode()? != MountMode::Closed {
         run("/usr/bin/umount", &[MOUNT], None)?;
     }
@@ -2479,10 +3235,377 @@ fn close_general() -> Result<()> {
     require(
         mount_mode()? == MountMode::Closed && !mapping_open("oblivion-general")?,
         "general_still_open",
-    )
+    )?;
+    clear_key_file("host-opening")
+}
+
+fn physical_safe_owners_stopped() -> Result<bool> {
+    let mut units = Vec::new();
+    let mut mappings = Vec::new();
+    for index in 0..scope::LIMIT {
+        scope::within(scope::Slot::try_from(index).map_err(Error)?, || {
+            for name in ["oblivion-session", "oblivion-import", "oblivion-export"] {
+                mappings.push(scope::current().mapping(name));
+            }
+            for role in [crate::vm::Role::Session, crate::vm::Role::Gateway,
+                crate::vm::Role::Import, crate::vm::Role::Export, crate::vm::Role::OnionUplink,
+                crate::vm::Role::OnionGateway, crate::vm::Role::OnionFile] {
+                units.push(format!("{}.service", role.runtime().trim_start_matches("/run/")));
+            }
+            for owner in ["oblivion-gateway-host", "oblivion-transfer-host", "oblivion-onion-host"] {
+                units.push(scope::current().owner(owner));
+            }
+        });
+    }
+    for entry in fs::read_dir("/sys/block").map_err(|_| Error("mapping_check_failed"))? {
+        let entry = entry.map_err(|_| Error("mapping_check_failed"))?;
+        if !entry.file_name().as_encoded_bytes().starts_with(b"dm-") { continue }
+        let name = fs::read_to_string(entry.path().join("dm/name"))
+            .map_err(|_| Error("mapping_check_failed"))?;
+        if mappings.iter().any(|mapping| mapping == name.trim())
+            || name.trim().strip_prefix("oblivion-safe-create-").is_some_and(|id| validate_id(id).is_ok()) {
+            return Ok(false);
+        }
+    }
+    let output = Command::new("/usr/bin/systemctl")
+        .args(["show", "--property=Id,LoadState,ActiveState,MainPID,ControlPID"]).args(&units)
+        .env_clear().env("LC_ALL", "C")
+        .stdin(Stdio::null()).stderr(Stdio::null()).output()
+        .map_err(|_| Error("vm_state_unavailable"))?;
+    require(output.status.success(), "vm_state_unavailable")?;
+    let output = String::from_utf8(output.stdout).map_err(|_| Error("invalid_vm_state"))?;
+    owners_observed_stopped(&output, &units)
+}
+
+fn owners_observed_stopped(output: &str, units: &[String]) -> Result<bool> {
+    let mut observed = std::collections::BTreeSet::new();
+    for block in output.trim().split("\n\n") {
+        let mut fields = std::collections::BTreeMap::new();
+        for line in block.lines() {
+            let (key, value) = line.split_once('=').ok_or(Error("invalid_vm_state"))?;
+            require(fields.insert(key, value).is_none(), "invalid_vm_state")?;
+        }
+        let id = *fields.get("Id").ok_or(Error("invalid_vm_state"))?;
+        require(units.iter().any(|unit| unit == id) && observed.insert(id), "invalid_vm_state")?;
+        let absent = *fields.get("LoadState").ok_or(Error("invalid_vm_state"))? == "not-found";
+        match fields.get("ActiveState").copied() {
+            Some("inactive" | "failed") => {}
+            None if absent => {}
+            _ => return Ok(false),
+        }
+        for key in ["MainPID", "ControlPID"] {
+            match fields.get(key) {
+                Some(value) if value.parse::<u32>().ok() == Some(0) => {}
+                None if absent => {}
+                _ => return Ok(false),
+            }
+        }
+    }
+    require(observed.len() == units.len(), "invalid_vm_state")?;
+    Ok(true)
+}
+
+struct SafeCredential {
+    token: family::SafeToken,
+    capability: family::Capability,
+    key: Zeroizing<[u8; 32]>,
+}
+
+fn safe_credential(path: &Path, expected: Option<&str>, password: &[u8]) -> Result<SafeCredential> {
+    let token = safe_family_token(path)?;
+    if let Some(expected) = expected {
+        require(token.safe_id == expected, "safe_identity_mismatch")?;
+    }
+    let capability = family::unlock_descriptor(&token.descriptor, password).map_err(Error)?;
+    let key = family::credential_for_safe(&capability, &token.safe_id).map_err(Error)?;
+    Ok(SafeCredential { token, capability, key })
+}
+
+pub(crate) fn safe_family_token(path: &Path) -> Result<family::SafeToken> {
+    trusted_file(path)?;
+    let mut child = Command::new("/usr/sbin/cryptsetup")
+        .args(["token", "export", "--token-id", "0", "--json-file", "-"])
+        .arg(path)
+        .env_clear().env("LC_ALL", "C")
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().map_err(|_| Error("family_token_unavailable"))?;
+    let mut bytes = Vec::new();
+    let read = child.stdout.take().ok_or(Error("family_token_unavailable"))?
+        .take(family::DESCRIPTOR_LIMIT as u64 + 1).read_to_end(&mut bytes);
+    let status = child.wait().map_err(|_| Error("family_token_unavailable"))?;
+    read.map_err(|_| Error("family_token_unavailable"))?;
+    require(status.success(), "family_token_unavailable")?;
+    family::Descriptor::decode_token(&bytes).map_err(Error)
+}
+
+// Safe v1 stores its password-wrapped family descriptor and stable SafeID in
+// public LUKS2 token0. Only a derived random key enters the actual LUKS slot.
+// The general archive keeps its independent human-password LUKS format.
+fn format_safe(path: &Path, credential: &[u8], descriptor: &family::Descriptor, safe_id: &str) -> Result<()> {
+    format_derived_volume(path, credential)?;
+    let token = descriptor.encode_token(safe_id, 0).map_err(Error)?;
+    run("/usr/sbin/cryptsetup", &["token", "import", "--token-id", "0", "--json-file", "-",
+        path.to_str().ok_or(Error("invalid_path"))?], Some(&token))?;
+    let verified = safe_family_token(path)?;
+    require(verified.safe_id == safe_id && verified.keyslot == 0
+        && verified.descriptor.encode().map_err(Error)? == descriptor.encode().map_err(Error)?, "family_token_write_failed")
+}
+
+fn format_derived_volume(path: &Path, credential: &[u8]) -> Result<()> {
+    run("/usr/sbin/cryptsetup", &[
+        "luksFormat", "--batch-mode", "--type", "luks2", "--cipher", "aes-xts-plain64",
+        "--key-size", "512", "--key-slot", "0", "--pbkdf", "pbkdf2",
+        // Password hardening is in the Argon2id wrapper. This slot receives
+        // a uniformly random 256-bit derivation rather than a human password.
+        "--pbkdf-force-iterations", "1000", "--key-file", "-",
+        path.to_str().ok_or(Error("invalid_path"))?,
+    ], Some(credential))
+}
+
+#[cfg(test)]
+mod ram_only_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires isolated root tmpfs /run and a read-only userdata fixture"]
+    fn ram_profile_needs_no_archive_and_keeps_userdata_untouched() {
+        assert_eq!(std::env::var("OBLIVION_RAM_ONLY_TEST").as_deref(), Ok("1"));
+        let sentinel = Path::new("/userdata/general.luks");
+        let before = fs::read(sentinel).unwrap();
+        assert!(OpenOptions::new().write(true).open(sentinel).is_err());
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(RUN).unwrap();
+        runtime().unwrap_or_else(|error| panic!("{}", error.0));
+        assert!(fs::read_dir(RUN).unwrap().next().is_none());
+        create_ram_profile().unwrap_or_else(|error| panic!("{}", error.0));
+        assert!(mount_mode().is_ok_and(|mode| mode == MountMode::RamOnly));
+        assert_eq!(serde_json::to_string(&MountMode::RamOnly).unwrap(), "\"ram-only\"");
+        assert!(!mapping_open("oblivion-general").unwrap_or(true));
+        let snapshot = idle_snapshot().unwrap_or_else(|error| panic!("{}", error.0));
+        assert!(snapshot.host.is_some() && !snapshot.general_open && !snapshot.writable);
+        let nonce = snapshot.host.unwrap();
+        assert_eq!(create_ram_profile().err().map(|error| error.0), Some("general_already_open"));
+        assert_eq!(read_nonce(&Path::new(RUN).join("host-opening")).unwrap_or(None).as_deref(), Some(nonce.as_str()));
+        let config = Config {
+            general_image: sentinel.into(), general_mib: 512, session_mib: 128, ephemeral_mib: 128,
+            pbkdf_memory_kib: 65536, manager_uid: 1000, vm: None, gateway: None, import: None,
+            export: None, onion: None, gateway_network: false, usb_persistence: false,
+            usb: None,
+        };
+        assert_eq!(config.initialize(b"not-a-persistent-password").err().map(|error| error.0), Some("volume_busy"));
+        assert_eq!(config.create(b"not-a-persistent-password", 128).err().map(|error| error.0), Some("general_not_writable"));
+        assert_eq!(config.unlock(b"not-a-persistent-password", true).err().map(|error| error.0), Some("general_already_open"));
+        let mut proxies = proxy_profiles::Registry::new(proxy_profiles::Archive::empty(), proxy_profiles::Archive::empty()).unwrap();
+        let command = proxy_profiles::Command::decode(br#"{"action":"add","name":"Fixture","transport":{"mode":"socks5","endpoint":"192.0.2.22:1080","authentication":null}}"#).unwrap();
+        assert!(matches!(proxies.change(command, true).unwrap(), proxy_profiles::Change::Temporary));
+        write_proxy_profile_archive(&Path::new(RUN).join("proxy-profiles.json"), proxies.temporary())
+            .unwrap_or_else(|error| panic!("{}", error.0));
+        assert!(proxies.status().entries.iter().all(|entry| entry.temporary));
+        let idle = crate::idle_controller::Controller::new().unwrap_or_else(|error| panic!("{}", error.0));
+        idle.configure(oblivion_host::autolock::Preferences { version: 1, safe_minutes: 5, host_minutes: 10 })
+            .unwrap_or_else(|error| panic!("{}", error.0));
+        let idle = serde_json::to_value(idle.status().unwrap_or_else(|error| panic!("{}", error.0))).unwrap();
+        assert_eq!(idle["storage"], "ram-only");
+        assert_eq!(idle["writable"], false);
+        assert!(fs::read_dir(PROFILE).unwrap().next().is_none());
+        // This container has no service manager. Unknown physical ownership
+        // must keep application state open rather than erase its marker.
+        mark_recovery().unwrap_or_else(|error| panic!("{}", error.0));
+        assert!(close_general().is_err());
+        assert!(mount_mode().is_ok_and(|mode| mode == MountMode::RamOnly));
+        assert!(recovery_required().unwrap_or(false));
+        assert_eq!(fs::read(sentinel).unwrap(), before);
+        assert!(!Path::new("/userdata/general.luks.pending").exists());
+    }
+}
+
+#[cfg(test)]
+mod family_storage_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires root and installed cryptsetup; uses a disposable image"]
+    fn production_family_roundtrips_through_real_luks_header() {
+        let password = b"disposable-family-test-password";
+        let id = "00000000000000000000000000000001";
+        let directory = std::env::temp_dir().join(format!("oblivion-family-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.join("safe.luks");
+        create_image(&path, 64).unwrap_or_else(|error| panic!("{}", error.0));
+        let (descriptor, capability) = family::new_family(password).unwrap();
+        let key = family::credential_for_safe(&capability, id).unwrap();
+        format_safe(&path, key.as_ref(), &descriptor, id)
+            .unwrap_or_else(|error| panic!("{}", error.0));
+        let recovered = safe_credential(&path, Some(id), password)
+            .unwrap_or_else(|error| panic!("{}", error.0));
+        assert_eq!(*recovered.key, *key);
+        assert!(safe_credential(&path, Some("00000000000000000000000000000002"), password).is_err());
+        run("/usr/sbin/cryptsetup", &[
+            "open", "--test-passphrase", "--disable-external-tokens", "--key-slot", "0", "--key-file", "-",
+            path.to_str().unwrap(),
+        ], Some(recovered.key.as_ref())).unwrap_or_else(|error| panic!("{}", error.0));
+        let other = family::credential_for_safe(&capability, "00000000000000000000000000000002").unwrap();
+        assert!(run("/usr/sbin/cryptsetup", &[
+            "open", "--test-passphrase", "--disable-external-tokens", "--key-slot", "0", "--key-file", "-",
+            path.to_str().unwrap(),
+        ], Some(other.as_ref())).is_err());
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod agent_safe_tests {
+    use super::*;
+
+    fn record(id: u8, parent: u8) -> AgentSafeRecord {
+        let id = format!("{id:032x}");
+        let parent = format!("{parent:032x}");
+        let capability = family::Capability::from_root_secret("ffffffffffffffffffffffffffffffff", Zeroizing::new([7; 32])).unwrap();
+        let sealed_task = family::SealedTask::seal(&capability, &family::TaskContext {
+            safe_id: &id, parent_id: &parent, request_id: &id, agent: "codex",
+        }, "private child task").unwrap();
+        AgentSafeRecord {
+            version: 1, id: id.clone(), parent,
+            created_by_agent: true, agent: "codex".into(), creator_chat_id: Some("explicit-native-chat-id".into()),
+            request_id: id, sealed_task,
+            ephemeral: false, mib: 512, state: AgentSafeState::AwaitingStart,
+        }
+    }
+
+    #[test]
+    fn only_the_requested_ready_ram_child_can_be_opened() {
+        let mut child = record(2, 1);
+        child.ephemeral = true;
+        let records = vec![child];
+        assert_eq!(available_ram_child(&records, &format!("{:032x}", 2)).unwrap_or_else(|error| panic!("{}", error.0)).id, format!("{:032x}", 2));
+        assert!(available_ram_child(&records, &format!("{:032x}", 3)).is_err());
+        for state in [AgentSafeState::Creating, AgentSafeState::Failed, AgentSafeState::RecoveryRequired] {
+            let mut child = record(2, 1); child.ephemeral = true; child.state = state;
+            assert!(available_ram_child(&[child], &format!("{:032x}", 2)).is_err());
+        }
+        assert!(available_ram_child(&[record(2, 1)], &format!("{:032x}", 2)).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires isolated root-owned tmpfs /run; no production state"]
+    fn closed_ram_child_is_counted_once_and_parent_close_fences_private_lookup() {
+        assert_eq!(std::env::var("OBLIVION_RAM_CHILD_TEST").as_deref(), Ok("1"));
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(RUN).unwrap();
+        create_ram_profile().unwrap_or_else(|error| panic!("{}", error.0));
+        let mut child = record(2, 1); child.ephemeral = true; child.mib = 128;
+        write_agent_safe(&child).unwrap_or_else(|error| panic!("{}", error.0));
+        private_directory(&child.image(false).parent().unwrap(), true).unwrap_or_else(|error| panic!("{}", error.0));
+        let file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(child.image(false)).unwrap();
+        file.set_len(child.mib * MIB).unwrap();
+        let config = Config { general_image: "/unused/general.luks".into(), general_mib: 512, session_mib: 128, ephemeral_mib: 128,
+            pbkdf_memory_kib: 65536, manager_uid: 1000, vm: None, gateway: None, import: None, export: None,
+            onion: None, gateway_network: false, usb_persistence: false, usb: None };
+        let closed = config.reserved_mib(&[]).unwrap_or_else(|error| panic!("{}", error.0));
+        assert_eq!(closed, RAM_PROFILE_RESERVE_MIB + 128);
+        let slot = scope::Slot::try_from(1).unwrap();
+        private_directory(Path::new(&slot.runtime()), true).unwrap_or_else(|error| panic!("{}", error.0));
+        scope::within(slot, || {
+            write_key_file("ephemeral-child", child.id.as_bytes()).unwrap_or_else(|error| panic!("{}", error.0));
+            assert!(ephemeral_session().unwrap_or(false));
+            assert!(!Path::new(&scope::path(EPHEMERAL)).exists());
+        });
+        let opened = [OpenSession { slot, id: Some(child.id.clone()), mode: Some("documents".into()), recovery_required: false }];
+        assert_eq!(config.reserved_mib(&opened).unwrap_or_else(|error| panic!("{}", error.0)), closed);
+        // No real parent VM exists: a cached family alone cannot grant access.
+        assert!(matches!(child_family_source(&child.id), Err(Error("parent_safe_not_open"))));
+        mark_branch_closing(&child.parent).unwrap_or_else(|error| panic!("{}", error.0));
+        assert!(matches!(child_family_source(&child.id), Err(Error("safe_branch_closing"))));
+        crate::ipc::assert_child_lookup_is_fenced(&child.id, &child.parent);
+    }
+
+    #[test]
+    fn branch_order_is_descendant_first_and_excludes_another_family() {
+        let records = vec![record(2, 1), record(3, 2), record(5, 4)];
+        let branch = safe_branch(&records, &format!("{:032x}", 1)).unwrap_or_else(|error| panic!("{}", error.0));
+        assert_eq!(branch, vec![(format!("{:032x}", 3), 2), (format!("{:032x}", 2), 1), (format!("{:032x}", 1), 0)]);
+        let mut cyclic = vec![record(2, 3), record(3, 2)];
+        assert!(safe_branch(&cyclic, &format!("{:032x}", 2)).is_err());
+        cyclic[1].parent = format!("{:032x}", 1);
+        assert!(safe_branch(&cyclic, &format!("{:032x}", 1)).is_ok());
+    }
+
+    #[test]
+    fn child_admission_checks_count_and_depth_before_allocation() {
+        let parent = format!("{:032x}", 1);
+        let mut records: Vec<_> = (2..10).map(|id| record(id, 1)).collect();
+        assert!(validate_child_limits(&records, &parent).is_err());
+        records.pop();
+        assert!(validate_child_limits(&records, &parent).is_ok());
+        let records = vec![record(2, 1), record(3, 2), record(4, 3), record(5, 4)];
+        assert!(validate_child_limits(&records, &format!("{:032x}", 4)).is_ok());
+        assert!(validate_child_limits(&records, &format!("{:032x}", 5)).is_err());
+    }
+
+    #[test]
+    fn provenance_status_never_exposes_task_or_claims_an_agent_started() {
+        let mut record = record(2, 1);
+        record.state = AgentSafeState::Creating;
+        let encoded = serde_json::to_value(record.info()).unwrap();
+        assert!(encoded.get("task").is_none());
+        assert!(encoded.get("sealed_task").is_none());
+        let stored = serde_json::to_string(&record).unwrap();
+        assert!(!stored.contains("private child task"));
+        assert!(!stored.contains("\"task\":"));
+        let mut old: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        old.as_object_mut().unwrap().remove("sealed_task");
+        old["task"] = "private child task".into();
+        assert!(serde_json::from_value::<AgentSafeRecord>(old).is_err());
+        assert_eq!(encoded["state"], "recovery-required");
+        record.state = AgentSafeState::AwaitingStart;
+        assert_eq!(serde_json::to_value(record.info()).unwrap()["state"], "awaiting-start");
+        let request: AgentSafeRequest = serde_json::from_value(serde_json::json!({
+            "agent":"claude", "task":"an explicit task", "request_id":format!("{:032x}", 1),
+            "creator_chat_id":"native-chat-id",
+        })).unwrap();
+        assert!(request.validate().is_ok());
+        assert!(serde_json::from_value::<AgentSafeRequest>(serde_json::json!({
+            "agent":"claude", "task":"an explicit task", "request_id":format!("{:032x}", 1), "parent":"forged",
+        })).is_err());
+    }
+
+    #[test]
+    fn maximum_child_task_stays_encrypted_within_the_bounded_provenance_record() {
+        let mut record = record(2, 1);
+        record.creator_chat_id = Some("x".repeat(256));
+        let capability = family::Capability::from_root_secret("ffffffffffffffffffffffffffffffff", Zeroizing::new([7; 32])).unwrap();
+        let task = "s".repeat(16384);
+        record.sealed_task = family::SealedTask::seal(&capability, &family::TaskContext {
+            safe_id: &record.id, parent_id: &record.parent, request_id: &record.request_id, agent: &record.agent,
+        }, &task).unwrap();
+        let bytes = serde_json::to_vec(&record).unwrap();
+        assert!(bytes.len() <= CHILD_RECORD_LIMIT);
+        assert!(!String::from_utf8_lossy(&bytes).contains(&task));
+        let reopened: AgentSafeRecord = serde_json::from_slice(&bytes).unwrap();
+        let task = reopened.sealed_task.open(&capability, &family::TaskContext {
+            safe_id: &reopened.id, parent_id: &reopened.parent, request_id: &reopened.request_id, agent: &reopened.agent,
+        }).unwrap();
+        assert_eq!(task.len(), 16384);
+    }
+
+    #[test]
+    fn failed_unit_with_a_remaining_pid_is_not_a_stopped_owner() {
+        let units = vec!["oblivion-session.service".to_string()];
+        let stopped = "Id=oblivion-session.service\nLoadState=loaded\nActiveState=failed\nMainPID=0\nControlPID=0\n";
+        assert!(owners_observed_stopped(stopped, &units).unwrap_or(false));
+        assert!(!owners_observed_stopped(&stopped.replace("MainPID=0", "MainPID=42"), &units).unwrap_or(false));
+        assert!(!owners_observed_stopped(&stopped.replace("ControlPID=0", "ControlPID=43"), &units).unwrap_or(false));
+        assert!(owners_observed_stopped("Id=oblivion-session.service\nLoadState=not-found\n", &units).unwrap_or(false));
+        assert!(owners_observed_stopped(stopped, &["another.service".into()]).is_err());
+    }
 }
 
 fn crypt_open(path: &Path, name: &str, secret: &[u8], readonly: bool) -> Result<()> {
+    crypt_open_keyslot(path, name, secret, readonly, None)
+}
+
+fn crypt_open_keyslot(path: &Path, name: &str, secret: &[u8], readonly: bool, keyslot: Option<u8>) -> Result<()> {
     let scoped = if name == "oblivion-session" { scope::current().mapping(name) } else { name.to_owned() };
     let name = scoped.as_str();
     let mut args = vec![
@@ -2497,6 +3620,10 @@ fn crypt_open(path: &Path, name: &str, secret: &[u8], readonly: bool) -> Result<
     ];
     if readonly {
         args.push("--readonly");
+    }
+    let keyslot = keyslot.map(|slot| slot.to_string());
+    if let Some(keyslot) = &keyslot {
+        args.extend(["--key-slot", keyslot]);
     }
     run("/usr/sbin/cryptsetup", &args, Some(secret)).map_err(|_| Error("volume_unlock_failed"))
 }
@@ -2561,7 +3688,7 @@ fn lock() -> Result<File> {
     lock_named("storage.lock")
 }
 
-fn recovery_lock() -> Result<File> {
+pub(crate) fn recovery_lock() -> Result<File> {
     // A status poll may still own the operation lock when the display exits.
     // Recovery is latched already: wait for that worker, never skip teardown.
     // A stuck worker still leaves recovery required after this bounded wait.
@@ -2603,9 +3730,11 @@ pub(crate) fn lock_named(name: &str) -> Result<File> {
 }
 
 pub(crate) fn recovery_required() -> Result<bool> {
-    Path::new(RECOVERY)
+    if Path::new(RECOVERY)
         .try_exists()
-        .map_err(|_| Error("recovery_check_failed"))
+        .map_err(|_| Error("recovery_check_failed"))? { return Ok(true) }
+    let Some(nonce) = read_nonce(&Path::new(RUN).join("host-opening"))? else { return Ok(false) };
+    crate::idle_controller::fenced(&crate::idle_controller::Target::Host { nonce })
 }
 
 fn runtime() -> Result<()> {
@@ -2740,19 +3869,52 @@ fn mapping_open(name: &str) -> Result<bool> {
     Ok(false)
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq, Serialize)]
 enum MountMode {
+    #[serde(rename = "locked")]
     Closed,
+    #[serde(rename = "read-only")]
     ReadOnly,
+    #[serde(rename = "persistent")]
     ReadWrite,
+    #[serde(rename = "ram-only")]
+    RamOnly,
+}
+
+fn create_ram_profile() -> Result<()> {
+    runtime()?;
+    require(mount_mode()? == MountMode::Closed && !mapping_open("oblivion-general")?, "general_already_open")?;
+    private_directory(Path::new(MOUNT), true)?;
+    require(fs::read_dir(MOUNT).map_err(|_| Error("ram_profile_unavailable"))?.next().is_none(), "ram_profile_not_empty")?;
+    let nonce = random_id()?;
+    write_key_file("host-opening", nonce.as_bytes())?;
+    if let Err(error) = write_key_file("ram-only", nonce.as_bytes()) {
+        clear_key_file("host-opening")?;
+        clear_key_file("ram-only.pending")?;
+        return Err(error);
+    }
+    let result = (|| {
+        private_directory(Path::new(PROFILE), true)?;
+        clear_key_file("proxy-profiles.json")?;
+        crate::idle_controller::clear_temporary()?;
+        scope::within(Default::default(), || -> Result<()> {
+            clear_transport_selection()?;
+            clear_network_selection()
+        })?;
+        Ok(())
+    })();
+    if result.is_err() { mark_recovery()?; }
+    result
 }
 
 fn mount_mode() -> Result<MountMode> {
+    let ram = read_nonce(&Path::new(RUN).join("ram-only"))?;
     let mounts =
         fs::read_to_string("/proc/self/mountinfo").map_err(|_| Error("mount_check_failed"))?;
     for line in mounts.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.get(4) == Some(&MOUNT) {
+            require(ram.is_none(), "mixed_app_storage")?;
             let separator = fields
                 .iter()
                 .position(|field| *field == "-")
@@ -2773,13 +3935,23 @@ fn mount_mode() -> Result<MountMode> {
             });
         }
     }
+    if let Some(nonce) = ram {
+        require(!mapping_open("oblivion-general")?
+            && read_nonce(&Path::new(RUN).join("host-opening"))?.as_deref() == Some(&nonce), "invalid_ram_profile")?;
+        require(private_directory(Path::new(MOUNT), false)?, "ram_profile_unavailable")?;
+        let directory = File::open(MOUNT).map_err(|_| Error("ram_profile_unavailable"))?;
+        let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        require(unsafe { libc::fstatfs(directory.as_raw_fd(), stats.as_mut_ptr()) } == 0
+            && unsafe { stats.assume_init().f_type } == libc::TMPFS_MAGIC, "ram_profile_must_be_tmpfs")?;
+        return Ok(MountMode::RamOnly);
+    }
     Ok(MountMode::Closed)
 }
 
 fn write_session_title(id: &str, title: &str) -> Result<()> {
-    let directory = Path::new(MOUNT).join("sessions");
-    let path = directory.join(format!("{id}.title"));
-    let pending = directory.join(format!("{id}.title-tmp"));
+    let path = persistent_safe_title(id)?;
+    let directory = path.parent().ok_or(Error("invalid_path"))?;
+    let pending = path.with_extension("title-tmp");
     for existing in [&path, &pending] {
         if fs::symlink_metadata(existing).is_ok() {
             trusted_file(existing)?;
@@ -2796,7 +3968,7 @@ fn write_session_title(id: &str, title: &str) -> Result<()> {
     file.write_all(title.as_bytes())
         .and_then(|()| file.sync_all())
         .map_err(|_| Error("session_title_write_failed"))?;
-    fs::rename(pending, path).map_err(|_| Error("session_title_write_failed"))?;
+    fs::rename(pending, &path).map_err(|_| Error("session_title_write_failed"))?;
     sync_directory(&directory)
 }
 
@@ -2806,14 +3978,9 @@ fn session_titles(mode: &MountMode) -> Result<std::collections::BTreeMap<String,
         MountMode::Closed => Vec::new(),
         MountMode::ReadWrite => sessions(".luks")?
             .into_iter()
-            .map(|id| {
-                (
-                    id.clone(),
-                    Path::new(MOUNT).join(format!("sessions/{id}.title")),
-                )
-            })
-            .collect(),
-        MountMode::ReadOnly => open_sessions()?.into_iter()
+            .map(|id| Ok((id.clone(), persistent_safe_title(&id)?)))
+            .collect::<Result<_>>()?,
+        MountMode::ReadOnly | MountMode::RamOnly => open_sessions()?.into_iter()
             .filter_map(|entry| entry.id.map(|id| (id, Path::new(&entry.slot.runtime()).join("session-title"))))
             .collect(),
     };
@@ -2835,6 +4002,61 @@ fn session_titles(mode: &MountMode) -> Result<std::collections::BTreeMap<String,
     Ok(titles)
 }
 
+pub(crate) fn share_export_host() -> Result<String> {
+    require(mount_mode()? == MountMode::ReadWrite && !recovery_required()?, "general_not_writable")?;
+    read_nonce(&Path::new(RUN).join("host-opening"))?.ok_or(Error("idle_opening_unknown"))
+}
+
+/// Only a current, unfenced host unlock can authorize import mutations. This
+/// identity is read from root RAM, never accepted from a frontend payload.
+pub(crate) fn share_import_host() -> Result<Option<String>> {
+    if recovery_required()? { return Ok(None) }
+    read_nonce(&Path::new(RUN).join("host-opening"))
+}
+
+/// The selected set comes from the encrypted controller catalog, not a guest.
+pub(crate) fn share_export_sources(selection: crate::share_export::Selection) -> Result<Vec<crate::share_export::Source>> {
+    share_export_host()?;
+    let all = sessions(".luks")?;
+    let records = agent_safe_records()?;
+    let parents = persistent_safe_parents()?;
+    let selected = match selection {
+        crate::share_export::Selection::All => all.clone(),
+        crate::share_export::Selection::Safe { safe_id } => { validate_id(&safe_id)?; vec![safe_id] },
+        crate::share_export::Selection::Branch { safe_id } => {
+            validate_id(&safe_id)?;
+            require(all.contains(&safe_id), "safe_not_found")?;
+            let mut selected = vec![safe_id.clone()];
+            for id in all.iter().filter(|id| **id != safe_id) {
+                let mut current = id;
+                let mut seen = std::collections::BTreeSet::new();
+                while let Some((_, parent)) = parents.iter().find(|entry| &entry.0 == current) {
+                    require(seen.insert(parent.clone()) && seen.len() <= oblivion_share::manifest::MAX_SAFES, "invalid_share_parent")?;
+                    if parent == &safe_id { selected.push(id.clone()); break }
+                    current = parent;
+                }
+            }
+            selected
+        }
+    };
+    require(!selected.is_empty() && selected.len() <= oblivion_share::manifest::MAX_SAFES, "share_safe_limit")?;
+    let open = open_sessions()?;
+    for id in &selected {
+        require(all.contains(id) && !open.iter().any(|entry| entry.id.as_ref() == Some(id)), "safe_must_be_closed")?;
+        require_branch_open(&records, id)?;
+        trusted_file(&persistent_safe_path(id)?)?;
+    }
+    Ok(selected.iter().map(|id| crate::share_export::Source {
+        id: id.clone(), parent: parents.iter().find(|entry| &entry.0 == id)
+            .map(|entry| entry.1.clone()).filter(|parent| selected.contains(parent)),
+    }).collect())
+}
+
+pub(crate) fn share_export_opening_closed(opening: &oblivion_host::autolock::Opening) -> Result<bool> {
+    scope::within(opening.slot, || Ok(idle_opening()?.as_ref() != Some(opening)
+        && !mapping_open("oblivion-session")? && crate::vm::stopped()?))
+}
+
 fn sessions(extension: &str) -> Result<Vec<String>> {
     let mut ids = Vec::new();
     for entry in
@@ -2846,6 +4068,15 @@ fn sessions(extension: &str) -> Result<Vec<String>> {
             validate_id(id)?;
             trusted_file(&entry.path())?;
             ids.push(id.to_owned());
+        }
+    }
+    if matches!(extension, ".luks" | ".growing") {
+        for imported in share_imports().imported()? {
+            let path = imported.directory.join("volume.luks");
+            if extension == ".growing" && !path.with_extension("growing").try_exists().map_err(|_| Error("session_list_failed"))? { continue }
+            require(!ids.contains(&imported.id), "duplicate_safe_identity")?;
+            trusted_file(&if extension == ".growing" { path.with_extension("growing") } else { path })?;
+            ids.push(imported.id);
         }
     }
     ids.sort();
@@ -2905,9 +4136,9 @@ pub(crate) fn require(condition: bool, code: &'static str) -> Result<()> {
 // Display metadata is RAM-only. The kernel mapping remains the ownership interlock.
 // Keep the already-unlocked volume, but revoke the failed chat before returning
 // it to an offline guest. Any incomplete cleanup leaves recovery latched.
-fn recover_chat(config: &Config) -> Result<()> {
+fn recover_agent_start(config: &Config) -> Result<()> {
     let (id, mode) = session_info()?.ok_or(Error("session_not_open"))?;
-    require(mode == "starting", "chat_not_starting")?;
+    require(mode == "starting", "agent_not_starting")?;
     OpenOptions::new()
         .write(true)
         .create(true)
@@ -2920,6 +4151,7 @@ fn recover_chat(config: &Config) -> Result<()> {
         crate::gateway::shutdown()?;
     }
     crate::vm::stop(false)?;
+    clear_key_file("native-offline")?;
     config
         .vm
         .as_ref()
@@ -2941,7 +4173,7 @@ pub(crate) fn session_info() -> Result<Option<(String, String)>> {
         .map_err(|_| Error("invalid_session_state"))?;
     validate_id(&value.0)?;
     require(
-        matches!(value.1.as_str(), "documents" | "chat" | "starting" | "agent"),
+        matches!(value.1.as_str(), "documents" | "starting" | "agent" | "share"),
         "invalid_session_state",
     )?;
     Ok(Some(value))
@@ -2967,52 +4199,20 @@ fn write_session_info(id: &str, mode: &str) -> Result<()> {
             write_network_policy(&profile.join("network-policy.json"), &policy, mount_mode()? == MountMode::ReadWrite)?;
         }
         if !profile.join("access.json").exists() {
-            crate::host_settings::write_access(&profile.join("access.json"), &crate::host_settings::host_status(true)?.current.web_access)?;
+            crate::safe_access_store::write(&profile.join("access.json"), Access::Open)?;
         }
-        // Pin the opening's credential independently of later default changes.
-        let selected = read_keyring()?.status(key_selection()?).selected;
-        write_key_selection(selected.as_deref())?;
     }
     Ok(())
 }
-fn credentials_editable() -> Result<bool> {
-    Ok(
-        (!mapping_open("oblivion-session")? && crate::vm::stopped()?)
-            || session_info()?.is_some_and(|(_, mode)| mode == "documents"),
-    )
-}
-
-fn session_export(
-    request: oblivion_host::chat_export::Request,
-) -> Result<oblivion_host::chat_export::Response> {
-    require(
-        !recovery_required()? && mapping_open("oblivion-session")? && !crate::vm::stopped()?,
-        "session_not_open",
-    )?;
-    require(request.valid(), "invalid_chat_export_request")?;
+fn session_admin(command: oblivion_host::safe_admin::Command) -> Result<oblivion_host::safe_admin::Response> {
+    require(!recovery_required()? && mapping_open("oblivion-session")? && !crate::vm::stopped()?, "session_not_open")?;
+    let request = oblivion_host::safe_admin::Request::new(command);
+    require(request.valid(), "invalid_safe_admin_request")?;
     let id = random_id()?;
     let result = (|| {
-        use oblivion_transfer::endpoint::{read_message, write_message};
-        let stream = crate::vm::chat_export_port(&id)?;
-        let mut channel =
-            oblivion_host::channel::Channel::new(&stream, std::time::Duration::from_secs(95));
-        let mut ready = [0; 6];
-        channel
-            .read_exact(&mut ready)
-            .map_err(|_| Error("chat_export_not_ready"))?;
-        require(&ready == b"ready\n", "invalid_transfer_guest")?;
-        channel
-            .write_all(b"G")
-            .map_err(|_| Error("chat_export_not_ready"))?;
-        write_message(&mut channel, &request).map_err(|_| Error("chat_export_failed"))?;
-        let response: oblivion_host::chat_export::Response =
-            read_message(&mut channel, 64 * 1024).map_err(|_| Error("chat_export_failed"))?;
-        require(response.valid(&request), "invalid_chat_export_response")?;
-        require(
-            !matches!(response, oblivion_host::chat_export::Response::Unavailable),
-            "chat_export_unavailable",
-        )?;
-        Ok(response)
+        let stream = crate::vm::safe_admin_port(&id)?;
+        let mut channel = oblivion_host::channel::Channel::new(&stream, std::time::Duration::from_secs(65));
+        oblivion_host::safe_admin::exchange(&mut channel, &request).map_err(|_| Error("safe_admin_failed"))
     })();
     let cleanup = crate::vm::remove_copy_port(&id);
     let response = result?;
@@ -3035,14 +4235,14 @@ fn diagnostic_report() -> Result<oblivion_host::diagnostics::Report> {
         },
         cpu_cores: system.cores,
         memory_mib: system.memory_total / MIB,
-        ephemeral: mount_mode()? == MountMode::ReadOnly,
+        ephemeral: matches!(mount_mode()?, MountMode::ReadOnly | MountMode::RamOnly),
         general_open: mapping_open("oblivion-general")?,
         session: if recovery_required()? {
             Session::Recovery
         } else {
             match session.as_ref().map(|(_, mode)| mode.as_str()) {
                 Some("documents") => Session::Documents,
-                Some("chat") => Session::Chat,
+                Some("agent") => Session::Agent,
                 Some("starting") => Session::Starting,
                 _ => Session::Locked,
             }
@@ -3082,7 +4282,7 @@ fn network_observation(mode: Option<&str>) -> network::Observation {
         age_ms: 0,
         tor_progress: None,
     };
-    if mode == Some("documents") {
+    if matches!(mode, Some("documents" | "share")) || runtime_record("native-offline").exists() {
         if crate::vm::network_devices().is_ok_and(|count| count == 0) {
             result.label = "OFFLINE · NO NETWORK DEVICE".into();
             result.direct_blocked = true;
@@ -3118,8 +4318,8 @@ fn network_observation(mode: Option<&str>) -> network::Observation {
         && (mode.is_none() || crate::vm::network_devices().is_ok_and(|count| count == 1));
     result.label = if !result.direct_blocked {
         "STATUS UNKNOWN"
-    } else if crate::host_settings::status(true)
-        .is_ok_and(|status| status.current.web_access == "offline")
+    } else if crate::safe_access_store::status(true)
+        .is_ok_and(|status| status.current == Access::Offline)
     {
         "OFFLINE"
     } else if !observed.ready {
@@ -3161,22 +4361,22 @@ fn open_sessions() -> Result<Vec<OpenSession>> {
 }
 
 pub(crate) fn runtime_record(name: &str) -> PathBuf {
-    // The key inventory and global default belong to the host. A per-opening
-    // selection and every session/gateway record belong to the explicit slot.
-    let base = if matches!(name.trim_end_matches(".pending"), "api-keys.json" | "api-key-default") {
+    // Proxy profiles and application-opening markers belong to the host.
+    // Per-opening selections and gateway records belong to the explicit slot.
+    let base = if matches!(name.trim_end_matches(".pending"), "proxy-profiles.json" | "host-opening" | "ram-only") {
         RUN.to_owned()
     } else { scope::current().runtime() };
     Path::new(&base).join(name)
 }
 
 pub(crate) fn network_profile() -> Result<PathBuf> {
-    let Some((id, _)) = session_info()? else { return Ok(PathBuf::from(PROFILE)); };
+    let Some((id, mode)) = session_info()? else { return Ok(PathBuf::from(PROFILE)); };
     // Gateway owners see the general mount read-only, even for a persistent
     // session. Its private profile subtree remains writable in that namespace.
-    let path = if Path::new(&scope::path(EPHEMERAL)).exists() {
+    let path = if mode == "share" || ephemeral_session()? {
         Path::new(&scope::current().runtime()).join("network-profile").join(id)
     } else {
-        Path::new(PROFILE).join("sessions").join(id)
+        persistent_safe_profile(&id)?
     };
     fs::create_dir_all(&path).map_err(|_| Error("profile_unavailable"))?;
     let metadata = fs::symlink_metadata(&path).map_err(|_| Error("profile_unavailable"))?;
@@ -3184,30 +4384,91 @@ pub(crate) fn network_profile() -> Result<PathBuf> {
     Ok(path)
 }
 
+fn gateway_reserved() -> Result<bool> {
+    if !crate::vm::stopped_role(crate::vm::Role::Gateway)? { return Ok(true); }
+    Ok(!matches!(crate::gateway::state()?.as_str(), "inactive" | "failed"))
+}
+
+fn memory_admission(memory: &str, reserved: u64, additional: u64, peak: u64, error: &'static str) -> Result<()> {
+    let kib = |name: &str| -> Result<u64> {
+        memory.lines().find_map(|line| line.strip_prefix(name))
+            .and_then(|value| value.split_whitespace().next()).and_then(|value| value.parse().ok())
+            .ok_or(Error("memory_unavailable"))
+    };
+    require(kib("MemAvailable:")? >= (peak + 256) * 1024
+        && kib("MemTotal:")? >= (reserved + additional + 512) * 1024, error)
+}
+
 impl Config {
-    fn admit_session(&self) -> Result<()> {
+    fn admit_session(&self, ephemeral: bool) -> Result<()> {
+        require(mapping_open("oblivion-session")?
+            || !(runtime_record("session-recovery-required").exists() || runtime_record("session-info").exists()), "recovery_required")?;
         let opened = open_sessions()?;
         require(!opened.iter().any(|entry| entry.recovery_required), "recovery_required")?;
-        let reservation = self.vm.as_ref().map_or(0, crate::vm::Config::reservation_mib)
-            + self.gateway.as_ref().map_or(0, crate::vm::Config::reservation_mib);
+        let vm = self.vm.as_ref().map_or(0, crate::vm::Config::reservation_mib);
+        let ram_disk = if ephemeral { self.ephemeral_mib } else { 0 };
+        if ephemeral {
+            let runtime = File::open(RUN).map_err(|_| Error("runtime_check_failed"))?;
+            let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+            require(unsafe { libc::fstatvfs(runtime.as_raw_fd(), stats.as_mut_ptr()) } == 0, "runtime_check_failed")?;
+            let stats = unsafe { stats.assume_init() };
+            require(stats.f_bavail.saturating_mul(stats.f_frsize) >= (ram_disk + 16) * MIB, "insufficient_ephemeral_storage")?;
+        }
+        // The KDF and the new guest do not run together. A RAM-backed volume
+        // does remain resident through both phases and must fit in full.
+        let peak = ram_disk + vm.max(u64::from(self.pbkdf_memory_kib).div_ceil(1024).max(256));
+        self.admit_memory(self.reserved_mib(&opened)?, ram_disk + vm, peak,
+            if ephemeral { "insufficient_ephemeral_memory" } else { "insufficient_session_memory" })
+    }
+
+    fn admit_agent(&self, network: bool) -> Result<()> {
+        let opened = open_sessions()?;
+        require(!opened.iter().any(|entry| entry.recovery_required), "recovery_required")?;
+        let additional = if network && !gateway_reserved()? {
+            self.gateway.as_ref().map_or(0, crate::vm::Config::reservation_mib)
+        } else { 0 };
+        self.admit_memory(self.reserved_mib(&opened)?, additional, additional, "insufficient_gateway_memory")
+    }
+
+    fn reserved_mib(&self, opened: &[OpenSession]) -> Result<u64> {
+        let guest = self.vm.as_ref().map_or(0, crate::vm::Config::reservation_mib);
+        let gateway = self.gateway.as_ref().map_or(0, crate::vm::Config::reservation_mib);
+        let profile = if mount_mode()? == MountMode::RamOnly { RAM_PROFILE_RESERVE_MIB } else { 0 };
+        let children = agent_safe_records()?.into_iter().filter(|record| record.ephemeral)
+            .try_fold(0u64, |total, record| -> Result<u64> {
+                let image = if record.image(false).try_exists().map_err(|_| Error("ephemeral_check_failed"))? { record.image(false) } else { record.image(true) };
+                let bytes = if image.try_exists().map_err(|_| Error("ephemeral_check_failed"))? {
+                    trusted_file(&image)?.metadata().map_err(|_| Error("metadata_failed"))?.len().div_ceil(MIB)
+                } else { 0 };
+                Ok(total + bytes)
+            })?;
+        opened.iter().try_fold(profile + children, |total, entry| scope::within(entry.slot, || {
+            let ram_disk = match fs::symlink_metadata(scope::path(EPHEMERAL)) {
+                Ok(metadata) => metadata.len().div_ceil(MIB),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+                Err(_) => return Err(Error("ephemeral_check_failed")),
+            };
+            // An open volume commits one guest even while it is rebooting.
+            // A gateway is committed only once its owner/VM has started.
+            Ok(total + guest + ram_disk + if gateway != 0 && gateway_reserved()? { gateway } else { 0 })
+        }))
+    }
+
+    fn admit_memory(&self, reserved: u64, additional: u64, peak: u64, error: &'static str) -> Result<()> {
         let memory = fs::read_to_string("/proc/meminfo").map_err(|_| Error("memory_unavailable"))?;
-        let kib = |name: &str| -> Result<u64> {
-            memory.lines().find_map(|line| line.strip_prefix(name))
-                .and_then(|value| value.split_whitespace().next()).and_then(|value| value.parse().ok())
-                .ok_or(Error("memory_unavailable"))
-        };
-        require(kib("MemAvailable:")? >= (reservation + 256) * 1024
-            && kib("MemTotal:")? >= ((opened.len() as u64 + 1) * reservation + 512) * 1024,
-            "insufficient_session_memory")
+        memory_admission(&memory, reserved, additional, peak, error)
     }
 
     fn close_slot(&self, force: bool) -> Result<bool> {
+        crate::ipc::release_family()?;
         if !mapping_open("oblivion-session")?
             && !Path::new(&crate::vm::Role::Gateway.runtime()).exists()
             && !Path::new(&crate::vm::Role::Session.runtime()).exists()
             && !Path::new(&scope::path(EPHEMERAL)).exists()
+            && ephemeral_child_id()?.is_none()
             && !runtime_record("session-recovery-required").exists()
             && !runtime_record("session-info").exists()
+            && crate::share_host::maintenance_opening()?.is_none()
             && !crate::transfer_host::prepared()? && !crate::onion_host::prepared()? {
             return Ok(true);
         }
@@ -3225,12 +4486,14 @@ impl Config {
             close_session()?;
             let ephemeral_profiles = Path::new(&scope::current().runtime()).join("network-profile");
             if ephemeral_profiles.exists() { fs::remove_dir_all(ephemeral_profiles).map_err(|_| Error("profile_cleanup_failed"))?; }
-            clear_key_selection()?;
             clear_key_file("session-info")?;
             clear_key_file("access.json")?;
-            clear_key_file("native-agent")?;
+            clear_key_file("native-offline")?;
+            clear_key_file("share-import")?;
+            clear_key_file("manual-owner")?;
             let clients = Path::new(&scope::current().runtime()).join("agent-clients");
             if clients.exists() { fs::remove_dir_all(clients).map_err(|_| Error("client_cleanup_failed"))?; }
+            crate::share_host::clear()?;
             clear_key_file("session-recovery-required")?;
             clear_transport_selection()?;
             clear_network_selection()?;
@@ -3238,5 +4501,54 @@ impl Config {
         })();
         if result.is_err() { write_key_file("session-recovery-required", b"1")?; }
         result
+    }
+}
+
+#[cfg(test)]
+mod share_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn unresolved_imported_proxy_label_survives_only_until_transport_is_configured() {
+        assert_eq!(share_proxy_requirement(None, Some("Research proxy")), Some("Research proxy".into()));
+        assert_eq!(share_proxy_requirement(None, None), None);
+        let tor = egress::Profile::default();
+        assert_eq!(share_proxy_requirement(Some(&tor), Some("Research proxy")), None);
+        let socks = egress::Profile::new(oblivion_transport::Transport::Socks5 {
+            endpoint: "192.0.2.20:1080".parse().unwrap(), authentication: None,
+        }).unwrap();
+        assert_eq!(share_proxy_requirement(Some(&socks), Some("Research proxy")), Some("SOCKS5 proxy".into()));
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::memory_admission;
+
+    fn memory(total: u64, available: u64) -> String {
+        format!("MemTotal: {} kB\nMemAvailable: {} kB\n", total * 1024, available * 1024)
+    }
+
+    #[test]
+    fn offline_safes_commit_guests_without_unstarted_gateways() {
+        assert!(memory_admission(&memory(6144, 3072), 2304, 1152, 1152, "insufficient_session_memory").is_ok());
+    }
+
+    #[test]
+    fn gateway_promotion_checks_new_commitment_and_available_memory() {
+        assert!(memory_admission(&memory(6144, 2048), 3456, 896, 896, "insufficient_gateway_memory").is_ok());
+        assert_eq!(memory_admission(&memory(6144, 2048), 5248, 896, 896, "insufficient_gateway_memory").err().unwrap().0, "insufficient_gateway_memory");
+        assert_eq!(memory_admission(&memory(6144, 1024), 1152, 896, 896, "insufficient_gateway_memory").err().unwrap().0, "insufficient_gateway_memory");
+    }
+
+    #[test]
+    fn ephemeral_disk_memory_stays_resident_during_guest_start() {
+        assert!(memory_admission(&memory(6144, 2048), 0, 1664, 1664, "insufficient_ephemeral_memory").is_ok());
+        assert_eq!(memory_admission(&memory(6144, 1800), 0, 1664, 1664, "insufficient_ephemeral_memory").err().unwrap().0, "insufficient_ephemeral_memory");
+    }
+
+    #[test]
+    fn missing_kernel_memory_observation_fails_closed() {
+        assert_eq!(memory_admission("MemTotal: 6291456 kB\n", 0, 1152, 1152, "insufficient_session_memory").err().unwrap().0, "memory_unavailable");
     }
 }

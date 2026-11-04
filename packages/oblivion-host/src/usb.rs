@@ -398,16 +398,13 @@ pub fn publish(plan: &Plan, minimum: u64) -> Result<()> {
     require(discover(minimum)?.status.present, "usb_publish_failed")
 }
 
-pub fn discard(minimum: u64) -> Result<()> {
+pub fn discard(plan: &Plan, minimum: u64) -> Result<()> {
     let current = discover(minimum)?;
+    require(current.status.plan.as_ref() == Some(plan), "usb_selection_changed")?;
     require(
         current.status.incomplete && !current.status.present,
         "usb_not_incomplete",
     )?;
-    let plan = current
-        .status
-        .plan
-        .ok_or(Error("usb_partition_unavailable"))?;
     let disk = format!("/dev/{}", plan.device);
     command(
         "/usr/sbin/sfdisk",

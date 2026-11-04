@@ -2,7 +2,7 @@
 # initramfs local-bottom: /dev/vdb is this session's already-unlocked volume.
 set -eu
 case "${1:-}" in prereqs) exit 0 ;; esac
-case " $(cat /proc/cmdline) " in *" oblivion.resize=1 "*) exit 0 ;; esac
+case " $(cat /proc/cmdline) " in *" oblivion.resize=1 "*|*" oblivion.share=1 "*) exit 0 ;; esac
 . /scripts/functions
 . /scripts/local
 

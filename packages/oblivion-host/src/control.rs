@@ -32,10 +32,6 @@ pub fn protect() -> Result<()> {
     Ok(())
 }
 
-fn connect(operation: &str, session: Option<&str>, secret: &[u8]) -> Result<UnixStream> {
-    connect_expected(operation, session, secret, None)
-}
-
 fn connect_expected(
     operation: &str,
     session: Option<&str>,
@@ -43,17 +39,20 @@ fn connect_expected(
     expected: Option<&str>,
 ) -> Result<UnixStream> {
     if secret.len()
-        > if matches!(
+        > if operation == "share-import-begin" { oblivion_share::manifest::MAX_METADATA + 4096 } else if matches!(
             operation,
-            "api-keys"
-                | "session-storage"
+            "session-storage"
                 | "egress"
+                | "proxy-profiles"
                 | "network-policy"
                 | "transfers"
                 | "onion"
                 | "prepare-usb"
-                | "settings"
-                | "connections"
+                | "safe-access"
+                | "browse"
+                | "share-export-source-open"
+                | "share-import-open"
+                | "share-import-finish"
         ) {
             4096
         } else {
@@ -87,27 +86,47 @@ fn connect_expected(
     channel.write_all(&(header.len() as u32).to_be_bytes())?;
     channel.write_all(&header)?;
     channel.write_all(secret)?;
-    if !matches!(operation, "agent-attach" | "file-attach") {
+    if !matches!(operation, "agent-attach" | "file-attach" | "share-attach" | "share-import-attach" | "share-export-lease") {
         stream.shutdown(std::net::Shutdown::Write)?;
     }
     Ok(stream)
 }
 
 pub fn request(operation: &str, session: Option<&str>, secret: &[u8]) -> Result<String> {
+    request_expected(operation, session, secret, None)
+}
+
+pub fn request_for(
+    expected: &str,
+    operation: &str,
+    session: Option<&str>,
+    secret: &[u8],
+) -> Result<String> {
+    request_expected(operation, session, secret, Some(expected))
+}
+
+fn request_expected(
+    operation: &str,
+    session: Option<&str>,
+    secret: &[u8],
+    expected: Option<&str>,
+) -> Result<String> {
     if let Some(path) = std::env::var_os("OBLIVION_CONTROL_SOCKET") {
         return crate::remote_control::request(
             std::path::Path::new(&path),
             operation,
             session,
             secret,
-            None,
+            expected,
         );
     }
-    let stream = connect(operation, session, secret)?;
+    let stream = connect_expected(operation, session, secret, expected)?;
     response(Channel::new(
         &stream,
         Duration::from_secs(if operation == "session-storage" {
             1800
+        } else if matches!(operation, "egress" | "proxy-profiles" | "start-agent" | "open-child-documents") {
+            210
         } else {
             120
         }),
@@ -134,38 +153,30 @@ fn response(channel: Channel<'_>) -> Result<String> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn console() -> Result<UnixStream> {
-    descriptor("console")
-}
-
-#[cfg(target_os = "linux")]
-pub fn terminal() -> Result<UnixStream> {
-    descriptor("terminal")
-}
-
-#[cfg(target_os = "linux")]
-fn descriptor(operation: &str) -> Result<UnixStream> {
-    let stream = connect(operation, None, &[])?;
-    let channel = Channel::new(&stream, Duration::from_secs(120));
-    let console = receive_descriptor(&stream, &channel)?;
-    response(channel)?;
-    Ok(console)
-}
-
-#[cfg(target_os = "linux")]
 pub fn attach_client(operation: &str, expected: &str) -> Result<(UnixStream, UnixStream, String)> {
+    attach_scoped(operation, None, Some(expected))
+}
+
+pub fn attach_export(id: &str) -> Result<(UnixStream, UnixStream, String)> {
+    attach_scoped("share-export-lease", Some(id), None)
+}
+
+#[cfg(target_os = "linux")]
+fn attach_scoped(operation: &str, session: Option<&str>, expected: Option<&str>) -> Result<(UnixStream, UnixStream, String)> {
     if let Some(path) = std::env::var_os("OBLIVION_CONTROL_SOCKET") {
-        let (stream, client) =
-            crate::remote_control::attach(std::path::Path::new(&path), operation, expected)?;
+        let (stream, client) = crate::remote_control::attach_scoped(std::path::Path::new(&path), operation, session, expected)?;
         return Ok((stream.try_clone()?, stream, client));
     }
-    let stream = connect_expected(operation, None, &[], Some(expected))?;
+    let stream = connect_expected(operation, session, &[], expected)?;
     let channel = Channel::new(&stream, Duration::from_secs(120));
     let console = receive_descriptor(&stream, &channel)?;
-    // This connection is a lease. EOF releases this client and locks the Safe
-    // when its last launcher disconnects, including after a launcher crash.
+    // The control connection owns the attachment until EOF, independently of
+    // the passed stream. A vanished launcher releases only this client.
     let mut client = [0; 32];
     Channel::new(&stream, Duration::from_secs(10)).read_exact(&mut client)?;
+    if !client.iter().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)) {
+        return Err("invalid_client_identifier".into());
+    }
     Ok((console, stream, String::from_utf8(client.to_vec())?))
 }
 
@@ -207,20 +218,15 @@ fn receive_descriptor(stream: &UnixStream, channel: &Channel<'_>) -> Result<Unix
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn console() -> Result<UnixStream> {
-    Err("linux_required".into())
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn terminal() -> Result<UnixStream> {
-    Err("linux_required".into())
-}
-
-#[cfg(not(target_os = "linux"))]
 pub fn attach_client(operation: &str, expected: &str) -> Result<(UnixStream, UnixStream, String)> {
+    attach_scoped(operation, None, Some(expected))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn attach_scoped(operation: &str, session: Option<&str>, expected: Option<&str>) -> Result<(UnixStream, UnixStream, String)> {
     let path = std::env::var_os("OBLIVION_CONTROL_SOCKET").ok_or("native_runtime_required")?;
     let (stream, client) =
-        crate::remote_control::attach(std::path::Path::new(&path), operation, expected)?;
+        crate::remote_control::attach_scoped(std::path::Path::new(&path), operation, session, expected)?;
     Ok((stream.try_clone()?, stream, client))
 }
 

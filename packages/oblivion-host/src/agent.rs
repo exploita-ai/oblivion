@@ -5,12 +5,19 @@ use std::io::{Read, Write};
 
 pub const LIMIT: usize = 65536;
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Command<'a> {
+    Agent(&'a Launch),
+    Workspace { terminal: Size },
+}
+
+#[derive(Serialize)]
 pub struct Launch {
     pub agent: String,
     pub argv: Vec<String>,
     pub terminal: Option<Size>,
+    pub managed: Option<crate::managed::Command>,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -25,6 +32,13 @@ impl Launch {
         if !matches!(self.agent.as_str(), "codex" | "claude" | "opencode2") {
             return Err("unsupported_agent".into());
         }
+        if self
+            .managed
+            .as_ref()
+            .is_some_and(|value| !value.valid() || !self.argv.is_empty() || self.terminal.is_some())
+        {
+            return Err("invalid_managed_job".into());
+        }
         if self.argv.len() > 1024 || self.argv.iter().any(|arg| arg.contains('\0')) {
             return Err("invalid_agent_arguments".into());
         }
@@ -37,7 +51,24 @@ impl Launch {
     }
 
     pub fn write(&self, stream: &mut impl Write) -> Result<()> {
-        self.validate()?;
+        Command::Agent(self).write(stream)
+    }
+}
+
+impl Command<'_> {
+    pub fn write(&self, stream: &mut impl Write) -> Result<()> {
+        match self {
+            Self::Agent(launch) => launch.validate()?,
+            Self::Workspace { terminal }
+                if terminal.rows == 0
+                    || terminal.cols == 0
+                    || terminal.rows > 1000
+                    || terminal.cols > 1000 =>
+            {
+                return Err("invalid_terminal_size".into());
+            }
+            Self::Workspace { .. } => {}
+        }
         let bytes = zeroize::Zeroizing::new(serde_json::to_vec(self)?);
         if bytes.len() > LIMIT {
             return Err("agent_request_too_large".into());
