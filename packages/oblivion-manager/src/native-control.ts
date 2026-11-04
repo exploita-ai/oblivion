@@ -93,7 +93,6 @@ export async function readNativeStatus(launcher: string, timeout = 10_000) {
 export async function readNativeJson(launcher: string, args: string[], timeout = 10_000) {
   const child = Bun.spawn([launcher, ...args], {
     stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout,
-    env: { ...process.env, OBLIVION_MANAGER_ACTIVE: "1" },
   })
   const output = await new Response(child.stdout).text()
   if (await child.exited !== 0) throw new Error("The Oblivion runtime is unavailable. Press R to retry.")
@@ -103,7 +102,6 @@ export async function readNativeJson(launcher: string, args: string[], timeout =
 export async function reportNativeActivity(launcher: string, input: z.infer<typeof nativeActivity>) {
   const child = Bun.spawn([launcher, "activity"], {
     stdin: "pipe", stdout: "ignore", stderr: "ignore", timeout: 2000,
-    env: { ...process.env, OBLIVION_MANAGER_ACTIVE: "1" },
   })
   child.stdin.write(JSON.stringify(input))
   child.stdin.end()

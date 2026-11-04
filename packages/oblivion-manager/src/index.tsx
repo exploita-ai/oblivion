@@ -28,7 +28,6 @@ async function launch(args: string[]) {
   try {
     const child = Bun.spawn([nativeLauncher(), ...args], {
       stdin: "inherit", stdout: "inherit", stderr: "inherit",
-      env: { ...process.env, OBLIVION_MANAGER_ACTIVE: "1" },
     })
     return await child.exited
   } finally {
