@@ -1,19 +1,19 @@
-use crate::{Result, config::RuntimeConfig};
+use crate::{Result, config::RuntimeConfig, lifetime::Lifetime};
 
-pub fn run(config: RuntimeConfig) -> Result<()> {
+pub fn run(config: RuntimeConfig, lifetime: Lifetime) -> Result<()> {
     #[cfg(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     {
-        linux::run(config)
+        linux::run(config, lifetime)
     }
     #[cfg(not(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )))]
     {
-        let _ = config;
+        let _ = (config, lifetime);
         Err(crate::Error("linux_x86_64_or_aarch64_required"))
     }
 }
@@ -27,7 +27,9 @@ pub fn report(event: &str) {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 mod linux {
-    use crate::{Error, Result, auth, bridge, config::RuntimeConfig, kvm, private, qemu};
+    use crate::{
+        Error, Result, auth, bridge, config::RuntimeConfig, kvm, lifetime::Lifetime, private, qemu,
+    };
     use std::fs;
     use std::io::{Read, Write};
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -95,7 +97,8 @@ mod linux {
         }
     }
 
-    pub fn run(config: RuntimeConfig) -> Result<()> {
+    pub fn run(config: RuntimeConfig, lifetime: Lifetime) -> Result<()> {
+        lifetime.check()?;
         config.validate()?;
         let capabilities = kvm::capabilities();
         if !capabilities.supported {
@@ -142,6 +145,7 @@ mod linux {
                 Ok(())
             });
         }
+        lifetime.check()?;
         let mut child = ChildGuard(command.spawn().map_err(|_| Error("runtime_start_failed"))?);
         if let Some(mut destination) = child.0.stdin.take() {
             std::thread::spawn(move || {
@@ -193,8 +197,10 @@ mod linux {
             }
         });
         let mut qmp = qemu::Qmp::connect(&qmp_path, Instant::now() + Duration::from_secs(10))?;
+        lifetime.check()?;
         let mut provisioning =
             qemu::connect_private(&auth_path, Instant::now() + Duration::from_secs(10))?;
+        lifetime.check()?;
         qmp.command("cont", Instant::now() + Duration::from_secs(5))?;
         let stop = Arc::new(AtomicBool::new(false));
         let token = Arc::new(auth::Token::random()?);
@@ -216,6 +222,7 @@ mod linux {
         let mut qmp_closed = false;
         let result = (|| {
             loop {
+                lifetime.check()?;
                 let fatal = failure.load(Ordering::Acquire);
                 if fatal != 0 {
                     return Err(Error(match fatal {
@@ -294,6 +301,7 @@ mod linux {
                     }
                 }
                 while stopping.is_none() && authenticated {
+                    lifetime.check()?;
                     let local = match endpoint.accept() {
                         Ok(Some(stream)) => stream,
                         Ok(None) => break,

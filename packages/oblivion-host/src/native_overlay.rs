@@ -93,6 +93,7 @@ impl Keys {
 
 pub struct Overlay {
     child: Child,
+    _handoff: oblivion_host::native_runtime::ManagerHandoff,
     group: libc::pid_t,
     raw: libc::termios,
     restored: bool,
@@ -123,6 +124,7 @@ impl Overlay {
                 safe,
             ])
             .env("OBLIVION_LAUNCHER", &launcher);
+        let mut handoff = oblivion_host::native_runtime::ManagerHandoff::prepare(&mut command)?;
         // The child claims the foreground before exec. A parent/child pipe gate
         // in pre_exec would deadlock Command::spawn's exec-error handshake.
         unsafe {
@@ -147,12 +149,15 @@ impl Overlay {
             return Err(std::io::Error::last_os_error().into());
         }
         match command.spawn() {
-            Ok(child) => Ok(Self {
-                child,
-                group,
-                raw,
-                restored: false,
-            }),
+            Ok(mut child) => {
+                if let Err(error) = handoff.bind(&child) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    restore(group, &raw)?;
+                    return Err(error);
+                }
+                Ok(Self { child, _handoff: handoff, group, raw, restored: false })
+            },
             Err(error) => {
                 restore(group, &raw)?;
                 Err(error.into())

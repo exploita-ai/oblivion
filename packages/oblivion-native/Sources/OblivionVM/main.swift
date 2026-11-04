@@ -2,6 +2,7 @@ import Darwin
 import Dispatch
 import Foundation
 import Virtualization
+import RuntimeLifetime
 
 struct RuntimeConfig: Decodable {
     struct Disk: Decodable {
@@ -130,10 +131,12 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
     private var signals: [DispatchSourceSignal] = []
     private var bridges: [UUID: StreamBridge] = [:]
     private var stopping = false
+    private var lifetimeRevoked = false
+    private let lifetime: SupervisorLifetime
     private let consolePipe: Pipe
     private var serialTail = Data()
 
-    init(config: RuntimeConfig) throws {
+    init(config: RuntimeConfig, lifetime: SupervisorLifetime) throws {
         try requireHost()
         guard config.version == 1, config.controlPort > 1024,
               config.memoryMiB <= UInt64.max / 1048576,
@@ -186,6 +189,7 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
         settings.serialPorts = [serial]
         try settings.validate()
         self.config = config
+        self.lifetime = lifetime
         self.machine = VZVirtualMachine(configuration: settings)
         super.init()
         machine.delegate = self
@@ -197,6 +201,8 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
     }
 
     func start() throws {
+        try lifetime.check()
+        lifetime.monitor(queue: .main) { [weak self] in self?.supervisorLost() }
         try listen()
         for number in [SIGINT, SIGTERM, SIGHUP] {
             signal(number, SIG_IGN)
@@ -341,6 +347,18 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
         if serialTail.count > 128 { serialTail.removeFirst(serialTail.count - 128) }
     }
 
+    private func supervisorLost() {
+        guard !lifetimeRevoked else { return }
+        lifetimeRevoked = true
+        stopping = true
+        acceptSource?.cancel()
+        bridges.values.forEach { $0.close() }
+        report("supervisor_lifetime_lost")
+        // This VM belongs to this helper instance. A lost supervisor is a
+        // failure path, not a successful archive lock or graceful user exit.
+        machine.stop { _ in self.finish(code: 1, event: "runtime_supervisor_lost") }
+    }
+
     private func stop() {
         guard !stopping else { return }
         stopping = true
@@ -365,6 +383,7 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
     }
 
     private func finish(code: Int32, event: String) -> Never {
+        lifetime.cancel()
         consolePipe.fileHandleForReading.readabilityHandler = nil
         bridges.values.forEach { $0.close() }
         if listener >= 0 { Darwin.close(listener) }
@@ -375,7 +394,7 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
     }
 
     func guestDidStop(_ virtualMachine: VZVirtualMachine) {
-        finish(code: 0, event: "runtime_stopped")
+        finish(code: lifetimeRevoked ? 1 : 0, event: lifetimeRevoked ? "runtime_supervisor_lost" : "runtime_stopped")
     }
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
@@ -408,12 +427,14 @@ func main() throws {
         FileHandle.standardOutput.write(Data([10]))
         return
     }
-    guard args.count == 3, args[0] == "run", args[1] == "--config" else {
+    guard args.count == 5, args[0] == "run", args[1] == "--config",
+          args[3] == "--lifetime-fd", args[4] == "3" else {
         throw RuntimeError.invalidArguments
     }
+    let lifetime = try SupervisorLifetime(taking: 3)
     try requireHost()
     let config = try JSONDecoder().decode(RuntimeConfig.self, from: Data(contentsOf: URL(fileURLWithPath: args[2])))
-    let runtime = try Runtime(config: config)
+    let runtime = try Runtime(config: config, lifetime: lifetime)
     try runtime.start()
     withExtendedLifetime(runtime) { dispatchMain() }
 }
@@ -426,6 +447,9 @@ guard setrlimit(RLIMIT_CORE, &dumpLimit) == 0 else {
 }
 do {
     try main()
+} catch let error as SupervisorLifetimeFailure {
+    report(error.rawValue)
+    Darwin.exit(1)
 } catch let error as RuntimeError {
     report(error.rawValue)
     Darwin.exit(1)

@@ -207,6 +207,42 @@ fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
 env = os.environ.copy()
 env["OVERLAY_TRACE"] = str(run / "trace")
 env["OBLIVION_CONTROL_SOCKET"] = str(run / "control")
+# The production overlay requires the launcher's current typed runtime profile
+# and a private generation. This fixture publishes metadata only: no image,
+# helper, guest filesystem or VM is created or booted.
+runtime = run / "runtime"
+runtime.mkdir(mode=0o700)
+backend = "apple-vz" if sys.platform == "darwin" else "qemu-kvm"
+runtime_id = "1" * 32
+settings = {
+    "version": 1, "backend": backend,
+    "bundle": {"bundle_id": "a" * 64, "source_sha256": "b" * 64,
+               "boot": [{"path": "runtime/" + name, "sha256": "c" * 64,
+                         "bytes": 1, "executable": False}
+                        for name in ("controller.iso", "kernel", "initrd")]},
+    "runtimeId": runtime_id, "kernel": str(runtime / "kernel"),
+    "initrd": str(runtime / "initrd"),
+    "commandLine": f"console=hvc0 oblivion.runtime=1 oblivion.runtime-backend={backend} oblivion.runtime-id={runtime_id}",
+    "disks": [{"path": str(runtime / "controller.iso"), "readOnly": True},
+              {"path": str(runtime / "storage.raw"), "readOnly": False}],
+    "cpuCount": 4, "memoryMiB": 6144, "controlSocket": str(run / "control"),
+    "controlPort": 4050, "network": True, "serialStdio": False,
+}
+if backend == "qemu-kvm":
+    settings["guestCID"] = 45032
+(runtime / "runtime.json").write_text(json.dumps(settings))
+os.chmod(runtime / "runtime.json", 0o600)
+lifecycle = run / "control.lifecycle"
+lifecycle.mkdir(mode=0o700)
+(lifecycle / ("2" * 32)).mkdir(mode=0o700)
+(lifecycle / "generation.json").write_text(json.dumps({
+    "version": 1, "id": "2" * 32, "runtime_id": runtime_id,
+    "supervisor": None, "phase": "starting", "resident": False,
+}))
+os.chmod(lifecycle / "generation.json", 0o600)
+env["OBLIVION_RUNTIME_DIRECTORY"] = str(runtime)
+env["OBLIVION_RUNTIME_MODE"] = "desktop"
+env.pop("OBLIVION_MANAGER_OWNER", None)
 process = subprocess.Popen(
     [str(root / "harness"), str(run / "s"), "tty"],
     stdin=slave,

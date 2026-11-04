@@ -1,4 +1,4 @@
-use oblivion_native_linux::{Error, config::RuntimeConfig, kvm, runtime};
+use oblivion_native_linux::{Error, config::RuntimeConfig, kvm, lifetime::Lifetime, runtime};
 use std::path::Path;
 
 fn main() {
@@ -25,8 +25,16 @@ fn main() {
         return;
     }
     let result = match args.as_slice() {
-        [operation, flag, path] if operation == "run" && flag == "--config" => {
-            RuntimeConfig::read(Path::new(path)).and_then(runtime::run)
+        [operation, flag, path, lifetime, descriptor]
+            if operation == "run"
+                && flag == "--config"
+                && lifetime == "--lifetime-fd"
+                && descriptor == "3" =>
+        {
+            Lifetime::inherited().and_then(|lifetime| {
+                RuntimeConfig::read(Path::new(path))
+                    .and_then(|config| runtime::run(config, lifetime))
+            })
         }
         _ => Err(Error("invalid_arguments")),
     };

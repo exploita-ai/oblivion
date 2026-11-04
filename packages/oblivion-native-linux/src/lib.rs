@@ -2,6 +2,7 @@ pub mod auth;
 pub mod bridge;
 pub mod config;
 pub mod kvm;
+pub mod lifetime;
 pub mod private;
 pub mod qemu;
 pub mod runtime;

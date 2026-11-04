@@ -415,6 +415,8 @@ pub(crate) mod tests {
             let platform = test_platform();
             let native = if platform == "darwin-arm64" {
                 "lib/manager/@opentui/core-darwin-arm64/libopentui.dylib"
+            } else if platform == "linux-arm64" {
+                "lib/manager/@opentui/core-linux-arm64/libopentui.so"
             } else {
                 "lib/manager/@opentui/core-linux-x64/libopentui.so"
             };

@@ -255,6 +255,85 @@ mod tests {
     use super::{Identity, Process, current, linux_stat, parent, valid_boot};
 
     #[test]
+    fn process_birth_survives_the_manager_exec_handoff() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::{Command, Stdio};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "native_runtime::identity::tests::exec_identity_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = child.stdout.take().unwrap();
+        let (send, receive) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(output).lines() {
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let mut before = None;
+            loop {
+                let line = receive.recv_timeout(Duration::from_secs(5))??;
+                if let Some((_, value)) = line.split_once("before-exec ") {
+                    before = Some(serde_json::from_str::<Identity>(value)?);
+                }
+                if line == "after-exec" {
+                    break;
+                }
+            }
+            let before = before.ok_or("child did not report its pre-exec identity")?;
+            if before.pid != child.id()
+                || super::observe(child.id())?.as_ref() != Some(&before)
+                || !before.alive()?
+            {
+                return Err("manager identity changed across exec".into());
+            }
+            child
+                .stdin
+                .take()
+                .ok_or("child stdin missing")?
+                .write_all(b"done\n")?;
+            Ok(())
+        })();
+        // A failed handshake must not leave the fixture waiting on stdin.
+        if result.is_err() {
+            let _ = child.kill();
+        }
+        let exited = child.wait().unwrap();
+        reader.join().unwrap();
+        result.unwrap();
+        assert!(exited.success());
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for the actual exec handoff"]
+    fn exec_identity_child() {
+        use std::io::Write;
+        use std::os::unix::process::CommandExt;
+
+        println!(
+            "before-exec {}",
+            serde_json::to_string(&current().unwrap()).unwrap()
+        );
+        std::io::stdout().flush().unwrap();
+        let error = std::process::Command::new("/bin/sh")
+            .args(["-c", "printf 'after-exec\\n'; IFS= read -r input"])
+            .exec();
+        panic!("could not exec manager fixture: {error}");
+    }
+
+    #[test]
     fn current_and_parent_are_observed_without_a_subprocess() {
         let owner = current().unwrap();
         assert_eq!(owner.pid, std::process::id());

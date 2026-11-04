@@ -33,6 +33,18 @@ The executable uses `/usr/bin/qemu-system-x86_64` or `/usr/bin/qemu-system-aarch
 
 `capabilities` reports `version`, `backend`, `architecture`, `virtualization`, `nested`, `vsock`, `supported` and a static failure `reason`. Preflight opens `/dev/kvm`, checks API 12, creates and closes a VM descriptor, checks KVM's supported VMX/SVM CPUID flags and the enabled nested module parameter on x86. ARM64 requires the Linux UAPI `KVM_CAP_ARM_EL2` capability (240), and its QEMU machine explicitly enables virtualization on `virt` with GICv3. Older ARM kernels fail the check. Oblivion's ARM64 Live and private controller images select an official Debian backports kernel with this API by default, while their Safe/gateway images retain stable kernels; AMD64 hypervisors also retain stable. Exact kernel package/ABI/hash evidence is verified during packing. [Linux 6.16 API](https://docs.kernel.org/6.16/virt/kvm/api.html), [Debian ARM64 backports](https://packages.debian.org/trixie-backports/kernel/linux-image-arm64). It also requires access to `/dev/vhost-vsock` and an AF_VSOCK socket. It never substitutes TCG when KVM or nesting is unavailable. These probes establish access and advertised features; they do not replace a real nested guest acceptance test. [KVM API](https://docs.kernel.org/virt/kvm/api.html), [nested KVM](https://docs.kernel.org/virt/kvm/x86/running-nested-guests.html).
 
+Only the owning supervisor may start this helper, using the exact private form
+`oblivion-vm run --config CONFIG --lifetime-fd 3`. Descriptor 3 is a private Unix
+stream endpoint; it is claimed and marked `FD_CLOEXEC` before configuration or
+child processes are opened. EOF or unexpected bytes fail the run, revoke
+admission and use the existing owned-QEMU kill/reap cleanup. The runtime loop
+checks the endpoint every iteration. Startup checks it again before unpausing
+QEMU; an initial QMP connection may wait up to ten seconds while the VM is still
+paused. No configuration-only or alternate-descriptor invocation is supported.
+`capabilities` does not require a lifetime socket. This guard is independent of
+per-client attachment leases and never signals an instance found through a PID
+file.
+
 The backend receives a private `vm.json` projection with v1 fields, an explicit
 backend and Linux `guestCID`. The launcher's separate `runtime.json` additionally
 requires its strict current bundle/hash binding; the backend never chooses or

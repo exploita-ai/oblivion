@@ -123,15 +123,9 @@ extern "C" fn signal(value: i32) {
 fn main() {
     let result = run();
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let result = if std::env::args_os()
-        .nth(1)
-        .is_some_and(|arg| matches!(arg.to_str(), Some("run" | "shell" | "files" | "share" | "close" | "lock")))
-        && std::env::var_os("OBLIVION_CONTROL_SOCKET").is_some()
-    {
-        let cleanup = oblivion_host::native_runtime::stop_if_idle();
+    let result = {
+        let cleanup = oblivion_host::native_runtime::release_owner();
         result.and_then(|code| cleanup.map(|()| code))
-    } else {
-        result
     };
     match result {
         Ok(code) => std::process::exit(code),
@@ -224,6 +218,7 @@ fn run() -> control::Result<i32> {
                     oblivion_host::native_runtime::update(std::path::Path::new(&args[2]))?
                 }
                 Some("start") if args.len() == 2 => oblivion_host::native_runtime::start()?,
+                Some("supervise") if args.len() == 3 => oblivion_host::native_runtime::supervise(&args[2])?,
                 Some("choose-storage") if args.len() == 2 => oblivion_host::native_runtime::choose_live_storage()?,
                 Some("recover") if args.len() == 2 => oblivion_host::native_runtime::recover()?,
                 Some("stop") if args.len() == 2 => oblivion_host::native_runtime::stop()?,
@@ -250,6 +245,8 @@ fn run() -> control::Result<i32> {
         oblivion_host::native_runtime::request_live_storage(storage)?;
         if args.is_empty() {
             oblivion_host::native_runtime::prepare_manager()?;
+        } else if args == ["status", "--json"] {
+            oblivion_host::native_runtime::ensure_status()?;
         } else {
             oblivion_host::native_runtime::ensure()?;
         }

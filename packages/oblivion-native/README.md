@@ -11,11 +11,17 @@ packages/oblivion-native/.build/release/oblivion-vm capabilities
 
 `capabilities` prints a JSON object with `version`, `backend`, `virtualization`, `nested` and `supported`. The build script applies the virtualization entitlement with an ad hoc development signature. Release distribution needs the project's signed and notarized artifacts.
 
-Run the helper with a configuration produced by the launcher.
+Only the owning Oblivion supervisor starts a runtime. The private invocation is
+`oblivion-vm run --config CONFIG --lifetime-fd 3`, with descriptor 3 inherited as
+one endpoint of a private Unix stream pair. The supervisor alone retains the
+other endpoint. A configuration-only invocation or another descriptor number
+is rejected; `capabilities` remains usable without a lifetime socket.
 
-```sh
-oblivion-vm run --config /absolute/path/to/runtime.json
-```
+The helper marks the inherited endpoint close-on-exec before reading the
+configuration or creating the VM. EOF or any unexpected byte revokes this
+instance's admission and force-stops its owned VZ machine with a failure result.
+It never claims that this emergency stop cleanly locked the guest archive.
+The endpoint contains no credentials or request data.
 
 ```json
 {

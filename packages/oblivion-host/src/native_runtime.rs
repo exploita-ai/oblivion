@@ -2,6 +2,10 @@
 #[cfg(target_os = "linux")]
 #[path = "live_runtime.rs"]
 mod live;
+#[path = "native_identity.rs"]
+mod identity;
+#[path = "native_lifecycle.rs"]
+mod lifecycle;
 use crate::control::{self, Result};
 use crate::desktop_bundle::{self, Binding, Bundle};
 use serde::{Deserialize, Serialize};
@@ -10,9 +14,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 fn directory() -> Result<PathBuf> {
@@ -1387,7 +1390,7 @@ pub fn choose_live_storage() -> Result<()> {
 }
 
 pub fn start() -> Result<()> {
-    ensure()
+    ensure_as(lifecycle::Kind::Resident)
 }
 
 /// Keep physical storage review on the trusted terminal, before the Live TUI.
@@ -1400,20 +1403,30 @@ pub fn prepare_manager() -> Result<()> {
     if mode()? == Mode::Live {
         let root = directory()?;
         live::prepare(&root, &root.join("runtime.json"))?;
-        prepare_connection()?;
+        let settings = prepare_connection()?;
+        lifecycle::register(&settings, lifecycle::Kind::Manager)?;
         live::intro()?;
         return Ok(());
     }
-    ensure()
+    ensure_as(lifecycle::Kind::Manager)
 }
 
 pub fn ensure() -> Result<()> {
+    ensure_as(lifecycle::Kind::Command)
+}
+
+pub fn ensure_status() -> Result<()> {
+    ensure_as(lifecycle::Kind::Observation)
+}
+
+fn ensure_as(kind: lifecycle::Kind) -> Result<()> {
     #[cfg(target_os = "linux")]
     if mode()? == Mode::Live {
         let root = directory()?;
         live::prepare(&root, &root.join("runtime.json"))?;
     }
     let settings = prepare_connection()?;
+    lifecycle::register(&settings, kind)?;
     let bundle = Bundle::current()?;
     if bundle.id() != settings.bundle.bundle_id || bundle.source() != settings.bundle.source_sha256
     {
@@ -1438,19 +1451,17 @@ pub fn ensure() -> Result<()> {
         fs::remove_file(root.join("update.pending.json"))?;
         fs::File::open(&root)?.sync_all()?;
     }
-    let config = root.join("vm.json");
     let socket = &settings.control_socket;
     let deadline = Instant::now() + Duration::from_secs(390);
     if crate::remote_control::probe(socket, Duration::from_secs(2)).is_ok() {
-        return ready();
+        return ready(&settings);
     }
     let startup_lock = private_lock(&sidecar(socket, ".startup.lock"))?;
-    let helper_lock = private_lock(&sidecar(socket, ".lock"))?;
     let mut owns_startup = false;
-    let mut observed_owner = false;
     let mut child: Option<std::process::Child> = None;
     eprintln!("Preparing the protected runtime…");
     loop {
+        if !lifecycle::owner_alive(&settings)? { return Err("runtime_owner_lost".into()); }
         if let Some(child) = child.as_mut() {
             if child.try_wait()?.is_some() {
                 return Err("Runtime startup failed. Inspect oblivion-vm capabilities and the installed image.".into());
@@ -1458,13 +1469,9 @@ pub fn ensure() -> Result<()> {
         }
         if !owns_startup {
             owns_startup = try_lock(&startup_lock)?;
-            observed_owner |= !owns_startup;
         }
         if owns_startup && child.is_none() {
-            if try_lock(&helper_lock)? {
-                if observed_owner {
-                    return Err("The protected runtime stopped before its controller became ready. Retry to start it again.".into());
-                }
+            child = lifecycle::launch(&settings, || {
                 preflight()?;
                 bundle.verify_native()?;
                 verify_boot(&settings)?;
@@ -1481,9 +1488,6 @@ pub fn ensure() -> Result<()> {
                 {
                     return Err("Run oblivion runtime recover to inspect and remove disconnected runtime sockets".into());
                 }
-                if unsafe { libc::flock(helper_lock.as_raw_fd(), libc::LOCK_UN) } != 0 {
-                    return Err(std::io::Error::last_os_error().into());
-                }
                 // Backend configuration is a distinct current protocol. The
                 // launcher-owned bundle binding remains in runtime.json and is
                 // verified before generating this private, fixed VM projection.
@@ -1492,33 +1496,14 @@ pub fn ensure() -> Result<()> {
                     .ok_or("invalid_runtime_configuration")?
                     .remove("bundle");
                 write_record(&root, "vm.json", &wire)?;
-                let mut command = Command::new(helper()?);
-                command
-                    .args(["run", "--config"])
-                    .arg(&config)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
-                // The startup lease stays held until the helper owns its lifetime
-                // lease and its authenticated controller becomes ready.
-                unsafe {
-                    command.pre_exec(|| {
-                        if libc::setsid() < 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        Ok(())
-                    });
-                }
-                child = Some(command.spawn()?);
-            } else {
-                observed_owner = true;
-            }
+                Ok(())
+            })?;
         }
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .ok_or("Runtime is still starting. Retry after its controller becomes ready.")?;
         if crate::remote_control::probe(socket, remaining.min(Duration::from_secs(2))).is_ok() {
-            return ready();
+            return ready(&settings);
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return Err(
@@ -1529,7 +1514,8 @@ pub fn ensure() -> Result<()> {
     }
 }
 
-fn ready() -> Result<()> {
+fn ready(settings: &Settings) -> Result<()> {
+    lifecycle::admit(settings)?;
     #[cfg(target_os = "linux")]
     if mode()? == Mode::Live { live::activate_ram()?; }
     Ok(())
@@ -1544,6 +1530,7 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
 /// Explicitly recover sockets only after all owners and listeners have gone.
 pub fn recover() -> Result<()> {
     let settings = prepare_connection()?;
+    lifecycle::recovering(&settings)?;
     let startup = private_lock(&sidecar(&settings.control_socket, ".startup.lock"))?;
     let running = private_lock(&sidecar(&settings.control_socket, ".lock"))?;
     if !try_lock(&startup)? || !try_lock(&running)? {
@@ -1558,7 +1545,8 @@ pub fn recover() -> Result<()> {
     } else {
         vec![settings.control_socket.clone()]
     };
-    recover_sockets(&paths)
+    recover_sockets(&paths)?;
+    lifecycle::recovered(&settings)
 }
 
 fn recover_sockets(paths: &[PathBuf]) -> Result<()> {
@@ -1624,36 +1612,37 @@ fn try_lock(file: &fs::File) -> Result<bool> {
 }
 
 pub fn stop() -> Result<()> {
-    prepare_connection()?;
-    control::request("lock", None, &[])?;
-    control::request("shutdown-runtime", None, &[])?;
+    let settings = prepare_connection()?;
+    let generation = lifecycle::begin_stop(&settings)?;
+    let shutdown = (|| -> Result<()> {
+        control::request("lock", None, &[])?;
+        control::request("shutdown-runtime", None, &[])?;
+        Ok(())
+    })();
+    shutdown.map_err(|error| format!("Runtime stop could not be verified ({error}). Admission remains blocked; retry oblivion runtime stop, then oblivion runtime recover."))?;
+    lifecycle::stopped(&settings, &generation)?;
     Ok(())
 }
 
-pub fn stop_if_idle() -> Result<()> {
-    if std::env::var_os("OBLIVION_MANAGER_ACTIVE").is_some()
-        || std::env::var_os("OBLIVION_RUNTIME_MODE").as_deref()
-            != Some(std::ffi::OsStr::new("desktop"))
-    {
-        return Ok(());
+pub fn supervise(generation: &str) -> Result<()> {
+    let settings = prepare_connection()?;
+    lifecycle::supervise(&settings, generation)
+}
+
+pub fn release_owner() -> Result<()> {
+    lifecycle::release()
+}
+
+pub struct ManagerHandoff(lifecycle::Handoff);
+
+impl ManagerHandoff {
+    pub fn prepare(command: &mut Command) -> Result<Self> {
+        let settings = prepare_connection()?;
+        Ok(Self(lifecycle::Handoff::new(&settings, command)?))
     }
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match control::request("shutdown-idle", None, &[]) {
-            Ok(_) => return Ok(()),
-            Err(error) if error.to_string() == "runtime_busy" => return Ok(()),
-            // The EOF lease worker can still be removing the completed file
-            // channel. Busy is returned before mutation; let it finish before
-            // checking whether the runtime is now unowned. Other errors retain
-            // their meaning and never trigger a repeated shutdown request.
-            Err(error) if error.to_string() == "controller_busy" => {
-                if Instant::now() >= deadline {
-                    return Ok(());
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(error) => return Err(error),
-        }
+
+    pub fn bind(&mut self, child: &std::process::Child) -> Result<()> {
+        self.0.bind(child)
     }
 }
 
@@ -1677,7 +1666,7 @@ mod tests {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
-    fn settings(root: &Path) -> Settings {
+    pub(super) fn settings(root: &Path) -> Settings {
         let identity = "00112233445566778899aabbccddeeff";
         Settings {
             version: 1,
