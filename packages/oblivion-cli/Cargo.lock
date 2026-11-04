@@ -235,6 +235,7 @@ dependencies = [
  "oblivion-wire",
  "serde",
  "serde_json",
+ "sha2",
  "windows-sys",
  "zeroize",
 ]

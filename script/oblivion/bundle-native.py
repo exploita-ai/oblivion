@@ -18,6 +18,7 @@ PLATFORMS = {
     "darwin-arm64": ("arm64", "apple-vz", "@opentui/core-darwin-arm64/libopentui.dylib"),
     "linux-x86_64": ("amd64", "qemu-kvm", "@opentui/core-linux-x64/libopentui.so"),
     "linux-arm64": ("arm64", "qemu-kvm", "@opentui/core-linux-arm64/libopentui.so"),
+    "windows-x86_64": ("amd64", "hcs-hyperv", "@opentui/core-win32-x64/opentui.dll"),
 }
 EVIDENCE = ("host-sources.sha256", "gateway-sources.sha256", "iso-sources.sha256",
             "runtime.sha256", "client-evidence.json", "hypervisor-kernel.json", "host-packages.tsv",
@@ -36,9 +37,13 @@ def digest(path):
 
 
 def safe_path(value):
-    if (not value or len(value) > 512 or not value.isascii() or value.startswith("/") or "\\" in value
-            or any(ord(char) < 32 or ord(char) == 127 for char in value)
-            or any(part in ("", ".", "..") for part in value.split("/"))):
+    parts = value.split("/")
+    devices = {"con", "prn", "aux", "nul", *["com" + str(index) for index in range(1, 10)],
+               *["lpt" + str(index) for index in range(1, 10)]}
+    if (not value or len(value) > 512 or not value.isascii() or value.lower() == "bundle.json"
+            or any(ord(char) < 32 or ord(char) == 127 or char in '<>:\\|?*"' for char in value)
+            or any(part in ("", ".", "..") or part.endswith((".", " "))
+                   or part.split(".", 1)[0].rstrip(" ").lower() in devices for part in parts)):
         raise ValueError("Unsupported bundle path: " + value)
     return value
 
@@ -146,8 +151,10 @@ def assemble(args):
         raise ValueError("Prepared runtime platform or source identity mismatch")
     if digest(args.prepared / "runtime/controller.iso") != evidence["image_sha256"]:
         raise ValueError("Prepared runtime image checksum mismatch")
-    for source, target in ((args.cli, "oblivion"), (args.helper, "oblivion-vm"), (args.manager, "oblivion-manager")):
-        copy(source, args.prepared / "bin" / target, executable=True)
+    suffix = ".exe" if args.platform == "windows-x86_64" else ""
+    binaries = tuple("bin/" + name + suffix for name in ("oblivion", "oblivion-vm", "oblivion-manager"))
+    for source, target in zip((args.cli, args.helper, args.manager), binaries):
+        copy(source, args.prepared / target, executable=True)
     if args.manager_assets.is_symlink() or not args.manager_assets.is_dir():
         raise ValueError("Manager assets must be a directory")
     for entry in args.manager_assets.rglob("*"):
@@ -160,9 +167,12 @@ def assemble(args):
     for name in MANAGER_LICENSES:
         copy(REPO / "packages/oblivion-manager/node_modules" / name / "LICENSE",
              args.prepared / "licenses" / name.removeprefix("@").replace("/", "-") / "LICENSE")
-    copy(REPO / "script/oblivion/desktop/install.sh", args.prepared / "install.sh", executable=True)
+    if args.platform != "windows-x86_64":
+        copy(REPO / "script/oblivion/desktop/install.sh", args.prepared / "install.sh", executable=True)
+    if args.platform == "windows-x86_64":
+        copy(REPO / "docs/WINDOWS.md", args.prepared / "docs/WINDOWS.md")
     copy(REPO / "docs/DESKTOP.md", args.prepared / "docs/DESKTOP.md")
-    required = ("bin/oblivion", "bin/oblivion-vm", "bin/oblivion-manager",
+    required = (*binaries,
                 "runtime/controller.iso", "runtime/kernel", "runtime/initrd",
                 "lib/manager/" + PLATFORMS[args.platform][2],
                 "lib/manager/licenses/oblivion/LICENSE", "lib/manager/licenses/termcn/LICENSE")
@@ -170,14 +180,23 @@ def assemble(args):
         if regular(args.prepared / name).stat().st_size == 0:
             raise ValueError("Empty required bundle file: " + name)
     files = []
+    spellings = {}
     for entry in args.prepared.rglob("*"):
         mode = entry.lstat().st_mode
         if stat.S_ISDIR(mode):
             continue
         regular(entry)
-        files.append({"path": safe_path(entry.relative_to(args.prepared).as_posix()),
-                      "sha256": digest(entry), "bytes": entry.stat().st_size,
-                      "executable": bool(mode & 0o111)})
+        name = safe_path(entry.relative_to(args.prepared).as_posix())
+        if args.platform == "windows-x86_64":
+            # Validate ancestors as well as leaves: A/x and a/y would share a
+            # directory on Windows even when their full paths differ.
+            for length in range(1, len(name.split("/")) + 1):
+                prefix = "/".join(name.split("/")[:length])
+                previous = spellings.setdefault(prefix.lower(), prefix)
+                if previous != prefix:
+                    raise ValueError("Windows bundle path aliases another entry: " + name)
+        files.append({"path": name, "sha256": digest(entry), "bytes": entry.stat().st_size,
+                      "executable": name in binaries if args.platform == "windows-x86_64" else bool(mode & 0o111)})
     if not files or len(files) > 1024:
         raise ValueError("Bundle must contain between 1 and 1024 files")
     manifest = {"format": "oblivion-desktop", "version": 1, "development_only": True,

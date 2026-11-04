@@ -960,6 +960,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oblivion-bundle"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "oblivion-cli"
 version = "0.1.0"
 dependencies = [
@@ -983,6 +992,7 @@ dependencies = [
  "getrandom",
  "hkdf",
  "libc",
+ "oblivion-bundle",
  "oblivion-cli",
  "oblivion-share",
  "oblivion-tor-state",
@@ -1004,6 +1014,7 @@ dependencies = [
  "oblivion-wire",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "windows-sys",
  "zeroize",
 ]

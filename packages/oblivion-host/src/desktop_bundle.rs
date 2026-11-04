@@ -1,80 +1,14 @@
 //! Current-format development bundles. Checksums identify a paired source build;
 //! they do not establish release signing, redistribution approval or hardware support.
 use crate::control::Result;
-use serde::{Deserialize, Serialize};
+pub(crate) use oblivion_bundle::{Binding, File, Runtime};
+use oblivion_bundle::{MAX_MANIFEST, Manifest, hash};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::{Component, Path, PathBuf};
-
-const MAX_MANIFEST: usize = 1024 * 1024;
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct File {
-    pub path: String,
-    pub sha256: String,
-    pub bytes: u64,
-    pub executable: bool,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Runtime {
-    pub image: String,
-    pub kernel: String,
-    pub initrd: String,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Binding {
-    pub bundle_id: String,
-    pub source_sha256: String,
-    pub boot: [File; 3],
-}
-
-impl Binding {
-    pub fn validate(&self) -> Result<()> {
-        if !hash(&self.bundle_id) || !hash(&self.source_sha256) {
-            return Err("invalid_runtime_bundle_binding".into());
-        }
-        for (file, expected) in
-            self.boot
-                .iter()
-                .zip(["runtime/controller.iso", "runtime/kernel", "runtime/initrd"])
-        {
-            if file.path != expected
-                || file.executable
-                || file.bytes == 0
-                || file.bytes > 64 * 1024 * 1024 * 1024
-                || !hash(&file.sha256)
-            {
-                return Err("invalid_runtime_bundle_binding".into());
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Manifest {
-    format: String,
-    version: u8,
-    development_only: bool,
-    bundle_id: String,
-    product_version: String,
-    platform: String,
-    backend: String,
-    source_sha256: String,
-    control_protocol: u8,
-    assets: String,
-    runtime: Runtime,
-    files: Vec<File>,
-}
+use std::path::{Path, PathBuf};
 
 pub(crate) struct Bundle {
     pub root: PathBuf,
@@ -131,9 +65,10 @@ impl Bundle {
         expected_platform: &str,
         runtime: bool,
     ) -> Result<Self> {
-        if !root.is_absolute() || !matches!(expected_platform, "darwin-arm64" | "linux-x86_64" | "linux-arm64") {
+        if !root.is_absolute() {
             return Err("unsupported_desktop_bundle_platform".into());
         }
+        oblivion_bundle::target(expected_platform)?;
         let root = root.canonicalize()?;
         let metadata = fs::symlink_metadata(&root)?;
         owned(&metadata, true)?;
@@ -146,85 +81,18 @@ impl Bundle {
         if bytes.len() > MAX_MANIFEST {
             return Err("desktop_bundle_manifest_limit".into());
         }
-        let manifest: Manifest = serde_json::from_slice(&bytes)?;
-        let mut canonical = serde_json::to_value(&manifest)?;
-        canonical
-            .as_object_mut()
-            .ok_or("invalid_desktop_bundle")?
-            .remove("bundle_id");
-        let identity = format!("{:x}", Sha256::digest(serde_json::to_vec(&canonical)?));
-        let expected_backend = if expected_platform == "darwin-arm64" {
-            "apple-vz"
-        } else {
-            "qemu-kvm"
-        };
-        if manifest.format != "oblivion-desktop"
-            || manifest.version != 1
-            || !manifest.development_only
-            || manifest.bundle_id != identity
-            || manifest.platform != expected_platform
-            || manifest.backend != expected_backend
-            || !hash(&manifest.source_sha256)
-            || source.is_some_and(|source| !hash(source) || manifest.source_sha256 != source)
-            || manifest.control_protocol != 1
-            || manifest.product_version.is_empty()
-            || manifest.product_version.len() > 64
-            || !manifest
-                .product_version
-                .as_bytes()
-                .first()
-                .is_some_and(u8::is_ascii_digit)
-            || !manifest.product_version.contains("~dev")
-            || !manifest
-                .product_version
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b".+:~-".contains(&byte))
-            || manifest.assets != "lib/manager"
-            || manifest.runtime.image != "runtime/controller.iso"
-            || manifest.runtime.kernel != "runtime/kernel"
-            || manifest.runtime.initrd != "runtime/initrd"
-            || manifest.files.len() > 1024
-        {
-            return Err("desktop_bundle_does_not_match_this_build".into());
-        }
-        let mut files = BTreeMap::new();
+        let manifest = Manifest::decode(&bytes, source, expected_platform)?;
+        let files: BTreeMap<_, _> = manifest
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file))
+            .collect();
         let mut expected_directories = BTreeSet::new();
-        let mut previous = "";
         for file in &manifest.files {
-            if !relative(&file.path)
-                || !hash(&file.sha256)
-                || file.bytes > 64 * 1024 * 1024 * 1024
-                || file.path.as_str() <= previous
-                || files.insert(file.path.as_str(), file).is_some()
-            {
-                return Err("invalid_desktop_bundle_inventory".into());
-            }
             let mut directory = Path::new(&file.path).parent();
             while let Some(path) = directory.filter(|path| !path.as_os_str().is_empty()) {
                 expected_directories.insert(path.to_owned());
                 directory = path.parent();
-            }
-            previous = &file.path;
-        }
-        let native = if expected_platform == "darwin-arm64" {
-            "lib/manager/@opentui/core-darwin-arm64/libopentui.dylib"
-        } else if expected_platform == "linux-arm64" {
-            "lib/manager/@opentui/core-linux-arm64/libopentui.so"
-        } else {
-            "lib/manager/@opentui/core-linux-x64/libopentui.so"
-        };
-        for name in [
-            "bin/oblivion",
-            "bin/oblivion-vm",
-            "bin/oblivion-manager",
-            native,
-            manifest.runtime.image.as_str(),
-            manifest.runtime.kernel.as_str(),
-            manifest.runtime.initrd.as_str(),
-        ] {
-            let file = files.get(name).ok_or("desktop_bundle_file_missing")?;
-            if file.bytes == 0 || (name.starts_with("bin/") && !file.executable) {
-                return Err("desktop_bundle_file_invalid".into());
             }
         }
         let mut discovered = BTreeSet::new();
@@ -277,15 +145,7 @@ impl Bundle {
         &self.manifest.source_sha256
     }
     pub fn binding(&self) -> Result<Binding> {
-        Ok(Binding {
-            bundle_id: self.id().into(),
-            source_sha256: self.source().into(),
-            boot: [
-                self.file(&self.runtime().image)?.clone(),
-                self.file(&self.runtime().kernel)?.clone(),
-                self.file(&self.runtime().initrd)?.clone(),
-            ],
-        })
+        Ok(self.manifest.binding()?)
     }
     pub fn files(&self) -> &[File] {
         &self.manifest.files
@@ -363,31 +223,10 @@ fn owned(metadata: &fs::Metadata, directory: bool) -> Result<()> {
     Ok(())
 }
 
-fn relative(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 512
-        && value.is_ascii()
-        && !value.contains('\\')
-        && !value.contains('\0')
-        && Path::new(value)
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
-        && !value
-            .split('/')
-            .any(|component| component.is_empty() || component == "." || component == "..")
-        && value != "bundle.json"
-}
-
-fn hash(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use oblivion_bundle::relative;
     use std::os::unix::fs::PermissionsExt;
 
     pub(crate) struct Fixture {

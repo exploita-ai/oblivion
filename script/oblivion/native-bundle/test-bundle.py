@@ -46,7 +46,7 @@ class DesktopBundle(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("source fixture " + name + "\n")
         shutil.copyfile(REPO / "script/oblivion/native-bundle/host-sources.py", self.repo / "script/oblivion/native-bundle/host-sources.py")
-        for name in ("script/oblivion/desktop/install.sh", "docs/DESKTOP.md"):
+        for name in ("script/oblivion/desktop/install.sh", "docs/DESKTOP.md", "docs/WINDOWS.md"):
             target = self.repo / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("distribution fixture\n")
@@ -145,6 +145,36 @@ class DesktopBundle(unittest.TestCase):
         self.assertEqual(manifest["backend"], "qemu-kvm")
         self.assertTrue((args.output / "lib/manager/@opentui/core-linux-x64/libopentui.so").is_file())
 
+    def test_windows_assembly_uses_exe_roles_hyperv_and_pinned_opentui_dll(self):
+        args = self.prepared("windows-x86_64")
+        builder.assemble(args)
+        manifest = json.loads((args.output / "bundle.json").read_text())
+        self.assertEqual(manifest["platform"], "windows-x86_64")
+        self.assertEqual(manifest["backend"], "hcs-hyperv")
+        self.assertTrue((args.output / "lib/manager/@opentui/core-win32-x64/opentui.dll").is_file())
+        self.assertFalse((args.output / "install.sh").exists())
+        self.assertTrue((args.output / "docs/WINDOWS.md").is_file())
+        binaries = {"bin/oblivion.exe", "bin/oblivion-vm.exe", "bin/oblivion-manager.exe"}
+        self.assertEqual({item["path"] for item in manifest["files"] if item["executable"]}, binaries)
+        for name in binaries:
+            self.assertTrue((args.output / name).is_file())
+        self.assertFalse((args.output / "bin/oblivion").exists())
+        identity = manifest.pop("bundle_id")
+        self.assertEqual(identity, hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest())
+
+    def test_windows_assembly_rejects_case_aliases_in_ancestor_directories(self):
+        args = self.prepared("windows-x86_64")
+        for name in ("Upper/one", "upper/two"):
+            target = args.prepared / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"fixture")
+        # Use a case-sensitive fixture directory when the platform offers one.
+        if len(list(args.prepared.glob("[Uu]pper"))) != 2:
+            self.skipTest("Requires a case-sensitive filesystem")
+        with self.assertRaisesRegex(ValueError, "aliases another entry"):
+            builder.assemble(args)
+        self.assertFalse(args.output.exists())
+
     def test_assembly_rejects_non_development_version(self):
         args = self.prepared()
         args.product_version = "1.0.0"
@@ -196,7 +226,7 @@ class DesktopBundle(unittest.TestCase):
             builder.prepare(args)
 
     def test_unsafe_paths(self):
-        for name in ("/absolute", "../outside", "a/./b", "a//b", "a\\b", "nonascii-\N{SNOWMAN}", "line\nbreak", "x" * 513):
+        for name in ("/absolute", "../outside", "a/./b", "a//b", "a\\b", "nonascii-\N{SNOWMAN}", "line\nbreak", "x" * 513, "C:/outside", "C:outside", "dir/CON.txt", "dir/name. ", "BUNDLE.JSON", "a/lpt9", "a/COM1.log", "dir/file?"):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 builder.safe_path(name)
 

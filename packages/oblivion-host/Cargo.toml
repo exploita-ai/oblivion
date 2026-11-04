@@ -16,6 +16,7 @@ chacha20poly1305 = "=0.10.1"
 getrandom = "=0.2.17"
 hkdf = "=0.12.4"
 oblivion-cli = { path = "../oblivion-cli" }
+oblivion-bundle = { path = "../oblivion-bundle" }
 oblivion-wire = { path = "../oblivion-wire" }
 oblivion-tor-state = { path = "../oblivion-tor-state" }
 oblivion-transport = { path = "../oblivion-transport" }
