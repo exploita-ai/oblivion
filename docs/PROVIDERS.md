@@ -10,6 +10,22 @@ refresh tokens, client databases and API keys saved by the client live inside
 that Safe's encrypted volume. Two agents in the same Safe can access data
 permitted by that guest's user account; different Safes have separate filesystems.
 
+The intended agent-created-child flow starts already authenticated when the
+controller can authorize a supported credential-only delegation from the parent.
+This is still in implementation. Candidate forms are API keys,
+`CodexAccessToken` and `ClaudeSetupToken`, subject to the pinned client's supported
+flow and qualification. The mechanism must not copy a whole home, agent profile,
+conversation store or cache, nor import the desktop's login. Native login remains
+a fallback when delegation is unavailable. General managed-OAuth portability,
+refresh-token reuse and identical account behavior across clients are not
+promised.
+
+Delegation does not make a provider account anonymous or narrow its permissions.
+Expiry, refresh, logout and simultaneous parent/child use require real-provider
+tests before a credential form is declared supported. Delegated secrets remain
+excluded from portable Share data, task text, public status and MCP responses;
+personal encrypted volume backups may still contain saved credentials.
+
 The client communicates through its Safe's Tor or configured SOCKS5 gateway.
 Open Internet is the default access policy; Strict and Offline remain explicit
 Safe-wide choices. A provider may refuse Tor exits, require interactive login,

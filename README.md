@@ -48,7 +48,9 @@ when its archive or name is missing.
 
 A Safe is a separate Linux VM with its own encrypted disk, home, workspace,
 agent profiles and network gateway. Several agent sessions can use the same
-Safe and its files. Different Safes do not share filesystems or provider logins.
+Safe and its files. Different Safes have separate filesystems and credential
+stores. Scoped provider-credential delegation to an agent-created child is a
+planned exception; it does not share a filesystem or copy a whole agent profile.
 Closing a Safe stops its processes and locks its volume; it does not delete its
 persistent conversations or files.
 
@@ -87,10 +89,15 @@ These are source capabilities with different levels of verification. Component
 checks do not establish that the complete installed product is ready for
 sensitive use. See the roadmap for the exact remaining VM and hardware gates.
 
-Agent-created Safes are marked in the manager. Review their parent, requested
-client, storage and creation state before opening them. The creation record is
-distinct from a running task; automatic task delivery and provider-login
-delegation are not implemented.
+Agent-created Safes are marked in the manager. Their inspector separates parent,
+requested client, storage and creation record from the actual VM and managed-job
+state. Open the saved task offline, review its text, then explicitly start it.
+An uncertain submission is reconciled with the same request; a new attempt
+requires a confirmed failure or cancellation and an explicit retry. Back leaves
+the job active; inactivity locking still stops work. Creation-triggered startup
+and credential-only delegation are still in implementation. The intended child
+flow is already authenticated when a supported credential can be delegated;
+native login remains a fallback. See [provider limits](docs/PROVIDERS.md).
 
 ## Networking
 
@@ -124,6 +131,13 @@ an unconfirmed failure stays blocked. Other Safes have independent gateways.
 Dedicated telemetry collectors known for the pinned clients are blocked, and
 supported client telemetry settings are disabled. This cannot distinguish
 telemetry from model traffic sharing the same encrypted destination.
+
+The footer separates the host's `Network` link from verified `Tor` and `SOCKS5`
+routes. A Safe's current `Strict`, `Open Internet` or `Offline` policy appears
+beside Network only with a fresh observation for that exact host and Safe
+opening. A lock, reopening or expired observation removes the old policy and
+protected-route marks. The physical Network indicator remains available on the
+welcome screen; it does not assert that a provider is reachable.
 
 ## Files and authentication
 

@@ -48,7 +48,20 @@ Child creation journals contain a sealed task envelope, not plaintext prompt
 text. A separate HKDF domain and XChaCha20-Poly1305 bind it to its family, Safe,
 parent, request and requested agent. Unlocking General alone cannot decrypt that
 task; the controller needs the family's authorized capability. Status and Share
-do not include task content. These queued tasks are not automatically delivered.
+do not include task content. An explicit `safe task review SAFE --json` opens the
+task for review only after the Safe is open. The manager first pins an offline
+opening; status and review do not establish a network route. The view escapes
+control and direction characters and clears its plaintext on Back, error, lock,
+opening change or unmount.
+
+`safe task status/start/retry/cancel` expose the actual managed job, native chat
+ID, request identity and attempt count. Start reconciles an uncertain attempt
+without allocating a second request. Retry needs a confirmed failed or cancelled
+job and explicit confirmation; completed and unknown outcomes are not retryable.
+After an interrupted command the UI reads authoritative status before reporting
+an outcome. Back leaves the job running, and normal inactivity locking still
+applies. Opening the native client does not submit the saved task. Automatic
+startup on child creation remains in implementation.
 A same-capability password rewrap preserves access; changing the family secret
 requires resealing pending tasks as part of the rotation transaction.
 
@@ -70,6 +83,15 @@ rotating Tor revokes streams and blocks application admission before constructin
 the new route. Readiness requires verified transport and isolation observations,
 not a settings selection. Failure stays closed. Other Safes have independent
 route lifetimes. No automatic external IP-check request is part of readiness.
+
+The manager refreshes observations every five seconds and removes positive
+transport state after ten seconds without valid data. Policy and transport are
+bound to the current host nonce and the selected Safe's ID, slot and opening
+nonce, rather than a global or slot-zero status. Locked, closing, recovery and
+changed-opening snapshots cannot carry forward ready marks. A transport mark
+also requires a current agent-mode VM and verified isolation. The host-link
+indicator is independent and remains available before unlocking; a Safe's policy
+is shown beside it only with a fresh matching Safe observation.
 
 Known dedicated telemetry collectors for the pinned clients are blocked. A
 hostname gateway cannot classify telemetry mixed with inference traffic at the
@@ -93,8 +115,14 @@ See the [history adapter](../packages/oblivion-history/README.md).
 Scoped MCP operations authenticate their calling VM and opening. A task can
 create a closed child Safe with provenance and a password inherited through the
 family credential design; it cannot choose another Safe's authority, filesystem
-or credentials. Automatic child startup and explicit credential delegation are
-still incomplete. Managed chat jobs use bounded output, timeouts and controller
+or credentials. The intended automatic-child path includes scoped delegation of
+only the requested agent's supported provider credential, not its whole home,
+profile, history or caches. This work remains in implementation, with API keys,
+`CodexAccessToken` and `ClaudeSetupToken` as candidate forms to qualify. Universal
+managed OAuth reuse or refresh is not promised. The controller must authorize
+the transfer; task text, public status and MCP responses never carry the secret.
+Native login is the fallback when a credential cannot be delegated. Managed
+chat jobs use bounded output, timeouts and controller
 cleanup ownership. They do not weaken native permission prompts silently.
 
 ## Transfers, backups and Share
@@ -105,7 +133,13 @@ External removable filesystems are parsed in separate offline media VMs, not in
 the controller or Safe. No copy grants a permanent shared directory.
 
 A personal backup copies a closed encrypted volume and may include native
-provider credentials. Share is a different, versioned portable package: selected
+provider credentials. The immutable offline SafeAdmin checkpoint records child
+origin, sealed task and attempts inside `/vault/state/oblivion/safe.json`, without
+running the sudo overlay or history watcher. Raw restore authenticates the volume
+password/token and task context without the mother, retains original identity,
+family and data key, and publishes with an Offline profile. The native backup
+CLI is still in implementation, and the actual VM round trip remains a gate.
+Share is a different, versioned portable package: selected
 workspace/imports, canonical conversations and approved relationships, encrypted
 with a separate passphrase. Known credential stores and installed-system overlays
 are excluded. Content scanning is best effort and explicit review remains

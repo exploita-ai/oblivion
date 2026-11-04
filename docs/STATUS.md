@@ -18,8 +18,27 @@ Agent-created Safes have an explicit review screen. Closed RAM children resolve
 to their existing volume and require their live parent's family authority; they
 are not silently replaced with another Safe. Queued child tasks are sealed to
 family/context before their creation journal is written. They are omitted from
-public status and portable Share data. Automatic delivery and independent raw
-backup of that creation journal remain unfinished.
+public status and portable Share data. The CLI and manager now provide explicit
+offline task review, start/reconciliation, confirmed retry and cancellation,
+plus current managed-job identifiers and outcomes. Plaintext is fetched only for
+review, escaped for display and cleared on Back, error, lock or opening change.
+Native-client access sends no saved task. Creation-triggered startup and
+credential-only delegation remain in implementation; supported credential
+forms and independent task-journal restore still require qualification.
+
+The immutable SafeAdmin checkpoint now stores child provenance, the sealed task
+and attempts inside the encrypted volume. Raw restore authenticates the volume
+password/token and task context without requiring the mother, preserves original
+identity/family/key and publishes through the current transaction with Offline
+policy. The native personal-backup CLI is still in implementation; an actual
+VM backup/restore round trip remains an acceptance gate.
+
+The footer now shows a fresh Safe-scoped policy beside Network. Policy and
+Tor/SOCKS5 observations bind to the host opening and the exact Safe ID, slot and
+opening nonce, and expire after ten seconds. A locked, closing or reopened Safe
+cannot inherit a previous positive route mark. Physical host-link status can
+still appear on the welcome screen. Renderer fixtures cover these boundaries
+at narrow and wide sizes; real gateway fault-injection acceptance remains open.
 
 The development Debian package reuses the Live immutable role assets. Real dpkg
 install/remove/purge/reinstall fixtures preserve configuration and data, and
@@ -41,7 +60,8 @@ this diagnostic result does not qualify Mac hardware acceleration. There is no
 production emulation fallback. Linux hardware acceptance and the Windows backend
 remain open.
 
-Remaining release gates include real login, chat persistence after cold restart,
+Remaining release gates include real login and scoped child-credential delegation,
+chat persistence after cold restart,
 interactive cross-agent resume and author admission, close during active jobs,
 family password rotation and independent restore, concurrent Tor/SOCKS5 failures,
 Share between two installed candidates, physical media, resource measurements, desktop
