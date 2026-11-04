@@ -1,10 +1,11 @@
 # Windows native backend — feasibility and implementation proposal
 
-Research checkpoint: 4 November 2026. **The Windows backend and installer are not
-implemented or qualified.** The manager has a Windows x64 build target; its PE
+Implementation checkpoint: 4 November 2026. **The Windows product is not complete
+or qualified.** An experimental offline HCS helper core is implemented; HNS,
+frontend integration, installation and recovery remain open. The manager has a Windows x64 build target; its PE
 execution and complete installed path still need qualification. This is a proposal for phase 8 of the
 [roadmap](oblivion1.0-roadmap.md), rather than instructions for an available product.
-No VM or Windows configuration was changed during this audit.
+No Windows VM has been booted to qualify this source increment.
 
 ## First target: Windows 11 x64 with an HCS-owned Hyper-V VM
 
@@ -40,6 +41,23 @@ Windows Terminal / PowerShell -> oblivion.exe
        -> the same versioned Debian controller for amd64
             -> Safe Linux VMs + per-Safe gateways
 ```
+
+The [HCS helper source](../packages/oblivion-native-windows/README.md) now creates
+an owned compute system, provisions a private per-boot token and relays authenticated
+local control pipes over AF_HYPERV. Its typed configuration currently refuses
+network devices and online startup. `capabilities` reports observed HCS availability
+separately from product support, which remains false. This is not yet connected
+to an installed Windows CLI or manager.
+
+The helper pins trusted boot assets, a private VHDX and their parent directories,
+checks actual ACLs and file identities, and grants VM access only to that reviewed
+set. The new installation contract binds the VHDX Identifier to the runtime UUID;
+the guest separately verifies the virtual disk's runtime marker or filesystem
+UUID. Configuring a VHDX container is not sufficient to initialize that content.
+Supervisor EOF revokes the helper, including during bounded HCS waits. A successful
+HCS request is not a stopped observation. Unknown cleanup retains leases until the
+one-shot process exits and requires explicit grant reconciliation; that recovery
+frontend is still to be implemented.
 
 The installer should automate feature detection, explicit elevation, VM creation,
 image verification and any restart handoff. Everyday commands should run as the
@@ -86,9 +104,10 @@ to apply to a VM created through the separate VMMS management interface.
 
 ### Per-boot authentication: private VirtioSerial
 
-Keep the existing bootstrap: guest `READY`, a fresh 32-byte host token, then guest
-`SET`. `host/runtime-auth.py` currently accepts only `apple-vz` and `qemu-kvm`;
-an HCS profile and backend provisioner remain to be implemented. The token stays
+The implemented bootstrap keeps guest `READY`, a fresh 32-byte host token, then
+guest `SET`. `host/runtime-auth.py` now accepts `hcs-hyperv` alongside `apple-vz`
+and `qemu-kvm`; HCS and QEMU use the same authenticated protocol implementation.
+The token stays
 in broker memory and the guest's private `/run` directory, never argv, the HCS
 configuration, KVP or a plaintext host file.
 
@@ -102,6 +121,10 @@ non-console port named `oblivion.runtime-auth`, not a debug console or log relay
 
 Create the pipe with an explicit restrictive DACL before handing its name to HCS,
 one instance, `FILE_FLAG_FIRST_PIPE_INSTANCE` and `PIPE_REJECT_REMOTE_CLIENTS`.
+The authentication port has `ConsoleSupport: false` explicitly and no kernel
+`console=` parameter. It is a named serial port, never the kernel's `hvc0`
+console; console output must not share the READY/token stream. Microsoft's WSL
+configuration enables `ConsoleSupport` for its separate `hvc0` port.
 Windows documents these controls; default pipe security is unsuitable because it
 also permits Everyone/anonymous reads. The exact HCS connecting identity and
 its access under the proposed DACL still require qualification on Windows.
@@ -129,29 +152,37 @@ from the selected ABI; `hypervisor-kernel.json` records driver modes, module
 checksums and the initramfs checksum. ARM64 is unchanged by this Windows x64
 contract. The checks use the upstream names, including `hv_vmbus`, `hv_storvsc`,
 `hv_netvsc` and `hv_sock`.
+The inventory also requires `virtio_console` for the named bootstrap port and
+`virtio_mmio`, enabled by the reference Microsoft kernel. Modular dependencies
+are included by initramfs-tools; no hard-coded MMIO address or extra kernel
+transport argument is introduced.
 [VMBus](https://github.com/torvalds/linux/blob/v6.12/drivers/hv/Makefile),
 [storage](https://github.com/torvalds/linux/blob/v6.12/drivers/scsi/Makefile),
 [network](https://github.com/torvalds/linux/blob/v6.12/drivers/net/hyperv/Makefile),
 [vsock](https://github.com/torvalds/linux/blob/v6.12/net/vmw_vsock/Kconfig).
+[Reference Microsoft kernel](https://github.com/microsoft/WSL2-Linux-Kernel/blob/linux-msft-wsl-6.6.y/arch/x86/configs/config-wsl).
 
 Focused source fixtures cover built-in/module configurations, missing or changed
 drivers and a small Debian initramfs archive. No controller image or Hyper-V VM
 has been built or booted to qualify this increment. Driver coverage introduces
 no Hyper-V runtime backend, authentication alternative or firmware policy.
 
-Concrete changes still required by our source:
+Concrete integration and qualification still required:
 
 - Package and qualify the HCS direct-kernel/initrd boot, supported schema and
   nested processor capability. Neither the Linux helper nor driver fixtures
   establish a Windows boot or an accelerated inner Safe.
-- Replace assumptions about VirtIO block names with validated runtime disk
-  identity; Hyper-V synthetic SCSI devices use a different presentation.
-- Implement the HCS-owned pipe/provisioner above, bind its lifetime to the owned
-  compute-system identity, and qualify the pipe peer/DACL and guest port identity.
+- Qualify the implemented guest disk selector: it binds the configured VMBus
+  controller GUID, storage class/driver and data LUN before marker/UUID checks,
+  rather than trusting an `sdX` name. Current fixtures use actual temporary sysfs
+  trees; they do not prove Hyper-V's presentation on the target Windows host.
+- Qualify the HCS-owned pipe/provisioner above, its compute-system lifetime,
+  connecting peer/DACL and guest port identity.
   An unsuccessful handshake must prevent control access; no SSH, shared host
   folder, unauthenticated TCP or weaker fallback is part of this bootstrap.
-- Implement local Windows IPC with explicit per-user/broker ACLs and verified
-  client identity. Named-pipe defaults can grant read access to Everyone and
+- Integrate the implemented local Windows IPC with the Windows frontend and
+  installer. It uses explicit per-user/broker ACLs and verified client identity.
+  Named-pipe defaults can grant read access to Everyone and
   anonymous users, so default ACLs are unsuitable here. [Pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights).
 
 ## Storage and lifecycle
@@ -244,8 +275,9 @@ Remaining split, without a second command implementation:
    adapters for Unix and Windows. Preserve opaque argument arrays; never feed
    agent arguments into a PowerShell command string. The three agent binaries
    remain the existing pinned Linux binaries inside the Safe.
-4. Add a Windows backend/installer using HCS and the same
-   runtime lifetime/lease contract. Compile and qualify a native OpenTUI manager
+4. Complete the Windows HCS backend with HNS, provisioned VHDX data, explicit
+   failed-stop/grant recovery and the installer, using the same runtime lifetime
+   contract. Compile and qualify a native OpenTUI manager
    artifact as well; a CLI-only substitute would not satisfy bare `oblivion`.
 
 For a launcher attached to an existing Windows Terminal, use its console/VT

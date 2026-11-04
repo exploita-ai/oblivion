@@ -180,8 +180,8 @@ remain open.
 Portable CLI run/proxy parsing, private wire framing and Files validation now
 compile for Windows MSVC; the Windows CI job includes their portable tests. The shared
 amd64 controller build also verifies Hyper-V driver coverage in its kernel and
-initramfs. Remaining Windows command orchestration, backend, bootstrap authentication, direct-kernel boot and
-installer remain unimplemented or unqualified; see [Windows requirements](WINDOWS.md).
+initramfs. Remaining Windows command orchestration, installed backend integration and
+installer remain incomplete or unqualified; see [Windows requirements](WINDOWS.md).
 
 The manager's target descriptor now drives both its builder and native launcher
 discovery, including Windows x64 `.exe` names and the pinned OpenTUI DLL. Local
@@ -232,13 +232,19 @@ The controller's human-activity tracker is unchanged. Real Unix-socket fixtures,
 portable DTO/command tests and the Linux maintenance-admission predicate cover
 these source boundaries. Actual disk growth and cold-restart acceptance remain open.
 
-Windows research now selects an HCS-owned Hyper-V VM with direct kernel/initrd
-boot and a dedicated private VirtioSerial bootstrap. Microsoft's implementation
-demonstrates a host-created pipe before VM creation, and HCS exposes nested CPU
-extensions. KVP is excluded for secrets because its pools persist. This is a
-source-based implementation choice, not an implemented backend; restrictive pipe
-peer/ACL behavior, VM ownership and actual inner KVM still require Windows tests.
-See the [Windows backend design](WINDOWS.md).
+Windows now has an experimental offline HCS helper core with direct kernel/initrd
+boot, owned VM handles, private VirtioSerial token provisioning, local named-pipe
+control and authenticated AF_HYPERV. Linux and Windows consume one runtime-auth
+implementation. File leases check ACLs, object identity and VHDX metadata; the
+guest selects the configured VMBus SCSI controller and LUN before disk writes.
+Supervisor loss is observed during HCS waits. Successful shutdown requires an
+actual Stopped observation; uncertain cleanup retains the leases until exit.
+Portable models and MSVC compilation pass locally. Native Windows ACL, pipe,
+cancellation and lifetime fixtures are defined in CI but have not been executed
+on this Mac. Network startup remains explicitly refused: HNS, Windows frontend,
+installer and grant-recovery integration are unfinished. Pipe peer/ACL behavior
+with the actual HCS worker, boot, inner KVM and the installed lifecycle remain
+Windows acceptance gates. See the [Windows backend](WINDOWS.md).
 
 Remaining release gates include real login and scoped child-credential delegation,
 chat persistence after cold restart,
