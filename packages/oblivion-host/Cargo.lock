@@ -963,6 +963,7 @@ dependencies = [
 name = "oblivion-cli"
 version = "0.1.0"
 dependencies = [
+ "oblivion-transfer",
  "oblivion-transport",
  "oblivion-wire",
  "serde",

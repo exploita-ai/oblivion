@@ -209,6 +209,11 @@ fn run() -> control::Result<i32> {
     } else {
         None
     };
+    let files_command = if args.first().is_some_and(|arg| arg == "files") {
+        oblivion_cli::files::parse(&args[1..])?
+    } else {
+        None
+    };
     let safe_command = if args.first().is_some_and(|arg| arg == "safe")
         && !args
             .get(1)
@@ -306,7 +311,10 @@ fn run() -> control::Result<i32> {
             },
         ),
         "shell" => shell_commands::run(workspace_options.ok_or("workspace_options_missing")?),
-        "files" => file_commands::run(&args[1..]),
+        "files" => match files_command {
+            Some(command) => file_commands::inspect(command),
+            None => file_commands::run(&args[1..]),
+        },
         "backup" => backup_commands::run(&args[1..]),
         "share" => share_commands::run(&args[1..]),
         "safe" if args.get(1).is_some_and(|arg| arg == "password") => {

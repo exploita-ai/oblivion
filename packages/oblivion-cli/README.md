@@ -59,6 +59,16 @@ zero explicitly disables it. The preferences and full status view have one wire
 model shared with the controller; human-activity and monotonic-clock logic remain
 there.
 
+Files `list`, `transfers`, `status`, `recover` and `discard` now use the shared
+parser and executor. Safe selection and fresh opening checks are also consumed
+by the Unix import/export adapter. Metadata pages and receiver outcomes are
+validated before output or recovery; an operation remains bound to its Safe,
+slot and opening nonce. The platform adapter owns the private file-channel lease
+and local destination filesystem. Trusted source selection, manifest review,
+approval and payload streaming for import/export remain in the Unix adapter;
+this extraction does not supply Windows filesystem endpoints. Invalid inspection
+syntax is rejected by the launcher before it starts the runtime.
+
 SOCKS5 URLs accept the existing literal IPv4/port syntax and optional percent-
 encoded credentials. Both `socks5://` and `socks5h://` use the existing transport;
 no destination DNS lookup occurs here. A username without `:PASSWORD` returns a
