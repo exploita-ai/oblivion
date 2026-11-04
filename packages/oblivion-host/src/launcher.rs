@@ -214,6 +214,11 @@ fn run() -> control::Result<i32> {
     } else {
         None
     };
+    let backup_command = if args.first().is_some_and(|arg| arg == "backup") {
+        Some(oblivion_cli::backup::parse(&args[1..])?)
+    } else {
+        None
+    };
     let family_password_command = if args.first().is_some_and(|arg| arg == "safe")
         && args.get(1).is_some_and(|arg| arg == "password")
     {
@@ -329,7 +334,7 @@ fn run() -> control::Result<i32> {
             Some(command) => file_commands::inspect(command),
             None => file_commands::run(&args[1..]),
         },
-        "backup" => backup_commands::run(&args[1..]),
+        "backup" => backup_commands::run(backup_command.ok_or("backup_command_missing")?),
         "share" => share_commands::run(&args[1..]),
         "safe" if args.get(1).is_some_and(|arg| arg == "password") => {
             family_password_commands::run(

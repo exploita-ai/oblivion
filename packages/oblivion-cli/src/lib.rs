@@ -8,6 +8,7 @@ pub mod shell;
 pub mod storage;
 
 pub mod controller;
+pub mod backup;
 pub mod child_task;
 pub mod family_password;
 pub mod files;

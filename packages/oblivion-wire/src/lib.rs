@@ -3,6 +3,7 @@
 //! No filesystem, sockets, runtime discovery, authorization or OS policy lives
 //! here. Callers authenticate peers and apply operation-specific secret budgets.
 pub mod agent;
+pub mod backup;
 pub mod child_task;
 pub mod control;
 pub mod control_client;
