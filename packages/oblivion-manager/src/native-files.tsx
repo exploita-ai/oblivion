@@ -14,7 +14,7 @@ import { ActionBar } from "./action-bar"
 import { FilePicker } from "./vendor/termcn/file-picker"
 import { theme } from "./theme"
 import type { NativeRuntime } from "./native-control"
-import { createFileTransfers, fileOutcome, type FileOutcome, type FileTransfer } from "./native-file-transfers"
+import { createFileTransfers, fileInventory, fileOutcome, type FileInventory, type FileOutcome, type FileReference, type FileTransfer } from "./native-file-transfers"
 import type { FileMappingEntry, FileReview, RunningFileCopy } from "./native-file-events"
 import { SelectionBasket, selectionError, type FileSelection } from "./file-selection"
 
@@ -27,14 +27,20 @@ const directory = z.object({
 
 export function NativeFiles(props: { safe: string; name: string; opening?: string; blocked?: string; transfers?: ReturnType<typeof createFileTransfers>; runtime: NativeRuntime; run: (args: string[]) => Promise<boolean>; back: () => void }) {
   const transfers = props.transfers ?? createFileTransfers()
-  const [page, setPage] = createSignal<"menu" | "source" | "guest" | "destination" | "name" | "transfer" | "records" | "outcome" | "recover" | "discard">("menu")
+  const [page, setPage] = createSignal<"menu" | "source" | "guest" | "destination" | "name" | "transfer" | "records" | "record-destination" | "outcome" | "recover" | "discard">("menu")
   const [selected, setSelected] = createSignal(0)
   const [operation, setOperation] = createSignal<"import" | "export">("import")
   const [sources, setSources] = createSignal<string[]>([])
   const [destination, setDestination] = createSignal("")
   const [name, setName] = createSignal("")
   const [notice, setNotice] = createSignal("")
-  const [transaction, setTransaction] = createSignal<string>()
+  const [reference, setReference] = createSignal<{ entry: FileReference; location: "recent" | "inventory" }>()
+  const [recordsScope, setRecordsScope] = createSignal<"import" | "export" | "recent">("import")
+  const [inventory, setInventory] = createSignal<FileInventory>()
+  const [inventoryCursors, setInventoryCursors] = createSignal<string[]>([])
+  const [inventoryDestination, setInventoryDestination] = createSignal<string>()
+  const [inventoryBusy, setInventoryBusy] = createSignal(false)
+  const [inventoryNeedsOpen, setInventoryNeedsOpen] = createSignal(false)
   const [observed, setObserved] = createSignal<FileOutcome>()
   const [confirmation, setConfirmation] = createSignal<FileOutcome>()
   const [working, setWorking] = createSignal(false)
@@ -45,16 +51,18 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
   let running: RunningFileCopy | undefined
   let decision: { requested: boolean } | undefined
   let copyEpoch = 0
+  let inventoryEpoch = 0
   let stopped = false
   let reviewScroll: ScrollBoxRenderable | undefined
   const records = () => transfers.entries().filter((entry) => entry.safe === props.safe)
-  const current = () => records().find((entry) => entry.id === transaction())
+  const current = () => reference()?.entry
+  const details = () => reference()?.location === "recent" ? records().find((entry) => entry.id === current()?.id && entry.opening === current()?.opening) : undefined
   const generation = createMemo(() => `${props.safe}/${props.opening ?? ""}`)
   const availability = createMemo(() => props.blocked)
   const recoverable = () => !!current() && !props.blocked && observed()?.state === "ready" && observed()?.can_recover
   const discardable = () => !!current() && !props.blocked && ["ready", "incomplete"].includes(observed()?.state ?? "") && observed()?.can_discard
 
-  async function read(entry: FileTransfer) {
+  async function read(entry: FileReference) {
     const expected = generation()
     const state = await props.runtime.status()
     const opened = state.idle_lock.safes.find((safe) => safe.opening.safe_id === entry.safe && !safe.closing)?.opening
@@ -63,6 +71,53 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       ...(entry.kind === "export" ? ["--destination", entry.destination] : []), "--json"]))
     if (expected !== generation() || entry.safe !== props.safe || result.operation_id !== entry.id || result.safe_id !== entry.safe || result.opening !== opened.nonce || result.source_opening && result.source_opening !== entry.opening) throw new Error("Copy identity changed")
     return result
+  }
+
+  async function listTransfers(kind: "import" | "export", cursors: string[] = []) {
+    const expected = generation()
+    const folder = inventoryDestination()
+    const epoch = ++inventoryEpoch
+    const after = cursors.at(-1)
+    setRecordsScope(kind); setInventory(undefined); setInventoryCursors(cursors); setSelected(0); setInventoryBusy(true); setInventoryNeedsOpen(false); setNotice("")
+    try {
+      const state = await props.runtime.status()
+      const opened = state.idle_lock.safes.find((safe) => safe.opening.safe_id === props.safe && !safe.closing)?.opening
+      if (stopped || epoch !== inventoryEpoch || expected !== generation()) return
+      if (!state.app_open || !state.idle_lock.host || state.idle_lock.host.closing || !opened) {
+        setInventoryNeedsOpen(state.app_open && !!state.idle_lock.host && !state.idle_lock.host.closing && !opened)
+        throw new Error("Safe opening unavailable")
+      }
+      if (props.opening && props.opening !== opened.nonce || kind === "export" && !folder) throw new Error("Receiver unavailable")
+      const result = fileInventory.parse(await props.runtime.query(["files", "transfers", "--safe", props.safe, "--opening", opened.nonce,
+        ...(kind === "export" ? ["--destination", folder!] : []), ...(after ? ["--cursor", after] : []), "--limit", "8", "--json"]))
+      if (stopped || epoch !== inventoryEpoch || expected !== generation()) return
+      if (result.safe_id !== props.safe || result.opening !== opened.nonce || result.direction !== kind
+        || after && (result.entries.some((entry) => entry.operation_id <= after) || result.next_cursor && result.next_cursor <= after)) throw new Error("Transfer inventory changed")
+      setInventory(result)
+    } catch {
+      if (!stopped && epoch === inventoryEpoch && expected === generation()) setNotice(inventoryNeedsOpen() ? "Open this Safe to read its recorded transfers, then refresh." : "Receiver records are unavailable. Refresh before inspecting a transfer; no copy will be retried.")
+    } finally { if (!stopped && epoch === inventoryEpoch) setInventoryBusy(false) }
+  }
+
+  function showTransfers(kind: "import" | "export" = "import") { setPage("records"); void listTransfers(kind) }
+  function showRecent() { inventoryEpoch++; setInventoryBusy(false); setInventory(undefined); setInventoryCursors([]); setInventoryNeedsOpen(false); setNotice(""); setSelected(0); setRecordsScope("recent"); setPage("records") }
+  function chooseExportReceiver() { inventoryEpoch++; setInventoryBusy(false); setInventory(undefined); setInventoryNeedsOpen(false); setNotice(""); setPage("record-destination") }
+  async function openInventorySafe() {
+    if (working()) return
+    const expected = generation()
+    setWorking(true)
+    try { if (await props.run(["safe", "open", props.safe]) && !stopped && expected === generation()) await listTransfers(recordsScope() === "export" ? "export" : "import") }
+    catch { if (!stopped && expected === generation()) setNotice("The Safe could not be opened. Reopen it before refreshing receiver records.") }
+    finally { if (!stopped) setWorking(false) }
+  }
+
+  function inspectInventory(index: number) {
+    const row = inventory()?.entries[index]
+    const kind = recordsScope()
+    if (!row || kind === "recent" || inventoryBusy()) return
+    const destination = kind === "import" ? `workspace/${row.name}` : inventoryDestination()
+    if (!destination) return
+    void inspect({ id: row.operation_id, safe: props.safe, opening: row.source_opening, kind, name: row.name, destination }, "inventory")
   }
 
   async function refresh() {
@@ -79,9 +134,9 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
     } finally { if (!stopped) setWorking(false) }
   }
 
-  async function inspect(entry: FileTransfer) {
+  async function inspect(entry: FileReference, location: "recent" | "inventory" = "recent") {
     if (working()) return
-    setTransaction(entry.id); setObserved(undefined); setConfirmation(undefined); setNotice(""); setPage("outcome")
+    setReference({ entry, location }); setObserved(undefined); setConfirmation(undefined); setNotice(""); setPage("outcome")
     try {
       if (!await props.run(["safe", "open", props.safe])) { setNotice("Open this Safe to inspect the recorded outcome. No copy will be retried automatically."); return }
       await refresh()
@@ -104,7 +159,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
     if (stopped || epoch !== copyEpoch) return
     setCopyStage(undefined); setWorking(false)
     if (beforeApproval) {
-      setTransaction(undefined); setObserved(undefined); setCopyReview(undefined); setSelected(0); setPage("menu")
+      setReference(undefined); setObserved(undefined); setCopyReview(undefined); setSelected(0); setPage("menu")
       setNotice(beforeApproval === "cancelled-before-copy" ? "Cancelled before copying. No file contents were copied." : "Preparation stopped before approval. Check the source and destination.")
       return
     }
@@ -133,9 +188,9 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       const opened = state.idle_lock.safes.find((entry) => entry.opening.safe_id === safe && !entry.closing)?.opening
       if (!state.app_open || !state.idle_lock.host || state.idle_lock.host.closing || !opened) { setNotice("The Safe is no longer available. Reopen it before copying."); return }
       if (props.opening && props.opening !== opened.nonce) { setNotice("The Safe opening changed. Refresh Files and review the copy again."); return }
-      const entry: FileTransfer = { id: crypto.randomUUID().replaceAll("-", ""), safe, opening: opened.nonce, kind: operation(), sources: sources(), destination: operation() === "import" ? `workspace/${name()}` : destination() }
+      const entry: FileTransfer = { id: crypto.randomUUID().replaceAll("-", ""), safe, opening: opened.nonce, kind: operation(), name: name(), sources: sources(), destination: operation() === "import" ? `workspace/${name()}` : destination() }
       transfers.remember(entry)
-      setTransaction(entry.id); setObserved(undefined); setCopyReview(undefined); setCopyMappings([]); setCopied(0); setCopyStage("preparing"); setPage("transfer")
+      setReference({ entry, location: "recent" }); setObserved(undefined); setCopyReview(undefined); setCopyMappings([]); setCopied(0); setCopyStage("preparing"); setPage("transfer")
       const args = entry.kind === "import"
         ? ["files", "import", "--safe", entry.safe, ...entry.sources.flatMap((source) => ["--source", source]), "--name", name()]
         : ["files", "export", "--safe", entry.safe, ...entry.sources.flatMap((source) => ["--path", source]), "--destination", entry.destination, "--name", name()]
@@ -204,7 +259,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       await props.run(["files", action, "--safe", entry.safe, "--operation", entry.id, "--opening", result.opening,
         ...(entry.kind === "export" ? ["--destination", entry.destination] : []), "--json"])
     } catch { /* Always inspect authoritative status after a lost reply. */ }
-    finally { if (!stopped) { setWorking(false); await refresh() } }
+    finally { if (!stopped) { setWorking(false); await refresh(); if (reference()?.location === "inventory" && recordsScope() !== "recent") await listTransfers(recordsScope() === "export" ? "export" : "import", inventoryCursors()) } }
   }
 
   function back() {
@@ -212,6 +267,9 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
     if (working() || copyStage()) return
     if (page() === "menu") { props.back(); return }
     if (page() === "recover" || page() === "discard") { setConfirmation(undefined); setPage("outcome"); return }
+    if (page() === "outcome") { setPage("records"); setSelected(0); return }
+    if (page() === "record-destination") { setPage("records"); if (recordsScope() !== "recent") void listTransfers(recordsScope() === "export" ? "export" : "import"); return }
+    if (page() === "records") { inventoryEpoch++; setInventoryBusy(false) }
     setPage("menu"); setSelected(0)
   }
 
@@ -224,7 +282,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
   const actions = () => [
     { name: "Import", description: "Choose local files or folders across directories. A verified copy is published into this Safe's writable workspace.", action: "Choose source", disabled: props.blocked, run: () => { setOperation("import"); setSources([]); setPage("source") } },
     { name: "Export", description: "Choose files or folders under workspace and imports, then a destination on this computer.", action: "Choose Safe files", disabled: props.blocked, run: () => { void props.run(["safe", "open", props.safe]).then((ok) => { if (ok) { setOperation("export"); setSources([]); setPage("guest") } }) } },
-    { name: "Transfers and recovery", description: "Inspect this manager's recorded operation IDs. Verify an uncertain outcome, publish verified staging without copying again, or explicitly discard incomplete staging.", action: "Inspect transfers", run: () => { setSelected(0); setPage("records") } },
+    { name: "Transfers and recovery", description: "Find receiver records after restarting this manager. Inspect current status before recovering or discarding; no copy is retried automatically.", action: "Inspect transfers", run: () => showTransfers() },
   ]
   const label = () => observed()?.state === "published" ? "Copy completed and verified."
     : observed()?.state === "ready" ? "Verified copy · publication unconfirmed"
@@ -235,10 +293,12 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
 
   createEffect(on([generation, availability], () => {
     setObserved(undefined); setConfirmation(undefined)
+    inventoryEpoch++; setInventory(undefined); setInventoryCursors([]); setInventoryDestination(undefined); setInventoryBusy(false); setInventoryNeedsOpen(false); setRecordsScope("import")
+    if (reference()?.location === "inventory") { setReference(undefined); setSelected(0); if (["outcome", "recover", "discard", "record-destination"].includes(page())) setPage("records") }
     if (["recover", "discard"].includes(page())) setPage("outcome")
     const copy = running
     if (!copy) return
-    const entry = current()
+    const entry = details()
     const approval = decision
     running = undefined
     const epoch = ++copyEpoch
@@ -248,8 +308,8 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       if (!stopped && epoch === copyEpoch) { setWorking(false); setCopyStage(undefined); setPage("records") }
     })
   }, { defer: true }))
-  createEffect(() => { if (transaction() && !current()) { setObserved(undefined); setConfirmation(undefined); setTransaction(undefined); setPage("records"); if (running) void cancelCopy() } })
-  onCleanup(() => { stopped = true; copyEpoch++; void running?.cancel().catch(() => {}) })
+  createEffect(() => { if (reference()?.location === "recent" && !details()) { setObserved(undefined); setConfirmation(undefined); setReference(undefined); setPage("records"); if (running) void cancelCopy() } })
+  onCleanup(() => { stopped = true; copyEpoch++; inventoryEpoch++; void running?.cancel().catch(() => {}) })
   useKeyboard((key) => {
     if (key.defaultPrevented) return
     if (page() === "transfer" && key.name === "escape") { key.preventDefault(); void cancelCopy(); return }
@@ -262,6 +322,18 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
     }
     if (working()) return
     if (key.name === "escape" && ["menu", "records", "outcome"].includes(page())) { key.preventDefault(); back(); return }
+    if (page() === "records") {
+      if (key.name === "i") { key.preventDefault(); showTransfers(); return }
+      if (key.name === "e") { key.preventDefault(); chooseExportReceiver(); return }
+      if (key.name === "m") { key.preventDefault(); showRecent(); return }
+      if (key.name === "o" && inventoryNeedsOpen()) { key.preventDefault(); void openInventorySafe(); return }
+      if (recordsScope() === "recent") return
+      const kind = recordsScope() === "export" ? "export" : "import"
+      if (key.name === "r") { key.preventDefault(); void listTransfers(kind); return }
+      if (inventoryBusy()) return
+      if (key.name === "pagedown" && inventory()?.next_cursor) { key.preventDefault(); void listTransfers(kind, [...inventoryCursors(), inventory()!.next_cursor!]); return }
+      if (key.name === "pageup" && inventoryCursors().length) { key.preventDefault(); void listTransfers(kind, inventoryCursors().slice(0, -1)); return }
+    }
     if (page() !== "outcome") return
     if (key.name === "r") { key.preventDefault(); void refresh() }
     if (key.name === "c" && recoverable()) { key.preventDefault(); void prepare("recover") }
@@ -273,13 +345,35 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       items={actions()} selected={selected()} change={setSelected} focused disabled={working()} choose={(index) => { const action = actions()[index]; if (!action?.disabled) action?.run() }} back={props.back} />
       <text fg={theme.text.muted}>Agents running in another terminal keep working. Files are shared by agents in this Safe.</text>
     </Show>
-    <Show when={page() === "records"}><Menu title="File transfers" description="The latest 32 operations stay in this manager's RAM. No automatic retries. Keep an operation ID for CLI inspection after closing the manager."
-      items={records().map((entry) => ({ name: `${entry.kind === "import" ? "Import" : "Export"} ${entry.sources.length === 1 ? path.basename(entry.sources[0]!) : `${entry.sources.length} items`}`, badge: entry.id.slice(0, 8), description: `Operation ${entry.id}\nFrom ${entry.sources.join("\n")}\nTo ${entry.destination}`, action: "Inspect outcome", run: () => { void inspect(entry) } }))}
-      selected={selected()} change={setSelected} focused disabled={working()} choose={(index) => { const entry = records()[index]; if (entry) void inspect(entry) }} back={back} empty="No operations recorded in this manager yet." /></Show>
+    <Show when={page() === "records"}><Menu title="File transfers" description={recordsScope() === "recent" ? "Recent operations · The latest 32 references stay in this manager's RAM, including copies with an uncertain outcome."
+      : recordsScope() === "import" ? `In this Safe · ${props.name}\nImports recorded in the encrypted volume. Choose an item to check its current outcome.`
+      : `On this computer · ${inventoryDestination()}\nExports recorded in this folder. Choose an item to check its current outcome.`}
+      items={recordsScope() === "recent" ? records().map((entry) => ({ name: `${entry.kind === "import" ? "Import" : "Export"} ${entry.name}`, badge: entry.id.slice(0, 8), description: `Operation ${entry.id}\nFrom ${entry.sources.join("\n")}\nTo ${entry.destination}`, action: "Inspect outcome", run: () => { void inspect(entry) } }))
+        : (inventory()?.entries ?? []).map((entry) => ({ name: entry.name, badge: entry.operation_id.slice(0, 8), description: "Check the recorded outcome before recovering or discarding.", run: () => {} }))}
+      selected={selected()} change={setSelected} focused disabled={working() || inventoryBusy()} details={recordsScope() === "recent"}
+      choose={(index) => { if (recordsScope() !== "recent") { inspectInventory(index); return }; const entry = records()[index]; if (entry) void inspect(entry) }} back={back}
+      toolbar={[
+        { title: "In this Safe", key: "I", run: () => showTransfers() },
+        { title: "Choose export folder", key: "E", run: chooseExportReceiver },
+        { title: `Recent in RAM (${records().length})`, key: "M", run: showRecent },
+        ...(recordsScope() !== "recent" ? [
+          { title: "Refresh", key: "R", run: () => { void listTransfers(recordsScope() === "export" ? "export" : "import") } },
+          ...(inventoryNeedsOpen() ? [{ title: "Open Safe", key: "O", run: () => { void openInventorySafe() } }] : []),
+          { title: "Previous", key: "PageUp", disabled: !inventoryCursors().length || inventoryBusy(), run: () => { void listTransfers(recordsScope() === "export" ? "export" : "import", inventoryCursors().slice(0, -1)) } },
+          { title: "Next", key: "PageDown", disabled: !inventory()?.next_cursor || inventoryBusy(), run: () => { void listTransfers(recordsScope() === "export" ? "export" : "import", [...inventoryCursors(), inventory()!.next_cursor!]) } },
+        ] : []),
+        { title: "Back", key: "Esc", run: back },
+      ]}
+      empty={recordsScope() === "recent" ? "No operations recorded in this manager yet." : inventoryBusy() ? "Reading receiver records…" : !inventory() ? "Refresh to read this receiver's records."
+        : inventory()?.next_cursor ? "No records for this Safe on this page. Continue to the next page." : "No receiver records in this location."} />
+      <Show when={inventory()?.skipped}><text flexShrink={0} fg={theme.feedback.info}>{inventory()!.skipped} receiver records skipped on this page.</text></Show>
+    </Show>
+    <Show when={page() === "record-destination"}><LocalChooser directoryOnly title="Find exported transfers" back={back} choose={(value) => { setInventoryDestination(value); showTransfers("export") }} /></Show>
     <Show when={page() === "outcome"}><PageHeader title="Copy outcome" description={description()} />
       <scrollbox flexGrow={1} minHeight={0}><box flexDirection="column" gap={1}>
         <text fg={observed()?.state === "published" ? theme.feedback.success : theme.feedback.warning}>{label()}</text>
-        <text fg={theme.text.muted}>{`From · ${current()?.sources.join("\n")}\nTo · ${current()?.destination}`}</text>
+        <Show when={details()}>{(entry) => <text fg={theme.text.muted}>{`From · ${entry().sources.join("\n")}`}</text>}</Show>
+        <text fg={theme.text.muted}>{`Name · ${current()?.name}\nTo · ${current()?.kind === "export" ? path.join(current()!.destination, current()!.name) : current()?.destination}`}</text>
         <Show when={observed()?.receipt}>{(receipt) => <text fg={theme.text.muted}>{`Manifest entries · ${receipt().entries} · ${receipt().bytes.toLocaleString("en-US")} B\nSHA-256 ${receipt().manifest_sha256}`}</text>}</Show>
         <Show when={observed()?.state === "published"}><text fg={theme.text.muted}>Recorded publication receipt. Later changes to destination files are not checked.</text></Show>
         <Show when={observed()?.source_opening && observed()?.source_opening !== observed()?.opening}><text fg={theme.feedback.info}>This copy belongs to an earlier opening. Its status was checked against the current Safe opening.</text></Show>
@@ -307,9 +401,9 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       <Show when={copyStage() === "copying" || copyStage() === "finalizing"}><text flexShrink={0} fg={theme.feedback.info}>{`${copied().toLocaleString("en-US")} B / ${copyReview()?.summary.bytes.toLocaleString("en-US") ?? "?"} B transferred`}</text></Show>
       <Show when={copyStage() === "finalizing"}><text flexShrink={0} fg={theme.text.muted}>All payload bytes were sent. Verification and publication are still in progress.</text></Show>
       <scrollbox ref={(value: ScrollBoxRenderable) => { reviewScroll = value }} flexGrow={1} minHeight={0}><box flexDirection="column" gap={1}>
-        <text fg={theme.text.muted}>{`From · ${sources().length === 1 ? current()?.sources[0] : `${sources().length} selected items`}\nTo · ${current()?.destination}`}</text>
+        <text fg={theme.text.muted}>{`From · ${sources().length === 1 ? details()?.sources[0] : `${sources().length} selected items`}\nTo · ${current()?.destination}`}</text>
         <Show when={copyReview() && copyStage() === "review"}><text fg={theme.text.base}><b>Destination names · PageUp / PageDown to scroll</b></text>
-          <For each={copyMappings()}>{(mapping) => <text fg={mapping.covered_by === null ? theme.text.base : theme.text.muted}>{`${mapping.input_index + 1}. ${current()?.sources[mapping.input_index]}\n   → ${mapping.covered_by === null ? `${name()}${sources().length === 1 ? "" : `/${mapping.alias}`}` : `Included in selection ${mapping.covered_by + 1}`}`}</text>}</For>
+          <For each={copyMappings()}>{(mapping) => <text fg={mapping.covered_by === null ? theme.text.base : theme.text.muted}>{`${mapping.input_index + 1}. ${details()?.sources[mapping.input_index]}\n   → ${mapping.covered_by === null ? `${name()}${sources().length === 1 ? "" : `/${mapping.alias}`}` : `Included in selection ${mapping.covered_by + 1}`}`}</text>}</For>
         </Show>
         <Show when={copyReview()}>{(review) => <>
           <text fg={theme.text.base}>{`${review().summary.files.toLocaleString("en-US")} selected files · ${review().summary.directories.toLocaleString("en-US")} selected folders\n${review().summary.bytes.toLocaleString("en-US")} B total · ${review().summary.entries.toLocaleString("en-US")} manifest entries`}</text>
@@ -326,7 +420,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
     </Show>
     <Show when={props.blocked && page() !== "outcome"}><text flexShrink={0} fg={theme.feedback.warning}>{props.blocked}</text></Show>
     <Show when={notice()}><text flexShrink={0} fg={theme.feedback.warning}>{notice()}</text></Show>
-    <Show when={working()}><BusyModal text={page() === "outcome" ? "Checking copy outcome" : "Checking Safe opening"} /></Show>
+    <Show when={working() || inventoryBusy() && page() === "records"}><BusyModal text={inventoryBusy() ? "Reading receiver records" : page() === "outcome" ? "Checking copy outcome" : "Checking Safe opening"} /></Show>
     <Show when={copyStage() === "preparing"}><BusyModal text="Preparing recursive copy review" cancellable cancel={() => { void cancelCopy() }} /></Show>
   </box>
 }

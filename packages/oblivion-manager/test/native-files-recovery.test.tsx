@@ -18,7 +18,7 @@ async function fixture() {
   const [nonce, setNonce] = createSignal(opening)
   const [blocked, setBlocked] = createSignal<string>()
   const transfers = createFileTransfers()
-  transfers.remember({ id: operation, safe, opening, kind: "export", sources: ["workspace/project"], destination: "/tmp/explicit-export" })
+  transfers.remember({ id: operation, safe, opening, kind: "export", name: "project", sources: ["workspace/project"], destination: "/tmp/explicit-export" })
   const commands: string[][] = []
   const queries: string[][] = []
   let response: FileOutcome = { operation_id: operation, safe_id: safe, opening, source_opening: opening, state: "ready", receipt, can_recover: true, can_discard: true }
@@ -26,7 +26,7 @@ async function fixture() {
   let onRun = (_args: string[]) => {}
   const runtime = { ...preview,
     status: async () => ({ ...current, idle_lock: { ...current.idle_lock, safes: current.idle_lock.safes.map((entry) => ({ ...entry, opening: { ...entry.opening, nonce: nonce() } })) } }),
-    query: async (args: string[]) => { queries.push(args); if (fail) throw new Error("Lost response"); return response },
+    query: async (args: string[]) => { if (args[1] === "transfers") return { safe_id: safe, opening: nonce(), direction: "import", entries: [], next_cursor: null, skipped: 0 }; queries.push(args); if (fail) throw new Error("Lost response"); return response },
   }
   return { transfers, commands, queries, runtime, nonce, setNonce, blocked, setBlocked,
     setResponse(value: Partial<FileOutcome>) { response = { ...response, ...value } },
@@ -51,6 +51,8 @@ async function inspect(app: Awaited<ReturnType<typeof testRender>>) {
   await app.mockInput.pressArrow("down")
   await app.mockInput.pressEnter()
   await visible(app, "File transfers")
+  await app.mockInput.pressKey("m")
+  await visible(app, "Recent operations")
   await app.mockInput.pressEnter()
 }
 
@@ -182,7 +184,7 @@ test("operation IDs and destinations survive leaving Files but are explicitly cl
 
 test("recent copy metadata remains bounded and clears when its manager owner locks", () => {
   const transfers = createFileTransfers()
-  for (let index = 0; index < 40; index++) transfers.remember({ id: index.toString(16).padStart(32, "0"), safe, opening, kind: "export", sources: ["workspace/project"], destination: "/tmp/explicit-export" })
+  for (let index = 0; index < 40; index++) transfers.remember({ id: index.toString(16).padStart(32, "0"), safe, opening, kind: "export", name: "project", sources: ["workspace/project"], destination: "/tmp/explicit-export" })
   expect(transfers.entries()).toHaveLength(32)
   expect(transfers.entries()[0]?.id).toBe((39).toString(16).padStart(32, "0"))
   transfers.clear()

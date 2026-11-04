@@ -17,9 +17,21 @@ export const fileOutcome = z.object({
   return !!value.source_opening && !value.receipt && !value.can_recover && !value.can_discard
 })
 
+export const fileInventory = z.object({
+  safe_id: id, opening: id, direction: z.enum(["import", "export"]),
+  entries: z.array(z.object({ operation_id: id, source_opening: id,
+    name: z.string().refine((value) => !!value && Buffer.byteLength(value) <= 255 && !/[\p{Cc}\p{Bidi_Control}\p{Zl}\p{Zp}/\\\uD800-\uDFFF]/u.test(value) && value !== "." && value !== ".."),
+  }).strict()).max(8),
+  next_cursor: id.nullable(), skipped: z.number().int().nonnegative().max(16384),
+}).strict().refine((value) => value.entries.every((entry, index) => index === 0 || value.entries[index - 1]!.operation_id < entry.operation_id)
+  && (!value.next_cursor || (!value.entries.length || value.next_cursor >= value.entries.at(-1)!.operation_id)
+    && (value.skipped > 0 || value.next_cursor === value.entries.at(-1)?.operation_id)))
+
 // Paths stay only in this manager's memory, never in a desktop profile or log.
-export type FileTransfer = { id: string; safe: string; opening: string; kind: "import" | "export"; sources: string[]; destination: string }
+export type FileReference = { id: string; safe: string; opening: string; kind: "import" | "export"; name: string; destination: string }
+export type FileTransfer = FileReference & { sources: string[] }
 export type FileOutcome = z.infer<typeof fileOutcome>
+export type FileInventory = z.infer<typeof fileInventory>
 
 export function createFileTransfers() {
   const [entries, setEntries] = createSignal<FileTransfer[]>([])

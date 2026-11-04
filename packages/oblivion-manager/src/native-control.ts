@@ -115,6 +115,7 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
   const ids = ["0123456789abcdef0123456789abcdef", "abcdef0123456789abcdef0123456789"]
   const tasks = new Map<string, { attempts: number; request: string; state: "running" | "cancelled" }>()
   const copies = new Map<string, FileOutcome>()
+  const copyRecords = new Map<string, { safe: string; opening: string; direction: "import" | "export"; name: string; destination?: string }>()
   const passwordChanges: { transaction: string; family_id: string; members: { safe_id: string; title: string }[]; outcome: "complete" }[] = []
   const pendingCopies = new Set<RunningFileCopy>()
   const files: NativeFileClient = {
@@ -136,6 +137,8 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
           const receipt = { id: request.identity.operation_id, manifest_sha256: review.summary.manifest_sha256, entries: review.summary.entries, bytes: 24 }
           copies.set(receipt.id, { operation_id: receipt.id, safe_id: request.identity.safe_id, opening: request.identity.opening, source_opening: request.identity.opening,
             state: "published", receipt, can_recover: false, can_discard: false })
+          copyRecords.set(receipt.id, { safe: request.identity.safe_id, opening: request.identity.opening, direction: request.direction, name: request.name,
+            ...(request.direction === "export" ? { destination: request.args[request.args.indexOf("--destination") + 1] } : {}) })
           const finished = { event: "finished" as const, identity: request.identity, outcome: "completed" as const, receipt }
           event(finished); stopped = true; completion.resolve({ code: 0, finished }); pendingCopies.delete(copy)
         },
@@ -176,6 +179,17 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
     async activity() {},
     async status() { return current },
     async query(args) {
+      if (args[0] === "files" && args[1] === "transfers") {
+        const safe = args[args.indexOf("--safe") + 1]
+        const nonce = args[args.indexOf("--opening") + 1]
+        if (!current.idle_lock.safes.some((entry) => entry.opening.safe_id === safe && entry.opening.nonce === nonce && !entry.closing)) throw new Error("Open the preview Safe before reading receiver records.")
+        const folder = args.includes("--destination") ? args[args.indexOf("--destination") + 1] : undefined
+        const direction = folder ? "export" : "import"
+        const after = args.includes("--cursor") ? args[args.indexOf("--cursor") + 1] : undefined
+        const entries = [...copyRecords].filter(([id, record]) => record.safe === safe && record.direction === direction && record.destination === folder && (!after || id > after))
+          .sort(([first], [second]) => first.localeCompare(second)).map(([operation_id, record]) => ({ operation_id, source_opening: record.opening, name: record.name }))
+        return { safe_id: safe, opening: nonce, direction, entries: entries.slice(0, 8), next_cursor: entries.length > 8 ? entries[7]!.operation_id : null, skipped: 0 }
+      }
       if (args[0] === "safe" && args[1] === "password") {
         if (!current.idle_lock.host || current.app_mode !== "persistent") throw new Error("Unlock the preview storage first.")
         if (args[2] === "status") return { host_opening: current.idle_lock.host.nonce, transactions: passwordChanges }
