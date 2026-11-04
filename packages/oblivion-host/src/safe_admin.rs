@@ -8,7 +8,6 @@ use zeroize::Zeroizing;
 pub const READY: &[u8; 6] = b"OBSA1\n";
 pub const REQUEST_LIMIT: usize = 32768;
 pub const RESPONSE_LIMIT: usize = 65536;
-pub const PAGE_SIZE: usize = 50;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -24,7 +23,6 @@ pub enum Command {
     Diagnostics { report: crate::diagnostics::Report },
     Checkpoint { metadata: Metadata },
     Inspect {},
-    ArchiveState { cursor: Option<String> },
     Job { job_id: String },
     CredentialExport { agent: Agent },
     CredentialInstall { credential: crate::delegation::Credential },
@@ -42,9 +40,6 @@ impl Request {
             && match &self.command {
                 Command::Diagnostics { report } => report.valid(),
                 Command::Checkpoint { metadata } => metadata.valid(),
-                Command::ArchiveState { cursor } => {
-                    cursor.as_ref().is_none_or(|id| valid_chat_id(id))
-                }
                 Command::Job { job_id } => crate::managed::id(job_id),
                 Command::CredentialExport { .. } => true,
                 Command::CredentialInstall { credential } => credential.valid(),
@@ -61,14 +56,12 @@ pub struct Metadata {
     pub version: u8,
     pub safe_id: String,
     pub title: Option<String>,
-    pub history_version: u8,
     pub origin: crate::safe_origin::Origin,
 }
 impl Metadata {
     pub fn valid(&self) -> bool {
         self.format == "oblivion-safe"
             && self.version == 1
-            && self.history_version == 1
             && valid_safe_id(&self.safe_id)
             && self.origin.valid(&self.safe_id)
             && self
@@ -91,7 +84,6 @@ pub enum Response {
     Storage { usage: crate::volume::Usage },
     Exported { path: String, bytes: u64 },
     Metadata { metadata: Metadata },
-    ArchiveState { state: ArchiveState },
     Job { info: Option<crate::managed::Info> },
     Credential { credential: Option<crate::delegation::Credential>, reason: Option<CredentialReason> },
     CredentialInstalled {},
@@ -105,7 +97,6 @@ pub enum Response {
 pub enum Rejection {
     UnsupportedVersion,
     InvalidMetadata,
-    InvalidCatalog,
 }
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
@@ -136,30 +127,6 @@ impl Agent {
     }
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Entry {
-    pub chat_id: String,
-    pub title: String,
-    pub updated: u64,
-    pub agents: Vec<Agent>,
-}
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Consistency {
-    CatalogSqliteOk,
-    CatalogEmpty,
-}
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArchiveState {
-    pub history_version: u8,
-    pub consistency: Consistency,
-    pub entries: Vec<Entry>,
-    pub next: Option<String>,
-    pub pending: Vec<Agent>,
-}
-
 impl Response {
     pub fn valid(&self, request: &Request) -> bool {
         match (self, &request.command) {
@@ -183,41 +150,9 @@ impl Response {
             },
             (Self::CredentialInstalled {}, Command::CredentialInstall { .. }) => true,
             (Self::CredentialNotInstalled { .. }, Command::CredentialInstall { .. }) => true,
-            (Self::ArchiveState { state }, Command::ArchiveState { cursor }) => {
-                state.history_version == 1
-                    && (!matches!(state.consistency, Consistency::CatalogEmpty)
-                        || (state.entries.is_empty()
-                            && state.next.is_none()
-                            && state.pending.is_empty()))
-                    && state.entries.len() <= PAGE_SIZE
-                    && valid_agents(&state.pending)
-                    && state.entries.iter().all(|entry| {
-                        valid_chat_id(&entry.chat_id)
-                            && entry.title.chars().count() <= 240
-                            && safe_text(&entry.title)
-                            && valid_agents(&entry.agents)
-                    })
-                    && state
-                        .entries
-                        .windows(2)
-                        .all(|rows| rows[0].chat_id < rows[1].chat_id)
-                    && cursor.as_ref().is_none_or(|cursor| {
-                        state
-                            .entries
-                            .first()
-                            .is_none_or(|entry| &entry.chat_id > cursor)
-                    })
-                    && state.next.as_ref().is_none_or(|next| {
-                        state.entries.len() == PAGE_SIZE
-                            && state
-                                .entries
-                                .last()
-                                .is_some_and(|entry| &entry.chat_id == next)
-                    })
-            }
             (
                 Self::Rejected { .. },
-                Command::Checkpoint { .. } | Command::Inspect {} | Command::ArchiveState { .. } | Command::Job { .. } | Command::CredentialInstall { .. },
+                Command::Checkpoint { .. } | Command::Inspect {} | Command::Job { .. } | Command::CredentialInstall { .. },
             ) => true,
             (Self::Unavailable {}, _) => true,
             _ => false,
@@ -264,27 +199,4 @@ fn valid_safe_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-fn valid_chat_id(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(index, byte)| {
-            if matches!(index, 8 | 13 | 18 | 23) {
-                byte == b'-'
-            } else {
-                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
-            }
-        })
-}
-fn safe_text(value: &str) -> bool {
-    !value.chars().any(|character| {
-        character.is_control()
-            || matches!(character, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-    })
-}
-fn valid_agents(value: &[Agent]) -> bool {
-    value.len() <= 3
-        && value
-            .iter()
-            .enumerate()
-            .all(|(index, agent)| !value[..index].contains(agent))
 }

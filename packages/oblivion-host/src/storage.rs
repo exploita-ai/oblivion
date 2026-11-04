@@ -2826,7 +2826,6 @@ impl Config {
             version: 1,
             safe_id: id.into(),
             title: session_titles(&MountMode::ReadWrite)?.remove(id),
-            history_version: 1,
             origin: backup_origin(id)?,
         };
         let result = (|| {
@@ -2843,9 +2842,6 @@ impl Config {
                         }
                         oblivion_host::safe_admin::Rejection::InvalidMetadata => {
                             "invalid_backup_metadata"
-                        }
-                        oblivion_host::safe_admin::Rejection::InvalidCatalog => {
-                            "invalid_backup_catalog"
                         }
                     }))
                 }
@@ -2894,9 +2890,6 @@ impl Config {
                         }
                         oblivion_host::safe_admin::Rejection::InvalidMetadata => {
                             "invalid_backup_metadata"
-                        }
-                        oblivion_host::safe_admin::Rejection::InvalidCatalog => {
-                            "invalid_backup_catalog"
                         }
                     }))
                 }

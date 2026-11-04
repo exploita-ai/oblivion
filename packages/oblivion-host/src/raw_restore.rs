@@ -209,7 +209,7 @@ mod tests {
         let capability = Capability::from_root_secret(&"1".repeat(32), Zeroizing::new([7; 32])).unwrap();
         let context = TaskContext { safe_id: &"2".repeat(32), parent_id: &"3".repeat(32), request_id: &"4".repeat(32), agent: "codex" };
         let metadata = Metadata {
-            format: "oblivion-safe".into(), version: 1, safe_id: context.safe_id.into(), title: Some("Restored child".into()), history_version: 1,
+            format: "oblivion-safe".into(), version: 1, safe_id: context.safe_id.into(), title: Some("Restored child".into()),
             origin: safe_origin::Origin::AgentCreated { record: safe_origin::AgentCreated {
                 safe_id: context.safe_id.into(), parent_id: context.parent_id.into(), request_id: context.request_id.into(), agent: context.agent.into(),
                 creator_chat_id: Some("reported-creator".into()), sealed_task: SealedTask::seal(&capability, &context, "private-task-canary").unwrap(),

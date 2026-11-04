@@ -1,12 +1,12 @@
 use oblivion_host::safe_admin::{self, Command, Metadata, Request, Response};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::fd::IntoRawFd;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 struct Fixture(PathBuf);
@@ -23,7 +23,7 @@ impl Fixture {
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
         ));
-        for name in ["state", "workspace", "home/.oblivion-history"] {
+        for name in ["state", "workspace", "home"] {
             fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
@@ -80,52 +80,11 @@ with os.fdopen(0,'r+b',buffering=0) as channel:
         assert!(child.wait().unwrap().success());
         response
     }
-    fn catalog_writer(&self) -> Writer {
-        let script = r#"
-import os, sys
-os.umask(0o077)
-sys.path.insert(0,sys.argv[2])
-from pathlib import Path
-from oblivion_history.catalog import Catalog
-catalog=Catalog(Path(sys.argv[1])/'home/.oblivion-history')
-catalog.db.execute('PRAGMA wal_autocheckpoint=0')
-with catalog.db:
-    for index in range(62):
-        identifier='00000000-0000-4000-8000-'+format(index,'012x')
-        catalog.db.execute('INSERT INTO chat VALUES (?,?,?,?,?)',(identifier,'/vault/workspace','Chat città '+str(index)+'\x1b\u202e',1,index))
-        catalog.db.execute('INSERT INTO native VALUES (?,?,?,?,?,?)',('codex','native-'+str(index),identifier,'','',''))
-    catalog.db.execute("INSERT INTO deleted_chat VALUES (?,1,'explicit_confirmation')",('00000000-0000-4000-8000-000000000000',))
-print('ready',flush=True)
-sys.stdin.buffer.read(1)
-catalog.close()
-"#;
-        let mut child = std::process::Command::new("python3")
-            .args(["-B", "-u", "-c", script])
-            .arg(&self.0)
-            .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../oblivion-history"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let mut ready = String::new();
-        BufReader::new(child.stdout.take().unwrap())
-            .read_line(&mut ready)
-            .unwrap();
-        assert_eq!(ready, "ready\n");
-        Writer(child)
-    }
+
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
-    }
-}
-struct Writer(Child);
-impl Drop for Writer {
-    fn drop(&mut self) {
-        self.0.stdin.take();
-        let _ = self.0.wait();
     }
 }
 fn metadata() -> Metadata {
@@ -134,20 +93,25 @@ fn metadata() -> Metadata {
         version: 1,
         safe_id: "b".repeat(32),
         title: Some("Città".into()),
-        history_version: 1,
         origin: oblivion_host::safe_origin::Origin::Local {},
     }
 }
 
 #[test]
-fn schema_accepts_only_current_neutral_safe_metadata() {
+fn schema_accepts_only_current_safe_metadata_and_native_operations() {
     assert!(metadata().valid());
+    let mut obsolete = serde_json::to_value(metadata()).unwrap();
+    obsolete["history_version"] = 1.into();
+    assert!(serde_json::from_value::<Metadata>(obsolete).is_err());
     let mut value = serde_json::to_value(metadata()).unwrap();
     value["original_id"] = "b".repeat(32).into();
     assert!(serde_json::from_value::<Metadata>(value).is_err());
     for invalid in [
         r#"{"version":1,"command":{"operation":"usage","path":"/etc/passwd"}}"#,
-        r#"{"version":1,"command":{"operation":"archive-state","cursor":"../escape"}}"#,
+        r#"{"version":1,"command":{"operation":"archive-state","cursor":null}}"#,
+        r#"{"version":1,"command":{"operation":"chat-info","chat_id":"00000000-0000-4000-8000-000000000001"}}"#,
+        r#"{"version":1,"command":{"operation":"chat-delete","chat_id":"00000000-0000-4000-8000-000000000001","confirm":"00000000-0000-4000-8000-000000000001"}}"#,
+        r#"{"version":1,"command":{"operation":"chat-status","chat_id":"00000000-0000-4000-8000-000000000001"}}"#,
         r#"{"version":0,"command":{"operation":"usage"}}"#,
         r#"{"version":1,"command":{"operation":"checkpoint","metadata":{"format":"oblivion-session","version":1,"original_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","title":null}}}"#,
     ] {
@@ -248,67 +212,6 @@ fn offline_job_observation_reads_only_bounded_status_and_reconciles_a_dead_runne
 }
 
 #[test]
-fn paged_real_readonly_sqlite_snapshot_includes_committed_wal_and_omits_tombstones() {
-    let fixture = Fixture::new();
-    let _writer = fixture.catalog_writer();
-    assert!(
-        fixture
-            .0
-            .join("home/.oblivion-history/history.sqlite-wal")
-            .exists()
-    );
-    let first = match fixture
-        .call(Command::ArchiveState { cursor: None })
-        .unwrap()
-    {
-        Response::ArchiveState { state } => state,
-        _ => panic!("not archive state"),
-    };
-    assert_eq!(first.entries.len(), 50);
-    assert!(
-        first
-            .entries
-            .iter()
-            .all(|entry| entry.title.starts_with("Chat città")
-                && !entry.title.contains('\x1b')
-                && !entry.title.contains('\u{202e}'))
-    );
-    assert!(
-        first
-            .entries
-            .iter()
-            .all(|entry| !entry.chat_id.ends_with("000000000000"))
-    );
-    let second = match fixture
-        .call(Command::ArchiveState {
-            cursor: first.next.clone(),
-        })
-        .unwrap()
-    {
-        Response::ArchiveState { state } => state,
-        _ => panic!("not archive state"),
-    };
-    assert_eq!(second.entries.len(), 11);
-    assert!(second.next.is_none());
-    assert!(second.entries[0].chat_id > first.entries.last().unwrap().chat_id);
-}
-
-#[test]
-fn invalid_present_catalog_is_not_reset_or_treated_as_empty() {
-    let fixture = Fixture::new();
-    let path = fixture.0.join("home/.oblivion-history/history.sqlite");
-    fs::write(&path, b"malformed private data").unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(matches!(
-        fixture
-            .call(Command::ArchiveState { cursor: None })
-            .unwrap(),
-        Response::Rejected { .. }
-    ));
-    assert_eq!(fs::read(path).unwrap(), b"malformed private data");
-}
-
-#[test]
 fn diagnostics_use_allowlist_and_cannot_follow_workspace_symlinks() {
     let fixture = Fixture::new();
     let report = || {
@@ -351,12 +254,12 @@ fn diagnostics_use_allowlist_and_cannot_follow_workspace_symlinks() {
             .call(Command::Diagnostics { report: report() })
             .is_err()
     );
-    assert_eq!(fs::read_dir(fixture.0.join("home")).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(fixture.0.join("home")).unwrap().count(), 0);
 }
 
 #[test]
 fn native_frame_reader_refuses_oversized_and_cross_operation_replies() {
-    for response in [None, Some(br#"{"version":1,"response":{"result":"metadata","metadata":{"format":"oblivion-safe","version":1,"safe_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","title":null,"history_version":1}}}"#.as_slice())] {
+    for response in [None, Some(br#"{"version":1,"response":{"result":"metadata","metadata":{"format":"oblivion-safe","version":1,"safe_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","title":null}}}"#.as_slice())] {
         let (mut client, mut server) = UnixStream::pair().unwrap();
         let payload = response.map(Vec::from);
         let worker = std::thread::spawn(move || {
