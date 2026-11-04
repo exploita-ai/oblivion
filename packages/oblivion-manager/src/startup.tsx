@@ -6,7 +6,7 @@ import type { NativeRuntime, NativeStatus } from "./native-control"
 
 export type InitialStatus = { state: NativeStatus; received: number }
 
-export function Startup(props: { runtime: NativeRuntime; initial: Promise<InitialStatus | undefined> }) {
+export function Startup(props: { runtime: NativeRuntime; initial: Promise<InitialStatus | undefined>; liveStorage?: "persistent" | "ephemeral" }) {
   const clock = useRenderer().clock
   const [elapsed, setElapsed] = createSignal(0)
   const [boot, setBoot] = createSignal(true)
@@ -17,7 +17,7 @@ export function Startup(props: { runtime: NativeRuntime; initial: Promise<Initia
   const finish = clock.setTimeout(() => { clock.clearInterval(animation); setBoot(false) }, 3000)
   onMount(() => { void props.initial.then((value) => { if (!stopped) setInitial(value) }) })
   onCleanup(() => { stopped = true; clock.clearInterval(animation); clock.clearTimeout(finish) })
-  return <Show when={boot()} fallback={<SafeManager runtime={props.runtime} initial={initial()?.state} initialReceived={initial()?.received} />}>
+  return <Show when={boot()} fallback={<SafeManager runtime={props.runtime} initial={initial()?.state} initialReceived={initial()?.received} liveStorage={props.liveStorage} />}>
     <BootLogo elapsed={elapsed()} />
   </Show>
 }

@@ -8,6 +8,8 @@ import { nativeLauncher, nativeOverlay, nativePreview, readNativeJson, readNativ
 
 const demonstration = process.argv.includes("--preview")
 const overlay = nativeOverlay(process.argv.slice(2))
+const liveStorage = demonstration ? undefined : process.env.OBLIVION_LIVE_STORAGE
+if (liveStorage !== undefined && liveStorage !== "persistent" && liveStorage !== "ephemeral") throw new Error("Invalid Live storage mode")
 // A cold Linux virtual console may still interpret output as an 8-bit charset.
 // Select UTF-8 before OpenTUI draws its borders or accepts non-ASCII input.
 if (process.env.TERM === "linux") process.stdout.write("\u001b%G")
@@ -44,7 +46,6 @@ const runtime: NativeRuntime = demonstration ? nativePreview(exit) : {
     exit()
   },
 }
-const direct = !demonstration && !overlay && process.platform === "linux" && process.env.OBLIVION_RUNTIME_MODE !== "desktop"
-const initial = direct ? runtime.status().then((state) => ({ state, received: performance.now() }), () => undefined) : undefined
-const intro = direct && await readNativeJson(nativeLauncher(), ["intro", "--json"]).then((value) => value === true, () => false)
-await render(() => intro ? <Startup runtime={runtime} initial={initial!} /> : <SafeManager runtime={runtime} preview={demonstration} overlay={overlay} />, renderer)
+const intro = !demonstration && !overlay && liveStorage !== undefined && process.env.OBLIVION_SHOW_INTRO === "1"
+const initial = intro ? runtime.status().then((state) => ({ state, received: performance.now() }), () => undefined) : undefined
+await render(() => intro ? <Startup runtime={runtime} initial={initial!} liveStorage={liveStorage} /> : <SafeManager runtime={runtime} preview={demonstration} overlay={overlay} liveStorage={liveStorage} />, renderer)

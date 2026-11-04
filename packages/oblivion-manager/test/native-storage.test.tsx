@@ -101,3 +101,41 @@ test("first boot can explicitly enter RAM-only mode without opening or creating 
     expect(state.general_readonly).toBe(false)
   } finally { await app.dispose() }
 })
+
+test.each([[80, 24], [160, 50]])("Live RAM mode never offers persistent storage at %ix%i", async (width, height) => {
+  const fixture = nativePreview(() => {}, { general_present: true })
+  const commands: string[][] = []
+  const initial = await fixture.status()
+  const app = await testRender(() => <SafeManager liveStorage="ephemeral" initial={initial} runtime={{ ...fixture, run: async (args) => { commands.push(args); return fixture.run(args) } }} />, { width, height, kittyKeyboard: true })
+  try {
+    await app.renderOnce()
+    const frame = app.captureCharFrame()
+    expect(frame).toContain("Ephemeral mode")
+    expect(frame).toContain("Persistent storage is not attached")
+    expect(frame).not.toContain("Unlock Oblivion")
+    expect(frame).not.toContain("Create encrypted storage")
+    await app.mockInput.pressEnter()
+    await app.renderOnce()
+    expect(commands).toEqual([["ephemeral"]])
+    expect((await fixture.status()).general_open).toBe(false)
+    expect(app.captureCharFrame()).toContain("Your Safes")
+  } finally { await app.dispose() }
+})
+
+test.each([[80, 24], [160, 50]])("Live persistent mode keeps the selected disk mode at %ix%i", async (width, height) => {
+  const fixture = nativePreview(() => {}, { general_present: true })
+  const commands: string[][] = []
+  const initial = await fixture.status()
+  const app = await testRender(() => <SafeManager liveStorage="persistent" initial={initial} runtime={{ ...fixture, run: async (args) => { commands.push(args); return fixture.run(args) } }} />, { width, height, kittyKeyboard: true })
+  try {
+    await app.renderOnce()
+    const frame = app.captureCharFrame()
+    expect(frame).toContain("Unlock Oblivion")
+    expect(frame).not.toContain("Ephemeral mode")
+    expect(frame).toContain("Persistent Live run")
+    await app.mockInput.pressEnter()
+    await app.renderOnce()
+    expect(commands).toEqual([["unlock"]])
+    expect((await fixture.status()).app_mode).toBe("persistent")
+  } finally { await app.dispose() }
+})

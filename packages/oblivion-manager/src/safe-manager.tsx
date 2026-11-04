@@ -25,7 +25,7 @@ const agents = [
   { id: "opencode2", name: "OpenCode 2", description: "Open the official OpenCode 2 TUI and choose your provider inside this Safe." },
 ] as const
 
-export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeStatus; initialReceived?: number; preview?: boolean; overlay?: NativeOverlay }) {
+export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeStatus; initialReceived?: number; preview?: boolean; overlay?: NativeOverlay; liveStorage?: "persistent" | "ephemeral" }) {
   const size = useTerminalDimensions()
   const [state, setState] = createSignal(props.initial)
   const [error, setError] = createSignal("")
@@ -295,15 +295,15 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
       run: () => { void execute(["run", ...(target() ? ["--safe", target()!] : safeName() ? ["--name", safeName()!] : []), ...(ephemeral() ? ["--ephemeral"] : []), agent.id]) },
     }))
     if (!state()?.app_open) return [
-      {
+      ...(props.liveStorage === "ephemeral" ? [] : [{
         name: state()?.general_present ? "Unlock Oblivion" : state()?.general_incomplete ? "Reset incomplete storage setup" : "Create encrypted storage",
         badge: state()?.general_present ? "Saved encrypted" : state()?.general_incomplete ? "Setup incomplete" : "First-time setup",
         description: storageUnavailable(state()) ?? (state()?.general_incomplete ? "Review and reset only the unfinished app archive before creating encrypted storage." : "Keep Safes, files and agent logins in encrypted storage. Each Safe has its own password and isolated virtual machine."),
         action: state()?.general_present ? "Unlock" : state()?.general_incomplete ? "Review incomplete setup" : "Review storage",
         disabled: storageUnavailable(state()),
         run: () => { if (state()?.general_present) { void execute(["unlock"]); return }; reviewStorage(state()?.general_incomplete ?? false) },
-      },
-      { name: "Ephemeral mode", badge: "RAM only", description: `Work in RAM for this run${state()?.ephemeral_session_bytes ? ` with ${capacity(state()!.ephemeral_session_bytes!)} per Safe` : ""}. New Safes and files are discarded when they close or the computer restarts.`, action: "Enter ephemeral mode", run: () => { void execute(["ephemeral"]) } },
+      }]),
+      ...(props.liveStorage === "persistent" ? [] : [{ name: "Ephemeral mode", badge: "RAM only", description: `Work in RAM for this run${state()?.ephemeral_session_bytes ? ` with ${capacity(state()!.ephemeral_session_bytes!)} per Safe` : ""}. New Safes and files are discarded when they close or the computer restarts.`, action: "Enter ephemeral mode", run: () => { void execute(["ephemeral"]) } }]),
     ]
     return safeRows().map(({ id, depth }) => {
       const opened = active().find((safe) => safe.id === id)
@@ -418,7 +418,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
       <Show when={page() === "rename" || page() === "grow"}><FormView form={{ title: page() === "rename" ? "Rename Safe" : "Increase storage", description: safeTitle(), fields: [{ id: "value", label: page() === "rename" ? "Safe name" : "New total capacity (MiB)", value: page() === "rename" ? safeTitle() : String(Math.max(2048, Math.ceil((state()?.session_sizes?.[safe()!] ?? 0) / 1024 ** 2) + 1024)), validate: (value) => page() === "rename" ? !value.trim() || value.trim() !== value ? "Enter a name without leading or trailing spaces." : undefined : !/^\d+$/.test(value) || Number(value) < 512 ? "Enter a capacity of at least 512 MiB." : undefined }], submit: page() === "rename" ? "Rename" : "Increase storage", run: async () => {} }} cancel={() => section("settings")} submit={(values) => { void execute(["safe", page() === "rename" ? "rename" : "grow", safe()!, values.value]) }} /></Show>
       <Show when={["safes", "settings", "name", "agents", "lock"].includes(page())}>
       <Show when={page() === "name"} fallback={<Menu title={page() === "settings" ? "Settings" : page() === "lock" ? "Close and lock" : page() === "agents" ? "Choose an agent" : state()?.app_open ? "Your Safes" : "Welcome to Oblivion"}
-        description={page() === "settings" ? `${safeTitle()} · Network and storage apply to the selected Safe. Automatic lock applies to Oblivion.` : page() === "agents" ? target() ? `${state()?.session_titles[target()!] ?? target()!.slice(0, 8)} · Shared files, independent agent conversations\nEnter starts a new conversation. C continues the highlighted agent's latest saved conversation.` : ephemeral() ? "Create an isolated Safe in RAM. Its contents are discarded when closed." : `${safeName() ?? "New Safe"} · Separate password, encrypted files and virtual machine.` : page() === "lock" ? "Active work stops when its Safe is locked." : state()?.app_open ? "Choose a Safe to continue, or create a separate environment." : "Run your coding agent in an isolated VM. Choose how to keep your work."}
+        description={page() === "settings" ? `${safeTitle()} · Network and storage apply to the selected Safe. Automatic lock applies to Oblivion.` : page() === "agents" ? target() ? `${state()?.session_titles[target()!] ?? target()!.slice(0, 8)} · Shared files, independent agent conversations\nEnter starts a new conversation. C continues the highlighted agent's latest saved conversation.` : ephemeral() ? "Create an isolated Safe in RAM. Its contents are discarded when closed." : `${safeName() ?? "New Safe"} · Separate password, encrypted files and virtual machine.` : page() === "lock" ? "Active work stops when its Safe is locked." : state()?.app_open ? "Choose a Safe to continue, or create a separate environment." : props.liveStorage === "ephemeral" ? "RAM-only Live run. Persistent storage is not attached. Close Oblivion and restart to change storage mode." : props.liveStorage === "persistent" ? "Persistent Live run. Your encrypted data stays on the selected boot device. Close Oblivion and restart to change storage mode." : "Run your coding agent in an isolated VM. Choose how to keep your work."}
         items={items()} selected={selected()} change={setSelected} focused={area() === "list"} disabled={attached() || busy() || !!error()}
         choose={(index) => { const item = items()[index]; if (item && !item.disabled) item.run() }}
         toolbar={toolbar()} actionsFocused={area() === "actions"} focusActions={() => setArea("actions")} focus={() => setArea("list")}
