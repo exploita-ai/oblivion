@@ -69,7 +69,7 @@ if destination.exists():
 installation = pathlib.Path(sys.argv[3]) / 'etc/oblivion/installation.json'
 if installation.exists():
     assert not installation.is_symlink(), 'installation profile must be a regular file'
-    assert json.loads(installation.read_text()) == {'version': 1, 'mode': 'direct-controller'}, 'incompatible installation profile'
+    assert json.loads(installation.read_text()) == {'version': 1, 'mode': 'controller-runtime'}, 'incompatible installation profile'
 if sys.argv[3] == '/':
     pwd.getpwuid(int(sys.argv[2]))
     identities = [(1100, 'oblivion-vm'), (1101, 'oblivion-gateway-vm'),
@@ -127,7 +127,7 @@ source, target = map(pathlib.Path, sys.argv[1:3])
 destination = target / 'etc/oblivion/controller.json'
 if not destination.exists():
     config = json.loads((source / 'etc/oblivion/controller.json').read_text())
-    config.update(manager_uid=int(sys.argv[3]), usb_persistence=False,
+    config.update(manager_uid=int(sys.argv[3]),
                   general_image='/var/lib/oblivion/general.luks')
     fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, 'w') as output:
@@ -140,7 +140,7 @@ installation = target / 'etc/oblivion/installation.json'
 if not installation.exists():
     fd = os.open(installation, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
     with os.fdopen(fd, 'w') as output:
-        json.dump({'version': 1, 'mode': 'direct-controller'}, output)
+        json.dump({'version': 1, 'mode': 'controller-runtime'}, output)
         output.write('\n')
 PY
 cat > "$target_root/etc/systemd/system/oblivion-manager.service.d/user.conf" <<EOF

@@ -799,7 +799,6 @@ enum Operation {
     BackupCancel,
     BackupDiscard,
     InitGeneral,
-    PrepareUsb,
     SafeAccess,
     OpenDocuments,
     OpenChildDocuments,
@@ -871,7 +870,7 @@ fn secret_limit(operation: &Operation) -> u32 {
     match operation {
         Operation::FamilyPasswordChange => oblivion_host::family_rotation::CHANGE_LIMIT as u32,
         Operation::ShareImportBegin => (oblivion_share::manifest::MAX_METADATA + 4096) as u32,
-        Operation::FamilyPasswordRecover | Operation::SessionStorage | Operation::BackupImportFinish | Operation::Browse | Operation::PrepareUsb | Operation::SafeAccess
+        Operation::FamilyPasswordRecover | Operation::SessionStorage | Operation::BackupImportFinish | Operation::Browse | Operation::SafeAccess
             | Operation::Egress | Operation::ProxyProfiles | Operation::NetworkPolicy | Operation::Transfers
             | Operation::Onion | Operation::ShareExportSourceOpen | Operation::ShareImportOpen | Operation::ShareImportFinish => 4096,
         _ => 1024,
@@ -1100,7 +1099,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         Operation::InitGeneral
             | Operation::FamilyPasswordChange | Operation::FamilyPasswordRecover
             | Operation::BackupExportBegin | Operation::BackupImportFinish
-            | Operation::PrepareUsb
+
             | Operation::Unlock
             | Operation::UnlockReadOnly
             | Operation::Create
@@ -1131,7 +1130,6 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
             | Operation::Debug
             | Operation::Activity
             | Operation::IdleSettings
-            | Operation::DiscardGeneralPending
     );
     require(
         needs_secret == (request.secret_len > 0),
@@ -1300,7 +1298,6 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         Operation::BackupImportFinish => "backup-import-finish",
         Operation::BackupDiscard => "backup-discard",
         Operation::InitGeneral => "init-general",
-        Operation::PrepareUsb => "prepare-usb",
         Operation::SafeAccess => "safe-access",
         Operation::OpenDocuments => "enter-documents",
         Operation::OpenChildDocuments => "open-child-documents",

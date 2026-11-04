@@ -1,5 +1,5 @@
 use oblivion_host::scope;
-use oblivion_host::{egress, family, network, persistence, proxy_profiles, safe_access, transfers};
+use oblivion_host::{egress, family, network, proxy_profiles, safe_access, transfers};
 use oblivion_transport::policy::{Access, Policy, Session, Tools};
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
@@ -643,10 +643,6 @@ struct Config {
     onion: Option<crate::onion_host::Config>,
     #[serde(default)]
     gateway_network: bool,
-    #[serde(default)]
-    usb_persistence: bool,
-    #[serde(skip)]
-    usb: Option<crate::usb::Inspection>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -665,6 +661,7 @@ struct Status {
     session_slot_limit: u8,
     general_present: bool,
     general_incomplete: bool,
+    general_bytes: u64,
     general_open: bool,
     general_mounted: bool,
     general_readonly: bool,
@@ -689,7 +686,6 @@ struct Status {
     gateway_vm_state: Option<String>,
     gateway_network: bool,
     transfers_configured: bool,
-    persistence: Option<persistence::Status>,
     safe_access: safe_access::Status,
     network_status: network::Observation,
     system: crate::system_info::Status,
@@ -877,7 +873,6 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
     if matches!(
         op,
         "init-general"
-            | "prepare-usb"
             | "unlock"
             | "unlock-read-only"
             | "enter-ram"
@@ -1302,70 +1297,8 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             );
             Ok(())
         }
-        "init-general" => {
-            require(!config.usb_persistence, "usb_confirmation_required")?;
-            config.initialize(&password(true)?)
-        }
-        "prepare-usb" => {
-            require(config.usb_persistence, "usb_not_configured")?;
-            require(
-                !mapping_open("oblivion-general")?
-                    && !mapping_open("oblivion-session")?
-                    && mount_mode()? == MountMode::Closed,
-                "volume_busy",
-            )?;
-            let mut bytes = Zeroizing::new(Vec::new());
-            std::io::stdin()
-                .take(4097)
-                .read_to_end(&mut bytes)
-                .map_err(|_| Error("secret_read_failed"))?;
-            require(bytes.len() <= 4096, "invalid_secret_length")?;
-            let request: persistence::Prepare =
-                serde_json::from_slice(&bytes).map_err(|_| Error("invalid_usb_request"))?;
-            require(
-                (16..=1024).contains(&request.password.len()),
-                "invalid_secret_length",
-            )?;
-            let device = crate::usb::prepare(&request.plan, config.general_mib * MIB)?;
-            config.format(&device, request.password.as_bytes())?;
-            crypt_open(
-                &device,
-                "oblivion-general",
-                request.password.as_bytes(),
-                false,
-            )?;
-            let formatted = run(
-                "/usr/sbin/mkfs.ext4",
-                &[
-                    "-q",
-                    "-m",
-                    "0",
-                    "-E",
-                    "lazy_itable_init=0,lazy_journal_init=0",
-                    GENERAL,
-                ],
-                None,
-            );
-            let closed = crypt_close("oblivion-general");
-            formatted?;
-            closed?;
-            crate::usb::publish(&request.plan, config.general_mib * MIB)
-        }
+        "init-general" => config.initialize(&password(true)?),
         "discard-general-pending" => {
-            let mut bytes = Vec::new();
-            std::io::stdin().take(1025).read_to_end(&mut bytes).map_err(|_| Error("invalid_usb_request"))?;
-            require(bytes.len() <= 1024, "invalid_usb_request")?;
-            let plan: Option<persistence::Plan> = serde_json::from_slice(&bytes).map_err(|_| Error("invalid_usb_request"))?;
-            if config.usb_persistence {
-                require(
-                    !mapping_open("oblivion-general")?
-                        && !mapping_open("oblivion-session")?
-                        && mount_mode()? == MountMode::Closed,
-                    "volume_busy",
-                )?;
-                return crate::usb::discard(plan.as_ref().ok_or(Error("usb_confirmation_required"))?, config.general_mib * MIB);
-            }
-            require(plan.is_none(), "usb_selection_changed")?;
             require(
                 !config
                     .general_image
@@ -1876,23 +1809,9 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 session_mode: session_info()?.map(|(_, mode)| mode),
                 active_session: session_info()?.map(|(id, _)| id),
                 safe_access: crate::safe_access_store::status(mode != MountMode::Closed)?,
-                general_present: if let Some(usb) = &config.usb {
-                    usb.status.present
-                } else {
-                    config
-                        .general_image
-                        .try_exists()
-                        .map_err(|_| Error("image_check_failed"))?
-                },
-                general_incomplete: if let Some(usb) = &config.usb {
-                    usb.status.incomplete
-                } else {
-                    config
-                        .pending_general()
-                        .try_exists()
-                        .map_err(|_| Error("image_check_failed"))?
-                },
-                persistence: config.usb.as_ref().map(|usb| usb.status.clone()),
+                general_present: config.general_image.try_exists().map_err(|_| Error("image_check_failed"))?,
+                general_incomplete: config.pending_general().try_exists().map_err(|_| Error("image_check_failed"))?,
+                general_bytes: config.general_mib * MIB,
                 general_open: mapping_open("oblivion-general")?,
                 general_mounted: matches!(mode, MountMode::ReadOnly | MountMode::ReadWrite),
                 general_readonly: mode == MountMode::ReadOnly,
@@ -2399,7 +2318,7 @@ impl Config {
                 <= 4096,
             "config_too_large",
         )?;
-        let mut config: Self =
+        let config: Self =
             serde_json::from_reader(file).map_err(|_| Error("invalid_config"))?;
         require(config.general_image.is_absolute(), "invalid_image_path")?;
         require(config.manager_uid > 0, "manager_must_not_be_root")?;
@@ -2416,15 +2335,6 @@ impl Config {
             (65536..=1048576).contains(&config.pbkdf_memory_kib),
             "invalid_kdf_memory",
         )?;
-        if config.usb_persistence {
-            let usb = crate::usb::inspect(config.general_mib * MIB);
-            // An unavailable medium must never fall back to a RAM archive.
-            config.general_image = usb
-                .source
-                .clone()
-                .unwrap_or_else(|| PathBuf::from("/run/oblivion/unprepared-usb"));
-            config.usb = Some(usb);
-        }
         Ok(config)
     }
 
@@ -2476,14 +2386,7 @@ impl Config {
             !mapping_open("oblivion-general")? && mount_mode()? == MountMode::Closed,
             "general_already_open",
         )?;
-        if let Some(usb) = &self.usb {
-            require(
-                usb.status.present && usb.source.is_some(),
-                "usb_general_unavailable",
-            )?;
-        } else {
-            trusted_file(&self.general_image)?;
-        }
+        trusted_file(&self.general_image)?;
         crypt_open(&self.general_image, "oblivion-general", secret, readonly)?;
         fs::create_dir_all(MOUNT).map_err(|_| Error("mount_directory_failed"))?;
         let result = run(
@@ -3756,8 +3659,7 @@ mod ram_only_tests {
         let config = Config {
             general_image: sentinel.into(), general_mib: 512, session_mib: 128, ephemeral_mib: 128,
             pbkdf_memory_kib: 65536, manager_uid: 1000, vm: None, gateway: None, import: None,
-            export: None, onion: None, gateway_network: false, usb_persistence: false,
-            usb: None,
+            export: None, onion: None, gateway_network: false,
         };
         assert_eq!(config.initialize(b"not-a-persistent-password").err().map(|error| error.0), Some("volume_busy"));
         assert_eq!(config.create(b"not-a-persistent-password", 128).err().map(|error| error.0), Some("general_not_writable"));
@@ -3870,7 +3772,7 @@ mod agent_safe_tests {
         file.set_len(child.mib * MIB).unwrap();
         let config = Config { general_image: "/unused/general.luks".into(), general_mib: 512, session_mib: 128, ephemeral_mib: 128,
             pbkdf_memory_kib: 65536, manager_uid: 1000, vm: None, gateway: None, import: None, export: None,
-            onion: None, gateway_network: false, usb_persistence: false, usb: None };
+            onion: None, gateway_network: false };
         let closed = config.reserved_mib(&[]).unwrap_or_else(|error| panic!("{}", error.0));
         assert_eq!(closed, RAM_PROFILE_RESERVE_MIB + 128);
         let slot = scope::Slot::try_from(1).unwrap();

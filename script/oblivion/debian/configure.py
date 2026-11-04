@@ -53,7 +53,7 @@ def configure(account):
     if config_path.exists() or config_path.is_symlink():
         regular(config_path, 0o600)
         config = json.loads(config_path.read_text())
-        if config.get("manager_uid") != manager.pw_uid or config.get("usb_persistence") is not False:
+        if config.get("manager_uid") != manager.pw_uid:
             raise ValueError("existing_application_config_differs")
     else:
         config = json.loads(Path("/usr/share/oblivion/controller.template.json").read_text())

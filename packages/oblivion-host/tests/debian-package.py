@@ -127,7 +127,7 @@ class PackageLifecycle(unittest.TestCase):
         opaque = b"Encrypted-data-preservation fixture, not a real LUKS volume.\n"
         (data / "general.luks").write_bytes(opaque)
         config = json.loads((self.source / "etc/oblivion/controller.json").read_text())
-        config.update(manager_uid=1000, usb_persistence=False, general_image=str(data / "general.luks"), general_mib=4096)
+        config.update(manager_uid=1000, general_image=str(data / "general.luks"), general_mib=4096)
         config_path = Path("/etc/oblivion/controller.json")
         write(config_path, json.dumps(config) + "\n", 0o600)
         original = config_path.read_bytes()

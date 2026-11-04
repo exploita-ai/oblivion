@@ -1,12 +1,10 @@
 import { expect, test } from "bun:test"
 import { testRender } from "@opentui/solid"
 import { SafeManager } from "../src/safe-manager"
-import { nativePreview, type StoragePlan } from "../src/native-control"
+import { nativePreview } from "../src/native-control"
 
-const plan: StoragePlan = { device: "vda", identity: "252:0", table: "reviewed-table", disk_bytes: 8 * 1024 ** 3, start: 4 * 1024 ** 2, sectors: 12 * 1024 ** 2, partition: 5 }
-
-test.each([[80, 24], [160, 50]])("Live setup reviews the exact device before invoking init at %ix%i", async (width, height) => {
-  const fixture = nativePreview(() => {}, { general_present: false, persistence: { plan: structuredClone(plan), present: false, incomplete: false, unavailable: null } })
+test.each([[80, 24], [160, 50]])("archive creation reviews managed capacity and returns locked at %ix%i", async (width, height) => {
+  const fixture = nativePreview(() => {}, { general_present: false, general_bytes: 2 * 1024 ** 3 })
   const initial = await fixture.status()
   const commands: string[][] = []
   const app = await testRender(() => <SafeManager initial={initial} runtime={{ ...fixture, run: async (args) => { commands.push(args); return fixture.run(args) } }} />, { width, height, kittyKeyboard: true, exitOnCtrlC: false })
@@ -14,43 +12,43 @@ test.each([[80, 24], [160, 50]])("Live setup reviews the exact device before inv
     await app.renderOnce()
     await app.mockInput.pressEnter()
     await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("/dev/vda")
-    expect(app.captureCharFrame()).toContain("8.0 GiB total")
+    expect(app.captureCharFrame()).toContain("Managed encrypted archive")
+    expect(app.captureCharFrame()).toContain("2.0 GiB")
+    expect(app.captureCharFrame()).not.toContain("/dev/")
     expect(commands).toHaveLength(0)
     await app.mockInput.pressEscape()
     await app.renderOnce()
     expect(commands).toHaveLength(0)
     await app.mockInput.pressEnter()
     await app.renderOnce()
-    initial.persistence!.plan!.identity = "252:16"
     await app.mockInput.pressEnter()
     await app.renderOnce()
-    expect(commands).toEqual([["init", "--confirmed-plan", JSON.stringify(plan)]])
+    expect(commands).toEqual([["init"]])
     expect(app.captureCharFrame()).toContain("Unlock Oblivion")
     expect(app.captureCharFrame()).toContain("Ephemeral mode")
     expect((await fixture.status()).app_open).toBe(false)
   } finally { await app.dispose() }
 })
 
-test("unsupported read-only Live media cannot start storage preparation", async () => {
-  const fixture = nativePreview(() => {}, { general_present: false, persistence: { plan: null, present: false, incomplete: false, unavailable: "usb_medium_readonly" } })
+test("runtime recovery prevents archive preparation", async () => {
+  const fixture = nativePreview(() => {}, { general_present: false, recovery_required: true })
   const initial = await fixture.status()
   const commands: string[][] = []
-  const app = await testRender(() => <SafeManager initial={initial} runtime={{ ...fixture, run: async (args) => { commands.push(args); return 0 } }} />, { width: 80, height: 24, kittyKeyboard: true, exitOnCtrlC: false })
+  const app = await testRender(() => <SafeManager initial={initial} runtime={{ ...fixture, run: async (args) => { commands.push(args); return 0 } }} />, { width: 80, height: 24, kittyKeyboard: true })
   try {
     await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("read-only ISO")
+    expect(app.captureCharFrame()).toContain("Complete runtime recovery")
     await app.mockInput.pressEnter()
     await app.renderOnce()
     expect(commands).toHaveLength(0)
   } finally { await app.dispose() }
 })
 
-test("unfinished app storage has a dedicated reset confirmation and never auto-creates", async () => {
-  const fixture = nativePreview(() => {}, { general_present: false, general_incomplete: true, persistence: { plan, present: false, incomplete: true, unavailable: null } })
+test("unfinished archive reset requires review and never automatically creates a replacement", async () => {
+  const fixture = nativePreview(() => {}, { general_present: false, general_incomplete: true })
   const initial = await fixture.status()
   const commands: string[][] = []
-  const app = await testRender(() => <SafeManager initial={initial} runtime={{ ...fixture, run: async (args) => { commands.push(args); return fixture.run(args) } }} />, { width: 80, height: 24, kittyKeyboard: true, exitOnCtrlC: false })
+  const app = await testRender(() => <SafeManager initial={initial} runtime={{ ...fixture, run: async (args) => { commands.push(args); return fixture.run(args) } }} />, { width: 80, height: 24, kittyKeyboard: true })
   try {
     await app.renderOnce()
     await app.mockInput.pressEnter()
@@ -60,7 +58,7 @@ test("unfinished app storage has a dedicated reset confirmation and never auto-c
     expect(commands).toHaveLength(0)
     await app.mockInput.pressEnter()
     await app.renderOnce()
-    expect(commands).toEqual([["init", "--reset-incomplete", "--confirmed-plan", JSON.stringify(plan)]])
+    expect(commands).toEqual([["init", "--reset-incomplete", "--confirmed-reset"]])
     expect((await fixture.status()).general_present).toBe(false)
     expect((await fixture.status()).app_open).toBe(false)
   } finally { await app.dispose() }

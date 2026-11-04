@@ -20,7 +20,6 @@ pub mod onion_copy;
 pub mod onion_task;
 pub mod onion_uplink;
 pub mod onion_vm;
-pub mod persistence;
 pub mod proxy_profiles;
 pub mod session_title;
 pub mod safe_access;

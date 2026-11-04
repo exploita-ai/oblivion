@@ -70,7 +70,7 @@ def prepare():
     run('/usr/bin/mount', '-t', 'ext4', '-o', 'nodev,nosuid,noexec', str(device), str(destination))
     destination.chmod(0o700)
     config = json.loads(Path('/etc/oblivion/controller.json').read_text())
-    config.update(usb_persistence=False, general_image=str(destination / 'general.luks'),
+    config.update(general_image=str(destination / 'general.luks'),
                   general_mib=min(1024 * 1024, size // (1024 * 1024) - 512),
                   session_mib=2048, ephemeral_mib=512)
     runtime = Path('/run/oblivion-runtime')

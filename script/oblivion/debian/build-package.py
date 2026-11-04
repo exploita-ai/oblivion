@@ -110,7 +110,7 @@ def build(source, architecture, version, output):
     for name in evidence_names:
         regular(evidence / name)
     config = json.loads((source / "etc/oblivion/controller.json").read_text())
-    if set(config) - {"general_image", "general_mib", "session_mib", "ephemeral_mib", "pbkdf_memory_kib", "manager_uid", "usb_persistence", "gateway_network", "vm", "gateway", "import", "export", "onion"}:
+    if set(config) - {"general_image", "general_mib", "session_mib", "ephemeral_mib", "pbkdf_memory_kib", "manager_uid", "gateway_network", "vm", "gateway", "import", "export", "onion"}:
         raise ValueError("Unexpected controller template fields")
     for role in (config["vm"], config["gateway"], config["import"], config["export"], config["onion"]["gateway"], config["onion"]["files"]):
         if set(role) - {"root", "kernel", "initrd", "filesystem", "memory_mib", "cpus", "accelerator"} or role.get("accelerator", "kvm") != "kvm":
@@ -120,7 +120,7 @@ def build(source, architecture, version, output):
             if not path.is_absolute() or ".." in path.parts or not path.is_relative_to("/usr/lib/oblivion/vm") or not (source / str(path).lstrip("/")).exists():
                 raise ValueError("VM configuration points outside packaged assets")
     config.update(general_image="/var/lib/oblivion/general.luks", general_mib=8192,
-                  session_mib=2048, usb_persistence=False)
+                  session_mib=2048)
     config.pop("manager_uid", None)
     output.mkdir(mode=0o755, parents=True, exist_ok=True)
     target = output / f"oblivion-stack_{version}_{architecture}.deb"

@@ -148,7 +148,7 @@ struct Status {
     app_mode: AppMode,
     general_present: bool,
     general_incomplete: bool,
-    persistence: Option<oblivion_host::persistence::Status>,
+    general_bytes: u64,
     recovery_required: bool,
     sessions: Vec<String>,
     session_titles: BTreeMap<String, String>,
@@ -925,7 +925,7 @@ mod tests {
     fn closed_ram_children_resolve_to_their_existing_identity() {
         let mut state: Status = serde_json::from_value(json!({
             "app_open":true,"app_mode":"ram-only","general_present":false,
-            "general_incomplete":false,"persistence":null,"recovery_required":false,
+            "general_incomplete":false,"general_bytes":8589934592_u64,"recovery_required":false,
             "sessions":[],"session_titles":{},"open_sessions":[],
             "agent_safes":[{"id":"a".repeat(32),"ephemeral":true,"state":"awaiting-start"},
                 {"id":"b".repeat(32),"ephemeral":false,"state":"awaiting-start"}],

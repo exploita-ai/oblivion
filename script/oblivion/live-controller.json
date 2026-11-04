@@ -5,7 +5,6 @@
   "ephemeral_mib": 512,
   "pbkdf_memory_kib": 262144,
   "manager_uid": 1000,
-  "usb_persistence": false,
   "gateway_network": true,
   "vm": {
     "root": "/usr/lib/oblivion/vm/qemu-root",

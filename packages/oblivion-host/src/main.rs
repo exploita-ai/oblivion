@@ -37,8 +37,6 @@ mod system_info;
 #[cfg(target_os = "linux")]
 mod transfer_host;
 #[cfg(target_os = "linux")]
-mod usb;
-#[cfg(target_os = "linux")]
 mod vm;
 
 #[cfg(target_os = "linux")]

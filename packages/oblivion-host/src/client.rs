@@ -47,7 +47,6 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
     let needs_secret = matches!(
         operation.as_str(),
         "init-general"
-            | "prepare-usb"
             | "unlock"
             | "unlock-read-only"
             | "create"
@@ -72,7 +71,6 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
             | "onion"
             | "safe-access"
             | "browse"
-            | "prepare-usb"
     ) {
         4096
     } else {

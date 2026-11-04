@@ -2,8 +2,6 @@ import path from "node:path"
 import { z } from "zod"
 
 const opening = z.object({ slot: z.number().int().min(0).max(31), safe_id: z.string().regex(/^[a-f0-9]{32}$/), nonce: z.string().regex(/^[a-f0-9]{32}$/) })
-export const storagePlan = z.object({ device: z.string(), identity: z.string(), table: z.string(), disk_bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), start: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), sectors: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), partition: z.number().int().positive() }).strict()
-export type StoragePlan = z.infer<typeof storagePlan>
 export const nativeActivity = z.object({ host: z.string().regex(/^[a-f0-9]{32}$/), safe: opening.nullable() })
 export const idleLock = z.object({
   preferences: z.object({ version: z.literal(1), safe_minutes: z.number().int().min(0).max(1440), host_minutes: z.number().int().min(0).max(1440) }),
@@ -18,7 +16,7 @@ export const nativeStatus = z.object({
   idle_lock: idleLock,
   general_present: z.boolean(),
   general_incomplete: z.boolean(),
-  persistence: z.object({ plan: storagePlan.nullable(), present: z.boolean(), incomplete: z.boolean(), unavailable: z.string().nullable() }).nullable(),
+  general_bytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   general_open: z.boolean(),
   general_readonly: z.boolean(),
   recovery_required: z.boolean(),
@@ -110,7 +108,7 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
     safe_access: { current: "open", saved: null, temporary: false },
     idle_lock: { preferences: { version: 1, safe_minutes: 15, host_minutes: 30 }, storage: "defaults", writable: false, host: null, safes: [], last_error: null },
     general_present: true, general_open: false, general_readonly: false,
-    general_incomplete: false, persistence: null,
+    general_incomplete: false, general_bytes: 8 * 1024 ** 3,
     recovery_required: false, family_password_pending: [], sessions: ids,
     safe_parents: [],
     agent_safes: [],
@@ -164,7 +162,7 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
         if (args[2] === "retry" && previous?.state === "cancelled" && previous.attempts < 16) tasks.set(args[3], { attempts: previous.attempts + 1, request: (previous.attempts + 1).toString(16).padStart(32, "0"), state: "running" })
         if (args[2] === "cancel" && previous) tasks.set(args[3], { ...previous, state: "cancelled" })
       }
-      if (args[0] === "init") current = { ...current, general_present: !args.includes("--reset-incomplete"), general_incomplete: false, persistence: current.persistence ? { ...current.persistence, present: !args.includes("--reset-incomplete"), incomplete: false } : null }
+      if (args[0] === "init") current = { ...current, general_present: !args.includes("--reset-incomplete"), general_incomplete: false }
       if (args[0] === "unlock" || args[0] === "ephemeral") current = { ...current, app_open: true, app_mode: args[0] === "ephemeral" ? "ram-only" : args[1] === "--read-only" ? "read-only" : "persistent", general_open: args[0] !== "ephemeral", general_readonly: args[0] === "unlock" && args[1] === "--read-only", idle_lock: { ...current.idle_lock, writable: args[0] === "unlock" && args[1] !== "--read-only", host: { nonce: "c".repeat(32), remaining_seconds: 1800, closing: false } } }
       if (args[0] === "lock") current = { ...current, app_open: false, app_mode: "locked", general_open: false, general_readonly: false, open_sessions: [], idle_lock: { ...current.idle_lock, writable: false, host: null, safes: [] } }
       if (args[0] === "close") current = { ...current, open_sessions: current.open_sessions.filter((safe) => safe.id !== args[1]), idle_lock: { ...current.idle_lock, safes: current.idle_lock.safes.filter((safe) => safe.opening.safe_id !== args[1]) } }
