@@ -136,11 +136,18 @@ jobs:
           assert len(binaries) == 1, "expected one current storage test executable"
           print(binaries[0])')
           test -x "$test_binary"
-          for fixture in share_import::tests::atomic_collection_publish_and_abort_keep_existing_safes_untouched share_import::tests::retained_request_nonce_expires_at_the_real_host_opening_authorization_boundary agent_safe_tests::closed_ram_child_is_counted_once_and_parent_close_fences_private_lookup; do
+          for fixture in share_import::tests::atomic_collection_publish_and_abort_keep_existing_safes_untouched share_import::tests::retained_request_nonce_expires_at_the_real_host_opening_authorization_boundary storage::agent_safe_tests::closed_ram_child_is_counted_once_and_parent_close_fences_private_lookup; do
             docker run --rm --network none --tmpfs /run:rw,nosuid,nodev,noexec,size=16m \
               --mount "type=bind,src=$test_binary,dst=/storage-tests,readonly" \
               --env OBLIVION_SHARE_IMPORT_TEST=1 --env OBLIVION_SHARE_IMPORT_AUTH_TEST=1 --env OBLIVION_RAM_CHILD_TEST=1 \
-              oblivion-native-guest-fixture /storage-tests --ignored --exact "$fixture"
+              oblivion-native-guest-fixture /bin/sh -ec '
+                fixture_listing=$(/storage-tests --list --exact "$1")
+                case "$fixture_listing" in
+                  "$1: test"*) ;;
+                  *) printf "Required storage fixture is missing: %s\n" "$1" >&2; exit 1 ;;
+                esac
+                exec /storage-tests --ignored --exact "$1"
+              ' sh "$fixture"
           done
       - name: Verify development Debian package install and data-preserving removal
         run: sh script/oblivion/test-deb.sh
