@@ -8,6 +8,7 @@ mod directory;
 pub mod endpoint;
 pub mod native_files;
 pub mod native_file_events;
+pub mod selection;
 #[cfg(unix)]
 mod filesystem;
 #[cfg(target_os = "linux")]

@@ -1,4 +1,5 @@
 //! Bounded, path-free NDJSON for one explicitly reviewed native Files copy.
+use crate::selection::{Mapping, Plan};
 use crate::{Entry, Manifest, Receipt, invalid, native_files::Direction, require, validate_id};
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -25,6 +26,7 @@ impl Identity {
 #[serde(deny_unknown_fields)]
 pub struct Summary {
     pub manifest_sha256: String,
+    pub mapping_sha256: String,
     pub entries: usize,
     pub files: usize,
     pub directories: usize,
@@ -32,8 +34,9 @@ pub struct Summary {
 }
 
 impl Summary {
-    pub fn from_manifest(manifest: &Manifest, selected: &str) -> io::Result<Self> {
-        crate::validate_path(selected)?;
+    pub fn from_manifest(manifest: &Manifest, plan: &Plan) -> io::Result<Self> {
+        plan.validate()?;
+        let selected = plan.selected.as_str();
         let mut files = 0;
         let mut directories = 0;
         for entry in manifest.entries() {
@@ -43,28 +46,30 @@ impl Summary {
                     .strip_prefix(selected)
                     .is_some_and(|suffix| suffix.starts_with('/'))
             {
+                if plan.mappings.len() > 1 && entry.path() == selected {
+                    continue;
+                }
                 match entry {
                     Entry::File { .. } => files += 1,
                     Entry::Directory { .. } => directories += 1,
                 }
                 continue;
             }
-            require(
-                matches!(entry, Entry::Directory { .. })
-                    && selected
-                        .strip_prefix(entry.path())
-                        .is_some_and(|suffix| suffix.starts_with('/')),
-                "invalid_file_review",
-            )?;
+            return Err(invalid("invalid_file_review"));
         }
         let summary = Self {
             manifest_sha256: manifest.sha256(),
+            mapping_sha256: plan.sha256()?,
             entries: manifest.entries().len(),
             files,
             directories,
             bytes: manifest.bytes(),
         };
         summary.validate()?;
+        require(
+            summary.entries - files - directories == usize::from(plan.mappings.len() > 1),
+            "invalid_file_review",
+        )?;
         Ok(summary)
     }
 
@@ -75,9 +80,10 @@ impl Summary {
             .ok_or_else(|| invalid("invalid_file_review"))?;
         require(
             hash(&self.manifest_sha256)
+                && hash(&self.mapping_sha256)
                 && (1..=crate::MAX_ENTRIES).contains(&self.entries)
                 && (1..=self.entries).contains(&selected)
-                && self.entries - selected <= 31
+                && self.entries - selected <= 1
                 && self.bytes <= crate::MAX_DOCUMENT_BYTES,
             "invalid_file_review",
         )
@@ -109,6 +115,14 @@ pub enum Outcome {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Event {
+    Mapping {
+        identity: Identity,
+        start: usize,
+        total: usize,
+        selected: String,
+        entries: Vec<Mapping>,
+        mapping_sha256: String,
+    },
     Review {
         identity: Identity,
         direction: Direction,
@@ -131,21 +145,48 @@ pub enum Event {
 impl Event {
     pub fn validate(&self) -> io::Result<()> {
         match self {
+            Self::Mapping {
+                identity,
+                start,
+                total,
+                selected,
+                entries,
+                mapping_sha256,
+            } => {
+                identity.validate()?;
+                crate::selection::validate_alias(selected)?;
+                require(
+                    (1..=crate::selection::MAX_SELECTIONS).contains(total)
+                        && *start < *total
+                        && start % crate::selection::MAPPING_PAGE == 0
+                        && entries.len() == crate::selection::MAPPING_PAGE.min(total - start)
+                        && hash(mapping_sha256),
+                    "invalid_file_mapping",
+                )?;
+                for (offset, entry) in entries.iter().enumerate() {
+                    require(entry.input_index == start + offset, "invalid_file_mapping")?;
+                    match (&entry.alias, entry.covered_by) {
+                        (Some(alias), None) => crate::selection::validate_alias(alias)?,
+                        (None, Some(owner)) => require(
+                            owner < *total && owner != entry.input_index,
+                            "invalid_file_mapping",
+                        )?,
+                        _ => return Err(invalid("invalid_file_mapping")),
+                    }
+                }
+                Ok(())
+            }
             Self::Review {
                 identity,
-                direction,
                 name,
                 summary,
+                ..
             } => {
                 identity.validate()?;
                 crate::validate_path(name)?;
                 require(!name.contains('/'), "invalid_file_review")?;
                 summary.validate()?;
-                require(
-                    *direction != Direction::Import
-                        || summary.files + summary.directories == summary.entries,
-                    "invalid_file_review",
-                )
+                Ok(())
             }
             Self::Progress {
                 identity,
@@ -256,19 +297,24 @@ mod tests {
     }
 
     #[test]
-    fn selected_counts_exclude_export_ancestors_but_receipt_count_keeps_them() {
+    fn selected_counts_exclude_only_the_generated_collection_wrapper() {
         let manifest = Manifest::new(
             vec![
                 Entry::Directory {
-                    path: "workspace".into(),
+                    path: "selection".into(),
                 },
                 Entry::Directory {
-                    path: "workspace/project".into(),
+                    path: "selection/project".into(),
                 },
                 Entry::File {
-                    path: "workspace/project/note".into(),
+                    path: "selection/project/note".into(),
                     size: 2,
                     sha256: "d".repeat(64),
+                },
+                Entry::File {
+                    path: "selection/readme".into(),
+                    size: 1,
+                    sha256: "e".repeat(64),
                 },
             ],
             crate::Limits {
@@ -277,7 +323,18 @@ mod tests {
             },
         )
         .unwrap();
-        let summary = Summary::from_manifest(&manifest, "workspace/project").unwrap();
+        let plan = Plan::new(&[
+            crate::selection::Input {
+                path: "workspace/project".into(),
+                directory: true,
+            },
+            crate::selection::Input {
+                path: "imports/readme".into(),
+                directory: false,
+            },
+        ])
+        .unwrap();
+        let summary = Summary::from_manifest(&manifest, &plan).unwrap();
         assert_eq!(
             (
                 summary.entries,
@@ -285,7 +342,7 @@ mod tests {
                 summary.directories,
                 summary.bytes
             ),
-            (3, 1, 1, 2)
+            (4, 2, 1, 3)
         );
         assert!(
             encode(&Event::Review {
@@ -303,9 +360,21 @@ mod tests {
                 name: "project".into(),
                 summary
             })
-            .is_err()
+            .is_ok()
         );
-        assert!(Summary::from_manifest(&manifest, "workspace/other").is_err());
+        let other = Plan::new(&[crate::selection::Input {
+            path: "workspace/other".into(),
+            directory: true,
+        }])
+        .unwrap();
+        assert!(Summary::from_manifest(&manifest, &other).is_err());
+        let single = Plan::new(&[crate::selection::Input {
+            path: "workspace/selection".into(),
+            directory: true,
+        }])
+        .unwrap();
+        let summary = Summary::from_manifest(&manifest, &single).unwrap();
+        assert_eq!(summary.directories, 2);
     }
 
     #[test]
@@ -332,6 +401,49 @@ mod tests {
                 .as_bytes(),
                 &identity().operation_id
             )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn maximum_selection_mapping_is_paged_within_the_ndjson_bound() {
+        let plan = Plan::new(
+            &(0..crate::selection::MAX_SELECTIONS)
+                .map(|index| crate::selection::Input {
+                    path: format!("/source{index}/{}{index:03}", "\"".repeat(252)),
+                    directory: false,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        for (page, mappings) in plan
+            .mappings
+            .chunks(crate::selection::MAPPING_PAGE)
+            .enumerate()
+        {
+            let event = Event::Mapping {
+                identity: identity(),
+                start: page * crate::selection::MAPPING_PAGE,
+                total: plan.mappings.len(),
+                selected: plan.selected.clone(),
+                entries: mappings.to_vec(),
+                mapping_sha256: plan.sha256().unwrap(),
+            };
+            let line = encode(&event).unwrap();
+            assert!(line.len() <= LINE_LIMIT);
+            assert!(!String::from_utf8(line).unwrap().contains("/source"));
+        }
+        let mut entries = plan.mappings[..crate::selection::MAPPING_PAGE].to_vec();
+        entries[0].input_index = 1;
+        assert!(
+            encode(&Event::Mapping {
+                identity: identity(),
+                start: 0,
+                total: plan.mappings.len(),
+                selected: plan.selected.clone(),
+                entries,
+                mapping_sha256: plan.sha256().unwrap(),
+            })
             .is_err()
         );
     }
