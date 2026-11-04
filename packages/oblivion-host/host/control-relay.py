@@ -24,12 +24,21 @@ CONTROL = "/run/oblivion-control.sock"
 PORT = 4050
 MAX_HEADER = 1024
 MAX_SECRET = 4096
+MAX_FAMILY_PASSWORD_SECRET = 16 * 1024
 MAX_IMPORT_SECRET = 4 * 1024 * 1024 + 4096
 MAX_RESPONSE = 1024 * 1024
 MAX_BUFFER = 256 * 1024
 MAX_CLIENTS = 64
 AUTH_HELLO = b"OBLVCTL1"
 AUTH_ACK = b"OBLVAUT1"
+
+
+def secret_limit(operation):
+    if operation == "family-password-change":
+        return MAX_FAMILY_PASSWORD_SECRET
+    if operation == "share-import-begin":
+        return MAX_IMPORT_SECRET
+    return MAX_SECRET
 
 
 def runtime_token():
@@ -183,7 +192,7 @@ def serve_client(remote, token, controller=CONTROL):
             raise ValueError("invalid_protocol_version")
         del header["version"]
         size = header.get("secret_len")
-        if type(size) is not int or not 0 <= size <= (MAX_IMPORT_SECRET if header.get("operation") == "share-import-begin" else MAX_SECRET):
+        if type(size) is not int or not 0 <= size <= secret_limit(header.get("operation")):
             raise ValueError("invalid_secret_length")
         operation = header.get("operation")
         local_header = json.dumps(header, separators=(",", ":")).encode()
@@ -200,7 +209,7 @@ def serve_client(remote, token, controller=CONTROL):
             local.sendall(local_header)
             local.sendall(secret)
             secret[:] = bytes(len(secret))
-            timeout = 1800 if operation == "session-storage" else 210 if operation in ("egress", "proxy-profiles", "start-agent", "open-child-documents", "backup-export-begin", "backup-import-finish") else 120
+            timeout = 1800 if operation == "session-storage" else 210 if operation in ("egress", "proxy-profiles", "start-agent", "open-child-documents", "backup-export-begin", "backup-import-finish", "family-password-change", "family-password-recover") else 120
             local.settimeout(timeout)
             remote.settimeout(timeout)
             if operation in ("agent-attach", "file-attach", "share-attach", "share-import-attach", "share-export-lease", "backup-attach"):

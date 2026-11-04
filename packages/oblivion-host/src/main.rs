@@ -3,6 +3,8 @@ mod debug;
 #[cfg(target_os = "linux")]
 mod backup_host;
 #[cfg(target_os = "linux")]
+mod family_rotation_host;
+#[cfg(target_os = "linux")]
 mod gateway;
 #[cfg(target_os = "linux")]
 mod safe_access_store;

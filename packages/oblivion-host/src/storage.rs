@@ -200,7 +200,7 @@ impl AgentSafeRecord {
     }
 }
 
-fn private_directory(path: &Path, create: bool) -> Result<bool> {
+pub(crate) fn private_directory(path: &Path, create: bool) -> Result<bool> {
     if !path.try_exists().map_err(|_| Error("safe_profile_unavailable"))? {
         if !create { return Ok(false) }
         fs::DirBuilder::new().recursive(true).mode(0o700).create(path)
@@ -679,6 +679,7 @@ struct Status {
     ephemeral_session_bytes: u64,
     session_sizes: std::collections::BTreeMap<String, u64>,
     pending_growth: Vec<String>,
+    family_password_pending: Vec<String>,
     vm_state: Option<String>,
     laboratory_emulation: bool,
     recovery_required: bool,
@@ -788,7 +789,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             == if matches!(
                 op,
                 "open" | "enter" | "enter-documents" | "discard-session-pending" | "agent-release" | "branch-recover"
-                    | "backup-export-begin" | "backup-discard"
+                    | "backup-export-begin" | "backup-discard" | "family-password-preview"
                     | "open-child-documents" | "open-agent-child" | "share-export-source-open" | "share-release" | "share-import-finish"
             ) {
                 4
@@ -815,11 +816,13 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
     };
     // A delayed view callback cannot operate on a new session which reused
     // its old slot. Verify under the same lock as the operation itself.
-    require(!matches!(op, "share-export-source-open" | "backup-export-begin") || expected.is_some(), "expected_session_required")?;
+    require(!matches!(op, "share-export-source-open" | "backup-export-begin" | "family-password-preview") || expected.is_some(), "expected_session_required")?;
     require(!matches!(op, "share-import-open" | "share-import-finish") || expected.is_some(), "expected_session_required")?;
     require(!matches!(op, "open-child-documents" | "open-agent-child") || expected == args.get(3).map(String::as_str), "expected_session_required")?;
     if let Some(id) = expected {
-        if matches!(op, "share-export-source-open" | "open-child-documents" | "open-agent-child" | "backup-export-begin") {
+        if op == "family-password-preview" {
+            require(args[3] == id, "session_changed")?;
+        } else if matches!(op, "share-export-source-open" | "open-child-documents" | "open-agent-child" | "backup-export-begin") {
             crate::share_host::require_closed_target(&args[3], id, session_info()?.as_ref().map(|entry| entry.0.as_str()))?;
         } else if op == "share-import-open" {
             require(session_info()?.is_none(), "session_changed")?;
@@ -902,6 +905,31 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         require(!recovery_required()?, "recovery_required")?;
     }
     match op {
+        "family-password-preview" => {
+            let plan = crate::family_rotation_host::preview(&args[3])?;
+            println!("{}", serde_json::to_string(&plan).map_err(|_| Error("encode_failed"))?);
+            Ok(())
+        }
+        "family-password-change" => {
+            let bytes = read_storage_request(oblivion_host::family_rotation::CHANGE_LIMIT)?;
+            let request = serde_json::from_slice(&bytes).map_err(|_| Error("invalid_family_password_request"))?;
+            drop(bytes);
+            let result = crate::family_rotation_host::change(request)?;
+            println!("{}", serde_json::to_string(&result).map_err(|_| Error("encode_failed"))?);
+            Ok(())
+        }
+        "family-password-status" => {
+            let result = crate::family_rotation_host::status()?;
+            println!("{}", serde_json::to_string(&result).map_err(|_| Error("encode_failed"))?);
+            Ok(())
+        }
+        "family-password-recover" => {
+            let bytes = read_storage_request(4096)?;
+            let request = serde_json::from_slice(&bytes).map_err(|_| Error("invalid_family_password_request"))?;
+            let result = crate::family_rotation_host::recover(request)?;
+            println!("{}", serde_json::to_string(&result).map_err(|_| Error("encode_failed"))?);
+            Ok(())
+        }
         "backup-export-begin" => {
             config.prepare_backup(&args[3], &password(false)?)?;
             let source = closed_session_file(&args[3])?;
@@ -1371,7 +1399,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         "create" => config.create(&password(true)?, config.session_mib),
         "session-storage" => {
             let request: oblivion_host::volume::Request =
-                serde_json::from_slice(&read_storage_request()?)
+                serde_json::from_slice(&read_storage_request(4096)?)
                     .map_err(|_| Error("invalid_storage_request"))?;
             request.validate().map_err(Error)?;
             match request {
@@ -1853,6 +1881,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 safe_parents: persistent_safe_parents()?.into_iter().map(|(id, parent)| oblivion_host::sharing::Parent { id, parent }).collect(),
                 agent_safe_limits: AgentSafeLimits { direct_children: CHILD_DIRECT_LIMIT,
                     descendants: CHILD_BRANCH_LIMIT, depth: CHILD_DEPTH_LIMIT, records: CHILD_LIMIT },
+                family_password_pending: crate::family_rotation_host::pending_safes()?,
                 closing_branches: {
                     let mut roots: Vec<_> = branch_latches()?.into_iter().map(|entry| entry.0).collect();
                     roots.sort(); roots.dedup(); roots
@@ -2184,6 +2213,7 @@ impl Config {
     }
 
     fn open_share_using(&self, id: &str, open: impl FnOnce() -> Result<()>) -> Result<crate::share_host::Metadata> {
+        crate::family_rotation_host::require_available(id)?;
         crate::backup_host::require_safe_available(id)?;
         validate_id(id)?;
         require(mount_mode()? == MountMode::ReadWrite, "general_not_writable")?;
@@ -2887,6 +2917,7 @@ impl Config {
     }
 
     fn open_child_documents(&self, id: &str, nonce: Option<&str>) -> Result<()> {
+        crate::family_rotation_host::require_available(id)?;
         crate::backup_host::require_safe_available(id)?;
         let records = agent_safe_records()?;
         let record = available_child(&records, id)?;
@@ -2963,6 +2994,7 @@ impl Config {
     }
 
     fn open_credential(&self, id: &str, secret: &[u8]) -> Result<SafeCredential> {
+        crate::family_rotation_host::require_available(id)?;
         crate::backup_host::require_safe_available(id)?;
         validate_id(id)?;
         require_branch_open(&agent_safe_records()?, id)?;
@@ -3310,6 +3342,7 @@ fn close_session() -> Result<()> {
 
 pub(crate) fn closed_session_file(id: &str) -> Result<File> {
     validate_id(id)?;
+    crate::family_rotation_host::require_available(id)?;
     crate::backup_host::require_safe_available(id)?;
     require(!open_sessions()?.iter().any(|entry| entry.id.as_deref() == Some(id)), "session_already_open")?;
     closed_archive()?;
@@ -3318,6 +3351,35 @@ pub(crate) fn closed_session_file(id: &str) -> Result<File> {
 
 pub(crate) fn backup_source_closed(id: &str) -> Result<()> {
     require(!open_sessions()?.iter().any(|entry| entry.id.as_deref() == Some(id)), "safe_must_be_closed")
+}
+
+pub(crate) fn rotation_host() -> Result<String> {
+    require(!recovery_required()?, "recovery_required")?;
+    backup_catalog_open()?;
+    backup_host_nonce()?.ok_or(Error("idle_opening_unknown"))
+}
+
+pub(crate) fn rotation_sources() -> Result<Vec<crate::family_rotation_host::Source>> {
+    rotation_host()?;
+    let titles = session_titles(&MountMode::ReadWrite)?;
+    sessions(".luks")?.into_iter().map(|id| Ok(crate::family_rotation_host::Source {
+        title: titles.get(&id).cloned().unwrap_or_else(|| id.clone()), path: persistent_safe_path(&id)?, id,
+    })).collect()
+}
+
+pub(crate) fn rotation_closed(id: &str) -> Result<()> {
+    // Unlike normal admission this must remain usable for an already fenced
+    // family's explicit roll-forward/rollback. Never bypass backup/VM owners.
+    rotation_host()?;
+    backup_source_closed(id)?;
+    crate::backup_host::require_safe_available(id)?;
+    let path = persistent_safe_path(id)?;
+    trusted_file(&path)?;
+    require(!path.with_extension("growing").try_exists().map_err(|_| Error("image_check_failed"))?, "session_growth_pending")
+}
+
+pub(crate) fn rotation_admit_kdf() -> Result<()> {
+    memory_admission(&fs::read_to_string("/proc/meminfo").map_err(|_| Error("memory_unavailable"))?, 0, 0, 256, "insufficient_family_memory")
 }
 
 fn closed_archive() -> Result<()> {
@@ -3641,6 +3703,7 @@ struct SafeCredential {
 
 fn safe_credential(path: &Path, expected: Option<&str>, password: &[u8]) -> Result<SafeCredential> {
     let token = safe_family_token(path)?;
+    crate::family_rotation_host::require_family_available(token.descriptor.family_id())?;
     if let Some(expected) = expected {
         require(token.safe_id == expected, "safe_identity_mismatch")?;
     }
@@ -4487,13 +4550,13 @@ fn password(creating: bool) -> Result<Zeroizing<Vec<u8>>> {
     Ok(bytes)
 }
 
-fn read_storage_request() -> Result<Zeroizing<Vec<u8>>> {
+fn read_storage_request(limit: usize) -> Result<Zeroizing<Vec<u8>>> {
     let mut bytes = Zeroizing::new(Vec::new());
     std::io::stdin()
-        .take(4097)
+        .take((limit + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| Error("secret_read_failed"))?;
-    require(bytes.len() <= 4096, "invalid_storage_request")?;
+    require(bytes.len() <= limit, "invalid_storage_request")?;
     Ok(bytes)
 }
 

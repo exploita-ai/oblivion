@@ -123,7 +123,7 @@ jobs:
         run: |
           docker build --tag oblivion-native-guest-fixture - <<'DOCKERFILE'
           FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
-          RUN apt-get update && apt-get install -y --no-install-recommends python3 tmux bash util-linux \
+          RUN apt-get update && apt-get install -y --no-install-recommends python3 tmux bash util-linux cryptsetup \
               && rm -rf /var/lib/apt/lists/*
           DOCKERFILE
       - name: Exercise actual tmux panes and native agent wrappers offline
@@ -153,6 +153,31 @@ jobs:
                 case "$fixture_listing" in
                   "$1: test"*) ;;
                   *) printf "Required storage fixture is missing: %s\n" "$1" >&2; exit 1 ;;
+                esac
+                exec /storage-tests --ignored --exact "$1"
+              ' sh "$fixture"
+          done
+      - name: Verify interrupted family password changes with real LUKS2 headers
+        working-directory: packages/oblivion-host
+        run: |
+          # Argon2 runs at the production cost; use the optimized fixture rather
+          # than slowing it down with a debug build or weakening its parameters.
+          test_binary=$(cargo test --release --locked --bin oblivion-storage family_rotation_host::tests --no-run --message-format=json | python3 -c '
+          import json, sys
+          artifacts = [json.loads(line) for line in sys.stdin]
+          binaries = [item["executable"] for item in artifacts if item.get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == "oblivion-storage" and item.get("profile", {}).get("test") and item.get("executable")]
+          assert len(binaries) == 1, "expected one current release storage test executable"
+          print(binaries[0])')
+          test -x "$test_binary"
+          for fixture in family_rotation_host::tests::interrupted_rewrap_fences_family_and_recovers_original_keys_and_standalone_child family_rotation_host::tests::unknown_member_header_prevents_every_write_and_explicit_rollback_restores_all; do
+            docker run --rm --network none --tmpfs /run:rw,nosuid,nodev,noexec,size=16m \
+              --mount "type=bind,src=$test_binary,dst=/storage-tests,readonly" \
+              --env OBLIVION_FAMILY_ROTATION_TEST=1 \
+              oblivion-native-guest-fixture /bin/sh -ec '
+                fixture_listing=$(/storage-tests --list --exact "$1")
+                case "$fixture_listing" in
+                  "$1: test"*) ;;
+                  *) printf "Required password fixture is missing: %s\n" "$1" >&2; exit 1 ;;
                 esac
                 exec /storage-tests --ignored --exact "$1"
               ' sh "$fixture"

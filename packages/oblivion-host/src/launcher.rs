@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 mod file_commands;
 mod backup_commands;
+mod family_password_commands;
 mod idle_commands;
 mod init_commands;
 mod network_commands;
@@ -43,6 +44,10 @@ Safe management
   oblivion safe open SAFE          Open offline for files
   oblivion safe rename SAFE NAME   Change its title
   oblivion safe grow SAFE MIB      Increase a closed Safe's capacity
+  oblivion safe password SAFE [--confirmed-plan SHA]
+  oblivion safe password preview SAFE --json
+  oblivion safe password status [--json]
+  oblivion safe password recover TRANSACTION --complete|--rollback
   oblivion safe task status SAFE [--json]
   oblivion safe task review SAFE [--json]
   oblivion safe task start|retry|cancel SAFE [--request ID] [--json]

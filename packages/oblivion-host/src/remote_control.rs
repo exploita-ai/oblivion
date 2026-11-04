@@ -83,7 +83,8 @@ fn connect(
     budget: Duration,
 ) -> Result<UnixStream> {
     let deadline = Instant::now() + budget;
-    if secret.len() > if operation == "share-import-begin" { oblivion_share::manifest::MAX_METADATA + 4096 } else { 4096 } {
+    if secret.len() > if operation == "family-password-change" { crate::family_rotation::CHANGE_LIMIT }
+        else if operation == "share-import-begin" { oblivion_share::manifest::MAX_METADATA + 4096 } else { 4096 } {
         return Err("secret_too_large".into());
     }
     let metadata = std::fs::symlink_metadata(path)?;
@@ -138,7 +139,7 @@ fn read_response(stream: &UnixStream, operation: &str) -> Result<String> {
         stream,
         Duration::from_secs(if operation == "session-storage" {
             1800
-        } else if matches!(operation, "egress" | "proxy-profiles" | "start-agent" | "open-child-documents" | "backup-export-begin" | "backup-import-finish") {
+        } else if matches!(operation, "egress" | "proxy-profiles" | "start-agent" | "open-child-documents" | "backup-export-begin" | "backup-import-finish" | "family-password-change" | "family-password-recover") {
             210
         } else {
             120

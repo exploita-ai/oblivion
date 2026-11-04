@@ -787,6 +787,10 @@ fn rollback_agent_start(config: &Path, families: &Families, opening: &oblivion_h
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum Operation {
+    FamilyPasswordPreview,
+    FamilyPasswordChange,
+    FamilyPasswordStatus,
+    FamilyPasswordRecover,
     BackupExportBegin,
     BackupImportBegin,
     BackupAttach,
@@ -866,8 +870,9 @@ struct Request {
 
 fn secret_limit(operation: &Operation) -> u32 {
     match operation {
+        Operation::FamilyPasswordChange => oblivion_host::family_rotation::CHANGE_LIMIT as u32,
         Operation::ShareImportBegin => (oblivion_share::manifest::MAX_METADATA + 4096) as u32,
-        Operation::SessionStorage | Operation::BackupImportFinish | Operation::Browse | Operation::PrepareUsb | Operation::SafeAccess
+        Operation::FamilyPasswordRecover | Operation::SessionStorage | Operation::BackupImportFinish | Operation::Browse | Operation::PrepareUsb | Operation::SafeAccess
             | Operation::Egress | Operation::ProxyProfiles | Operation::NetworkPolicy | Operation::Transfers
             | Operation::Onion | Operation::ShareExportSourceOpen | Operation::ShareImportOpen | Operation::ShareImportFinish => 4096,
         _ => 1024,
@@ -1048,6 +1053,10 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         .read_exact(&mut header)
         .map_err(|_| Error("invalid_frame"))?;
     let request: Request = serde_json::from_slice(&header).map_err(|_| Error("invalid_request"))?;
+    require(!matches!(request.operation, Operation::FamilyPasswordPreview)
+        || request.session.is_some() && request.session == request.expected_session, "expected_session_required")?;
+    require(!matches!(request.operation, Operation::FamilyPasswordChange | Operation::FamilyPasswordStatus | Operation::FamilyPasswordRecover)
+        || request.session.is_none() && request.expected_session.is_none(), "invalid_family_password_request")?;
     require(!matches!(request.operation, Operation::EnterRam)
         || request.expected_session.is_none() && request.slot.index() == 0, "invalid_ram_request")?;
     require(!matches!(request.operation, Operation::CloseIdle) || request.expected_session.is_some(), "expected_session_required")?;
@@ -1073,7 +1082,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
             Operation::OpenDocuments | Operation::OpenChildDocuments | Operation::DiscardSessionPending | Operation::AgentRelease
                 | Operation::ShareRelease | Operation::ShareExportSourceOpen
                 | Operation::ShareExportLease | Operation::ShareImportFinish
-                | Operation::BackupExportBegin | Operation::BackupAttach | Operation::BackupCancel | Operation::BackupDiscard
+                | Operation::BackupExportBegin | Operation::BackupAttach | Operation::BackupCancel | Operation::BackupDiscard | Operation::FamilyPasswordPreview
         ) == request.session.is_some(),
         "invalid_session_argument",
     )?;
@@ -1090,6 +1099,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
     let needs_secret = matches!(
         request.operation,
         Operation::InitGeneral
+            | Operation::FamilyPasswordChange | Operation::FamilyPasswordRecover
             | Operation::BackupExportBegin | Operation::BackupImportFinish
             | Operation::PrepareUsb
             | Operation::Unlock
@@ -1282,6 +1292,10 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
     }
     let attach_tools = matches!(request.operation, Operation::StartAgent);
     let operation = match request.operation {
+        Operation::FamilyPasswordPreview => "family-password-preview",
+        Operation::FamilyPasswordChange => "family-password-change",
+        Operation::FamilyPasswordStatus => "family-password-status",
+        Operation::FamilyPasswordRecover => "family-password-recover",
         Operation::BackupExportBegin => "backup-export-begin",
         Operation::BackupImportBegin => "backup-import-begin",
         Operation::BackupImportFinish => "backup-import-finish",
@@ -1609,7 +1623,7 @@ mod family_tests {
     }
 
     #[test]
-    fn share_import_large_metadata_is_the_only_expanded_authenticated_body() {
+    fn operation_body_limits_expand_only_their_own_protocol() {
         let request: Request = serde_json::from_value(serde_json::json!({
             "operation":"share-import-begin", "session":null,"expected_session":null,
             "secret_len":70000, "slot":0,
@@ -1621,6 +1635,8 @@ mod family_tests {
         assert_eq!(secret_limit(&Operation::ShareImportCommit),1024);
         assert_eq!(secret_limit(&Operation::Unlock),1024);
         assert_eq!(secret_limit(&Operation::Egress),4096);
+        assert_eq!(secret_limit(&Operation::FamilyPasswordChange), oblivion_host::family_rotation::CHANGE_LIMIT as u32);
+        assert_eq!(secret_limit(&Operation::FamilyPasswordRecover),4096);
         assert!(serde_json::from_value::<Request>(serde_json::json!({
             "operation":"share-export-open", "session":null,"expected_session":null,
             "secret_len":0,"slot":0,

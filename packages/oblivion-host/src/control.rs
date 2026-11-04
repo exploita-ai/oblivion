@@ -39,9 +39,11 @@ fn connect_expected(
     expected: Option<&str>,
 ) -> Result<UnixStream> {
     if secret.len()
-        > if operation == "share-import-begin" { oblivion_share::manifest::MAX_METADATA + 4096 } else if matches!(
+        > if operation == "family-password-change" { crate::family_rotation::CHANGE_LIMIT }
+        else if operation == "share-import-begin" { oblivion_share::manifest::MAX_METADATA + 4096 } else if matches!(
             operation,
             "session-storage"
+                | "family-password-recover"
                 | "egress"
                 | "proxy-profiles"
                 | "network-policy"
@@ -126,7 +128,7 @@ fn request_expected(
         &stream,
         Duration::from_secs(if operation == "session-storage" {
             1800
-        } else if matches!(operation, "egress" | "proxy-profiles" | "start-agent" | "open-child-documents" | "backup-export-begin" | "backup-import-finish") {
+        } else if matches!(operation, "egress" | "proxy-profiles" | "start-agent" | "open-child-documents" | "backup-export-begin" | "backup-import-finish" | "family-password-change" | "family-password-recover") {
             210
         } else {
             120

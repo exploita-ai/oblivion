@@ -11,6 +11,7 @@ pub mod diagnostics;
 pub mod display;
 pub mod egress;
 pub mod family;
+pub mod family_rotation;
 pub mod network;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod native_runtime;

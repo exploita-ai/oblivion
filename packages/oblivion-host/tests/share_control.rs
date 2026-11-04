@@ -106,3 +106,61 @@ fn import_begin_carries_u32_sized_metadata_without_expanding_other_operations() 
     );
     server.join().unwrap();
 }
+
+#[test]
+fn family_password_change_carries_maximum_json_escaping_without_widening_other_requests() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("password.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let change = oblivion_host::family_rotation::Change {
+        safe_id: "a".repeat(32), host_opening: "b".repeat(32), plan_sha256: "c".repeat(64),
+        current_password: zeroize::Zeroizing::new("\u{1}".repeat(1024)),
+        new_password: zeroize::Zeroizing::new("\u{2}".repeat(1024)),
+    };
+    let body = zeroize::Zeroizing::new(serde_json::to_vec(&change).unwrap());
+    assert!(body.len() > 4096 && body.len() <= oblivion_host::family_rotation::CHANGE_LIMIT);
+    for operation in ["unlock", "egress", "family-password-recover"] {
+        assert!(remote_control::request(&path, operation, None, &body, None).is_err());
+    }
+    assert!(remote_control::request(&path, "family-password-change", None,
+        &vec![0; oblivion_host::family_rotation::CHANGE_LIMIT + 1], None).is_err());
+    let expected = body.len();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut size = [0; 4];
+        stream.read_exact(&mut size).unwrap();
+        let mut header = vec![0; u32::from_be_bytes(size) as usize];
+        stream.read_exact(&mut header).unwrap();
+        let header: serde_json::Value = serde_json::from_slice(&header).unwrap();
+        assert_eq!(header["operation"], "family-password-change");
+        assert_eq!(header["secret_len"], expected);
+        let mut payload = zeroize::Zeroizing::new(vec![0; expected]);
+        stream.read_exact(&mut payload).unwrap();
+        let decoded: oblivion_host::family_rotation::Change = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(decoded.current_password.as_str(), "\u{1}".repeat(1024));
+        assert_eq!(decoded.new_password.as_str(), "\u{2}".repeat(1024));
+        let response = br#"{"ok":true,"output":"accepted-synthetic-body","error":null}"#;
+        stream.write_all(&(response.len() as u32).to_be_bytes()).unwrap();
+        stream.write_all(response).unwrap();
+    });
+    assert_eq!(remote_control::request(&path, "family-password-change", None, &body, None).unwrap(), "accepted-synthetic-body");
+    server.join().unwrap();
+
+    // Exercise the actual Debian relay's limit owner without starting any
+    // listener or touching a controller, user profile, password KDF or disk.
+    let output = std::process::Command::new("python3")
+        .args(["-B", "-c", r#"
+import importlib.util,json,sys
+spec=importlib.util.spec_from_file_location('relay_fixture',sys.argv[1])
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+print(json.dumps({operation:module.secret_limit(operation) for operation in ['family-password-change','family-password-recover','unlock','egress']}))
+"#])
+        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("host/control-relay.py"))
+        .output().unwrap();
+    assert!(output.status.success());
+    let limits: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(limits["family-password-change"], oblivion_host::family_rotation::CHANGE_LIMIT);
+    for operation in ["family-password-recover", "unlock", "egress"] { assert_eq!(limits[operation], 4096); }
+}

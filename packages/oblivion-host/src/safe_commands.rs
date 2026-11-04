@@ -2,6 +2,9 @@ use oblivion_host::{control, scope};
 use serde_json::json;
 
 pub fn run(args: &[String]) -> control::Result<i32> {
+    if args.first().is_some_and(|action| action == "password") {
+        return super::family_password_commands::run(&args[1..]);
+    }
     if args.first().is_some_and(|action| action == "task") {
         return super::child_task_commands::run(&args[1..]);
     }
