@@ -10,6 +10,7 @@ struct RuntimeConfig: Decodable {
     }
 
     let version: Int
+    let backend: String
     let kernel: String
     let initrd: String?
     let commandLine: String
@@ -36,7 +37,21 @@ enum RuntimeError: String, Error {
 
 func report(_ event: String) {
     // Events contain identifiers only. Subprocess or guest output never enters them.
-    FileHandle.standardError.write(Data(("{\"event\":\"" + event + "\"}\n").utf8))
+    diagnosticWrite(Data(("{\"event\":\"" + event + "\"}\n").utf8), to: STDERR_FILENO)
+}
+
+func diagnosticWrite(_ data: Data, to descriptor: Int32) {
+    // Debug PTYs may be nonblocking. Foundation writeData raises an exception
+    // on EAGAIN; optional console output must never terminate a running VM.
+    data.withUnsafeBytes { bytes in
+        var offset = 0
+        while offset < bytes.count {
+            let written = Darwin.write(descriptor, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+            if written < 0 && errno == EINTR { continue }
+            if written <= 0 { return }
+            offset += written
+        }
+    }
 }
 
 func requireHost() throws {
@@ -127,6 +142,10 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
               !config.commandLine.contains("\0") else {
             throw RuntimeError.invalidConfiguration
         }
+        let backend = config.commandLine.split(separator: " ").filter { $0.hasPrefix("oblivion.runtime-backend=") }
+        guard config.backend == "apple-vz", backend == ["oblivion.runtime-backend=apple-vz"] else {
+            throw RuntimeError.invalidConfiguration
+        }
         let settings = VZVirtualMachineConfiguration()
         let boot = VZLinuxBootLoader(kernelURL: URL(fileURLWithPath: config.kernel))
         boot.initialRamdiskURL = config.initrd.map { URL(fileURLWithPath: $0) }
@@ -144,7 +163,10 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
             let attachment = try VZDiskImageStorageDeviceAttachment(
                 url: URL(fileURLWithPath: disk.path),
                 readOnly: disk.readOnly,
-                cachingMode: .uncached,
+                // Explicit cached I/O avoids VZ guest memory corruption seen
+                // with uncached/automatic disk access on Apple Silicon.
+                // Keep durable flushes: https://github.com/apple/container/pull/1041
+                cachingMode: .cached,
                 synchronizationMode: .full
             )
             return VZVirtioBlockDeviceConfiguration(attachment: attachment)
@@ -298,13 +320,20 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
     }
 
     private func observeSerial(_ bytes: Data) {
-        if config.serialStdio { FileHandle.standardOutput.write(bytes) }
+        if config.serialStdio { diagnosticWrite(bytes, to: STDOUT_FILENO) }
         serialTail.append(bytes)
-        if serialTail.range(of: Data("Kernel panic - not syncing".utf8)) != nil {
+        let memoryFailure = [
+            "BUG: Bad rss-counter state",
+            "BUG: corrupted stack end",
+            "Internal error: Oops",
+        ].contains { serialTail.range(of: Data($0.utf8)) != nil }
+        if memoryFailure || serialTail.range(of: Data("Kernel panic - not syncing".utf8)) != nil {
             guard !stopping else { return }
             stopping = true
             acceptSource?.cancel()
-            report("runtime_kernel_panic")
+            // An Oops can leave the kernel running with corrupted memory. It
+            // must not continue accepting Safe requests until an eventual panic.
+            report(memoryFailure ? "runtime_kernel_memory_failure" : "runtime_kernel_panic")
             machine.stop { _ in self.finish(code: 1, event: "runtime_failed") }
             return
         }
@@ -370,7 +399,7 @@ func main() throws {
         #endif
         let response: [String: Any] = [
             "version": 1,
-            "backend": "apple-virtualization",
+            "backend": "apple-vz",
             "virtualization": VZVirtualMachine.isSupported,
             "nested": nested,
             "supported": VZVirtualMachine.isSupported && nested,

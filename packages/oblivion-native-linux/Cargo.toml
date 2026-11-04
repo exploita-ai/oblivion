@@ -1,0 +1,17 @@
+[package]
+name = "oblivion-native-linux"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = "1.9"
+
+[[bin]]
+name = "oblivion-vm"
+path = "src/main.rs"
