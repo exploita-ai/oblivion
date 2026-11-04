@@ -86,10 +86,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "oblivion-bundle"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "oblivion-native-windows"
 version = "0.1.0"
 dependencies = [
  "getrandom",
+ "oblivion-bundle",
  "oblivion-wire",
  "serde",
  "serde_json",

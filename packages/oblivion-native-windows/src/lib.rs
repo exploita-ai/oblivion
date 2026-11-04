@@ -15,6 +15,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 pub mod auth;
 #[cfg(windows)]
+pub mod bundle;
+#[cfg(windows)]
 pub mod bridge;
 pub mod config;
 pub mod disk;
@@ -25,6 +27,7 @@ pub mod files;
 #[cfg(windows)]
 pub mod hcs;
 pub mod hcs_model;
+pub mod installation;
 pub mod network_model;
 #[cfg(windows)]
 pub mod network;

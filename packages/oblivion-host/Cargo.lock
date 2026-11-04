@@ -1011,6 +1011,7 @@ name = "oblivion-native-windows"
 version = "0.1.0"
 dependencies = [
  "getrandom",
+ "oblivion-bundle",
  "oblivion-wire",
  "serde",
  "serde_json",

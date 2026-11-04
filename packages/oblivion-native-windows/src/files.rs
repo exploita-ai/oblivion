@@ -8,12 +8,15 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
+use std::sync::Arc;
+use windows_sys::Win32::Foundation::GENERIC_WRITE;
 use windows_sys::Win32::Foundation::{
     GENERIC_EXECUTE, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT,
 };
+use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, AclSizeInformation,
     DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetLengthSid, INHERIT_ONLY_ACE,
@@ -21,8 +24,9 @@ use windows_sys::Win32::Security::{
     PSECURITY_DESCRIPTOR, PSID, SID,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DEVICE,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_REPARSE_POINT, FILE_EXECUTE,
+    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
+    FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_REPARSE_POINT, FILE_EXECUTE,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_ID_INFO,
     FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, FileIdInfo,
     GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType,
@@ -199,15 +203,25 @@ pub(crate) struct CreationParent {
 
 impl CreationParent {
     pub(crate) fn open(path: &str, identity: &Identity) -> Result<Self> {
-        let parents = pin_parents(path)?;
+        let parent = Self::ancestors(path)?;
         permissions(
-            &parents.last().ok_or(Error("runtime_parent_required"))?.1,
+            &parent
+                .parents
+                .last()
+                .ok_or(Error("runtime_parent_required"))?
+                .1,
             identity.sid(),
             true,
         )?;
+        Ok(parent)
+    }
+
+    /// Only for creating a NEW protected app directory. This does not claim
+    /// the existing parent is private; callers must seal and verify the child.
+    pub(crate) fn ancestors(path: &str) -> Result<Self> {
         Ok(Self {
             path: path.to_owned(),
-            parents,
+            parents: pin_parents(path)?,
         })
     }
 
@@ -259,6 +273,247 @@ impl CreatedDiskLeaf {
 pub(crate) fn verify_private(file: &File, path: &str, identity: &Identity) -> Result<()> {
     inspect(file, path, false)?;
     permissions(file, identity.sid(), true)
+}
+
+/// Identity observation for an already admitted runtime disk. This conveys no
+/// initialization, write, ACL or adoption authority (a running VM has its own ACE).
+pub(crate) fn data_file_identity(path: &str) -> Result<(u64, [u8; 16])> {
+    let parents = pin_parents(path)?;
+    let file = open_raw(path, FILE_READ_ATTRIBUTES, true, false)?;
+    let (id, _) = inspect(&file, path, false)?;
+    verify_parents(&parents)?;
+    Ok((id.volume, id.file))
+}
+
+/// A pinned tree shares ancestor handles rather than opening the entire parent
+/// chain once for every bundle file. Leaf names are checked before path APIs.
+#[derive(Clone)]
+pub(crate) struct Directory(Arc<DirectoryPin>);
+
+struct DirectoryPin {
+    path: String,
+    file: File,
+    id: FileId,
+    ancestors: Vec<(String, File, FileId)>,
+    parent: Option<Directory>,
+}
+
+pub(crate) struct Asset {
+    path: String,
+    file: File,
+    id: FileId,
+    bytes: u64,
+    parent: Directory,
+}
+
+impl Directory {
+    pub(crate) fn open(path: &str, identity: &Identity, private: bool) -> Result<Self> {
+        let ancestors = pin_parents(path)?;
+        let file = open_raw(path, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?;
+        let (id, _) = inspect(&file, path, true)?;
+        permissions(&file, identity.sid(), private)?;
+        Ok(Self(Arc::new(DirectoryPin {
+            path: path.into(),
+            file,
+            id,
+            ancestors,
+            parent: None,
+        })))
+    }
+
+    pub(crate) fn create(path: &str, identity: &Identity) -> Result<Self> {
+        let parent = CreationParent::open(path, identity)?;
+        parent.verify()?;
+        create_directory(path, identity)?;
+        let directory = Self::open(path, identity, true)?;
+        parent.verify()?;
+        Ok(directory)
+    }
+
+    pub(crate) fn path(&self) -> &str {
+        &self.0.path
+    }
+
+    pub(crate) fn verify(&self) -> Result<()> {
+        if let Some(parent) = &self.0.parent {
+            parent.verify()?;
+        }
+        verify_parents(&self.0.ancestors)?;
+        if inspect(&self.0.file, &self.0.path, true)?.0 != self.0.id {
+            return Err(Error("runtime_asset_changed"));
+        }
+        Ok(())
+    }
+
+    fn child_path(&self, name: &str) -> Result<String> {
+        if name.contains(['/', '\\']) {
+            return Err(Error("invalid_runtime_asset_path"));
+        }
+        let path = format!("{}\\{name}", self.0.path);
+        if !crate::config::drive_file(&path) {
+            return Err(Error("invalid_runtime_asset_path"));
+        }
+        Ok(path)
+    }
+
+    pub(crate) fn child(&self, name: &str, identity: &Identity, private: bool) -> Result<Self> {
+        let path = self.child_path(name)?;
+        self.verify()?;
+        let file = open_raw(&path, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?;
+        let (id, _) = inspect(&file, &path, true)?;
+        permissions(&file, identity.sid(), private)?;
+        Ok(Self(Arc::new(DirectoryPin {
+            path,
+            file,
+            id,
+            ancestors: vec![],
+            parent: Some(self.clone()),
+        })))
+    }
+
+    pub(crate) fn create_child(&self, name: &str, identity: &Identity) -> Result<Self> {
+        let path = self.child_path(name)?;
+        self.verify()?;
+        permissions(&self.0.file, identity.sid(), true)?;
+        create_directory(&path, identity)?;
+        self.child(name, identity, true)
+    }
+
+    pub(crate) fn names(&self, limit: usize) -> Result<Vec<String>> {
+        self.verify()?;
+        let mut names = Vec::new();
+        for entry in
+            std::fs::read_dir(&self.0.path).map_err(|_| Error("runtime_inventory_unavailable"))?
+        {
+            let entry = entry.map_err(|_| Error("runtime_inventory_unavailable"))?;
+            names.push(
+                entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| Error("invalid_runtime_asset_path"))?,
+            );
+            if names.len() > limit {
+                return Err(Error("runtime_inventory_limit"));
+            }
+        }
+        self.verify()?;
+        names.sort();
+        Ok(names)
+    }
+
+    pub(crate) fn asset(&self, name: &str, identity: &Identity, private: bool) -> Result<Asset> {
+        let path = self.child_path(name)?;
+        self.verify()?;
+        let file = open_raw(&path, GENERIC_READ | READ_CONTROL, false, false)?;
+        let (id, bytes) = inspect(&file, &path, false)?;
+        permissions(&file, identity.sid(), private)?;
+        Ok(Asset {
+            path,
+            file,
+            id,
+            bytes,
+            parent: self.clone(),
+        })
+    }
+
+    pub(crate) fn create_file(&self, name: &str, identity: &Identity) -> Result<Asset> {
+        let path = self.child_path(name)?;
+        self.verify()?;
+        permissions(&self.0.file, identity.sid(), true)?;
+        let descriptor = identity.file_descriptor()?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.as_ptr(),
+            bInheritHandle: 0,
+        };
+        let handle = unsafe {
+            CreateFileW(
+                wide(&path).as_ptr(),
+                GENERIC_READ | GENERIC_WRITE | READ_CONTROL,
+                FILE_SHARE_READ,
+                &attributes,
+                CREATE_NEW,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(Error("runtime_file_creation_failed"));
+        }
+        let file = unsafe { File::from_raw_handle(handle) };
+        let (id, bytes) = inspect(&file, &path, false)?;
+        permissions(&file, identity.sid(), true)?;
+        Ok(Asset {
+            path,
+            file,
+            id,
+            bytes,
+            parent: self.clone(),
+        })
+    }
+}
+
+impl Asset {
+    pub(crate) fn bytes(&self) -> u64 {
+        self.bytes
+    }
+    pub(crate) fn identity(&self) -> (u64, [u8; 16]) {
+        (self.id.volume, self.id.file)
+    }
+    pub(crate) fn verify(&self) -> Result<()> {
+        self.parent.verify()?;
+        if inspect(&self.file, &self.path, false)?.0 != self.id {
+            return Err(Error("runtime_asset_changed"));
+        }
+        Ok(())
+    }
+    pub(crate) fn reader(&self) -> Result<File> {
+        self.verify()?;
+        let mut file = self
+            .file
+            .try_clone()
+            .map_err(|_| Error("runtime_asset_unavailable"))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| Error("runtime_asset_read_failed"))?;
+        Ok(file)
+    }
+    pub(crate) fn writer(&mut self) -> &mut File {
+        &mut self.file
+    }
+    pub(crate) fn finish(&mut self) -> Result<()> {
+        self.file
+            .sync_all()
+            .map_err(|_| Error("runtime_asset_sync_failed"))?;
+        self.bytes = inspect(&self.file, &self.path, false)?.1;
+        self.verify()?;
+        // A retained write handle would prevent the helper's own read-only
+        // pin from opening. Keep a metadata/no-delete guard throughout this
+        // downgrade, then retain only a read handle for the published asset.
+        let guard = open_raw(&self.path, READ_CONTROL | FILE_READ_ATTRIBUTES, true, false)?;
+        if inspect(&guard, &self.path, false)?.0 != self.id {
+            return Err(Error("runtime_asset_changed"));
+        }
+        self.file = guard;
+        let read = open_raw(&self.path, GENERIC_READ | READ_CONTROL, false, false)?;
+        if inspect(&read, &self.path, false)?.0 != self.id {
+            return Err(Error("runtime_asset_changed"));
+        }
+        self.file = read;
+        self.verify()
+    }
+}
+
+fn create_directory(path: &str, identity: &Identity) -> Result<()> {
+    let descriptor = identity.file_descriptor()?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.as_ptr(),
+        bInheritHandle: 0,
+    };
+    if unsafe { CreateDirectoryW(wide(path).as_ptr(), &attributes) } == 0 {
+        return Err(Error("runtime_directory_creation_failed"));
+    }
+    Ok(())
 }
 
 fn pin_parents(path: &str) -> Result<Vec<(String, File, FileId)>> {
