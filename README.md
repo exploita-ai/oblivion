@@ -159,15 +159,24 @@ service terms still apply.
 
 ```sh
 oblivion safe open research
-oblivion files import --safe research ./project --name project
+oblivion files import --safe research --source ./project --name project
 oblivion files list --safe research workspace/project --json
-oblivion files export --safe research workspace/project ./exports
+oblivion files export --safe research --path workspace/project --destination ./exports
+
+# Copy selections from different folders into one reviewed collection
+oblivion files import --safe research --source ./project --source ./notes --name research
 oblivion close research
 ```
 
 Imported files enter the Safe only through an explicit copy. Export destinations
 must already exist. Files shared by agents in one Safe remain shared by those
 agents; they can read and modify them according to guest permissions.
+
+Files lets you select items across directories and pages, inspect the selected
+items, and name a collection before review. The CLI repeats `--source` for import
+or `--path` for export; multiple selections require `--name`. One approved
+manifest covers the whole collection, including destination names and overlapping
+selections. A single selected item keeps its existing layout.
 
 In the manager, open **Files → Import**, then press **P** for **Enter path**.
 Paste a local path or `file://` URL, inspect it and choose it before confirming

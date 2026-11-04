@@ -44,6 +44,24 @@ payload or creating receiver staging before approval. Recursive counts and total
 bytes come from that manifest; approval binds its digest. File contents that no
 longer match the reviewed manifest abort the copy.
 
+Sources may have unrelated local parents; guest selections can span `workspace`
+and `imports`. One input keeps its single-item layout. Multiple inputs use one
+named collection, manifest, payload stream and atomic publication. Exact
+duplicates and descendants covered by a selected directory are recorded as
+covered inputs. Logical leaf aliases use NFC and full Unicode case folding for
+collision detection, with deterministic numeric suffixes. Physical source paths
+are never Unicode-normalized. Invalid nested names fail preparation instead of
+silently changing project contents. Parent descriptors are deduplicated by their
+actual filesystem identity, with admission checked before review.
+
+The source offer exposes kinds and logical mappings rather than physical source
+paths. The downloader derives the expected plan from its requested guest paths
+and refuses changed plans or unselected manifest roots. The manager receives the
+complete ordered map in pages of at most four entries; each event remains within
+4096 bytes including its newline. A canonical mapping digest binds all pages to
+the review. The selection limit is 128 inputs and 64 KiB of UTF-8 source paths;
+the encoded request also remains subject to the 64 KiB message cap.
+
 The manager communicates through a bounded, metadata-only NDJSON channel while
 remaining active. A single owned copy process handles review, approval, payload
 progress and finalizing. Progress counts actual document bytes, excluding wire

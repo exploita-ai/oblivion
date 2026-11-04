@@ -40,8 +40,17 @@ Only confirmed pre-approval cancellation claims that no file contents were
 copied. Later interruption is reconciled from receiver records. The process
 client retains ownership until actual child exit and uses bounded cleanup of
 that child alone. CLI terminal copies review and confirm too; unattended copies
-require `--yes`, which cannot bypass the manager's event approval. Multi-select,
-native GUI drop APIs and installed-platform acceptance remain incomplete.
+require `--yes`, which cannot bypass the manager's event approval.
+
+Files now supports a selection basket across local directories and guest
+workspace/imports pages. A single item keeps its layout; multiple inputs use one
+named collection and one atomic publication. The backend resolves overlapping
+folders and colliding leaf names, and the manager verifies every ordered mapping
+page and its digest before enabling review. Absolute local source paths remain
+in the calling process; only logical aliases enter the source offer. The CLI uses
+repeated `--source` or `--path` selectors, with an explicit collection name for
+multiple inputs. Native GUI drop APIs and installed-platform acceptance remain
+incomplete.
 
 Cross-agent conversation sharing, synchronization, conversion and handoff are
 outside the 1.0 scope. Each agent owns its native chats and resume inside the
