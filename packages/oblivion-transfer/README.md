@@ -22,11 +22,10 @@ both peer processes with `SO_PEERPIDFD`, uses one absolute deadline, and stops
 on owner death or controller cancellation. It verifies content and receipts;
 only metadata reaches the controller. It has no listener or retry loop.
 
-The host manager integrates USB import, recovery and export. The controller owns
-authorization, isolated source/destination environments, storage placement,
-close/lock integration, filesystem-stall recovery and release to the chat.
-These operations are packaged in the experimental
-[`v0.1.0-beta.2` images](../../README.md#download-oblivion).
+The controller owns authorization, isolated media endpoints, storage placement,
+close/lock integration and cleanup. The native CLI also copies explicitly
+selected desktop files over private streams without shared folders. Current
+1.0 integration and whole-image acceptance have separate gates in the roadmap.
 The relay binary requires Linux; Mac tests exercise its library with explicit
 lifetime channels, while Linux tests and the VM laboratory exercise real pidfds.
 
@@ -35,8 +34,10 @@ lifetime channels, while Linux tests and the VM laboratory exercise real pidfds.
 Closed-session backup and restore reuse the streaming, approval and receipt
 protocol. `session.oblivion` is the existing LUKS2 volume, including its chats,
 documents and embedded metadata. There is no new encryption format; restoring
-it requires the original session password. Host settings and provider keys
-remain in the general vault and are not part of this backup.
+it requires the original session password. General application settings are excluded. Native agent profiles and provider
+credentials saved inside the Safe ARE part of a personal disk backup; use
+Share to exclude known provider credential stores when transferring portable
+work to another user. Review selected content for secrets as well.
 
 `send-open-file` and `receive-open-file` operate on parent-selected descriptors.
 They cannot choose a path on the host, browse a parent directory or read a
@@ -80,6 +81,20 @@ replacement-path isolation with a bounded budget for unoptimized CI binaries.
 File-VM laboratories additionally exercise HTTP interruption/resume, read-only
 device checks, malformed inputs, approval, cancellation and teardown. A sparse
 fixture with a LUKS marker is not a valid encrypted archive; real LUKS and
-compiled-chat preservation have separate host laboratories. Public large-file
-Tor transfer and supported-image/physical-media qualification remain open in
+native-chat preservation require separate whole-product acceptance. Public large-file
+Tor transfer and current-image/physical-media qualification remain open in
 [STATUS.md](../../docs/STATUS.md).
+
+## Share endpoints
+
+`share-send` consumes a locally approved planner manifest on FD4 and the private
+channel on FD3. Source aliases are limited to the portable roots and that
+request's canonical catalog. `share-receive` stages the same hash-checked
+protocol in a private new Safe inbox. Known credential-store paths are rejected
+by one shared positive-root validator.
+
+The guest wrapper controls review and sends its final acknowledgement only
+after cleaning the generated catalog stage. The copy library does not start
+clients, publish imported Safes or decrypt the outer Share package. Those
+responsibilities belong to the guest adapter, controller and
+[Share container](../oblivion-share/README.md).

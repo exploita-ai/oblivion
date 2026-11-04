@@ -15,6 +15,20 @@ fn main() {
 fn execute() -> Result<(), Box<dyn std::error::Error>> {
     runtime::harden()?;
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|role| matches!(role.as_str(), "share-send" | "share-receive")) {
+        let send = args[0] == "share-send";
+        if args.len() != if send { 3 } else { 4 } { return Err("invalid_arguments".into()); }
+        let budget = args.last().ok_or("invalid_arguments")?.parse::<u64>()?;
+        if !(1..=3_600_000).contains(&budget) { return Err("invalid_deadline".into()); }
+        let mut channel = Channel::new(runtime::inherited(3)?, Duration::from_millis(budget))?;
+        let receipt = if send {
+            oblivion_transfer::share::send(&mut channel, Path::new(&args[1]), runtime::inherited(4)?)?
+        } else {
+            oblivion_transfer::share::receive(&mut channel, Path::new(&args[1]), &args[2])?
+        };
+        println!("{}", serde_json::to_string(&receipt)?);
+        return Ok(());
+    }
     if args
         .first()
         .is_some_and(|role| matches!(role.as_str(), "send-open-file" | "receive-open-file"))

@@ -7,6 +7,7 @@ pub mod onion_file;
 pub mod recovery;
 pub mod relay;
 pub mod stream;
+pub mod share;
 
 use directory::Directory;
 use serde::{Deserialize, Serialize};
@@ -149,6 +150,10 @@ enum Sources {
         root: Directory,
         identities: Vec<(u64, u64)>,
     },
+    Approved {
+        root: Directory,
+        sources: Vec<(String, u64, u64)>,
+    },
 }
 
 impl Selection {
@@ -264,6 +269,30 @@ impl Selection {
         &self.manifest
     }
 
+    /// The isolated source supplies an already reviewed manifest and one
+    /// relative source alias per file. Generated portable metadata can have a
+    /// public destination name without copying the workspace into staging.
+    pub fn approved(root: &Path, manifest: Manifest, aliases: &[String]) -> io::Result<Self> {
+        let root = Directory::open(root)?;
+        let mut sources = Vec::new();
+        for entry in manifest.entries() {
+            if let Entry::File { size, sha256, .. } = entry {
+                let alias = aliases.get(sources.len()).ok_or_else(|| invalid("source_alias_missing"))?;
+                validate_path(alias)?;
+                let mut components = alias.split('/').collect::<Vec<_>>();
+                let name = components.pop().ok_or_else(|| invalid("invalid_path"))?;
+                let parent = components.into_iter().try_fold(root.clone()?, |parent, name| parent.directory(name))?;
+                let mut file = parent.source(name)?;
+                let metadata = file.metadata()?;
+                require(metadata.is_file() && metadata.nlink() == 1 && metadata.len() == *size, "source_changed")?;
+                require(copy_hash(&mut file, &mut io::sink(), *size)? == *sha256, "source_changed")?;
+                sources.push((alias.clone(), metadata.dev(), metadata.ino()));
+            }
+        }
+        require(sources.len() == aliases.len(), "source_alias_expanded")?;
+        Ok(Self { manifest, files: Sources::Approved { root, sources } })
+    }
+
     /// Writes the already offered files; a changed source aborts before END.
     /// The caller owns transport deadlines, cancellation and the final receipt.
     pub fn send_data(&mut self, writer: &mut impl Write) -> io::Result<()> {
@@ -288,6 +317,17 @@ impl Selection {
                         )?;
                         file
                     }
+                    Sources::Approved { root, sources } => {
+                        let (alias, device, inode) = sources.get(index).ok_or_else(|| invalid("source_changed"))?;
+                        let mut components = alias.split('/').collect::<Vec<_>>();
+                        let name = components.pop().ok_or_else(|| invalid("invalid_path"))?;
+                        let parent = components.into_iter().try_fold(root.clone()?, |parent, name| parent.directory(name))?;
+                        let file = parent.source(name)?;
+                        let metadata = file.metadata()?;
+                        require(metadata.is_file() && metadata.nlink() == 1
+                            && metadata.dev() == *device && metadata.ino() == *inode, "source_changed")?;
+                        file
+                    }
                 };
                 file.rewind()?;
                 require(file.metadata()?.len() == *size, "source_changed")?;
@@ -310,6 +350,21 @@ pub struct Receipt {
     pub manifest_sha256: String,
     pub entries: usize,
     pub bytes: u64,
+}
+
+/// Forward an already approved payload without opening or publishing a file.
+/// Encrypted Share containers use the same hashes and terminator as the guest
+/// copy endpoints; a corrupt source never produces a completed payload.
+pub fn relay_payload(reader: &mut impl Read, writer: &mut impl Write, manifest: &Manifest) -> io::Result<()> {
+    for entry in manifest.entries() {
+        if let Entry::File { size, sha256, .. } = entry {
+            require(copy_hash(reader, writer, *size)? == *sha256, "source_changed")?;
+        }
+    }
+    let mut end = [0; 8];
+    reader.read_exact(&mut end)?;
+    require(&end == END, "incomplete_transfer")?;
+    writer.write_all(END)
 }
 
 /// Copy into a new private transaction under a receiver-owned root. On success
