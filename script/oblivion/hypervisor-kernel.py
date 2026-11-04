@@ -50,8 +50,8 @@ def verify(root, controller=None):
     config = (root / 'boot' / ('config-' + record['abi'])).read_text()
     if not re.search(r'^CONFIG_KVM=(y|m)$', config, re.M):
         raise ValueError('hypervisor_kernel_requires_kvm')
-    required = ['kvm-arm.mode=nested'] if record['architecture'] == 'arm64' else []
-    if record['required_boot_arguments'] != required:
+    arguments = {'outer-live': ['kvm-arm.mode=nested'] if record['architecture'] == 'arm64' else [], 'controller': []}
+    if record['boot_arguments'] != arguments:
         raise ValueError('hypervisor_kernel_boot_mode_changed')
     if controller:
         expected = json.loads(controller.read_text())
@@ -102,16 +102,16 @@ def install(architecture, requested):
                                      'kernel_package': image, 'kernel_version': version,
                                      'abi': abi, 'kernel_sha256': digest(boot[0]),
                                      'arm64_minimum_kernel': '6.16',
-                                     'required_boot_arguments': ['kvm-arm.mode=nested'] if architecture == 'arm64' else []}, sort_keys=True, indent=2) + '\n')
+                                     'boot_arguments': {'outer-live': ['kvm-arm.mode=nested'] if architecture == 'arm64' else [], 'controller': []}}, sort_keys=True, indent=2) + '\n')
     verify(Path('/'))
 
 
-def grub(root, template):
+def grub(root, template, role):
     record = verify(root)
     source = template.read_text()
     if source.count(' boot=live ') != 1 or 'kvm-arm.mode=' in source:
         raise ValueError('one_canonical_live_boot_entry_required')
-    arguments = ' '.join(record['required_boot_arguments'])
+    arguments = ' '.join(record['boot_arguments'][role])
     return source.replace(' boot=live ', ' boot=live ' + arguments + (' ' if arguments else ''), 1)
 
 
@@ -127,12 +127,13 @@ def main():
     boot = commands.add_parser('grub')
     boot.add_argument('root', type=Path)
     boot.add_argument('template', type=Path)
+    boot.add_argument('--role', choices=('outer-live', 'controller'), required=True)
     args = parser.parse_args()
     if args.operation == 'install':
         install(args.architecture, args.version)
         return
     if args.operation == 'grub':
-        print(grub(args.root, args.template), end='')
+        print(grub(args.root, args.template, args.role), end='')
         return
     print(json.dumps(verify(args.root, args.controller), sort_keys=True))
 

@@ -26,7 +26,7 @@ class KernelInventory(unittest.TestCase):
         value = {'version': 1, 'architecture': architecture, 'abi': abi,
                  'kernel_package': 'linux-image-' + abi, 'kernel_version': '6.16.12-1~bpo13+1',
                  'kernel_sha256': kernel.digest(image),
-                 'required_boot_arguments': ['kvm-arm.mode=nested'] if architecture == 'arm64' else []}
+                 'boot_arguments': {'outer-live': ['kvm-arm.mode=nested'] if architecture == 'arm64' else [], 'controller': []}}
         output = self.root / kernel.RECORD
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(value))
@@ -75,11 +75,12 @@ class KernelInventory(unittest.TestCase):
         template = self.root / 'grub.cfg'
         source = "menuentry 'Live' {\n linux /live/vmlinuz boot=live components noswap\n}\n"
         template.write_text(source)
-        self.assertIn(' boot=live kvm-arm.mode=nested components', kernel.grub(self.root, template))
+        self.assertIn(' boot=live kvm-arm.mode=nested components', kernel.grub(self.root, template, 'outer-live'))
+        self.assertEqual(kernel.grub(self.root, template, 'controller'), source)
         for path in (self.root / 'boot').iterdir():
             path.unlink()
         self.record('amd64', '6.12.115+deb13-amd64')
-        self.assertEqual(kernel.grub(self.root, template), source)
+        self.assertEqual(kernel.grub(self.root, template, 'outer-live'), source)
 
 
 if __name__ == '__main__':

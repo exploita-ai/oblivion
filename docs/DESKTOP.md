@@ -226,10 +226,12 @@ inventories record the selected package/version/ABI and kernel SHA-256;
 packing rejects extra boot kernels, missing KVM configuration, changed images
 or a mismatch between the outer Live and controller kernels. The native
 capability probe still verifies actual hardware support before data setup.
-Both ARM64 boot paths also select `kvm-arm.mode=nested`; the default VHE/nVHE
-mode does not enable nested virtualization. Linux documents this as an
-experimental mode requiring ARMv8.4 FEAT_NV2. Kernel selection alone does not
-qualify a machine. [ARM kernel parameters](https://docs.kernel.org/6.16/admin-guide/kernel-parameters.html).
+The ARM64 **outer Live OS** selects `kvm-arm.mode=nested` so it can present
+virtual EL2 to the controller VM. Linux documents this as an experimental mode
+requiring ARMv8.4 FEAT_NV2. The controller itself uses ordinary VHE/nVHE to run
+EL1 Safe/gateway guests; it does not request another nested EL2 level. The
+shared kernel record therefore declares separate boot arguments for the two
+roles. Kernel selection alone does not qualify a machine. [ARM kernel parameters](https://docs.kernel.org/6.16/admin-guide/kernel-parameters.html).
 Older host kernels fail that check. [Linux 6.16 KVM API](https://docs.kernel.org/6.16/virt/kvm/api.html),
 [Debian ARM64 backports kernel](https://packages.debian.org/trixie-backports/kernel/linux-image-arm64). There is no
 software-emulation or direct-controller fallback. Live inside another VM adds

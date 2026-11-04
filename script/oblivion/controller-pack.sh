@@ -10,7 +10,7 @@ chroot /host dpkg-query -W -f='${Package}\t${Version}\n' > /out/host-packages.ts
 cp /session/usr/lib/oblivion/build-evidence.json /out/client-evidence.json
 cp /sources/host-sources.sha256 /sources/gateway-sources.sha256 /out/
 (cd /sources && find . -type f -print0 | sort -z | xargs -0 sha256sum) > /out/iso-sources.sha256
-python3 -B /sources/hypervisor-kernel.py grub /host /sources/live-grub.cfg > /iso/boot/grub/grub.cfg
+python3 -B /sources/hypervisor-kernel.py grub /host /sources/live-grub.cfg --role controller > /iso/boot/grub/grub.cfg
 name=${OBLIVION_IMAGE_NAME:-oblivion-development}
 mksquashfs /host /iso/live/filesystem.squashfs -noappend -comp zstd -processors 2 -quiet -wildcards -e 'boot/*'
 # x86 supports BIOS + UEFI; ARM64 uses UEFI. No Secure Boot claim.
