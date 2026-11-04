@@ -1,5 +1,6 @@
 //! Secret-free, portable configuration for the owned HCS controller. Paths are
 //! checked lexically here; Windows file identity, leases and ACLs belong to I/O.
+use crate::network_model::Attachment;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -81,9 +82,6 @@ impl RuntimeConfig {
             return Err(Error("invalid_runtime_configuration"));
         }
         self.boot_identity()?;
-        if self.network {
-            return Err(Error("hcs_network_not_implemented"));
-        }
         Ok(())
     }
 
@@ -103,7 +101,12 @@ impl RuntimeConfig {
     /// HCS schema 2.2: LinuxKernelDirect, VirtioSerial, SCSI and explicit
     /// HvSocket permissions. The schema and Microsoft's WSL implementation are
     /// the owners of these field names; callers cannot supply arbitrary devices.
-    pub fn hcs(&self, bootstrap_pipe: &str, owner_sddl: &str) -> Result<String> {
+    pub fn hcs(
+        &self,
+        bootstrap_pipe: &str,
+        owner_sddl: &str,
+        network: Option<&Attachment>,
+    ) -> Result<String> {
         self.validate()?;
         let prefix = format!(r"\\.\pipe\oblivion.{}.auth.", self.runtime_id);
         if !bootstrap_pipe.strip_prefix(&prefix).is_some_and(identifier) {
@@ -111,6 +114,12 @@ impl RuntimeConfig {
         }
         if !owner_descriptor(owner_sddl) {
             return Err(Error("invalid_runtime_owner_descriptor"));
+        }
+        if self.network != network.is_some() {
+            return Err(Error("runtime_network_attachment_required"));
+        }
+        if let Some(network) = network {
+            network.validate(&self.runtime_id)?;
         }
         let document = ComputeSystem {
             owner: "Oblivion",
@@ -123,7 +132,10 @@ impl RuntimeConfig {
                     linux_kernel_direct: LinuxKernelDirect {
                         kernel_file_path: &self.kernel,
                         init_rd_path: &self.initrd,
-                        kernel_cmd_line: &self.command_line,
+                        kernel_cmd_line: network.map_or_else(
+                            || self.command_line.clone(),
+                            |network| format!("{} {}", self.command_line, network.boot_args()),
+                        ),
                     },
                 },
                 compute_topology: Topology {
@@ -137,13 +149,22 @@ impl RuntimeConfig {
                     },
                 },
                 devices: Devices {
+                    network_adapters: network.map_or_else(BTreeMap::new, |network| {
+                        BTreeMap::from([(
+                            network.adapter_id.clone(),
+                            NetworkAdapter {
+                                endpoint_id: network.endpoint_id.clone(),
+                                mac_address: network.hcs_mac(),
+                            },
+                        )])
+                    }),
                     scsi: BTreeMap::from([(
                         self.vm_id(),
                         Scsi {
                             attachments: BTreeMap::from([
                                 (
                                     "0",
-                                    Attachment {
+                                    DiskAttachment {
                                         kind: "Iso",
                                         path: &self.disks[0].path,
                                         read_only: true,
@@ -151,7 +172,7 @@ impl RuntimeConfig {
                                 ),
                                 (
                                     "1",
-                                    Attachment {
+                                    DiskAttachment {
                                         kind: "VirtualDisk",
                                         path: &self.disks[1].path,
                                         read_only: false,
@@ -316,7 +337,7 @@ struct LinuxKernelDirect<'a> {
     kernel_file_path: &'a str,
     #[serde(rename = "InitRdPath")]
     init_rd_path: &'a str,
-    kernel_cmd_line: &'a str,
+    kernel_cmd_line: String,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
@@ -340,18 +361,26 @@ struct Processor {
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct Devices<'a> {
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    network_adapters: BTreeMap<String, NetworkAdapter>,
     scsi: BTreeMap<String, Scsi<'a>>,
     virtio_serial: VirtioSerial<'a>,
     hv_socket: HvSocket<'a>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
-struct Scsi<'a> {
-    attachments: BTreeMap<&'a str, Attachment<'a>>,
+struct NetworkAdapter {
+    endpoint_id: String,
+    mac_address: String,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
-struct Attachment<'a> {
+struct Scsi<'a> {
+    attachments: BTreeMap<&'a str, DiskAttachment<'a>>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct DiskAttachment<'a> {
     #[serde(rename = "Type")]
     kind: &'a str,
     path: &'a str,

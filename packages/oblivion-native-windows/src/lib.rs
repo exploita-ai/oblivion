@@ -22,6 +22,9 @@ pub mod files;
 #[cfg(windows)]
 pub mod hcs;
 pub mod hcs_model;
+pub mod network_model;
+#[cfg(windows)]
+pub mod network;
 #[cfg(windows)]
 pub mod lifetime;
 #[cfg(windows)]

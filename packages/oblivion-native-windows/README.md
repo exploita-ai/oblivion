@@ -2,7 +2,7 @@
 
 Experimental `oblivion-vm.exe` source for a headless, owned Hyper-V controller.
 This is the backend core, **not an installable Windows Oblivion release**.
-The Windows frontend, privileged installation, VHDX initialization, HNS network,
+The Windows frontend, privileged installation, VHDX initialization, network
 recovery integration and actual nested-Safe boot remain unfinished or unqualified.
 The surrounding architecture is described in [Windows](../../docs/WINDOWS.md).
 
@@ -10,10 +10,31 @@ The helper uses the Windows SDK through the pinned `windows-sys` bindings.
 It creates only its own HCS compute system, requests nested CPU extensions and
 direct kernel/initrd boot, and attaches one read-only ISO and one private VHDX.
 There is no GUI, WSL distribution, host filesystem export, unauthenticated TCP
-control listener or software-emulation fallback. The current configuration
-requires `network: false`; an online request fails before VM creation.
+control listener or software-emulation fallback. `network: false` attaches no
+network device. `network: true` prepares a separate, owned HCN ICS network and
+one statically addressed controller endpoint before creating the VM.
 `capabilities` distinguishes observed HCS/nested availability from product
 support, which remains false until the complete integration is qualified.
+
+The network follows the HCN default schema used by Microsoft's WSL implementation:
+ICS with `IsolateSwitch: true` and the nonpersistent flag, a requested private
+subnet and a separately owned endpoint. It does not adopt the Default Switch or
+create a second manual WinNAT configuration. Host routes and existing HCN address
+spaces exclude overlapping ranges. Returned identities, MAC, subnet and gateway
+must match the request; a different assignment fails the run. Only validated
+address metadata is appended to the kernel command line. Debian publishes a
+private NetworkManager keyfile under `/run`, matches the NIC by MAC and uses
+static IPv4. Auto-generated wired profiles are disabled for `hv_netvsc`; the
+controller's existing resolver and IPv6 restrictions remain in place.
+[Microsoft's HCN network path](https://github.com/microsoft/WSL/blob/master/src/windows/common/NatNetworking.cpp).
+
+HCN service calls are synchronous and have no documented cancellation handle.
+Lifetime checks surround the calls; creation precedes any VM and deletion follows
+a confirmed stop. No timeout worker continues to mutate networking after the
+helper reports a successful cancellation. A stalled HCN service, actual ICS with
+the DNS flag omitted, interaction with other virtualization products and retained
+resource recovery still need Windows qualification. Safe routing remains the
+responsibility of the existing per-Safe Tor/SOCKS5 gateways inside the controller.
 
 The one supported private invocation is `oblivion-vm.exe run --config PATH`.
 Its supervisor must provide an inherited stdin pipe and keep its writer open;

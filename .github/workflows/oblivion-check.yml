@@ -201,6 +201,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 tests/agent-channel.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/credential-delegation.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/native-runtime.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/runtime-network.py
       - name: Check native agent configuration preservation
         working-directory: packages/oblivion-host/guest/native-tools
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_configure
@@ -362,6 +363,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 tests/agent-channel.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/credential-delegation.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/native-runtime.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/runtime-network.py
       - name: Compile the actual Apple helper
         working-directory: packages/oblivion-native
         run: swift build --configuration release

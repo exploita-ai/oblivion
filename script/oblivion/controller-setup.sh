@@ -16,6 +16,7 @@ printf 'tmpfs /persist tmpfs ro,nosuid,nodev,noexec,size=4k,mode=0700 0 0\n' >> 
 cat > /etc/NetworkManager/conf.d/80-oblivion.conf <<'EOF'
 [main]
 plugins=keyfile
+no-auto-default=driver:hv_netvsc
 dns=none
 rc-manager=unmanaged
 [keyfile]
@@ -32,6 +33,7 @@ for unit in NetworkManager oblivion-controller; do
     printf '[Unit]\nRequires=oblivion-host-firewall.service\nAfter=oblivion-host-firewall.service\n' > "/etc/systemd/system/$unit.service.d/firewall.conf"
 done
 systemctl enable oblivion-controller.service oblivion-host-firewall.service NetworkManager.service
+printf '[Unit]\nRequires=oblivion-runtime-network.service\nAfter=oblivion-runtime-network.service\n' > /etc/systemd/system/NetworkManager.service.d/runtime-network.conf
 systemctl mask NetworkManager-wait-online.service e2scrub_reap.service e2scrub_all.timer dpkg-db-backup.timer dpkg-db-backup.service
 printf 'loop\ndm_crypt\nkvm\nvsock\nvmw_vsock_virtio_transport\n' > /etc/modules-load.d/oblivion-runtime.conf
 printf 'MODULES=most\nCOMPRESS=gzip\nRESUME=none\n' > /etc/initramfs-tools/conf.d/oblivion

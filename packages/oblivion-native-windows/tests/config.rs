@@ -1,4 +1,5 @@
 use oblivion_native_windows::config::{CONFIG_LIMIT, CONTROL_SERVICE, RuntimeConfig};
+use oblivion_native_windows::network_model::Plan;
 use serde_json::{Value, json};
 
 const ID: &str = "0123456789abcdef0123456789abcdef";
@@ -30,7 +31,7 @@ fn auth() -> String {
 fn hcs_json_has_only_owned_offline_devices_and_exact_security_fields() {
     let config = decode(config());
     assert_eq!(config.vm_id(), "01234567-89ab-cdef-0123-456789abcdef");
-    let output: Value = serde_json::from_str(&config.hcs(&auth(), OWNER).unwrap()).unwrap();
+    let output: Value = serde_json::from_str(&config.hcs(&auth(), OWNER, None).unwrap()).unwrap();
     assert_eq!(
         output,
         json!({
@@ -57,7 +58,7 @@ fn hcs_json_has_only_owned_offline_devices_and_exact_security_fields() {
             }
         })
     );
-    assert!(config.hcs(&auth(), "D:P(A;;GA;;;SY)").is_ok());
+    assert!(config.hcs(&auth(), "D:P(A;;GA;;;SY)", None).is_ok());
 }
 
 #[test]
@@ -191,7 +192,7 @@ fn bootstrap_and_control_pipe_names_are_bound_to_the_runtime_and_private_namespa
         format!(r"\\.\pipe\oblivion.{ID}.auth.{}\child", "a".repeat(32)),
     ] {
         assert_eq!(
-            config.hcs(&pipe, OWNER).unwrap_err().0,
+            config.hcs(&pipe, OWNER, None).unwrap_err().0,
             "invalid_runtime_auth_pipe"
         );
     }
@@ -229,15 +230,12 @@ fn kernel_parameters_are_a_positive_identity_allowlist_without_secret_channels()
 }
 
 #[test]
-fn network_and_untrusted_owner_descriptors_have_no_permissive_fallback() {
+fn network_attachment_and_untrusted_owner_descriptors_have_no_permissive_fallback() {
     let mut value = config();
     value["network"] = json!(true);
     assert_eq!(
-        RuntimeConfig::decode(&serde_json::to_vec(&value).unwrap())
-            .err()
-            .unwrap()
-            .0,
-        "hcs_network_not_implemented"
+        decode(value).hcs(&auth(), OWNER, None).unwrap_err().0,
+        "runtime_network_attachment_required"
     );
     let config = decode(config());
     for owner in [
@@ -249,8 +247,52 @@ fn network_and_untrusted_owner_descriptors_have_no_permissive_fallback() {
         "D:P(A;;GA;;;SY)(A;;GA;;;S-1-5-21-01-2-3-1001)",
     ] {
         assert_eq!(
-            config.hcs(&auth(), owner).unwrap_err().0,
+            config.hcs(&auth(), owner, None).unwrap_err().0,
             "invalid_runtime_owner_descriptor"
         );
     }
+}
+
+#[test]
+fn only_the_owned_network_lease_can_supply_adapter_and_boot_metadata() {
+    let plan = Plan::new(ID, &[]).unwrap();
+    let offline = decode(config());
+    assert_eq!(
+        offline
+            .hcs(&auth(), OWNER, Some(&plan.attachment))
+            .unwrap_err()
+            .0,
+        "runtime_network_attachment_required"
+    );
+    let mut value = config();
+    value["network"] = json!(true);
+    let online = decode(value);
+    let output: Value =
+        serde_json::from_str(&online.hcs(&auth(), OWNER, Some(&plan.attachment)).unwrap()).unwrap();
+    assert_eq!(
+        output["VirtualMachine"]["Devices"]["NetworkAdapters"],
+        json!({
+            (plan.attachment.adapter_id.clone()): {
+                "EndpointId":plan.attachment.endpoint_id,
+                "MacAddress":plan.attachment.hcs_mac(),
+            }
+        })
+    );
+    assert_eq!(
+        output["VirtualMachine"]["Chipset"]["LinuxKernelDirect"]["KernelCmdLine"],
+        format!("{} {}", online.command_line, plan.attachment.boot_args())
+    );
+    let foreign = Plan::new("1123456789abcdef0123456789abcdef", &[]).unwrap();
+    assert!(
+        online
+            .hcs(&auth(), OWNER, Some(&foreign.attachment))
+            .is_err()
+    );
+    let mut caller = config();
+    caller["commandLine"] = json!(format!(
+        "{} {}",
+        online.command_line,
+        plan.attachment.boot_args()
+    ));
+    assert!(RuntimeConfig::decode(&serde_json::to_vec(&caller).unwrap()).is_err());
 }

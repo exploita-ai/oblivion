@@ -471,6 +471,7 @@ COPY packages/oblivion-host/host/*.service /etc/systemd/system/
 COPY packages/oblivion-host/host/control-relay.py /usr/lib/oblivion/control-relay.py
 COPY packages/oblivion-host/host/runtime-prepare.py /usr/lib/oblivion/host/runtime-prepare.py
 COPY packages/oblivion-host/host/runtime-auth.py /usr/lib/oblivion/host/runtime-auth.py
+COPY packages/oblivion-host/host/runtime-network.py /usr/lib/oblivion/host/runtime-network.py
 COPY packages/oblivion-host/host/oblivion-runtime-generator /usr/lib/systemd/system-generators/oblivion-runtime-generator
 COPY script/oblivion/controller-setup.sh /tmp/live-setup
 COPY script/oblivion/hypervisor-kernel.py /tmp/hypervisor-kernel.py

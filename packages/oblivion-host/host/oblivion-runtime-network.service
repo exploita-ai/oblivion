@@ -1,0 +1,36 @@
+[Unit]
+Description=Oblivion HCS controller volatile network profile
+ConditionKernelCommandLine=oblivion.runtime=1
+ConditionKernelCommandLine=oblivion.runtime-backend=hcs-hyperv
+After=local-fs.target
+Before=NetworkManager.service
+PartOf=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+ExecStart=/usr/bin/python3 -B /usr/lib/oblivion/host/runtime-network.py
+RuntimeDirectory=NetworkManager/system-connections
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+TimeoutStartSec=10
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/NetworkManager/system-connections
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+StandardInput=null
+StandardOutput=null
+StandardError=null

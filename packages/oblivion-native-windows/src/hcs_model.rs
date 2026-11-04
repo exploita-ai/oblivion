@@ -1,6 +1,5 @@
 //! The documented HCS reply shapes. Raw HCS documents and parser diagnostics
 //! never cross the helper boundary.
-#[cfg(any(windows, test))]
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
@@ -120,7 +119,12 @@ impl Properties {
         }
         Ok(Self {
             state: reply.state,
-            runtime_id: reply.runtime_id.as_deref().map(runtime_id).transpose()?,
+            runtime_id: reply
+                .runtime_id
+                .as_deref()
+                .map(guid)
+                .transpose()
+                .map_err(|_| Error("invalid_hcs_runtime_id"))?,
         })
     }
 }
@@ -142,21 +146,20 @@ fn decode<T: serde::de::DeserializeOwned>(document: &str) -> Result<T> {
     serde_json::from_str(document).map_err(|_| Error("invalid_hcs_reply"))
 }
 
-#[cfg(any(windows, test))]
-fn runtime_id(value: &str) -> Result<u128> {
+pub(crate) fn guid(value: &str) -> Result<u128> {
     // HCS uses the Windows GUID string form, with optional surrounding braces.
     let value = value
         .strip_prefix('{')
         .and_then(|value| value.strip_suffix('}'))
         .unwrap_or(value);
     if value.len() != 36 {
-        return Err(Error("invalid_hcs_runtime_id"));
+        return Err(Error("invalid_hyperv_guid"));
     }
     let mut result = 0_u128;
     for (position, byte) in value.bytes().enumerate() {
         if [8, 13, 18, 23].contains(&position) {
             if byte != b'-' {
-                return Err(Error("invalid_hcs_runtime_id"));
+                return Err(Error("invalid_hyperv_guid"));
             }
             continue;
         }
@@ -164,19 +167,19 @@ fn runtime_id(value: &str) -> Result<u128> {
             b'0'..=b'9' => byte - b'0',
             b'a'..=b'f' => byte - b'a' + 10,
             b'A'..=b'F' => byte - b'A' + 10,
-            _ => return Err(Error("invalid_hcs_runtime_id")),
+            _ => return Err(Error("invalid_hyperv_guid")),
         };
         result = (result << 4) | u128::from(digit);
     }
     if result == 0 {
-        return Err(Error("invalid_hcs_runtime_id"));
+        return Err(Error("invalid_hyperv_guid"));
     }
     Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Capabilities, Error, MAX_REPLY_BYTES, Properties, Schema, State};
+    use super::{Capabilities, Error, Properties, Schema, State, MAX_REPLY_BYTES};
     const BASIC: &str = r#"{"Properties":[{"SupportedSchemaVersions":[{"Major":2,"Minor":11}]}]}"#;
     const PROCESSORS: &str = r#"{"PropertyResponses":{"ProcessorCapabilities":{"Response":{"ProcessorFeatures":["Sse3","NestedVirt"]}}}}"#;
 

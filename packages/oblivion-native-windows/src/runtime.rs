@@ -5,7 +5,7 @@ use crate::hcs::{Machine, State};
 use crate::lifetime::Lifetime;
 use crate::private::{Endpoint, Purpose};
 use crate::security::Identity;
-use crate::{Error, Result, auth, bridge, files, hcs, private};
+use crate::{Error, Result, auth, bridge, files, hcs, network, network_model, private};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -29,7 +29,7 @@ pub fn main() -> Result<()> {
     if args.len() == 1 && args[0] == "capabilities" {
         let observation = hcs::capabilities();
         // Availability of the helper core is distinct from installed product
-        // support: HNS, the Windows frontend and its installer are not wired yet.
+        // support: the Windows frontend and installer are not wired yet.
         let document = match observation {
             Ok(capabilities) => serde_json::json!({
                 "backend":"hcs-hyperv", "experimental":true, "supported":false,
@@ -78,23 +78,44 @@ pub fn run(config: RuntimeConfig, lifetime: Lifetime, identity: Identity) -> Res
     // HCS connects a serial port during VM construction; its private server
     // therefore has to exist first, not after the guest has booted.
     let bootstrap = Endpoint::bind(&bootstrap_name, Purpose::Bootstrap)?;
-    let configuration = config.hcs(&bootstrap_name, &identity.sddl())?;
-    lifetime.check()?;
-    leases.grant_vm_access(&config.vm_id())?;
-    let mut stopped = false;
-    let result = serve(
-        &config,
-        &configuration,
-        lifetime,
-        &mut endpoint,
-        bootstrap,
-        &mut stopped,
-    );
+    // HCN has synchronous service calls, not cancellable operation handles.
+    // Create networking before any VM exists; remove it only after the VM is
+    // confirmed stopped. A stalled HCN call never leaves an authorized guest.
+    let mut network = if config.network {
+        let occupied = network::inventory(&|| lifetime.check())?;
+        Some(network::Lease::acquire(
+            network_model::Plan::new(&config.runtime_id, &occupied)?,
+            &|| lifetime.check(),
+        )?)
+    } else {
+        None
+    };
+    let mut stopped = true;
+    let result = (|| {
+        let configuration = config.hcs(
+            &bootstrap_name,
+            &identity.sddl(),
+            network.as_ref().map(network::Lease::attachment),
+        )?;
+        lifetime.check()?;
+        leases.grant_vm_access(&config.vm_id())?;
+        serve(
+            &config,
+            &configuration,
+            lifetime,
+            &mut endpoint,
+            bootstrap,
+            &mut stopped,
+        )
+    })();
     if !stopped {
         // Closing the last HCS handle requests termination, but does not prove
         // completion. Keep paths and grants pinned until this one-shot process
         // exits; explicit Windows recovery must reconcile the retained grants.
         leases.retain_until_exit();
+        if let Some(network) = network {
+            network.retain_until_exit();
+        }
         if let Err(error) = result {
             report(error.0);
         }
@@ -102,8 +123,11 @@ pub fn run(config: RuntimeConfig, lifetime: Lifetime, identity: Identity) -> Res
     }
     // A grant is scoped to this invocation's validated assets, not retained as
     // an installation-wide permission. Failure remains a cleanup error.
+    let disconnected = network
+        .as_mut()
+        .map_or(Ok(()), |network| network.stop(&|| Ok(())));
     let revoked = leases.revoke_vm_access();
-    revoked.and(result)
+    disconnected.and(revoked).and(result)
 }
 
 fn serve(
@@ -115,6 +139,7 @@ fn serve(
     confirmed_stop: &mut bool,
 ) -> Result<()> {
     let token = Arc::new(auth::token()?);
+    *confirmed_stop = false;
     let machine = Machine::create(
         &config.vm_id(),
         configuration,
