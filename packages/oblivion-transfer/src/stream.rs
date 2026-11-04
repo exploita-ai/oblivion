@@ -2,48 +2,42 @@
 //! Manifest, file hashes, limits and receipts use the existing copy protocol.
 use crate::channel::Channel;
 use crate::directory::Directory;
-use crate::endpoint::{Approval, OfferRequest, ReceiveRequest, read_message, write_message};
+use crate::endpoint::{
+    Approval, OfferRequest, ReceiveRequest, SelectionOffer, read_message, write_message,
+};
 use crate::native_file_events::{Phase, Summary};
 use crate::native_files::{Context, Direction};
 use crate::{Limits, Manifest, Receipt, Selection, invalid, require, validate_id, validate_path};
 #[path = "stream_operations.rs"]
 pub mod operations;
 
+use crate::selection::{self, Input, Plan};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The source selection is prepared once, then retained through human review.
 /// No destination connection, receiver state or source snapshot is created here.
 pub struct PreparedUpload {
     selection: Selection,
     context: Context,
-    selected: String,
+    plan: Plan,
 }
 
 impl PreparedUpload {
     pub fn prepare(
-        source: &Path,
+        sources: &[PathBuf],
         context: Context,
         check: &mut dyn FnMut() -> io::Result<()>,
     ) -> io::Result<Self> {
         context.validate()?;
         require(
-            context.direction == Direction::Import && source.is_absolute(),
+            context.direction == Direction::Import,
             "invalid_file_source",
         )?;
-        check()?;
-        let name = source
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| invalid("invalid_source_name"))?;
-        let root = source
-            .parent()
-            .ok_or_else(|| invalid("invalid_source_root"))?;
-        let selection = Selection::prepare_checked(
-            Directory::open(root)?,
-            &[name.to_owned()],
+        let (selection, plan, _) = Selection::host_collection(
+            sources,
             Limits {
                 entries: crate::MAX_ENTRIES,
                 bytes: crate::MAX_DOCUMENT_BYTES,
@@ -53,14 +47,18 @@ impl PreparedUpload {
         let prepared = Self {
             selection,
             context,
-            selected: name.into(),
+            plan,
         };
         prepared.summary()?;
         Ok(prepared)
     }
 
     pub fn summary(&self) -> io::Result<Summary> {
-        Summary::from_manifest(self.selection.manifest(), &self.selected)
+        Summary::from_manifest(self.selection.manifest(), &self.plan)
+    }
+
+    pub fn plan(&self) -> &Plan {
+        &self.plan
     }
 
     pub fn send(
@@ -131,13 +129,13 @@ pub struct PreparedDownload {
     manifest: Manifest,
     target: Directory,
     context: Context,
-    selected: String,
+    plan: Plan,
 }
 
 impl PreparedDownload {
     pub fn prepare(
         mut channel: Channel,
-        selected: &str,
+        selected: &[String],
         target: &Path,
         context: Context,
     ) -> io::Result<Self> {
@@ -146,7 +144,14 @@ impl PreparedDownload {
             context.direction == Direction::Export,
             "invalid_file_destination",
         )?;
-        validate_path(selected)?;
+        selection::validate_paths(selected)?;
+        for path in selected {
+            validate_path(path)?;
+            require(
+                matches!(path.split('/').next(), Some("workspace" | "imports")),
+                "invalid_document_selection",
+            )?;
+        }
         let target = Directory::open(target)?;
         target.require_controlled()?;
         channel.check()?;
@@ -158,9 +163,11 @@ impl PreparedDownload {
                     entries: crate::MAX_ENTRIES,
                     bytes: crate::MAX_DOCUMENT_BYTES,
                 },
-                paths: vec![selected.into()],
+                paths: selected.to_vec(),
             },
         )?;
+        let offer: SelectionOffer = read_message(&mut channel, 64 * 1024)?;
+        let plan = selection_plan(selected, &offer)?;
         let manifest = Manifest::read(
             &mut channel,
             Limits {
@@ -168,20 +175,24 @@ impl PreparedDownload {
                 bytes: crate::MAX_DOCUMENT_BYTES,
             },
         )?;
-        require_selection(&manifest, selected)?;
+        require_collection(&manifest, &plan, &offer.directories)?;
         let prepared = Self {
             channel,
             manifest,
             target,
             context,
-            selected: selected.into(),
+            plan,
         };
         prepared.summary()?;
         Ok(prepared)
     }
 
     pub fn summary(&self) -> io::Result<Summary> {
-        Summary::from_manifest(&self.manifest, &self.selected)
+        Summary::from_manifest(&self.manifest, &self.plan)
+    }
+
+    pub fn plan(&self) -> &Plan {
+        &self.plan
     }
 
     pub fn receive(
@@ -236,7 +247,7 @@ impl PreparedDownload {
             &inbox,
             &self.target,
             &self.context.name,
-            &self.selected,
+            &self.plan.selected,
             &receipt,
             &self.manifest,
         )?;
@@ -565,6 +576,78 @@ fn selected_parent(transaction: &Directory, selected: &str) -> io::Result<Direct
         .try_fold(transaction.directory("files")?, |parent, component| {
             parent.directory(component)
         })
+}
+
+/// Both the native receiver and the media relay verify the source's path-free
+/// plan against the exact requested document selection before approving bytes.
+pub(crate) fn selection_plan(selected: &[String], offer: &SelectionOffer) -> io::Result<Plan> {
+    require(
+        offer.directories.len() == selected.len(),
+        "invalid_selection_offer",
+    )?;
+    for path in selected {
+        validate_path(path)?;
+        require(
+            matches!(path.split('/').next(), Some("workspace" | "imports")),
+            "invalid_document_selection",
+        )?;
+    }
+    let plan = Plan::new(
+        &selected
+            .iter()
+            .zip(&offer.directories)
+            .map(|(path, directory)| Input {
+                path: path.clone(),
+                directory: *directory,
+            })
+            .collect::<Vec<_>>(),
+    )?;
+    require(plan == offer.plan, "selection_changed")?;
+    Ok(plan)
+}
+
+pub(crate) fn require_collection(
+    manifest: &Manifest,
+    plan: &Plan,
+    directories: &[bool],
+) -> io::Result<()> {
+    require_selection(manifest, &plan.selected)?;
+    let roots = plan
+        .mappings
+        .iter()
+        .filter_map(|mapping| {
+            plan.manifest_path(mapping.input_index)
+                .map(|path| (mapping.input_index, path))
+        })
+        .collect::<Vec<_>>();
+    for (index, path) in &roots {
+        let entry = manifest
+            .entries()
+            .iter()
+            .find(|entry| entry.path() == path)
+            .ok_or_else(|| invalid("selection_missing"))?;
+        require(
+            matches!(entry, crate::Entry::Directory { .. }) == directories[*index],
+            "selection_changed",
+        )?;
+    }
+    for entry in manifest.entries() {
+        let wrapper = plan.mappings.len() > 1
+            && entry.path() == plan.selected
+            && matches!(entry, crate::Entry::Directory { .. });
+        require(
+            wrapper
+                || roots.iter().any(|(_, path)| {
+                    entry.path() == path
+                        || entry
+                            .path()
+                            .strip_prefix(path)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                }),
+            "selection_expanded",
+        )?;
+    }
+    Ok(())
 }
 
 fn require_selection(manifest: &Manifest, selected: &str) -> io::Result<()> {

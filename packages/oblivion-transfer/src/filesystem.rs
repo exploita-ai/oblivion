@@ -1,14 +1,18 @@
 //! Unix filesystem authority for explicitly reviewed copies.
-use crate::{Entry, Limits, Manifest, Receipt, END, ENCRYPTED_VOLUME_NAME, MAX_ENTRIES, copy_hash, invalid, require, validate_id, validate_path};
 use crate::directory::Directory;
+use crate::selection::{self, Input, Plan};
+use crate::{
+    ENCRYPTED_VOLUME_NAME, END, Entry, Limits, MAX_ENTRIES, Manifest, Receipt, copy_hash, invalid,
+    require, validate_id, validate_path,
+};
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Pins the root and source identities; files are reopened without following links.
-/// The source environment must be isolated; this object is not a host authority.
+/// Pins explicitly selected roots and object identities. Payload reopening uses
+/// only their positive source aliases, never a peer-supplied computer path.
 pub struct Selection {
     manifest: Manifest,
     files: Sources,
@@ -16,14 +20,26 @@ pub struct Selection {
 
 enum Sources {
     Volume(File),
-    Tree {
-        root: Directory,
-        identities: Vec<(u64, u64)>,
+    Mapped {
+        roots: Vec<Directory>,
+        files: Vec<Source>,
     },
-    Approved {
-        root: Directory,
-        sources: Vec<(String, u64, u64)>,
-    },
+}
+
+struct Source {
+    root: usize,
+    path: String,
+    device: u64,
+    inode: u64,
+}
+
+struct Chosen {
+    root: usize,
+    name: String,
+    path: String,
+    device: u64,
+    inode: u64,
+    directory: bool,
 }
 
 impl Selection {
@@ -89,7 +105,11 @@ impl Selection {
         Self::prepare_at(Directory::open(root)?, paths, limits)
     }
 
-    pub(crate) fn prepare_at(root: Directory, paths: &[String], limits: Limits) -> io::Result<Self> {
+    pub(crate) fn prepare_at(
+        root: Directory,
+        paths: &[String],
+        limits: Limits,
+    ) -> io::Result<Self> {
         Self::prepare_checked(root, paths, limits, &mut || Ok(()))
     }
 
@@ -119,6 +139,9 @@ impl Selection {
                         &parent,
                         component,
                         path,
+                        path,
+                        0,
+                        None,
                         limits,
                         &mut entries,
                         &mut files,
@@ -142,11 +165,128 @@ impl Selection {
         }
         Ok(Self {
             manifest: Manifest::new(entries, limits)?,
-            files: Sources::Tree {
-                root,
-                identities: files,
+            files: Sources::Mapped {
+                roots: vec![root],
+                files,
             },
         })
+    }
+
+    /// Native desktop choices are independent explicit roots. Their absolute
+    /// paths stay in this process; only approved logical aliases reach the peer.
+    pub(crate) fn host_collection(
+        paths: &[PathBuf],
+        limits: Limits,
+        check: &mut dyn FnMut() -> io::Result<()>,
+    ) -> io::Result<(Self, Plan, Vec<bool>)> {
+        require(
+            (1..=selection::MAX_SELECTIONS).contains(&paths.len()),
+            "selection_limit",
+        )?;
+        let keys = paths
+            .iter()
+            .map(|path| {
+                require(path.is_absolute(), "invalid_file_source")?;
+                path.to_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| invalid("invalid_file_source"))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        selection::validate_paths(&keys)?;
+        let mut roots = Vec::new();
+        let mut chosen = Vec::new();
+        for (path, key) in paths.iter().zip(keys) {
+            check()?;
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| invalid("invalid_source_name"))?;
+            let parent = path
+                .parent()
+                .ok_or_else(|| invalid("invalid_source_root"))?;
+            chosen.push(choose(&mut roots, Directory::open(parent)?, name, key)?);
+        }
+        Self::collection(roots, chosen, limits, check)
+    }
+
+    /// Every guest source is resolved beneath the fixed Documents authority.
+    /// Parent traversal never follows links, including across the two roots.
+    pub(crate) fn document_collection(
+        root: &Path,
+        paths: &[String],
+        limits: Limits,
+        check: &mut dyn FnMut() -> io::Result<()>,
+    ) -> io::Result<(Self, Plan, Vec<bool>)> {
+        selection::validate_paths(paths)?;
+        let root = Directory::open(root)?;
+        let mut roots = Vec::new();
+        let mut chosen = Vec::new();
+        for path in paths {
+            check()?;
+            validate_path(path)?;
+            require(
+                matches!(path.split('/').next(), Some("workspace" | "imports")),
+                "invalid_document_selection",
+            )?;
+            let mut components = path.split('/').collect::<Vec<_>>();
+            let name = components.pop().ok_or_else(|| invalid("invalid_path"))?;
+            let parent = components
+                .into_iter()
+                .try_fold(root.clone()?, |parent, name| parent.directory(name))?;
+            chosen.push(choose(&mut roots, parent, name, path.clone())?);
+        }
+        Self::collection(roots, chosen, limits, check)
+    }
+
+    fn collection(
+        roots: Vec<Directory>,
+        chosen: Vec<Chosen>,
+        limits: Limits,
+        check: &mut dyn FnMut() -> io::Result<()>,
+    ) -> io::Result<(Self, Plan, Vec<bool>)> {
+        let plan = Plan::new(
+            &chosen
+                .iter()
+                .map(|source| Input {
+                    path: source.path.clone(),
+                    directory: source.directory,
+                })
+                .collect::<Vec<_>>(),
+        )?;
+        let mut entries = Vec::new();
+        let mut files = Vec::new();
+        let mut bytes = 0;
+        if chosen.len() > 1 {
+            entries.push(Entry::Directory {
+                path: plan.selected.clone(),
+            });
+        }
+        for (index, source) in chosen.iter().enumerate() {
+            let Some(path) = plan.manifest_path(index) else {
+                continue;
+            };
+            collect(
+                &roots[source.root],
+                &source.name,
+                &path,
+                &source.name,
+                source.root,
+                Some((source.device, source.inode)),
+                limits,
+                &mut entries,
+                &mut files,
+                &mut bytes,
+                check,
+            )?;
+        }
+        Ok((
+            Self {
+                manifest: Manifest::new(entries, limits)?,
+                files: Sources::Mapped { roots, files },
+            },
+            plan,
+            chosen.iter().map(|source| source.directory).collect(),
+        ))
     }
 
     pub fn manifest(&self) -> &Manifest {
@@ -161,20 +301,41 @@ impl Selection {
         let mut sources = Vec::new();
         for entry in manifest.entries() {
             if let Entry::File { size, sha256, .. } = entry {
-                let alias = aliases.get(sources.len()).ok_or_else(|| invalid("source_alias_missing"))?;
+                let alias = aliases
+                    .get(sources.len())
+                    .ok_or_else(|| invalid("source_alias_missing"))?;
                 validate_path(alias)?;
                 let mut components = alias.split('/').collect::<Vec<_>>();
                 let name = components.pop().ok_or_else(|| invalid("invalid_path"))?;
-                let parent = components.into_iter().try_fold(root.clone()?, |parent, name| parent.directory(name))?;
+                let parent = components
+                    .into_iter()
+                    .try_fold(root.clone()?, |parent, name| parent.directory(name))?;
                 let mut file = parent.source(name)?;
                 let metadata = file.metadata()?;
-                require(metadata.is_file() && metadata.nlink() == 1 && metadata.len() == *size, "source_changed")?;
-                require(copy_hash(&mut file, &mut io::sink(), *size)? == *sha256, "source_changed")?;
-                sources.push((alias.clone(), metadata.dev(), metadata.ino()));
+                require(
+                    metadata.is_file() && metadata.nlink() == 1 && metadata.len() == *size,
+                    "source_changed",
+                )?;
+                require(
+                    copy_hash(&mut file, &mut io::sink(), *size)? == *sha256,
+                    "source_changed",
+                )?;
+                sources.push(Source {
+                    root: 0,
+                    path: alias.clone(),
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                });
             }
         }
         require(sources.len() == aliases.len(), "source_alias_expanded")?;
-        Ok(Self { manifest, files: Sources::Approved { root, sources } })
+        Ok(Self {
+            manifest,
+            files: Sources::Mapped {
+                roots: vec![root],
+                files: sources,
+            },
+        })
     }
 
     /// Writes the already offered files; a changed source aborts before END.
@@ -182,34 +343,28 @@ impl Selection {
     pub fn send_data(&mut self, writer: &mut impl Write) -> io::Result<()> {
         let mut index = 0;
         for entry in self.manifest.entries() {
-            if let Entry::File { path, size, sha256 } = entry {
+            if let Entry::File { size, sha256, .. } = entry {
                 let mut file = match &self.files {
                     Sources::Volume(file) => file.try_clone()?,
-                    Sources::Tree { root, identities } => {
-                        let mut components = path.split('/').collect::<Vec<_>>();
+                    Sources::Mapped { roots, files } => {
+                        let source = files.get(index).ok_or_else(|| invalid("source_changed"))?;
+                        let root = roots
+                            .get(source.root)
+                            .ok_or_else(|| invalid("source_changed"))?;
+                        let mut components = source.path.split('/').collect::<Vec<_>>();
                         let name = components.pop().ok_or_else(|| invalid("invalid_path"))?;
                         let parent = components
                             .into_iter()
                             .try_fold(root.clone()?, |parent, name| parent.directory(name))?;
                         let file = parent.source(name)?;
-                        let meta = file.metadata()?;
+                        let metadata = file.metadata()?;
                         require(
-                            meta.is_file()
-                                && meta.nlink() == 1
-                                && identities.get(index) == Some(&(meta.dev(), meta.ino())),
+                            metadata.is_file()
+                                && metadata.nlink() == 1
+                                && metadata.dev() == source.device
+                                && metadata.ino() == source.inode,
                             "source_changed",
                         )?;
-                        file
-                    }
-                    Sources::Approved { root, sources } => {
-                        let (alias, device, inode) = sources.get(index).ok_or_else(|| invalid("source_changed"))?;
-                        let mut components = alias.split('/').collect::<Vec<_>>();
-                        let name = components.pop().ok_or_else(|| invalid("invalid_path"))?;
-                        let parent = components.into_iter().try_fold(root.clone()?, |parent, name| parent.directory(name))?;
-                        let file = parent.source(name)?;
-                        let metadata = file.metadata()?;
-                        require(metadata.is_file() && metadata.nlink() == 1
-                            && metadata.dev() == *device && metadata.ino() == *inode, "source_changed")?;
                         file
                     }
                 };
@@ -227,6 +382,54 @@ impl Selection {
     }
 }
 
+fn choose(
+    roots: &mut Vec<Directory>,
+    parent: Directory,
+    name: &str,
+    path: String,
+) -> io::Result<Chosen> {
+    let metadata = parent.source(name)?.metadata()?;
+    require(
+        metadata.is_dir() || metadata.is_file() && metadata.nlink() == 1,
+        "unsupported_source",
+    )?;
+    let identity = parent.metadata()?;
+    let mut index = None;
+    for (offset, root) in roots.iter().enumerate() {
+        let metadata = root.metadata()?;
+        if metadata.dev() == identity.dev() && metadata.ino() == identity.ino() {
+            index = Some(offset);
+            break;
+        }
+    }
+    let root = match index {
+        Some(index) => index,
+        None => {
+            // Retain parents, not every selected file. Leave room for bounded
+            // descriptor-relative traversal, transport and receiver metadata.
+            let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+            if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            require(
+                unsafe { limit.assume_init() }.rlim_cur >= (roots.len() + 41) as libc::rlim_t,
+                "selection_descriptor_limit",
+            )?;
+            let index = roots.len();
+            roots.push(parent);
+            index
+        }
+    };
+    Ok(Chosen {
+        root,
+        name: name.into(),
+        path,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        directory: metadata.is_dir(),
+    })
+}
+
 /// Copy into a new private transaction under a receiver-owned root. On success
 /// only `id/files` is complete. The caller must explicitly release it to the chat.
 /// This function neither approves an offer nor grants access to a USB device.
@@ -239,7 +442,12 @@ pub fn receive(
     receive_at(reader, manifest, &Directory::open(root)?, id)
 }
 
-pub(crate) fn receive_at(reader: &mut impl Read, manifest: &Manifest, root: &Directory, id: &str) -> io::Result<Receipt> {
+pub(crate) fn receive_at(
+    reader: &mut impl Read,
+    manifest: &Manifest,
+    root: &Directory,
+    id: &str,
+) -> io::Result<Receipt> {
     validate_id(id)?;
     root.require_private()?;
     let transaction = root.create_directory(id)?;
@@ -446,9 +654,12 @@ fn collect(
     parent: &Directory,
     name: &str,
     path: &str,
+    source: &str,
+    root: usize,
+    expected: Option<(u64, u64)>,
     limits: Limits,
     entries: &mut Vec<Entry>,
-    files: &mut Vec<(u64, u64)>,
+    files: &mut Vec<Source>,
     bytes: &mut u64,
     check: &mut dyn FnMut() -> io::Result<()>,
 ) -> io::Result<()> {
@@ -457,6 +668,10 @@ fn collect(
     require(entries.len() < limits.entries, "entry_limit")?;
     let mut file = parent.source(name)?;
     let metadata = file.metadata()?;
+    require(
+        expected.is_none_or(|identity| identity == (metadata.dev(), metadata.ino())),
+        "source_changed",
+    )?;
     if metadata.is_dir() {
         entries.push(Entry::Directory {
             path: path.to_owned(),
@@ -467,6 +682,9 @@ fn collect(
                 &directory,
                 &child,
                 &format!("{path}/{child}"),
+                &format!("{source}/{child}"),
+                root,
+                None,
                 limits,
                 entries,
                 files,
@@ -485,7 +703,10 @@ fn collect(
         .ok_or_else(|| invalid("byte_limit"))?;
     require(*bytes <= limits.bytes, "byte_limit")?;
     let sha256 = copy_hash(
-        &mut CheckedRead { file: &mut file, check },
+        &mut CheckedRead {
+            file: &mut file,
+            check,
+        },
         &mut io::sink(),
         metadata.len(),
     )?;
@@ -495,7 +716,12 @@ fn collect(
         size: metadata.len(),
         sha256,
     });
-    files.push((metadata.dev(), metadata.ino()));
+    files.push(Source {
+        root,
+        path: source.to_owned(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    });
     Ok(())
 }
 

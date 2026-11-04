@@ -183,8 +183,7 @@ impl Event {
                 ..
             } => {
                 identity.validate()?;
-                crate::validate_path(name)?;
-                require(!name.contains('/'), "invalid_file_review")?;
+                crate::native_files::validate_name(name)?;
                 summary.validate()?;
                 Ok(())
             }

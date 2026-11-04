@@ -64,7 +64,7 @@ fn ready() -> (Tree, Tree) {
     let sender_context = context.clone();
     let sender = std::thread::spawn(move || {
         let prepared = stream::PreparedUpload::prepare(
-            &source.0.join("project"),
+            &[source.0.join("project")],
             sender_context,
             &mut || Ok(()),
         )?;
@@ -153,15 +153,33 @@ fn export_ack_loss_after_publication_is_published_from_the_durable_receipt() {
     let sender = std::thread::spawn(move || {
         let mut channel = channel(sender);
         let request: OfferRequest = read_message(&mut channel, 4096).unwrap();
-        let mut selection = Selection::prepare(&source.0, &request.paths, LIMITS).unwrap();
+        let plan =
+            oblivion_transfer::selection::Plan::new(&[oblivion_transfer::selection::Input {
+                path: request.paths[0].clone(),
+                directory: true,
+            }])
+            .unwrap();
+        write_message(
+            &mut channel,
+            &oblivion_transfer::endpoint::SelectionOffer {
+                directories: vec![true],
+                plan,
+            },
+        )
+        .unwrap();
+        let mut selection = Selection::prepare(&source.0, &["project".into()], LIMITS).unwrap();
         selection.manifest().write(&mut channel).unwrap();
         let _: Approval = read_message(&mut channel, 1024).unwrap();
         selection.send_data(&mut channel).unwrap();
         drop(channel);
     });
-    let prepared =
-        stream::PreparedDownload::prepare(channel(receiver), "project", &target.0, context)
-            .unwrap();
+    let prepared = stream::PreparedDownload::prepare(
+        channel(receiver),
+        &["workspace/project".into()],
+        &target.0,
+        context,
+    )
+    .unwrap();
     let summary = prepared.summary().unwrap();
     assert!(
         prepared
@@ -378,7 +396,21 @@ fn tracked_copy_keeps_both_reviewed_receiver_roots_when_paths_are_replaced() {
         let sender = std::thread::spawn(move || {
             let mut channel = channel(sender);
             let request: OfferRequest = read_message(&mut channel, 4096).unwrap();
-            let mut selection = Selection::prepare(&source.0, &request.paths, LIMITS).unwrap();
+            let plan =
+                oblivion_transfer::selection::Plan::new(&[oblivion_transfer::selection::Input {
+                    path: request.paths[0].clone(),
+                    directory: true,
+                }])
+                .unwrap();
+            write_message(
+                &mut channel,
+                &oblivion_transfer::endpoint::SelectionOffer {
+                    directories: vec![true],
+                    plan,
+                },
+            )
+            .unwrap();
+            let mut selection = Selection::prepare(&source.0, &["project".into()], LIMITS).unwrap();
             selection.manifest().write(&mut channel).unwrap();
             let _: Approval = read_message(&mut channel, 1024).unwrap();
             reached.send(()).unwrap();
@@ -392,7 +424,7 @@ fn tracked_copy_keeps_both_reviewed_receiver_roots_when_paths_are_replaced() {
         let receiver = std::thread::spawn(move || {
             let prepared = stream::PreparedDownload::prepare(
                 channel(receiver),
-                "project",
+                &["workspace/project".into()],
                 &target_path,
                 context,
             )?;

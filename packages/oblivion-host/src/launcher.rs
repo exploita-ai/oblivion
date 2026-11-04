@@ -64,8 +64,11 @@ Desktop runtime bundles
 
 Files
   oblivion files list --safe SAFE [workspace/PATH] --json
-  oblivion files import --safe SAFE SOURCE [--name NAME] [--yes]
-  oblivion files export --safe SAFE workspace/PATH DESTINATION [--yes]
+  oblivion files import --safe SAFE --source PATH [--source PATH...] [--name NAME]
+  oblivion files export --safe SAFE --path workspace/PATH [--path imports/PATH...]
+                       --destination DIR [--name NAME]
+  Multiple selections require --name NAME and publish one collection.
+  Copy commands review before copying; --yes approves an unattended copy.
   oblivion files status --safe SAFE --operation ID [--destination DIR] --json
   oblivion files recover --safe SAFE --operation ID [--destination DIR]
   oblivion files discard --safe SAFE --operation ID [--destination DIR]

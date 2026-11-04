@@ -2,7 +2,7 @@ mod support;
 
 use oblivion_transfer::channel::Channel;
 use oblivion_transfer::endpoint::{
-    Approval, OfferRequest, ReceiveRequest, read_message, write_message,
+    Approval, OfferRequest, ReceiveRequest, SelectionOffer, read_message, write_message,
 };
 use oblivion_transfer::{Limits, Manifest, Receipt, Selection};
 use std::fs::{self, File};
@@ -94,6 +94,9 @@ fn document_sender_refuses_session_state_and_only_exports_approved_document_root
             },
         )
         .unwrap();
+        let offer: SelectionOffer = read_message(&mut sender.channel, 65536).unwrap();
+        assert_eq!(offer.directories, [false]);
+        assert_eq!(offer.plan.selected, "document.txt");
         let manifest = Manifest::read(&mut sender.channel, LIMITS).unwrap();
         write_message(
             &mut receiver.channel,
@@ -119,12 +122,7 @@ fn document_sender_refuses_session_state_and_only_exports_approved_document_root
         sender.finish(true);
         receiver.finish(true);
         assert_eq!(
-            fs::read(
-                target
-                    .0
-                    .join(format!("Oblivion-{ID}/files/workspace/document.txt"))
-            )
-            .unwrap(),
+            fs::read(target.0.join(format!("Oblivion-{ID}/files/document.txt"))).unwrap(),
             CONTENT
         );
     }

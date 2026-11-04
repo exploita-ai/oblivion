@@ -721,6 +721,7 @@ fn relay_job(
                 owners,
                 remaining,
                 Permit { id: job.id, limits },
+                if job.backup.is_some() { relay::ExportSource::Ciphertext } else { relay::ExportSource::Documents },
             )
             .map_err(|_| Error("transfer_failed"));
         }

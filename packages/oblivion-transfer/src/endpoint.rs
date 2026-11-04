@@ -28,6 +28,15 @@ pub enum SourceRequest {
     Offer(OfferRequest),
 }
 
+/// Documents offers describe the selected inputs without exposing source paths.
+/// Payload framing and content manifests remain the common copy protocol.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectionOffer {
+    pub directories: Vec<bool>,
+    pub plan: crate::selection::Plan,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Approval {

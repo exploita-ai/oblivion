@@ -195,7 +195,7 @@ fn copy_hash(reader: &mut impl Read, writer: &mut impl Write, mut size: u64) -> 
 
 fn validate_path(path: &str) -> io::Result<()> {
     require(!path.is_empty() && path.len() <= 4096, "invalid_path")?;
-    require(!path.chars().any(|c| c.is_control() || c == '\\' || matches!(c, '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')), "invalid_path")?;
+    require(!path.chars().any(|c| c.is_control() || c == '\\' || matches!(c, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')), "invalid_path")?;
     let components: Vec<_> = path.split('/').collect();
     require(
         components.len() <= 32

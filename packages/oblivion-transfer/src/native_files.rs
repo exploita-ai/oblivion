@@ -25,9 +25,15 @@ impl Context {
         validate_id(&self.id)?;
         validate_id(&self.safe_id)?;
         validate_id(&self.opening)?;
-        crate::validate_path(&self.name)?;
-        require(!self.name.contains('/'), "invalid_destination_name")
+        validate_name(&self.name)
     }
+}
+
+/// A publication name preserves native spelling; only logical selection
+/// aliases use NFC normalization and case-folded collision detection.
+pub fn validate_name(name: &str) -> io::Result<()> {
+    crate::validate_path(name)?;
+    require(!name.contains('/'), "invalid_destination_name")
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]

@@ -1,37 +1,43 @@
+use oblivion_host::autolock::Opening;
 use oblivion_host::{control, scope};
 use oblivion_transfer::channel::Channel;
-use oblivion_transfer::{Receipt, stream};
 use oblivion_transfer::native_file_events::{Identity, Outcome, Phase, Summary};
-use oblivion_transfer::stream::{PreparedDownload, PreparedUpload};
 use oblivion_transfer::native_files::{Action, Context, Direction, Request, Status};
-use oblivion_host::autolock::Opening;
+use oblivion_transfer::selection::{self, Plan};
+use oblivion_transfer::stream::{PreparedDownload, PreparedUpload};
+use oblivion_transfer::{Receipt, stream};
 use serde::Deserialize;
 use serde_json::json;
 use std::fs::File;
-use std::io::{Read, Write};
 use std::io::IsTerminal;
+use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
-use std::path::{Path, PathBuf};
 use std::os::unix::net::UnixStream;
-use std::time::Instant;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::time::Instant;
 
 pub fn run(args: &[String]) -> control::Result<i32> {
     let operation = args
         .first()
         .map(String::as_str)
         .ok_or("Choose files import, export, list, status, recover or discard")?;
-    if !matches!(operation, "import" | "export" | "list" | "status" | "recover" | "discard") {
+    if !matches!(
+        operation,
+        "import" | "export" | "list" | "status" | "recover" | "discard"
+    ) {
         return Err("Choose files import, export, list, status, recover or discard".into());
     }
     let mut safe = None;
     let mut name = None;
     let mut paths = vec![];
+    let mut sources = vec![];
+    let mut selected = vec![];
     let mut cursor = None;
     let mut json_output = false;
     let mut operation_id = None;
     let mut expected_opening = None;
-    let mut recovery_destination = None;
+    let mut destination = None;
     let mut events_output = false;
     let mut confirmed = false;
     let mut options = args.iter().skip(1);
@@ -49,9 +55,31 @@ pub fn run(args: &[String]) -> control::Result<i32> {
             "--json" => json_output = true,
             "--events" => events_output = true,
             "--yes" => confirmed = true,
-            "--operation" => { if operation_id.is_some() { return Err("Duplicate --operation".into()); } operation_id = Some(options.next().ok_or("Missing operation ID")?.clone()); },
-            "--opening" => { if expected_opening.is_some() { return Err("Duplicate --opening".into()); } expected_opening = Some(options.next().ok_or("Missing opening nonce")?.clone()); },
-            "--destination" => { if recovery_destination.is_some() { return Err("Duplicate --destination".into()); } recovery_destination = Some(options.next().ok_or("Missing destination directory")?.clone()); },
+            "--operation" => {
+                if operation_id.is_some() {
+                    return Err("Duplicate --operation".into());
+                }
+                operation_id = Some(options.next().ok_or("Missing operation ID")?.clone());
+            }
+            "--opening" => {
+                if expected_opening.is_some() {
+                    return Err("Duplicate --opening".into());
+                }
+                expected_opening = Some(options.next().ok_or("Missing opening nonce")?.clone());
+            }
+            "--destination" => {
+                if destination.is_some() {
+                    return Err("Duplicate --destination".into());
+                }
+                destination = Some(
+                    options
+                        .next()
+                        .ok_or("Missing destination directory")?
+                        .clone(),
+                );
+            }
+            "--source" => sources.push(options.next().ok_or("Missing source path")?.clone()),
+            "--path" => selected.push(options.next().ok_or("Missing Safe path")?.clone()),
             "--name" => {
                 if name.is_some() {
                     return Err("Duplicate --name".into());
@@ -67,14 +95,85 @@ pub fn run(args: &[String]) -> control::Result<i32> {
         return Err("--events and --yes apply only to file import or export".into());
     }
     if events_output && confirmed {
-        return Err("Event copies require their reviewed approval; --yes cannot be combined with --events".into());
+        return Err(
+            "Event copies require their reviewed approval; --yes cannot be combined with --events"
+                .into(),
+        );
     }
-    if operation == "list" && (paths.len() > 1 || operation_id.is_some() || recovery_destination.is_some() || expected_opening.is_some())
-        || managing && (!paths.is_empty() || operation_id.is_none() || name.is_some() || cursor.is_some())
-        || !managing && operation != "list" && (paths.len() != if operation == "import" { 1 } else { 2 } || recovery_destination.is_some()) {
-        return Err("Use files import/export --safe SAFE SOURCE [DESTINATION], or files status/recover/discard --safe SAFE --operation ID [--destination DIRECTORY]".into());
+    if operation == "list"
+        && (paths.len() > 1
+            || operation_id.is_some()
+            || destination.is_some()
+            || expected_opening.is_some()
+            || name.is_some()
+            || !sources.is_empty()
+            || !selected.is_empty())
+        || managing
+            && (!paths.is_empty()
+                || operation_id.is_none()
+                || name.is_some()
+                || cursor.is_some()
+                || !sources.is_empty()
+                || !selected.is_empty())
+        || operation == "import"
+            && (!paths.is_empty()
+                || sources.is_empty()
+                || !selected.is_empty()
+                || destination.is_some()
+                || cursor.is_some())
+        || operation == "export"
+            && (!paths.is_empty()
+                || selected.is_empty()
+                || !sources.is_empty()
+                || destination.is_none()
+                || cursor.is_some())
+    {
+        return Err("Use files import --safe SAFE --source PATH [--source PATH...], or files export --safe SAFE --path workspace/PATH [--path imports/PATH...] --destination DIRECTORY".into());
     }
-    for value in operation_id.iter().chain(expected_opening.iter()) { if !oblivion_host::managed::id(value) { return Err("Invalid operation or opening ID".into()); } }
+    for value in operation_id.iter().chain(expected_opening.iter()) {
+        if !oblivion_host::managed::id(value) {
+            return Err("Invalid operation or opening ID".into());
+        }
+    }
+    let selection = if operation == "import" {
+        let sources = sources
+            .iter()
+            .map(std::path::absolute)
+            .collect::<std::io::Result<Vec<_>>>()?;
+        selection::validate_paths(
+            &sources
+                .iter()
+                .map(|path| {
+                    path.to_str()
+                        .map(str::to_owned)
+                        .ok_or("Source paths must be UTF-8")
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )?;
+        Some(CopySelection::Upload(sources))
+    } else if operation == "export" {
+        selection::validate_paths(&selected)?;
+        for path in &selected {
+            if !matches!(path.split('/').next(), Some("workspace" | "imports")) {
+                return Err("Export paths must be under workspace or imports".into());
+            }
+        }
+        Some(CopySelection::Download {
+            selected,
+            destination: Path::new(
+                destination
+                    .as_ref()
+                    .ok_or("Missing destination directory")?,
+            )
+            .canonicalize()?,
+        })
+    } else {
+        None
+    };
+    let destination_name = selection
+        .as_ref()
+        .map(|selection| selection.name(name.map(String::as_str)))
+        .transpose()?;
     let safe = safe.ok_or("Choose a Safe with --safe NAME")?;
     let state = super::status()?;
     let id = super::find_safe(&state, safe)?.ok_or("Safe not found")?;
@@ -125,45 +224,126 @@ pub fn run(args: &[String]) -> control::Result<i32> {
         }
         return Ok(0);
     }
-    if cursor.is_some() { return Err("--cursor applies to directory listing".into()); }
+    if cursor.is_some() {
+        return Err("--cursor applies to directory listing".into());
+    }
     #[derive(Deserialize)]
-    struct Current { idle_lock: oblivion_host::autolock::Status }
+    struct Current {
+        idle_lock: oblivion_host::autolock::Status,
+    }
     let current: Current = serde_json::from_str(&control::request("status", None, &[])?)?;
-    let opening = current.idle_lock.safes.into_iter().find(|entry| entry.opening.slot == opened.slot && entry.opening.safe_id == id && !entry.closing)
-        .ok_or("Safe opening changed; reopen Files before continuing")?.opening;
-    if expected_opening.as_deref().is_some_and(|expected| expected != opening.nonce) { return Err("Safe opening changed; inspect the operation again".into()); }
+    let opening = current
+        .idle_lock
+        .safes
+        .into_iter()
+        .find(|entry| {
+            entry.opening.slot == opened.slot && entry.opening.safe_id == id && !entry.closing
+        })
+        .ok_or("Safe opening changed; reopen Files before continuing")?
+        .opening;
+    if expected_opening
+        .as_deref()
+        .is_some_and(|expected| expected != opening.nonce)
+    {
+        return Err("Safe opening changed; inspect the operation again".into());
+    }
     if managing {
         let operation_id = operation_id.ok_or("Choose an operation ID")?;
-        let action = match operation { "recover" => Action::Recover, "discard" => Action::Discard, _ => Action::Status };
-        let result = if let Some(destination) = recovery_destination {
+        let action = match operation {
+            "recover" => Action::Recover,
+            "discard" => Action::Discard,
+            _ => Action::Status,
+        };
+        let result = if let Some(destination) = destination {
             let destination = Path::new(&destination).canonicalize()?;
-            stream::operations::manage(&destination.join(".oblivion-transfers"), &destination, &operation_id, &id, &opening.nonce, Direction::Export, action)?
+            stream::operations::manage(
+                &destination.join(".oblivion-transfers"),
+                &destination,
+                &operation_id,
+                &id,
+                &opening.nonce,
+                Direction::Export,
+                action,
+            )?
         } else {
-            scope::within(opened.slot, || manage_import(&opening, &operation_id, action))?
+            scope::within(opened.slot, || {
+                manage_import(&opening, &operation_id, action)
+            })?
         };
         result.validate(&operation_id, &id, &opening.nonce)?;
         println!("{}", serde_json::to_string(&result)?);
         return Ok(0);
     }
-    let destination_name = name.map(String::as_str).or_else(|| Path::new(paths[0]).file_name().and_then(|name| name.to_str()))
-        .ok_or("Choose a destination name with --name")?;
-    let source = (operation == "import").then(|| std::path::absolute(paths[0])).transpose()?;
-    let destination = (operation == "export").then(|| Path::new(paths[1]).canonicalize()).transpose()?;
-    let export = if operation == "export" {
-        let (root, selected) = paths[0].split_once('/').ok_or("Export a path under workspace/ or imports/")?;
-        if !matches!(root, "workspace" | "imports") || selected.is_empty() { return Err("Export a path under workspace/ or imports/".into()); }
-        Some((root, selected))
-    } else { None };
-    let operation_id = match operation_id { Some(id) => id, None => { let mut random = [0; 16]; File::open("/dev/urandom")?.read_exact(&mut random)?; random.iter().map(|byte| format!("{byte:02x}")).collect() } };
-    let context = Context { id: operation_id, safe_id: id.clone(), opening: opening.nonce.clone(), direction: if export.is_some() { Direction::Export } else { Direction::Import }, name: destination_name.into() };
+    let selection = selection.ok_or("Missing file selection")?;
+    let operation_id = match operation_id {
+        Some(id) => id,
+        None => {
+            let mut random = [0; 16];
+            File::open("/dev/urandom")?.read_exact(&mut random)?;
+            random.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+    };
+    let context = Context {
+        id: operation_id,
+        safe_id: id.clone(),
+        opening: opening.nonce.clone(),
+        direction: if operation == "export" {
+            Direction::Export
+        } else {
+            Direction::Import
+        },
+        name: destination_name.ok_or("Missing destination name")?,
+    };
     context.validate()?;
     // Stable identity is available before allocating any receiver state. Keep
     // stdout parseable as the final receipt, even if the copy is interrupted.
-    eprintln!("File operation {}. Inspect with oblivion files status --safe {} --operation {}{}", context.id, id, context.id, if export.is_some() { " --destination DIRECTORY" } else { "" });
+    eprintln!(
+        "File operation {}. Inspect with oblivion files status --safe {} --operation {}{}",
+        context.id,
+        id,
+        context.id,
+        if operation == "export" {
+            " --destination DIRECTORY"
+        } else {
+            ""
+        }
+    );
     if !events_output && !confirmed && !std::io::stdin().is_terminal() {
         return Err("A file copy needs review in a terminal, --yes for an explicit unattended copy, or --events for the manager".into());
     }
-    scope::within(opened.slot, || copy(opening, context, source, destination, export.map(|(root, selected)| (root.to_owned(), selected.to_owned())), events_output, confirmed))
+    scope::within(opened.slot, || {
+        copy(opening, context, selection, events_output, confirmed)
+    })
+}
+
+enum CopySelection {
+    Upload(Vec<PathBuf>),
+    Download {
+        selected: Vec<String>,
+        destination: PathBuf,
+    },
+}
+
+impl CopySelection {
+    fn name(&self, requested: Option<&str>) -> control::Result<String> {
+        let first = match self {
+            Self::Upload(sources) if sources.len() == 1 => {
+                sources[0].file_name().and_then(|name| name.to_str())
+            }
+            Self::Download { selected, .. } if selected.len() == 1 => {
+                selected[0].rsplit('/').next()
+            }
+            _ => None,
+        };
+        let name = requested
+            .or(first)
+            .ok_or("Choose a collection name with --name when selecting multiple paths")?;
+        // Publication names preserve the user's native spelling. NFC is an
+        // alias rule inside the transfer plan, not a rule for this pathname.
+        oblivion_transfer::native_files::validate_name(name)
+            .map_err(|_| "Choose a valid destination name with --name")?;
+        Ok(name.into())
+    }
 }
 
 enum PreparedCopy {
@@ -172,6 +352,12 @@ enum PreparedCopy {
 }
 
 impl PreparedCopy {
+    fn plan(&self) -> &Plan {
+        match self {
+            Self::Upload(prepared) => prepared.plan(),
+            Self::Download(prepared) => prepared.plan(),
+        }
+    }
     fn summary(&self) -> std::io::Result<Summary> {
         match self {
             Self::Upload(prepared) => prepared.summary(),
@@ -188,48 +374,90 @@ enum Copied {
 fn copy(
     opening: Opening,
     context: Context,
-    source: Option<PathBuf>,
-    destination: Option<PathBuf>,
-    export: Option<(String, String)>,
+    selection: CopySelection,
     events_output: bool,
     confirmed: bool,
 ) -> control::Result<i32> {
-    let mut events = events_output.then(|| super::file_events::Control::stdio(Identity {
-        operation_id: context.id.clone(), safe_id: context.safe_id.clone(), opening: context.opening.clone(),
-    }, context.direction, context.name.clone())).transpose()?;
+    let mut events = events_output
+        .then(|| {
+            super::file_events::Control::stdio(
+                Identity {
+                    operation_id: context.id.clone(),
+                    safe_id: context.safe_id.clone(),
+                    opening: context.opening.clone(),
+                },
+                context.direction,
+                context.name.clone(),
+            )
+        })
+        .transpose()?;
     // Retain the exact client even if its request or source preparation fails.
     // Dropping its private lease is the last-resort revocation on process death.
     let mut attachment = None;
     let result = (|| -> control::Result<Copied> {
-        let prepared = if let Some(source) = &source {
-            PreparedCopy::Upload(PreparedUpload::prepare(source, context.clone(), &mut || {
-                events.as_ref().map_or(Ok(()), super::file_events::Control::check)
-            })?)
-        } else {
-            let (root, selected) = export.as_ref().ok_or("Missing export selection")?;
-            let channel = file_channel(&opening, &json!({"operation":"export","root":root}), events.as_ref().map(super::file_events::Control::watch).transpose()?, &mut attachment)?;
-            PreparedCopy::Download(PreparedDownload::prepare(channel, selected,
-                destination.as_deref().ok_or("Missing export directory")?, context.clone())?)
+        let prepared = match &selection {
+            CopySelection::Upload(sources) => PreparedCopy::Upload(PreparedUpload::prepare(
+                sources,
+                context.clone(),
+                &mut || {
+                    events
+                        .as_ref()
+                        .map_or(Ok(()), super::file_events::Control::check)
+                },
+            )?),
+            CopySelection::Download {
+                selected,
+                destination,
+            } => {
+                let channel = file_channel(
+                    &opening,
+                    &json!({"operation":"export"}),
+                    events
+                        .as_ref()
+                        .map(super::file_events::Control::watch)
+                        .transpose()?,
+                    &mut attachment,
+                )?;
+                PreparedCopy::Download(PreparedDownload::prepare(
+                    channel,
+                    selected,
+                    destination,
+                    context.clone(),
+                )?)
+            }
         };
         let summary = prepared.summary()?;
         let digest = summary.manifest_sha256.clone();
         if let Some(events) = &mut events {
+            events.plan(prepared.plan())?;
             events.review(summary.clone())?;
-            if !events.wait_approval()? { return Ok(Copied::Cancelled); }
-        } else if !review(&context, &summary, source.as_deref(), destination.as_deref(), export.as_ref().map(|(_, selected)| selected.as_str()), confirmed)? {
+            if !events.wait_approval()? {
+                return Ok(Copied::Cancelled);
+            }
+        } else if !review(&context, &summary, &selection, prepared.plan(), confirmed)? {
             return Ok(Copied::Cancelled);
         }
-        let watch = events.as_ref().map(super::file_events::Control::watch).transpose()?;
+        let watch = events
+            .as_ref()
+            .map(super::file_events::Control::watch)
+            .transpose()?;
         let mut last_progress = None;
         let mut observer = |phase, bytes| {
-            if let Some(events) = &mut events { return events.progress(phase, bytes); }
+            if let Some(events) = &mut events {
+                return events.progress(phase, bytes);
+            }
             console_progress(phase, bytes, summary.bytes, &mut last_progress)
         };
         let receipt = match prepared {
             PreparedCopy::Upload(prepared) => {
                 // The import destination is not contacted until this exact
                 // prepared manifest has received the reviewed approval.
-                let request = Request::Import { id: context.id.clone(), safe_id: context.safe_id.clone(), opening: context.opening.clone(), name: context.name.clone() };
+                let request = Request::Import {
+                    id: context.id.clone(),
+                    safe_id: context.safe_id.clone(),
+                    opening: context.opening.clone(),
+                    name: context.name.clone(),
+                };
                 let mut channel = file_channel(&opening, &request, watch, &mut attachment)?;
                 prepared.send(&mut channel, &digest, &mut observer)?
             }
@@ -241,7 +469,9 @@ fn copy(
         let result = control::release_agent(&client, &opening.safe_id);
         drop(lease);
         result
-    } else { Ok(()) };
+    } else {
+        Ok(())
+    };
     if let Some(events) = &mut events {
         let outcome = if released.is_ok() {
             match &result {
@@ -250,16 +480,27 @@ fn copy(
                 Err(_) if events.cancelled_before_copy() => Outcome::CancelledBeforeCopy,
                 _ => Outcome::Interrupted,
             }
-        } else { Outcome::Interrupted };
-        let receipt = match result { Ok(Copied::Complete(receipt)) if outcome == Outcome::Completed => Some(receipt), _ => None };
+        } else {
+            Outcome::Interrupted
+        };
+        let receipt = match result {
+            Ok(Copied::Complete(receipt)) if outcome == Outcome::Completed => Some(receipt),
+            _ => None,
+        };
         if let Err(error) = events.finish(outcome, receipt) {
-            if outcome != Outcome::Completed { return Err(error.into()); }
+            if outcome != Outcome::Completed {
+                return Err(error.into());
+            }
             // Cancellation can arrive while releasing the owned attachment.
             // A rejected completion still gets one interrupted-outcome attempt.
             events.finish(Outcome::Interrupted, None)?;
             return Ok(1);
         }
-        return Ok(match outcome { Outcome::Completed => 0, Outcome::CancelledBeforeCopy => 130, Outcome::Interrupted => 1 });
+        return Ok(match outcome {
+            Outcome::Completed => 0,
+            Outcome::CancelledBeforeCopy => 130,
+            Outcome::Interrupted => 1,
+        });
     }
     eprintln!();
     released.map_err(|error| format!("File operation {} cleanup could not be confirmed ({error}). Inspect its status before retrying.", context.id))?;
@@ -277,34 +518,109 @@ fn file_channel(
 ) -> control::Result<Channel> {
     let (connection, lease, client) = control::attach_file(opening)?;
     *attachment = Some((lease, client));
-    let mut channel = Channel::new(File::from(OwnedFd::from(connection)), Duration::from_secs(3600))?;
-    if let Some(watch) = watch { channel.watch(watch); }
+    let mut channel = Channel::new(
+        File::from(OwnedFd::from(connection)),
+        Duration::from_secs(3600),
+    )?;
+    if let Some(watch) = watch {
+        channel.watch(watch);
+    }
     let request = serde_json::to_vec(request)?;
     channel.write_all(&(request.len() as u32).to_be_bytes())?;
     channel.write_all(&request)?;
     Ok(channel)
 }
 
-fn review(context: &Context, summary: &Summary, source: Option<&Path>, destination: Option<&Path>, selected: Option<&str>, confirmed: bool) -> control::Result<bool> {
-    eprintln!("Review {} · Safe {}", if context.direction == Direction::Import { "import" } else { "export" }, context.safe_id);
-    if let Some(source) = source { eprintln!("From this computer · {source:?}"); }
-    if let Some(selected) = selected { eprintln!("From the Safe · {selected:?}"); }
-    if let Some(destination) = destination { eprintln!("To this computer · {:?}", destination.join(&context.name)); }
-    else { eprintln!("To the Safe · workspace/{:?}", context.name); }
-    eprintln!("{} files · {} folders · {} bytes", summary.files, summary.directories, summary.bytes);
+fn review(
+    context: &Context,
+    summary: &Summary,
+    selection: &CopySelection,
+    plan: &Plan,
+    confirmed: bool,
+) -> control::Result<bool> {
+    eprintln!(
+        "Review {} · Safe {}",
+        if context.direction == Direction::Import {
+            "import"
+        } else {
+            "export"
+        },
+        context.safe_id
+    );
+    for mapping in &plan.mappings {
+        let source = match selection {
+            CopySelection::Upload(sources) => format!("{:?}", sources[mapping.input_index]),
+            CopySelection::Download { selected, .. } => {
+                format!("{:?}", selected[mapping.input_index])
+            }
+        };
+        if let Some(owner) = mapping.covered_by {
+            eprintln!(
+                "  {}. {source} · included in selection {}",
+                mapping.input_index + 1,
+                owner + 1
+            );
+            continue;
+        }
+        let output = if plan.mappings.len() == 1 {
+            context.name.clone()
+        } else {
+            format!(
+                "{}/{}",
+                context.name,
+                mapping.alias.as_deref().ok_or("Invalid file mapping")?
+            )
+        };
+        eprintln!("  {}. {source} → {output:?}", mapping.input_index + 1);
+    }
+    match selection {
+        CopySelection::Download { destination, .. } => {
+            eprintln!("To this computer · {:?}", destination.join(&context.name));
+            eprintln!("Exported files use the destination filesystem's protection.");
+        }
+        CopySelection::Upload(_) => eprintln!("To the Safe · workspace/{:?}", context.name),
+    }
+    eprintln!(
+        "{} files · {} folders · {} bytes",
+        summary.files, summary.directories, summary.bytes
+    );
     eprintln!("Manifest SHA-256 {}", summary.manifest_sha256);
-    if confirmed { return Ok(true); }
+    if confirmed {
+        return Ok(true);
+    }
     eprint!("Copy these items? [y/N] ");
     std::io::stderr().flush()?;
     use std::io::BufRead;
     let mut answer = String::new();
     std::io::stdin().lock().take(16).read_line(&mut answer)?;
-    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
-fn console_progress(phase: Phase, bytes: u64, total: u64, previous: &mut Option<(Phase, Instant)>) -> std::io::Result<()> {
-    if phase == Phase::Copying && bytes != total && previous.as_ref().is_some_and(|(last, at)| *last == phase && at.elapsed() < Duration::from_millis(100)) { return Ok(()); }
-    eprint!("\r{} · {bytes}/{total} bytes", if phase == Phase::Copying { "Copying" } else { "Finalizing" });
+fn console_progress(
+    phase: Phase,
+    bytes: u64,
+    total: u64,
+    previous: &mut Option<(Phase, Instant)>,
+) -> std::io::Result<()> {
+    if phase == Phase::Copying
+        && bytes != total
+        && previous
+            .as_ref()
+            .is_some_and(|(last, at)| *last == phase && at.elapsed() < Duration::from_millis(100))
+    {
+        return Ok(());
+    }
+    eprint!(
+        "\r{} · {bytes}/{total} bytes",
+        if phase == Phase::Copying {
+            "Copying"
+        } else {
+            "Finalizing"
+        }
+    );
     std::io::stderr().flush()?;
     *previous = Some((phase, Instant::now()));
     Ok(())
@@ -314,18 +630,36 @@ fn manage_import(opening: &Opening, operation: &str, action: Action) -> control:
     let (mut connection, lease, client) = control::attach_file(opening)?;
     let result = (|| -> control::Result<Status> {
         let request = match action {
-            Action::Status => Request::Status { id: operation.into(), safe_id: opening.safe_id.clone(), opening: opening.nonce.clone() },
-            Action::Recover => Request::Recover { id: operation.into(), safe_id: opening.safe_id.clone(), opening: opening.nonce.clone() },
-            Action::Discard => Request::Discard { id: operation.into(), safe_id: opening.safe_id.clone(), opening: opening.nonce.clone() },
+            Action::Status => Request::Status {
+                id: operation.into(),
+                safe_id: opening.safe_id.clone(),
+                opening: opening.nonce.clone(),
+            },
+            Action::Recover => Request::Recover {
+                id: operation.into(),
+                safe_id: opening.safe_id.clone(),
+                opening: opening.nonce.clone(),
+            },
+            Action::Discard => Request::Discard {
+                id: operation.into(),
+                safe_id: opening.safe_id.clone(),
+                opening: opening.nonce.clone(),
+            },
         };
         let request = serde_json::to_vec(&request)?;
-        connection.write_all(&(request.len() as u32).to_be_bytes())?; connection.write_all(&request)?;
-        let mut channel = Channel::new(File::from(OwnedFd::from(connection)), Duration::from_secs(60))?;
+        connection.write_all(&(request.len() as u32).to_be_bytes())?;
+        connection.write_all(&request)?;
+        let mut channel = Channel::new(
+            File::from(OwnedFd::from(connection)),
+            Duration::from_secs(60),
+        )?;
         let response: Status = oblivion_transfer::endpoint::read_message(&mut channel, 8192)?;
         response.validate(operation, &opening.safe_id, &opening.nonce)?;
         Ok(response)
     })();
-    let released = control::release_agent(&client, &opening.safe_id); drop(lease); released?;
+    let released = control::release_agent(&client, &opening.safe_id);
+    drop(lease);
+    released?;
     result
 }
 
@@ -335,10 +669,20 @@ mod tests {
 
     #[test]
     fn event_copies_cannot_bypass_their_manifest_approval_with_yes() {
-        let args = ["import", "--safe", "research", "/selected", "--events", "--yes"]
-            .map(str::to_owned);
-        assert_eq!(run(&args).unwrap_err().to_string(),
-            "Event copies require their reviewed approval; --yes cannot be combined with --events");
+        let args = [
+            "import",
+            "--safe",
+            "research",
+            "--source",
+            "/selected",
+            "--events",
+            "--yes",
+        ]
+        .map(str::to_owned);
+        assert_eq!(
+            run(&args).unwrap_err().to_string(),
+            "Event copies require their reviewed approval; --yes cannot be combined with --events"
+        );
     }
 
     #[test]
@@ -346,9 +690,69 @@ mod tests {
         for action in ["list", "status", "recover", "discard"] {
             for flag in ["--events", "--yes"] {
                 let args = [action, "--safe", "research", flag].map(str::to_owned);
-                assert_eq!(run(&args).unwrap_err().to_string(),
-                    "--events and --yes apply only to file import or export");
+                assert_eq!(
+                    run(&args).unwrap_err().to_string(),
+                    "--events and --yes apply only to file import or export"
+                );
             }
         }
+    }
+
+    #[test]
+    fn copy_selectors_are_explicit_and_never_reuse_the_positional_grammar() {
+        for args in [
+            vec!["import", "--safe", "research", "/selected"],
+            vec![
+                "export",
+                "--safe",
+                "research",
+                "workspace/project",
+                "/destination",
+            ],
+            vec![
+                "import",
+                "--safe",
+                "research",
+                "--path",
+                "workspace/project",
+            ],
+            vec!["list", "--safe", "research", "--source", "/selected"],
+            vec![
+                "recover",
+                "--safe",
+                "research",
+                "--operation",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "--path",
+                "workspace/project",
+            ],
+        ] {
+            assert!(
+                run(&args.into_iter().map(str::to_owned).collect::<Vec<_>>())
+                    .unwrap_err()
+                    .to_string()
+                    .starts_with("Use files import --safe SAFE --source PATH")
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_inputs_require_an_explicit_collection_name() {
+        let selection = super::CopySelection::Upload(vec!["/a/notes".into(), "/b/notes".into()]);
+        assert!(selection.name(None).is_err());
+        assert_eq!(selection.name(Some("research")).unwrap(), "research");
+        let selection = super::CopySelection::Download {
+            selected: vec!["workspace/project".into(), "imports/note".into()],
+            destination: "/tmp".into(),
+        };
+        assert!(selection.name(None).is_err());
+        assert_eq!(selection.name(Some("research")).unwrap(), "research");
+        let single = super::CopySelection::Upload(vec!["/a/notes".into()]);
+        assert_eq!(single.name(None).unwrap(), "notes");
+        assert_eq!(single.name(Some("renamed")).unwrap(), "renamed");
+        assert_eq!(single.name(Some("cafe\u{301}")).unwrap(), "cafe\u{301}");
+        let unsafe_name = super::CopySelection::Upload(vec!["/a/note\\draft".into()]);
+        assert!(unsafe_name.name(None).is_err());
+        assert_eq!(unsafe_name.name(Some("note_draft")).unwrap(), "note_draft");
     }
 }

@@ -5,6 +5,7 @@ use oblivion_transfer::native_file_events::{
     self, Event, Identity, Input, Outcome, Phase, Summary,
 };
 use oblivion_transfer::native_files::Direction;
+use oblivion_transfer::selection::{MAPPING_PAGE, Plan};
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -45,6 +46,7 @@ pub struct Control {
     output: File,
     reader: Option<JoinHandle<()>>,
     summary: Option<Summary>,
+    mapping: Option<(String, usize)>,
     deadline: Instant,
     progress: Option<(Phase, u64, Instant)>,
     finished: bool,
@@ -109,10 +111,41 @@ impl Control {
             output,
             reader: Some(reader),
             summary: None,
+            mapping: None,
             deadline: Instant::now() + BUDGET,
             progress: None,
             finished: false,
         })
+    }
+
+    pub fn plan(&mut self, plan: &Plan) -> io::Result<()> {
+        if self.mapping.is_some()
+            || self.finished
+            || !matches!(
+                self.shared.state.lock().map_err(|_| aborted())?.stage,
+                Stage::Preparing
+            )
+        {
+            return Err(aborted());
+        }
+        let digest = plan.sha256()?;
+        for (page, entries) in plan.mappings.chunks(MAPPING_PAGE).enumerate() {
+            self.emit(
+                &Event::Mapping {
+                    identity: self.identity.clone(),
+                    start: page * MAPPING_PAGE,
+                    total: plan.mappings.len(),
+                    selected: plan.selected.clone(),
+                    entries: entries.to_vec(),
+                    mapping_sha256: digest.clone(),
+                },
+                true,
+            )?;
+        }
+        // A failed or cancelled page never arms a review over an incomplete map.
+        self.check()?;
+        self.mapping = Some((digest, plan.mappings.len()));
+        Ok(())
     }
 
     pub fn review(&mut self, summary: Summary) -> io::Result<()> {
@@ -139,6 +172,12 @@ impl Control {
                 break;
             }
             state = self.wait(state)?;
+        }
+        if !self.mapping.as_ref().is_some_and(|(digest, count)| {
+            *digest == summary.mapping_sha256
+                && summary.files + summary.directories == summary.entries - usize::from(*count > 1)
+        }) {
+            return Err(aborted());
         }
         state.stage = Stage::Review(summary.manifest_sha256.clone());
         drop(state);
@@ -433,11 +472,19 @@ mod tests {
     fn summary() -> Summary {
         Summary {
             manifest_sha256: "d".repeat(64),
+            mapping_sha256: plan().sha256().unwrap(),
             entries: 1,
             files: 1,
             directories: 0,
             bytes: 8,
         }
+    }
+    fn plan() -> Plan {
+        Plan::new(&[oblivion_transfer::selection::Input {
+            path: "/private/note".into(),
+            directory: false,
+        }])
+        .unwrap()
     }
     fn fixture() -> (Control, UnixStream, BufReader<UnixStream>) {
         let (input, user) = UnixStream::pair().unwrap();
@@ -472,6 +519,19 @@ mod tests {
         reader.read_line(&mut line).unwrap();
         serde_json::from_str(&line).unwrap()
     }
+    fn review(control: &mut Control, output: &mut BufReader<UnixStream>) {
+        control.plan(&plan()).unwrap();
+        assert!(matches!(
+            event(output),
+            Event::Mapping {
+                start: 0,
+                total: 1,
+                ..
+            }
+        ));
+        control.review(summary()).unwrap();
+        assert!(matches!(event(output), Event::Review { .. }));
+    }
     fn revoked(control: &Control) {
         let deadline = Instant::now() + Duration::from_secs(2);
         while control.check().is_ok() {
@@ -483,8 +543,7 @@ mod tests {
     #[test]
     fn real_approval_progress_and_cancel_revoke_watched_io_but_deliver_terminal_outcome() {
         let (mut control, mut user, mut output) = fixture();
-        control.review(summary()).unwrap();
-        assert!(matches!(event(&mut output), Event::Review { .. }));
+        review(&mut control, &mut output);
         approve(&mut user);
         assert!(control.wait_approval().unwrap());
         control.progress(Phase::Copying, 0).unwrap();
@@ -520,6 +579,50 @@ mod tests {
     }
 
     #[test]
+    fn all_mapping_pages_and_their_exact_digest_are_required_before_review() {
+        let (mut control, _user, mut output) = fixture();
+        assert!(control.review(summary()).is_err());
+        let plan = Plan::new(
+            &(0..5)
+                .map(|index| oblivion_transfer::selection::Input {
+                    path: format!("/private/{index}/note"),
+                    directory: false,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        control.plan(&plan).unwrap();
+        for (start, length) in [(0, 4), (4, 1)] {
+            let Event::Mapping {
+                identity: observed,
+                start: observed_start,
+                total,
+                selected,
+                entries,
+                mapping_sha256,
+            } = event(&mut output)
+            else {
+                panic!("mapping page required")
+            };
+            assert_eq!(observed, identity());
+            assert_eq!((observed_start, total, entries.len()), (start, 5, length));
+            assert_eq!(selected, "selection");
+            assert_eq!(mapping_sha256, plan.sha256().unwrap());
+            assert_eq!(entries, plan.mappings[start..start + length]);
+        }
+        assert!(control.plan(&plan).is_err());
+        assert!(control.review(summary()).is_err());
+        let mut summary = summary();
+        summary.mapping_sha256 = plan.sha256().unwrap();
+        assert!(control.review(summary.clone()).is_err());
+        summary.entries = 6;
+        summary.files = 5;
+        control.review(summary).unwrap();
+        assert!(matches!(event(&mut output), Event::Review { .. }));
+        assert!(control.plan(&plan).is_err());
+    }
+
+    #[test]
     fn buffered_premature_or_duplicate_approval_and_eof_are_not_approval() {
         let (input, mut user) = UnixStream::pair().unwrap();
         let (output, _reader) = UnixStream::pair().unwrap();
@@ -535,15 +638,13 @@ mod tests {
         assert!(control.review(summary()).is_err());
         revoked(&control);
         let (mut control, mut user, mut output) = fixture();
-        control.review(summary()).unwrap();
-        event(&mut output);
+        review(&mut control, &mut output);
         approve(&mut user);
         assert!(control.wait_approval().unwrap());
         approve(&mut user);
         revoked(&control);
         let (mut control, user, mut output) = fixture();
-        control.review(summary()).unwrap();
-        event(&mut output);
+        review(&mut control, &mut output);
         drop(user);
         assert!(control.wait_approval().is_err());
         revoked(&control);
@@ -583,8 +684,7 @@ mod tests {
     #[test]
     fn completion_requires_the_reviewed_receipt_after_real_copy_totals() {
         let (mut control, mut user, mut output) = fixture();
-        control.review(summary()).unwrap();
-        event(&mut output);
+        review(&mut control, &mut output);
         approve(&mut user);
         assert!(control.wait_approval().unwrap());
         control.progress(Phase::Copying, 8).unwrap();
@@ -655,7 +755,18 @@ mod tests {
     #[test]
     fn cancellation_interrupts_a_full_stdout_without_holding_approval_mutex() {
         let (input, mut user) = UnixStream::pair().unwrap();
-        let (mut output, _unread) = UnixStream::pair().unwrap();
+        let (mut output, reader) = UnixStream::pair().unwrap();
+        let mut control = Control::new(
+            File::from(OwnedFd::from(input)),
+            File::from(OwnedFd::from(output.try_clone().unwrap())),
+            identity(),
+            Direction::Import,
+            "note".into(),
+        )
+        .unwrap();
+        control.plan(&plan()).unwrap();
+        let mut unread = BufReader::new(reader);
+        assert!(matches!(event(&mut unread), Event::Mapping { .. }));
         output.set_nonblocking(true).unwrap();
         let mut filled = 0;
         loop {
@@ -666,14 +777,6 @@ mod tests {
             }
         }
         assert!(filled > 0);
-        let mut control = Control::new(
-            File::from(OwnedFd::from(input)),
-            File::from(OwnedFd::from(output)),
-            identity(),
-            Direction::Import,
-            "note".into(),
-        )
-        .unwrap();
         let shared = Arc::clone(&control.shared);
         let started = Instant::now();
         let writer = std::thread::spawn(move || control.review(summary()));

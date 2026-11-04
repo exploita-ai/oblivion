@@ -1,4 +1,7 @@
-use super::{Approval, OfferRequest, ReceiveRequest, SourceRequest, read_message, write_message};
+use super::{
+    Approval, OfferRequest, ReceiveRequest, SelectionOffer, SourceRequest, read_message,
+    write_message,
+};
 use crate::channel::Channel;
 use crate::{Manifest, Receipt, Selection, invalid, receive, require, validate_id};
 use std::fs::File;
@@ -24,13 +27,22 @@ pub fn send_open_file(channel: &mut Channel, file: File, maximum: u64) -> io::Re
     send_open_file_receipt(channel, file, maximum).map(|_| ())
 }
 
-pub fn send_open_file_receipt(channel: &mut Channel, file: File, maximum: u64) -> io::Result<Receipt> {
+pub fn send_open_file_receipt(
+    channel: &mut Channel,
+    file: File,
+    maximum: u64,
+) -> io::Result<Receipt> {
     send_open_file_completed(channel, file, maximum, |_| Ok(()))
 }
 
 /// Completion is recorded before the final wire acknowledgment. A lost peer
 /// can reconcile the completed copy without replaying its mutation.
-pub fn send_open_file_completed(channel: &mut Channel, file: File, maximum: u64, completed: impl FnOnce(&Receipt) -> io::Result<()>) -> io::Result<Receipt> {
+pub fn send_open_file_completed(
+    channel: &mut Channel,
+    file: File,
+    maximum: u64,
+    completed: impl FnOnce(&Receipt) -> io::Result<()>,
+) -> io::Result<Receipt> {
     require(
         (32 * 1024 * 1024..=crate::MAX_ENCRYPTED_VOLUME_BYTES).contains(&maximum),
         "invalid_backup_limit",
@@ -71,11 +83,20 @@ pub fn receive_open_file(channel: &mut Channel, file: File, maximum: u64) -> io:
     receive_open_file_receipt(channel, file, maximum).map(|_| ())
 }
 
-pub fn receive_open_file_receipt(channel: &mut Channel, file: File, maximum: u64) -> io::Result<Receipt> {
+pub fn receive_open_file_receipt(
+    channel: &mut Channel,
+    file: File,
+    maximum: u64,
+) -> io::Result<Receipt> {
     receive_open_file_completed(channel, file, maximum, |_| Ok(()))
 }
 
-pub fn receive_open_file_completed(channel: &mut Channel, mut file: File, maximum: u64, completed: impl FnOnce(&Receipt) -> io::Result<()>) -> io::Result<Receipt> {
+pub fn receive_open_file_completed(
+    channel: &mut Channel,
+    mut file: File,
+    maximum: u64,
+    completed: impl FnOnce(&Receipt) -> io::Result<()>,
+) -> io::Result<Receipt> {
     require(
         (32 * 1024 * 1024..=crate::MAX_ENCRYPTED_VOLUME_BYTES).contains(&maximum),
         "invalid_backup_limit",
@@ -127,11 +148,11 @@ pub fn receive_open_file_completed(channel: &mut Channel, mut file: File, maximu
     file.sync_all()?;
     channel.check()?;
     let receipt = crate::Receipt {
-            id: request.approval.id,
-            manifest_sha256: manifest.sha256(),
-            entries: 1,
-            bytes: *size,
-        };
+        id: request.approval.id,
+        manifest_sha256: manifest.sha256(),
+        entries: 1,
+        bytes: *size,
+    };
     completed(&receipt)?;
     write_message(channel, &receipt)?;
     Ok(receipt)
@@ -159,16 +180,16 @@ fn source_request(channel: &mut Channel, root: &Path, documents: bool) -> io::Re
 fn send_from(channel: &mut Channel, root: &Path, documents: bool) -> io::Result<()> {
     let request = source_request(channel, root, documents)?;
     validate_id(&request.id)?;
-    if documents {
-        require(
-            request
-                .paths
-                .iter()
-                .all(|path| matches!(path.split('/').next(), Some("workspace" | "imports"))),
-            "invalid_document_selection",
-        )?;
-    }
-    let mut selection = Selection::prepare(root, &request.paths, request.limits)?;
+    let mut selection = if documents {
+        let (selection, plan, directories) =
+            Selection::document_collection(root, &request.paths, request.limits, &mut || {
+                channel.check()
+            })?;
+        write_message(channel, &SelectionOffer { directories, plan })?;
+        selection
+    } else {
+        Selection::prepare(root, &request.paths, request.limits)?
+    };
     send_selection(channel, &mut selection, &request.id)
 }
 
@@ -176,11 +197,20 @@ fn send_selection(channel: &mut Channel, selection: &mut Selection, id: &str) ->
     send_selection_receipt(channel, selection, id).map(|_| ())
 }
 
-fn send_selection_receipt(channel: &mut Channel, selection: &mut Selection, id: &str) -> io::Result<Receipt> {
+fn send_selection_receipt(
+    channel: &mut Channel,
+    selection: &mut Selection,
+    id: &str,
+) -> io::Result<Receipt> {
     send_selection_completed(channel, selection, id, |_| Ok(()))
 }
 
-fn send_selection_completed(channel: &mut Channel, selection: &mut Selection, id: &str, completed: impl FnOnce(&Receipt) -> io::Result<()>) -> io::Result<Receipt> {
+fn send_selection_completed(
+    channel: &mut Channel,
+    selection: &mut Selection,
+    id: &str,
+    completed: impl FnOnce(&Receipt) -> io::Result<()>,
+) -> io::Result<Receipt> {
     selection.manifest().write(channel)?;
     let approval: Approval = read_message(channel, 1024)?;
     require(
@@ -251,4 +281,3 @@ fn accept_into(channel: &mut Channel, root: &Path, published: Option<&Path>) -> 
     }
     write_message(channel, &receipt)
 }
-

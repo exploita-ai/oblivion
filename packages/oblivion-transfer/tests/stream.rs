@@ -32,7 +32,7 @@ fn desktop_upload_publishes_one_working_tree_and_recovers_the_same_receipt() {
             name: "gbsoftware".into(),
         };
         let prepared =
-            stream::PreparedUpload::prepare(&source.0.join("project"), context, &mut || Ok(()))
+            stream::PreparedUpload::prepare(&[source.0.join("project")], context, &mut || Ok(()))
                 .unwrap();
         let summary = prepared.summary().unwrap();
         prepared
@@ -119,7 +119,7 @@ fn publication_preserves_even_an_existing_empty_destination_directory() {
             name: "occupied".into(),
         };
         let prepared =
-            stream::PreparedUpload::prepare(&source.0.join("project"), context, &mut || Ok(()))?;
+            stream::PreparedUpload::prepare(&[source.0.join("project")], context, &mut || Ok(()))?;
         let summary = prepared.summary()?;
         prepared.send(
             &mut channel(sender),
@@ -181,7 +181,7 @@ fn desktop_download_uses_existing_document_sender_and_copies_only_the_selected_e
     };
     let prepared = stream::PreparedDownload::prepare(
         channel(receiver),
-        "workspace/project/note.txt",
+        &["workspace/project/note.txt".into()],
         &target.0,
         context,
     )

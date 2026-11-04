@@ -56,7 +56,7 @@ fn export(
     }
     let prepared = stream::PreparedDownload::prepare(
         receiver,
-        "workspace/project/note",
+        &["workspace/project/note".into()],
         &target.0,
         context(Direction::Export),
     )
@@ -69,7 +69,7 @@ fn prepared_upload_retains_the_reviewed_selection_and_counts_only_document_bytes
     fs::write(source.0.join("note"), vec![b'a'; BYTES]).unwrap();
     let context = context(Direction::Import);
     let prepared =
-        stream::PreparedUpload::prepare(&source.0.join("note"), context.clone(), &mut || Ok(()))
+        stream::PreparedUpload::prepare(&[source.0.join("note")], context.clone(), &mut || Ok(()))
             .unwrap();
     let summary = prepared.summary().unwrap();
     assert_eq!(
@@ -116,7 +116,7 @@ fn upload_preparation_checks_real_cancellation_during_hash_reads() {
     fs::write(source.0.join("large"), vec![b'a'; 4 * 1024 * 1024]).unwrap();
     let mut checks = 0;
     let prepared = stream::PreparedUpload::prepare(
-        &source.0.join("large"),
+        &[source.0.join("large")],
         context(Direction::Import),
         &mut || {
             checks += 1;
@@ -136,7 +136,7 @@ fn changed_upload_after_review_never_finishes_or_publishes_under_the_old_digest(
     fs::write(source.0.join("note"), vec![b'a'; BYTES]).unwrap();
     let context = context(Direction::Import);
     let prepared =
-        stream::PreparedUpload::prepare(&source.0.join("note"), context.clone(), &mut || Ok(()))
+        stream::PreparedUpload::prepare(&[source.0.join("note")], context.clone(), &mut || Ok(()))
             .unwrap();
     let summary = prepared.summary().unwrap();
     fs::write(source.0.join("note"), vec![b'b'; BYTES]).unwrap();
@@ -177,7 +177,7 @@ fn export_review_has_no_destination_writes_or_payload_approval_and_counts_no_anc
             summary.directories,
             summary.bytes
         ),
-        (3, 1, 0, BYTES as u64)
+        (1, 1, 0, BYTES as u64)
     );
     assert!(fs::read_dir(&target.0).unwrap().next().is_none());
     assert!(!source.is_finished());
@@ -264,7 +264,7 @@ fn upload_requires_the_reviewed_digest_before_any_offer_or_payload() {
     let source = Tree::new();
     fs::write(source.0.join("note"), b"original").unwrap();
     let prepared = stream::PreparedUpload::prepare(
-        &source.0.join("note"),
+        &[source.0.join("note")],
         context(Direction::Import),
         &mut || Ok(()),
     )

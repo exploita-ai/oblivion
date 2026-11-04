@@ -45,8 +45,8 @@ def command(fd):
             if not isinstance(name, str) or not name or len(name.encode()) > 255 or any(char in name for char in "/\\\0") or name in (".", ".."):
                 raise ValueError("invalid_import_name")
         return (["/usr/bin/oblivion-copy", "native-files", "/vault/home/.oblivion-file-staging", "/vault/workspace", "3600000"], json.dumps(value).encode())
-    if value.get("operation") == "export" and set(value) == {"operation", "root"} and value["root"] in ("workspace", "imports"):
-        return (["/usr/bin/oblivion-copy", "send", "/vault/" + value["root"], "3600000"], None)
+    if operation == "export" and set(value) == {"operation"}:
+        return (["/usr/bin/oblivion-copy", "documents", "/vault", "3600000"], None)
     raise ValueError("invalid_file_request")
 
 

@@ -39,12 +39,12 @@ class NativeFiles(unittest.TestCase):
                 self.request(invalid)
 
     def test_export_retains_only_explicit_guest_roots(self):
-        for root in ("workspace", "imports"):
-            command, metadata = self.request({"operation": "export", "root": root})
-            self.assertEqual(command, ["/usr/bin/oblivion-copy", "send", "/vault/" + root, "3600000"])
-            self.assertIsNone(metadata)
-        with self.assertRaises(ValueError):
-            self.request({"operation": "export", "root": "home"})
+        command, metadata = self.request({"operation": "export"})
+        self.assertEqual(command, ["/usr/bin/oblivion-copy", "documents", "/vault", "3600000"])
+        self.assertIsNone(metadata)
+        for root in ("workspace", "imports", "home", "/etc"):
+            with self.assertRaises(ValueError):
+                self.request({"operation": "export", "root": root})
 
 
 if __name__ == "__main__":

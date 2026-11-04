@@ -80,7 +80,7 @@ impl Page {
             require(
                 !next.contains('/')
                     && request.after.as_ref().is_none_or(|after| after < next)
-                    && previous.is_none_or(|name| name <= next),
+                    && previous.is_none_or(|name| name <= next.as_str()),
                 "invalid_cursor",
             )?;
         }
