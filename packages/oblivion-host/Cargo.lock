@@ -969,6 +969,7 @@ dependencies = [
  "oblivion-wire",
  "serde",
  "serde_json",
+ "windows-sys",
  "zeroize",
 ]
 

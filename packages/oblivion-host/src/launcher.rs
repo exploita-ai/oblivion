@@ -415,34 +415,7 @@ impl oblivion_cli::run::Runtime for UnixRuntime {
         Ok(())
     }
     fn notice(&mut self, notice: oblivion_cli::run::Notice<'_>) -> control::Result<()> {
-        let mut output = std::io::stderr().lock();
-        match notice {
-            oblivion_cli::run::Notice::WaitingForConnection => {
-                writeln!(output, "Waiting for the protected connection…")?
-            }
-            oblivion_cli::run::Notice::SafeOpened(id) => writeln!(
-                output,
-                "Safe {} opened",
-                id.get(..8).ok_or("invalid_safe_id")?
-            )?,
-            oblivion_cli::run::Notice::StorageCapacity(bytes) => writeln!(
-                output,
-                "Create the managed encrypted archive: {} MiB.",
-                bytes / 1024 / 1024
-            )?,
-            oblivion_cli::run::Notice::StorageCreated => {
-                writeln!(output, "Encrypted storage created. Run oblivion unlock.")?
-            }
-            oblivion_cli::run::Notice::IncompleteStorageReview => writeln!(
-                output,
-                "Only the unfinished app archive is removed. Published encrypted storage is preserved."
-            )?,
-            oblivion_cli::run::Notice::IncompleteStorageDiscarded => writeln!(
-                output,
-                "Incomplete setup removed. Run oblivion init to create encrypted storage."
-            )?,
-        }
-        Ok(())
+        notice.write(&mut std::io::stderr().lock())
     }
     fn attach(
         &mut self,

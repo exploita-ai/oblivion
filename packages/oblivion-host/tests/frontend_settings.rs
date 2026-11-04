@@ -126,3 +126,45 @@ fn timer_bounds_and_duplicate_options_are_checked_before_the_launcher_starts_a_v
         );
     }
 }
+
+#[test]
+fn compiled_activity_uses_the_opening_body_slot_without_runtime_startup_or_expected_safe() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let (fixture, listener) = Fixture::new();
+    let body = serde_json::to_vec(&oblivion_wire::idle::Activity {
+        host: "e".repeat(32),
+        safe: Some(oblivion_wire::idle::Opening {
+            slot: oblivion_host::scope::Slot::try_from(4).unwrap(),
+            safe_id: SAFE.into(),
+            nonce: "f".repeat(32),
+        }),
+    })
+    .unwrap();
+    let expected = body.clone();
+    let server = std::thread::spawn(move || {
+        let mut stream = accept(&listener);
+        let (request, body) = receive(&mut stream);
+        assert_eq!(request.operation, Operation::Activity);
+        assert_eq!(request.slot.index(), 4);
+        assert!(request.session.is_none() && request.expected_session.is_none());
+        assert_eq!(*body, expected);
+        reply(&mut stream, "", None);
+    });
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_oblivion"))
+        .arg("activity")
+        .env_clear()
+        .env("OBLIVION_CONTROL_SOCKET", &fixture.path)
+        .env("OBLIVION_SAFE_SLOT", "7")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&body).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    server.join().unwrap();
+}

@@ -147,6 +147,45 @@ impl Channel {
         self.pipe.close()
     }
 
+    /// Poll owned I/O without waiting for readiness. WouldBlock preserves the
+    /// operation; cancellation and terminal errors still revoke the channel.
+    pub fn try_read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        self.check()?;
+        let result = self.pipe.read(output);
+        self.check()?;
+        match result {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(error),
+            Err(error) => self.failed(error),
+            Ok(0) if !output.is_empty() => {
+                self.close()?;
+                Ok(0)
+            }
+            result => result,
+        }
+    }
+
+    pub fn try_write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.check()?;
+        let result = self.pipe.write(bytes);
+        self.check()?;
+        match result {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(error),
+            Err(error) => self.failed(error),
+            result => result,
+        }
+    }
+
+    pub fn try_flush(&mut self) -> io::Result<()> {
+        self.check()?;
+        let result = self.pipe.flush();
+        self.check()?;
+        match result {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(error),
+            Err(error) => self.failed(error),
+            result => result,
+        }
+    }
+
     fn check(&mut self) -> io::Result<()> {
         if self.closed {
             return Err(io::Error::new(
@@ -198,16 +237,8 @@ impl Channel {
 impl Read for Channel {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
         loop {
-            self.check()?;
-            let result = self.pipe.read(output);
-            self.check()?;
-            match result {
+            match self.try_read(output) {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => self.wait(true)?,
-                Err(error) => return self.failed(error),
-                Ok(0) if !output.is_empty() => {
-                    self.close()?;
-                    return Ok(0);
-                }
                 result => return result,
             }
         }
@@ -217,12 +248,8 @@ impl Read for Channel {
 impl Write for Channel {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         loop {
-            self.check()?;
-            let result = self.pipe.write(bytes);
-            self.check()?;
-            match result {
+            match self.try_write(bytes) {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => self.wait(false)?,
-                Err(error) => return self.failed(error),
                 result => return result,
             }
         }
@@ -230,12 +257,8 @@ impl Write for Channel {
 
     fn flush(&mut self) -> io::Result<()> {
         loop {
-            self.check()?;
-            let result = self.pipe.flush();
-            self.check()?;
-            match result {
+            match self.try_flush() {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => self.wait(false)?,
-                Err(error) => return self.failed(error),
                 result => return result,
             }
         }
@@ -456,6 +479,113 @@ mod tests {
             (4, 0_i32.to_be_bytes().to_vec())
         );
         channel.close().unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn one_owner_can_send_input_while_an_attached_read_is_pending() {
+        let (client, server) = serve(|mut channel| {
+            received(&mut channel);
+            reply(
+                &mut channel,
+                &json!({"ok":true,"output":CLIENT,"error":null}),
+            );
+            let mut input = [0; 5];
+            channel.read_exact(&mut input).unwrap();
+            assert_eq!(&input, b"input");
+            channel.write_all(b"output").unwrap();
+            channel.flush().unwrap();
+            released(&mut channel);
+        });
+        let (mut channel, _) = client
+            .attach(
+                request(Operation::AgentAttach, &[]),
+                &[],
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(3),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        channel.set_deadline(deadline).unwrap();
+        assert_eq!(channel.try_read(&mut []).unwrap(), 0);
+        assert_eq!(channel.try_write(&[]).unwrap(), 0);
+        channel.try_flush().unwrap();
+        assert_eq!(
+            channel.try_read(&mut [0; 6]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(channel.try_write(b"input").unwrap(), 5);
+        loop {
+            assert!(Instant::now() < deadline);
+            match channel.try_flush() {
+                Ok(()) => break,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                result => panic!("unexpected flush: {result:?}"),
+            }
+        }
+        let mut output = [0; 6];
+        let mut offset = 0;
+        while offset < output.len() {
+            assert!(Instant::now() < deadline);
+            match channel.try_read(&mut output[offset..]) {
+                Ok(0) => panic!("unexpected output EOF"),
+                Ok(count) => offset += count,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                result => panic!("unexpected read: {result:?}"),
+            }
+        }
+        assert_eq!(&output, b"output");
+        channel.close().unwrap();
+        assert_eq!(
+            channel.try_flush().unwrap_err().kind(),
+            io::ErrorKind::NotConnected
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn cancellation_of_a_polled_attachment_cannot_be_cleared_or_revived() {
+        let (client, server) = serve(|mut channel| {
+            received(&mut channel);
+            reply(
+                &mut channel,
+                &json!({"ok":true,"output":CLIENT,"error":null}),
+            );
+            released(&mut channel);
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut channel, _) = client
+            .attach(
+                request(Operation::AgentAttach, &[]),
+                &[],
+                Arc::clone(&stop),
+                Instant::now() + Duration::from_secs(3),
+            )
+            .unwrap();
+        assert_eq!(
+            channel.try_read(&mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        stop.store(true, Ordering::Release);
+        assert_eq!(
+            channel.try_read(&mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        assert_eq!(
+            channel.try_write(b"after cancel").unwrap_err().kind(),
+            io::ErrorKind::NotConnected
+        );
+        assert_eq!(
+            channel
+                .set_deadline(Instant::now() + Duration::from_secs(3))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotConnected
+        );
         server.join().unwrap();
     }
 

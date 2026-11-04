@@ -22,6 +22,38 @@ pub enum Notice<'a> {
     IncompleteStorageDiscarded,
 }
 
+impl Notice<'_> {
+    pub fn write(self, output: &mut impl std::io::Write) -> Result<()> {
+        match self {
+            Self::WaitingForConnection => {
+                writeln!(output, "Waiting for the protected connection…")?
+            }
+            Self::SafeOpened(id) => writeln!(
+                output,
+                "Safe {} opened",
+                id.get(..8).ok_or("invalid_safe_id")?
+            )?,
+            Self::StorageCapacity(bytes) => writeln!(
+                output,
+                "Create the managed encrypted archive: {} MiB.",
+                bytes / 1024 / 1024
+            )?,
+            Self::StorageCreated => {
+                writeln!(output, "Encrypted storage created. Run oblivion unlock.")?
+            }
+            Self::IncompleteStorageReview => writeln!(
+                output,
+                "Only the unfinished app archive is removed. Published encrypted storage is preserved."
+            )?,
+            Self::IncompleteStorageDiscarded => writeln!(
+                output,
+                "Incomplete setup removed. Run oblivion init to create encrypted storage."
+            )?,
+        }
+        Ok(())
+    }
+}
+
 pub trait Runtime: Controller {
     type Mark;
     fn slots(&self) -> Vec<Self::Slot>;
