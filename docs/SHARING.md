@@ -24,7 +24,19 @@ oblivion share export --all collection.oblivion-share
 persistent Safes and the application automatic-lock timers. No proxy passwords
 or provider profiles enter the package. Export refuses an existing output file.
 
-By default Share includes `workspace`, `imports` and portable conversations.
+By default Share includes `workspace`, `imports` and supported native
+conversations. Each conversation reopens in the agent that created it. Source
+login files, client configuration and native database blobs are not copied.
+OpenCode native transfers are imported on its next explicit launch, rather
+than executing a client in the offline maintenance VM.
+Native forks and reverts can depend on saved prefixes from other conversations.
+Share includes required native history dependencies and identifies that inclusion
+in review. It preserves physical transcript bytes instead of rewriting signed
+reasoning, tool records or byte offsets. Required document paths must also be
+selected for export; missing attachments or unsupported records stop the
+operation instead of producing an incomplete conversation. Credential files
+remain excluded; messages and documents themselves can still contain secrets.
+
 Narrow the selection or exclude items shown during review:
 
 ```sh
@@ -35,7 +47,9 @@ oblivion share export --safe research discussion.oblivion-share \
   --chat 11111111-1111-4111-8111-111111111111
 ```
 
-`--chat` selects conversations from a single Safe. `--exclude-chat UUID` can
+`--chat` selects conversations from a single Safe using the opaque UUID
+references shown by Share review, rather than a client-native ID. These are
+export selections, not a shared chat catalog. `--exclude-chat UUID` can
 exclude conversations from any export. Known credential-store paths are always
 rejected. Suspected secrets in arbitrary files or conversation content are
 excluded by default and reported for review; explicit `--include-sensitive PATH`

@@ -8,12 +8,12 @@ and the qualification gates.
 
 ## Runtime placement
 
-On desktop systems, the launcher manages a headless Debian controller VM and
-connects the calling terminal through a private authenticated relay. On Debian
-Live, that controller runs directly on the Debian host. The explicit installed
-mode marker selects the latter; a failed desktop startup cannot silently choose
-it. Linux vsock requires a fresh private per-boot credential in addition to the
-VM endpoint identity.
+The launcher manages a headless Debian controller VM on desktop systems and
+Debian Live, connecting the calling terminal through a private authenticated
+relay. The controller package belongs inside that VM. External Linux has no
+direct-controller bypass. Linux vsock requires a fresh private per-boot
+credential in addition to the VM endpoint identity. Live presents only its
+reviewed data partition to the controller; RAM-only runs do not attach it.
 
 The outer desktop OS and hypervisor remain trusted for input, display and memory.
 A bare-metal Live boot leaves the installed desktop OS inactive. Driver, Wi-Fi,
@@ -27,7 +27,7 @@ catalog, application settings and separate Safe LUKS2 containers. A Safe volume
 has its own encryption key and is mounted only by its Safe VM. There are no
 shared folders or host mounts of Safe filesystems.
 
-A Safe owns its workspace, imports, native profiles, canonical chat catalog and
+A Safe owns its workspace, imports, native agent histories and profiles, and
 sudo-installed system overlay. Multiple agents in that Safe deliberately share
 those files. Different Safes have separate VMs, disks, users at the hypervisor
 boundary and gateways. Resource admission occurs before allocation.
@@ -105,12 +105,14 @@ The launcher passes structured argv, resize, input, signals and distinct output
 streams; interactive terminal controls are filtered before they can affect the
 outer terminal. Profiles and authentication stay inside that Safe.
 
-A Safe-local watcher reconciles native resume stores with a canonical catalog.
-It retains source-native records separately from portable messages and tools.
-Native indexers/importers run without an external network route. The current
-catalog handles typed content and replayable projection intents; interactive
-picker, process-death and per-chat author admission remain acceptance work.
-See the [history adapter](../packages/oblivion-history/README.md).
+Each client owns its conversations, native IDs, tools and resume behavior.
+Agent wrappers directly execute the pinned official binary; no watcher,
+canonical conversation database, prompt-admission hook or cross-agent
+projection runs in the Safe. Native job supervision and Safe cgroups retain
+process cleanup independently. Share reads only the supported native transcript
+formats and restores them for their original agent. OpenCode imports are staged
+until its next explicit launch; offline maintenance never runs a client.
+See [native history transfers](../packages/oblivion-history/README.md).
 
 Scoped MCP operations authenticate their calling VM and opening. A task can
 create a child Safe with provenance and a password inherited through the
@@ -141,12 +143,12 @@ the controller or Safe. No copy grants a permanent shared directory.
 A personal backup copies a closed encrypted volume and may include native
 provider credentials. The immutable offline SafeAdmin checkpoint records child
 origin, sealed task and attempts inside `/vault/state/oblivion/safe.json`, without
-running the sudo overlay or history watcher. Raw restore authenticates the volume
+running the sudo overlay or agent processes. Raw restore authenticates the volume
 password/token and task context without the mother, retains original identity,
 family and data key, and publishes with an Offline profile. The native backup
-CLI is still in implementation, and the actual VM round trip remains a gate.
+CLI and manager are implemented; the actual VM round trip remains a gate.
 Share is a different, versioned portable package: selected
-workspace/imports, canonical conversations and approved relationships, encrypted
+workspace/imports, original-agent native conversations and approved relationships, encrypted
 with a separate passphrase. Known credential stores and installed-system overlays
 are excluded. Content scanning is best effort and explicit review remains
 necessary.

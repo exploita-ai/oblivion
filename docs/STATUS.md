@@ -5,10 +5,10 @@ Updated 4 November 2026. The current source is a development refactor. Published
 privacy framework. Use the [roadmap](oblivion1.0-roadmap.md) as the authoritative
 feature and acceptance ledger.
 
-Implemented source includes the native CLI, Mac and Linux x86_64 helpers,
+Implemented source includes the native CLI, Mac and Linux x86_64/ARM64 helpers,
 controller separation, official clients, private terminal/file relays, per-Safe
 network control, RAM-only mode, family credentials, child-Safe creation, managed
-chat jobs, canonical history adapters and the OpenTUI manager. Shell/tmux uses
+chat jobs, same-agent native Share transfers and the OpenTUI manager. Shell/tmux uses
 the same private relay and official agent wrappers. Share includes Safe/branch/all
 export, guest review, encrypted streams, fresh-volume import, atomic collection
 publication and explicit import recovery. These source statements do not imply
@@ -21,10 +21,27 @@ shell expansion and OS-native drag-and-drop APIs are not implemented.
 
 Cross-agent conversation sharing, synchronization, conversion and handoff are
 outside the 1.0 scope. Each agent owns its native chats and resume inside the
-Safe. The existing canonical adapters and Claude admission hook are experimental
-source, not release requirements or promises. They still need removal or
-isolation from the candidate runtime; this documentation change does not
-perform that cleanup. Retained technical evidence is in [HISTORY](HISTORY.md).
+Safe. The canonical catalog, sync/projection workers, cross-agent deletion
+protocol, history leases and Claude admission hook have been removed. Official
+clients launch directly with their encrypted native profiles. Share preserves
+the originating agent and native conversation formats; it never populates the
+other clients. Retained experimental evidence is in [HISTORY](HISTORY.md).
+
+Live now packages a launcher OS separately from the headless controller image.
+Both Live and desktop use that controller VM. Live persistent data is a reviewed,
+dedicated partition on the boot USB; RAM-only mode never attaches it. The old
+controller USB discovery/partitioning code and protocol have been removed.
+Archive setup reviews only the managed encrypted file and remains locked after
+creation. Debian NetworkManager, keyboard and time-zone dialogs are reachable
+on fixed virtual consoles; OS preferences remain in the volatile Live overlay.
+No automatic NTP service was enabled. See [Live controls](LIVE.md).
+
+Live controller initialization now overlaps the three-second, once-per-boot
+wordmark. Initial status requests share one operation and the startup budget;
+a cold-start failure stays visible until explicit retry. Verified cancellation
+and ownership cleanup after terminal loss during bootstrap remain open; no
+Cancel action is presented as working before that lifecycle is implemented.
+These source checks do not qualify USB reboot or nested virtualization.
 
 The agent chooser now separates Enter for a new conversation from C to
 continue that agent's latest conversation in its current workspace. A saved
@@ -103,11 +120,11 @@ remain open.
 
 Remaining release gates include real login and scoped child-credential delegation,
 chat persistence after cold restart,
-native resume for each agent, removal of excluded shared-history prototypes,
+native resume for each agent,
 close during active jobs,
 family password rotation and independent restore, concurrent Tor/SOCKS5 failures,
 Share between two installed candidates, physical media, resource measurements,
-desktop installation/uninstall qualification and signed release provenance. Local inference is deferred until after
+desktop installation/uninstall qualification, bootstrap terminal-loss cleanup and signed release provenance. Local inference is deferred until after
 1.0. No independent security audit has been completed.
 
 CI builds current-source images as drafts. A successful check, build or checksum

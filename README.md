@@ -49,26 +49,28 @@ when its archive or name is missing.
 A Safe is a separate Linux VM with its own encrypted disk, home, workspace,
 agent profiles and network gateway. Several agent sessions can use the same
 Safe and its files. Different Safes have separate filesystems and credential
-stores. Scoped provider-credential delegation to an agent-created child is a
-planned exception; it does not share a filesystem or copy a whole agent profile.
+stores. Supported credential-only delegation to an agent-created child is an
+explicit exception; it does not share a filesystem or copy a whole agent profile.
 Closing a Safe stops its processes and locks its volume; it does not delete its
 persistent conversations or files.
 
 On desktop systems, a native headless launcher manages a Debian controller VM
 and connects your existing terminal to the Safe. No UTM or VirtualBox window is
-part of this flow. On **Oblivion Live**, the Debian host runs that same controller
-directly. Debian owns hardware drivers, Wi-Fi, keyboard and operating-system
-preferences; Oblivion owns Safes and its application settings.
+part of this flow. **Oblivion Live** uses the same headless controller VM, with
+a reviewed data partition on its boot USB instead of a desktop disk image.
+RAM-only Live runs do not attach that persistent partition. Debian owns hardware
+drivers, Wi-Fi, keyboard and operating-system preferences; Oblivion owns Safes
+and its application settings.
+
+On Live, standard Debian consoles configure networking, keyboard and time zone.
+See the [Live controls and storage guide](docs/LIVE.md).
 
 ```text
-Your terminal                         Oblivion Live
-     │                                     │
-Native launcher                            │
-     │                                     │
-Headless Debian controller VM       Direct Debian controller
-     └──────────────────┬──────────────────┘
-                        ├─ Safe A: VM + encrypted disk + gateway
-                        └─ Safe B: VM + encrypted disk + gateway
+Your terminal / Debian Live terminal
+     └─ Native launcher
+          └─ Headless Debian controller VM
+               ├─ Safe A: VM + encrypted disk + gateway
+               └─ Safe B: VM + encrypted disk + gateway
 ```
 
 ## Built into the stack
@@ -87,8 +89,9 @@ Headless Debian controller VM       Direct Debian controller
 | **Personal backup** | [Copy the complete closed encrypted volume](docs/BACKUPS.md) through a revocable private stream. Restore the original identity using its original password; native credentials may be included. |
 | **Family passwords** | [Review and change one local family's password](docs/PASSWORDS.md), with explicit recovery after interruption. Existing backup passwords and data keys are unchanged. |
 
-The development tree still contains shared-history experiments. Removing them
-from the 1.0 runtime is planned work; this scope change does not disable code.
+Agent wrappers run the official clients directly. There is no shared-history
+watcher, prompt-admission hook or cross-agent replication. Share transfers each
+conversation for its original agent; it does not create a common resume catalog.
 
 These are source capabilities with different levels of verification. Component
 checks do not establish that the complete installed product is ready for

@@ -2,10 +2,11 @@
 
 Cross-agent conversation sharing, conversion, synchronization and handoff have
 been set aside. Oblivion 1.0 keeps each agent's native conversations and resume
-inside its Safe. This document records existing experimental source and prior
-research; it does not define a 1.0 product contract or acceptance gate.
-Removing or disabling the prototype in runtime images remains separate code
-work. The documentation update does not perform that removal.
+inside its Safe. The prototype catalog, synchronization, projections, author
+service and wrappers have been removed from maintained source and runtime
+installation. This document retains historical design and research evidence;
+the descriptions below are not current behavior, a 1.0 contract or an
+acceptance gate. Native Share transfers do not reintroduce that layer.
 
 Safes retain one encrypted conversation catalog and separate native histories
 for Codex, Claude Code and OpenCode. The catalog maps their native IDs to a
@@ -21,7 +22,7 @@ concurrent rewrites; it is not conversation ownership.
 
 ## Claude prompt admission
 
-The current implementation adds a separate Safe-local admission service for
+The removed prototype added a separate Safe-local admission service for
 Claude Code 2.1.302's `UserPromptSubmit` hook. It checks ownership **before a
 prompt reaches the model**. A conversation already claimed by another native
 process is denied. Different conversations remain concurrent. A stale local

@@ -68,7 +68,7 @@ or the acceptance matrix. A build does not qualify nested virtualization.
 
 The Rust package `oblivion-host` builds the CLI and Linux controller.
 `oblivion-native` builds the macOS Virtualization.framework helper;
-`oblivion-native-linux` builds the Linux x86_64 QEMU/KVM helper. A desktop
+`oblivion-native-linux` builds the Linux QEMU/KVM helper for x86_64 and ARM64. A desktop
 installation pairs the CLI, manager, helper and matching runtime image. Do not
 mix a current CLI with an earlier prototype's internal protocol.
 
@@ -78,10 +78,12 @@ running owners rather than replacing them in place. Test against disposable
 state directories. Never target a user's existing UTM disk or provisioned boot
 media during automated development checks.
 
-A root-owned `/etc/oblivion/installation.json` marker selects direct-controller
-mode on installed Debian/Live systems. The desktop cannot silently fall back to
-root operations on the outer OS. `install-runtime.sh` installs from a prepared
-runtime root; it is not a cross-platform desktop installer.
+A root-owned `/etc/oblivion/installation.json` marker with `live-launcher` selects
+the outer Live launcher. Both desktop and Live use a headless controller VM;
+there is no direct-controller fallback on external Debian. `install-runtime.sh`
+prepares the trusted inner controller root, not a cross-platform desktop
+installation. Live disk authorization reviews only a dedicated partition on
+the actual boot USB. RAM-only Live runs do not attach that partition.
 
 The development Debian controller package reuses the Live role-asset packer and
 stops before ISO creation:
@@ -95,6 +97,9 @@ assets; they do not start a Safe or qualify hardware. See [Debian packaging](DEB
 for exact payloads, dependencies, retained application data and release gates.
 
 ## Live and hypervisor tests
+
+The [Live guide](LIVE.md) lists the standard Debian consoles, storage-mode
+selection and the boundary between OS preferences and encrypted Oblivion data.
 
 The Live image can be written to supported writable boot media. The standalone
 `prepare-vm-disk.py` helper can copy a hybrid ISO into a larger new raw virtual
@@ -117,7 +122,7 @@ qualify current-source images.
 The release workflow produces draft prereleases and checksummed images. Automatic
 publication is disabled until actual native VM acceptance is recorded for the
 commit. Follow the [roadmap](oblivion1.0-roadmap.md) for persistence, login,
-cross-agent resume, interrupted cleanup, concurrent network isolation, Share,
+native resume in each original agent, interrupted cleanup, concurrent network isolation, Share,
 resource use and platform acceptance. Use synthetic conversations and credentials
 for fixtures, and clearly separate local protocol checks from real provider or
 public Tor tests.
