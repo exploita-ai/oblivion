@@ -61,8 +61,19 @@ fn ready() -> (Tree, Tree) {
     let context = context(Direction::Import);
     stream::operations::begin(&inbox.0, &target.0, &context).unwrap();
     let (sender, receiver) = UnixStream::pair().unwrap();
+    let sender_context = context.clone();
     let sender = std::thread::spawn(move || {
-        stream::send_path(&mut channel(sender), &source.0.join("project"), LIMITS, ID)
+        let prepared = stream::PreparedUpload::prepare(
+            &source.0.join("project"),
+            sender_context,
+            &mut || Ok(()),
+        )?;
+        let summary = prepared.summary()?;
+        prepared.send(
+            &mut channel(sender),
+            &summary.manifest_sha256,
+            &mut |_, _| Ok(()),
+        )
     });
     let mut receiver = channel(receiver);
     assert!(stream::receive_directory(&mut receiver, &inbox.0, &target.0, &context).is_err());
@@ -136,10 +147,8 @@ fn import_ack_loss_after_publication_reconciles_without_recopy_or_deleting_edits
 #[test]
 fn export_ack_loss_after_publication_is_published_from_the_durable_receipt() {
     let source = source();
-    let inbox = Tree::new();
     let target = Tree::new();
     let context = context(Direction::Export);
-    stream::operations::begin(&inbox.0, &target.0, &context).unwrap();
     let (sender, receiver) = UnixStream::pair().unwrap();
     let sender = std::thread::spawn(move || {
         let mut channel = channel(sender);
@@ -150,19 +159,28 @@ fn export_ack_loss_after_publication_is_published_from_the_durable_receipt() {
         selection.send_data(&mut channel).unwrap();
         drop(channel);
     });
+    let prepared =
+        stream::PreparedDownload::prepare(channel(receiver), "project", &target.0, context)
+            .unwrap();
+    let summary = prepared.summary().unwrap();
     assert!(
-        stream::download(
-            &mut channel(receiver),
-            "project",
-            &inbox.0,
-            &target.0,
-            &context
-        )
-        .is_err()
+        prepared
+            .receive(&summary.manifest_sha256, &mut |_, _| Ok(()))
+            .is_err()
     );
     sender.join().unwrap();
     assert_eq!(
-        status(&inbox, &target, Direction::Export).state,
+        stream::operations::manage(
+            &target.0.join(".oblivion-transfers"),
+            &target.0,
+            ID,
+            SAFE,
+            OPENING,
+            Direction::Export,
+            Action::Status
+        )
+        .unwrap()
+        .state,
         State::Published
     );
     assert_eq!(
@@ -352,10 +370,8 @@ fn tracked_copy_keeps_both_reviewed_receiver_roots_when_paths_are_replaced() {
     use std::os::unix::fs::DirBuilderExt;
     for replace_inbox in [false, true] {
         let source = source();
-        let inbox = Tree::new();
         let target = Tree::new();
         let context = context(Direction::Export);
-        stream::operations::begin(&inbox.0, &target.0, &context).unwrap();
         let (sender, receiver) = UnixStream::pair().unwrap();
         let (reached, waiting) = std::sync::mpsc::channel();
         let (resume, proceed) = std::sync::mpsc::channel();
@@ -372,19 +388,24 @@ fn tracked_copy_keeps_both_reviewed_receiver_roots_when_paths_are_replaced() {
             channel.write_all(b"copied\n").unwrap();
             receipt
         });
-        let inbox_path = inbox.0.clone();
         let target_path = target.0.clone();
         let receiver = std::thread::spawn(move || {
-            stream::download(
-                &mut channel(receiver),
+            let prepared = stream::PreparedDownload::prepare(
+                channel(receiver),
                 "project",
-                &inbox_path,
                 &target_path,
-                &context,
-            )
+                context,
+            )?;
+            let summary = prepared.summary()?;
+            prepared.receive(&summary.manifest_sha256, &mut |_, _| Ok(()))
         });
         waiting.recv_timeout(Duration::from_secs(3)).unwrap();
-        let replaced = if replace_inbox { &inbox.0 } else { &target.0 };
+        let inbox_path = target.0.join(".oblivion-transfers");
+        let replaced = if replace_inbox {
+            &inbox_path
+        } else {
+            &target.0
+        };
         let moved = replaced.with_extension("reviewed");
         fs::rename(replaced, &moved).unwrap();
         fs::DirBuilder::new().mode(0o700).create(replaced).unwrap();
@@ -417,7 +438,7 @@ fn tracked_copy_keeps_both_reviewed_receiver_roots_when_paths_are_replaced() {
             );
             assert!(
                 stream::operations::manage(
-                    &inbox.0,
+                    &moved.join(".oblivion-transfers"),
                     &target.0,
                     ID,
                     SAFE,

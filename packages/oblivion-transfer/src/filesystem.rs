@@ -90,6 +90,16 @@ impl Selection {
     }
 
     pub(crate) fn prepare_at(root: Directory, paths: &[String], limits: Limits) -> io::Result<Self> {
+        Self::prepare_checked(root, paths, limits, &mut || Ok(()))
+    }
+
+    pub(crate) fn prepare_checked(
+        root: Directory,
+        paths: &[String],
+        limits: Limits,
+        check: &mut dyn FnMut() -> io::Result<()>,
+    ) -> io::Result<Self> {
+        check()?;
         require(
             limits.entries > 0 && limits.entries <= MAX_ENTRIES,
             "invalid_entry_limit",
@@ -113,6 +123,7 @@ impl Selection {
                         &mut entries,
                         &mut files,
                         &mut bytes,
+                        check,
                     )?;
                     break;
                 }
@@ -439,7 +450,9 @@ fn collect(
     entries: &mut Vec<Entry>,
     files: &mut Vec<(u64, u64)>,
     bytes: &mut u64,
+    check: &mut dyn FnMut() -> io::Result<()>,
 ) -> io::Result<()> {
+    check()?;
     validate_path(path)?;
     require(entries.len() < limits.entries, "entry_limit")?;
     let mut file = parent.source(name)?;
@@ -458,6 +471,7 @@ fn collect(
                 entries,
                 files,
                 bytes,
+                check,
             )?;
         }
         return Ok(());
@@ -470,7 +484,11 @@ fn collect(
         .checked_add(metadata.len())
         .ok_or_else(|| invalid("byte_limit"))?;
     require(*bytes <= limits.bytes, "byte_limit")?;
-    let sha256 = copy_hash(&mut file, &mut io::sink(), metadata.len())?;
+    let sha256 = copy_hash(
+        &mut CheckedRead { file: &mut file, check },
+        &mut io::sink(),
+        metadata.len(),
+    )?;
     require(file.metadata()?.len() == metadata.len(), "source_changed")?;
     entries.push(Entry::File {
         path: path.to_owned(),
@@ -481,3 +499,15 @@ fn collect(
     Ok(())
 }
 
+/// Cancellation is observed during the existing bounded hash reads, without
+/// a second collector, alternate digest implementation or source snapshot.
+struct CheckedRead<'a> {
+    file: &'a mut File,
+    check: &'a mut dyn FnMut() -> io::Result<()>,
+}
+impl Read for CheckedRead<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        (self.check)()?;
+        self.file.read(buffer)
+    }
+}

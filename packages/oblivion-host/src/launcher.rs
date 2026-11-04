@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 mod file_commands;
+mod file_events;
 mod backup_commands;
 mod family_password_commands;
 mod idle_commands;
@@ -63,8 +64,8 @@ Desktop runtime bundles
 
 Files
   oblivion files list --safe SAFE [workspace/PATH] --json
-  oblivion files import --safe SAFE SOURCE [--name NAME]
-  oblivion files export --safe SAFE workspace/PATH DESTINATION
+  oblivion files import --safe SAFE SOURCE [--name NAME] [--yes]
+  oblivion files export --safe SAFE workspace/PATH DESTINATION [--yes]
   oblivion files status --safe SAFE --operation ID [--destination DIR] --json
   oblivion files recover --safe SAFE --operation ID [--destination DIR]
   oblivion files discard --safe SAFE --operation ID [--destination DIR]
@@ -115,6 +116,8 @@ Run options (before the agent)
 
 Agents: codex, claude, opencode2
 All arguments after the agent are passed unchanged inside the Safe.
+File copies review their prepared content before confirmation; --yes explicitly
+approves an unattended copy. The manager uses a private event/approval channel.
 Proxy USER without :PASS prompts privately for its password.
 In an interactive agent: F7 opens Files, F9 opens Network. The agent keeps running.
 Esc returns from the trusted overlay. Function keys in pasted text are passed through.

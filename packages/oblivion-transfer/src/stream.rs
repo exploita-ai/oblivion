@@ -3,6 +3,8 @@
 use crate::channel::Channel;
 use crate::directory::Directory;
 use crate::endpoint::{Approval, OfferRequest, ReceiveRequest, read_message, write_message};
+use crate::native_file_events::{Phase, Summary};
+use crate::native_files::{Context, Direction};
 use crate::{Limits, Manifest, Receipt, Selection, invalid, require, validate_id, validate_path};
 #[path = "stream_operations.rs"]
 pub mod operations;
@@ -12,36 +14,92 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-/// A locally selected file or directory. Peers cannot choose another host path.
-pub fn send_path(
-    channel: &mut Channel,
-    source: &Path,
-    limits: Limits,
-    id: &str,
-) -> io::Result<Receipt> {
-    require(source.is_absolute(), "absolute_source_required")?;
-    let name = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| invalid("invalid_source_name"))?;
-    let root = source
-        .parent()
-        .ok_or_else(|| invalid("invalid_source_root"))?;
-    let mut selection = Selection::prepare(root, &[name.to_owned()], limits)?;
-    send(channel, &mut selection, id)
+/// The source selection is prepared once, then retained through human review.
+/// No destination connection, receiver state or source snapshot is created here.
+pub struct PreparedUpload {
+    selection: Selection,
+    context: Context,
+    selected: String,
 }
 
-/// Talks directly to a destination using endpoint::import/accept framing.
+impl PreparedUpload {
+    pub fn prepare(
+        source: &Path,
+        context: Context,
+        check: &mut dyn FnMut() -> io::Result<()>,
+    ) -> io::Result<Self> {
+        context.validate()?;
+        require(
+            context.direction == Direction::Import && source.is_absolute(),
+            "invalid_file_source",
+        )?;
+        check()?;
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| invalid("invalid_source_name"))?;
+        let root = source
+            .parent()
+            .ok_or_else(|| invalid("invalid_source_root"))?;
+        let selection = Selection::prepare_checked(
+            Directory::open(root)?,
+            &[name.to_owned()],
+            Limits {
+                entries: crate::MAX_ENTRIES,
+                bytes: crate::MAX_DOCUMENT_BYTES,
+            },
+            check,
+        )?;
+        let prepared = Self {
+            selection,
+            context,
+            selected: name.into(),
+        };
+        prepared.summary()?;
+        Ok(prepared)
+    }
+
+    pub fn summary(&self) -> io::Result<Summary> {
+        Summary::from_manifest(self.selection.manifest(), &self.selected)
+    }
+
+    pub fn send(
+        mut self,
+        channel: &mut Channel,
+        approved_digest: &str,
+        observer: &mut dyn FnMut(Phase, u64) -> io::Result<()>,
+    ) -> io::Result<Receipt> {
+        let summary = self.summary()?;
+        require(
+            approved_digest == summary.manifest_sha256,
+            "offer_not_approved",
+        )?;
+        send_observed(channel, &mut self.selection, &self.context.id, observer)
+    }
+}
+
+/// Personal ciphertext backups already own their reviewed Selection. They
+/// share this exact source protocol without introducing native Files state.
 pub fn send(channel: &mut Channel, selection: &mut Selection, id: &str) -> io::Result<Receipt> {
+    send_observed(channel, selection, id, &mut |_, _| Ok(()))
+}
+
+fn send_observed(
+    channel: &mut Channel,
+    selection: &mut Selection,
+    id: &str,
+    observer: &mut dyn FnMut(Phase, u64) -> io::Result<()>,
+) -> io::Result<Receipt> {
     validate_id(id)?;
-    let approval = Approval {
-        id: id.to_owned(),
-        manifest_sha256: selection.manifest().sha256(),
-    };
+    observer(Phase::Copying, 0)?;
+    channel.check()?;
     write_message(
         channel,
         &ReceiveRequest {
-            approval,
+            approval: Approval {
+                id: id.into(),
+                manifest_sha256: selection.manifest().sha256(),
+            },
             limits: Limits {
                 entries: selection.manifest().entries().len(),
                 bytes: selection.manifest().bytes(),
@@ -52,10 +110,177 @@ pub fn send(channel: &mut Channel, selection: &mut Selection, id: &str) -> io::R
     let mut accepted = [0; 8];
     channel.read_exact(&mut accepted)?;
     require(&accepted == b"receive\n", "offer_rejected")?;
-    selection.send_data(channel)?;
+    let total = selection.manifest().bytes();
+    selection.send_data(&mut Payload {
+        inner: channel,
+        observer,
+        bytes: 0,
+        total,
+    })?;
+    observer(Phase::Finalizing, total)?;
+    channel.check()?;
     let receipt: Receipt = read_message(channel, 1024)?;
     verify_receipt(&receipt, id, selection.manifest())?;
     Ok(receipt)
+}
+
+/// The source offer and destination descriptor remain pinned during review.
+/// The source receives no Approval and the receiver writes nothing in prepare.
+pub struct PreparedDownload {
+    channel: Channel,
+    manifest: Manifest,
+    target: Directory,
+    context: Context,
+    selected: String,
+}
+
+impl PreparedDownload {
+    pub fn prepare(
+        mut channel: Channel,
+        selected: &str,
+        target: &Path,
+        context: Context,
+    ) -> io::Result<Self> {
+        context.validate()?;
+        require(
+            context.direction == Direction::Export,
+            "invalid_file_destination",
+        )?;
+        validate_path(selected)?;
+        let target = Directory::open(target)?;
+        target.require_controlled()?;
+        channel.check()?;
+        write_message(
+            &mut channel,
+            &OfferRequest {
+                id: context.id.clone(),
+                limits: Limits {
+                    entries: crate::MAX_ENTRIES,
+                    bytes: crate::MAX_DOCUMENT_BYTES,
+                },
+                paths: vec![selected.into()],
+            },
+        )?;
+        let manifest = Manifest::read(
+            &mut channel,
+            Limits {
+                entries: crate::MAX_ENTRIES,
+                bytes: crate::MAX_DOCUMENT_BYTES,
+            },
+        )?;
+        require_selection(&manifest, selected)?;
+        let prepared = Self {
+            channel,
+            manifest,
+            target,
+            context,
+            selected: selected.into(),
+        };
+        prepared.summary()?;
+        Ok(prepared)
+    }
+
+    pub fn summary(&self) -> io::Result<Summary> {
+        Summary::from_manifest(&self.manifest, &self.selected)
+    }
+
+    pub fn receive(
+        mut self,
+        approved_digest: &str,
+        observer: &mut dyn FnMut(Phase, u64) -> io::Result<()>,
+    ) -> io::Result<Receipt> {
+        let summary = self.summary()?;
+        require(
+            approved_digest == summary.manifest_sha256,
+            "offer_not_approved",
+        )?;
+        observer(Phase::Copying, 0)?;
+        self.channel.check()?;
+        // Create staging only after approval, beneath the reviewed descriptor
+        // even if the destination's pathname was replaced while showing review.
+        let inbox = match self.target.create_directory(".oblivion-transfers") {
+            Ok(directory) => {
+                self.target.sync()?;
+                directory
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                self.target.directory(".oblivion-transfers")?
+            }
+            Err(error) => return Err(error),
+        };
+        inbox.require_private()?;
+        inbox.lock()?;
+        operations::begin_at(&inbox, &self.target, &self.context)?;
+        self.channel.check()?;
+        write_message(
+            &mut self.channel,
+            &Approval {
+                id: self.context.id.clone(),
+                manifest_sha256: summary.manifest_sha256,
+            },
+        )?;
+        let receipt = crate::filesystem::receive_at(
+            &mut Payload {
+                inner: &mut self.channel,
+                observer,
+                bytes: 0,
+                total: summary.bytes,
+            },
+            &self.manifest,
+            &inbox,
+            &self.context.id,
+        )?;
+        observer(Phase::Finalizing, summary.bytes)?;
+        self.channel.check()?;
+        publish(
+            &inbox,
+            &self.target,
+            &self.context.name,
+            &self.selected,
+            &receipt,
+            &self.manifest,
+        )?;
+        write_message(&mut self.channel, &receipt)?;
+        let mut completed = [0; 7];
+        self.channel.read_exact(&mut completed)?;
+        require(&completed == b"copied\n", "source_not_completed")?;
+        Ok(receipt)
+    }
+}
+
+// Wrap only the existing payload copy, not its offer or manifest. END is part
+// of that stream but never contributes to document-byte progress.
+struct Payload<'a, T> {
+    inner: &'a mut T,
+    observer: &'a mut dyn FnMut(Phase, u64) -> io::Result<()>,
+    bytes: u64,
+    total: u64,
+}
+impl<T> Payload<'_, T> {
+    fn advance(&mut self, count: usize) -> io::Result<()> {
+        self.bytes += (count as u64).min(self.total - self.bytes);
+        (self.observer)(Phase::Copying, self.bytes)
+    }
+}
+impl<T: Read> Read for Payload<'_, T> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        (self.observer)(Phase::Copying, self.bytes)?;
+        let count = self.inner.read(buffer)?;
+        self.advance(count)?;
+        Ok(count)
+    }
+}
+impl<T: Write> Write for Payload<'_, T> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        (self.observer)(Phase::Copying, self.bytes)?;
+        let count = self.inner.write(buffer)?;
+        self.advance(count)?;
+        Ok(count)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        (self.observer)(Phase::Copying, self.bytes)?;
+        self.inner.flush()
+    }
 }
 
 /// A personal backup receiver owns one empty local file. The peer can offer
@@ -183,57 +408,6 @@ pub fn receive_directory(
     channel.check()?;
     publish(&guard, &target, name, &selected, &receipt, &manifest)?;
     write_message(channel, &receipt)?;
-    Ok(receipt)
-}
-
-/// A requested guest file is copied into the explicit desktop directory. This
-/// speaks to endpoint::send/documents, retaining its offer/approval/receipt flow.
-pub fn download(
-    channel: &mut Channel,
-    selected: &str,
-    inbox: &Path,
-    target: &Path,
-    context: &crate::native_files::Context,
-) -> io::Result<Receipt> {
-    let id = context.id.as_str();
-    let name = context.name.as_str();
-    let limits = Limits {
-        entries: crate::MAX_ENTRIES,
-        bytes: crate::MAX_DOCUMENT_BYTES,
-    };
-    validate_id(id)?;
-    validate_name(name)?;
-    validate_path(selected)?;
-    let guard = Directory::open(inbox)?;
-    guard.require_private()?;
-    guard.lock()?;
-    let target = Directory::open(target)?;
-    target.require_controlled()?;
-    operations::require_active(&guard, &target, context)?;
-    write_message(
-        channel,
-        &OfferRequest {
-            id: id.to_owned(),
-            limits,
-            paths: vec![selected.to_owned()],
-        },
-    )?;
-    let manifest = Manifest::read(channel, limits)?;
-    require_selection(&manifest, selected)?;
-    write_message(
-        channel,
-        &Approval {
-            id: id.to_owned(),
-            manifest_sha256: manifest.sha256(),
-        },
-    )?;
-    let receipt = crate::filesystem::receive_at(channel, &manifest, &guard, id)?;
-    channel.check()?;
-    publish(&guard, &target, name, selected, &receipt, &manifest)?;
-    write_message(channel, &receipt)?;
-    let mut completed = [0; 7];
-    channel.read_exact(&mut completed)?;
-    require(&completed == b"copied\n", "source_not_completed")?;
     Ok(receipt)
 }
 

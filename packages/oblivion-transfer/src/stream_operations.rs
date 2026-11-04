@@ -22,11 +22,15 @@ struct Record {
 }
 
 pub fn begin(inbox: &Path, target: &Path, context: &Context) -> io::Result<()> {
-    context.validate()?;
     let root = Directory::open(inbox)?;
     root.require_private()?;
     root.lock()?;
-    let target = Directory::open(target)?;
+    begin_at(&root, &Directory::open(target)?, context)
+}
+
+pub(super) fn begin_at(root: &Directory, target: &Directory, context: &Context) -> io::Result<()> {
+    context.validate()?;
+    root.require_private()?;
     target.require_controlled()?;
     let operations = match root.create_directory("operations") {
         Ok(value) => value,
