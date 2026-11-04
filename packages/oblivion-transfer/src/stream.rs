@@ -1,7 +1,7 @@
 //! Explicit desktop copies over an already authorized private stream.
 //! Manifest, file hashes, limits and receipts use the existing copy protocol.
 use crate::channel::Channel;
-use crate::directory::Directory;
+use crate::directory::{Directory, FileIdentity};
 use crate::endpoint::{
     Approval, OfferRequest, ReceiveRequest, SelectionOffer, read_message, write_message,
 };
@@ -154,6 +154,7 @@ impl PreparedDownload {
         }
         let target = Directory::open(target)?;
         target.require_controlled()?;
+        target.identity()?;
         channel.check()?;
         write_message(
             &mut channel,
@@ -427,8 +428,7 @@ pub fn receive_directory(
 struct Publication {
     name: String,
     selected: String,
-    device: u64,
-    inode: u64,
+    source: FileIdentity,
 }
 
 /// Finish only the verified operation's publication under its inbox lock.
@@ -466,9 +466,8 @@ fn recover_directory_locked(
                 .next()
                 .ok_or_else(|| invalid("invalid_selection"))?,
         ) {
-            let metadata = file.metadata()?;
             require(
-                metadata.dev() == publication.device && metadata.ino() == publication.inode,
+                publication.source.matches(&file)?,
                 "publication_changed",
             )?;
             let current = Selection::prepare_at(
@@ -485,7 +484,7 @@ fn recover_directory_locked(
             )?;
         }
     }
-    finish_publication(&transaction, target, &publication)?;
+    finish_publication(&transaction, target, &publication, target.metadata()?.dev())?;
     Ok(receipt)
 }
 
@@ -514,21 +513,21 @@ fn publish(
     let publication = Publication {
         name: name.to_owned(),
         selected: selected.to_owned(),
-        device: metadata.dev(),
-        inode: metadata.ino(),
+        source: FileIdentity::of(&file)?,
     };
     let mut record = transaction.create_file("publication.pending")?;
     serde_json::to_writer(&mut record, &publication).map_err(|_| invalid("invalid_publication"))?;
     record.sync_all()?;
     transaction.rename("publication.pending", "publication.json")?;
     transaction.sync()?;
-    finish_publication(&transaction, target, &publication)
+    finish_publication(&transaction, target, &publication, metadata.dev())
 }
 
 fn finish_publication(
     transaction: &Directory,
     target: &Directory,
     publication: &Publication,
+    device: u64,
 ) -> io::Result<()> {
     target.require_controlled()?;
     let current = target.source(&publication.name);
@@ -536,7 +535,7 @@ fn finish_publication(
         Ok(file) => {
             let metadata = file.metadata()?;
             require(
-                metadata.dev() == publication.device && metadata.ino() == publication.inode,
+                metadata.dev() == device && publication.source.matches(&file)?,
                 "destination_exists",
             )?;
         }
@@ -547,9 +546,10 @@ fn finish_publication(
                 .rsplit('/')
                 .next()
                 .ok_or_else(|| invalid("invalid_selection"))?;
-            let metadata = parent.source(selected)?.metadata()?;
+            let file = parent.source(selected)?;
+            let metadata = file.metadata()?;
             require(
-                metadata.dev() == publication.device && metadata.ino() == publication.inode,
+                metadata.dev() == device && publication.source.matches(&file)?,
                 "publication_changed",
             )?;
             parent.move_exclusive(selected, target, &publication.name)?;

@@ -69,6 +69,8 @@ Files
                        --destination DIR [--name NAME]
   Multiple selections require --name NAME and publish one collection.
   Copy commands review before copying; --yes approves an unattended copy.
+  oblivion files transfers --safe SAFE [--destination DIR] [--cursor ID] --json
+  Enumerate receiver records; select a directory explicitly for local exports.
   oblivion files status --safe SAFE --operation ID [--destination DIR] --json
   oblivion files recover --safe SAFE --operation ID [--destination DIR]
   oblivion files discard --safe SAFE --operation ID [--destination DIR]

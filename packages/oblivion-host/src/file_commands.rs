@@ -2,7 +2,10 @@ use oblivion_host::autolock::Opening;
 use oblivion_host::{control, scope};
 use oblivion_transfer::channel::Channel;
 use oblivion_transfer::native_file_events::{Identity, Outcome, Phase, Summary};
-use oblivion_transfer::native_files::{Action, Context, Direction, Request, Status};
+use oblivion_transfer::native_files::{
+    Action, Context, Direction, Request, Status, TRANSFERS_PAGE_LIMIT, TransfersPage,
+    TransfersQuery,
+};
 use oblivion_transfer::selection::{self, Plan};
 use oblivion_transfer::stream::{PreparedDownload, PreparedUpload};
 use oblivion_transfer::{Receipt, stream};
@@ -21,12 +24,14 @@ pub fn run(args: &[String]) -> control::Result<i32> {
     let operation = args
         .first()
         .map(String::as_str)
-        .ok_or("Choose files import, export, list, status, recover or discard")?;
+        .ok_or("Choose files import, export, list, transfers, status, recover or discard")?;
     if !matches!(
         operation,
-        "import" | "export" | "list" | "status" | "recover" | "discard"
+        "import" | "export" | "list" | "transfers" | "status" | "recover" | "discard"
     ) {
-        return Err("Choose files import, export, list, status, recover or discard".into());
+        return Err(
+            "Choose files import, export, list, transfers, status, recover or discard".into(),
+        );
     }
     let mut safe = None;
     let mut name = None;
@@ -34,6 +39,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
     let mut sources = vec![];
     let mut selected = vec![];
     let mut cursor = None;
+    let mut limit = None;
     let mut json_output = false;
     let mut operation_id = None;
     let mut expected_opening = None;
@@ -50,7 +56,24 @@ pub fn run(args: &[String]) -> control::Result<i32> {
                 safe = Some(options.next().ok_or("Missing Safe name")?);
             }
             "--cursor" => {
-                cursor = Some(options.next().ok_or("Missing directory cursor")?.clone());
+                if cursor.is_some() {
+                    return Err("Duplicate --cursor".into());
+                }
+                cursor = Some(options.next().ok_or("Missing cursor")?.clone());
+            }
+            "--limit" => {
+                if limit.is_some() {
+                    return Err("Duplicate --limit".into());
+                }
+                limit = Some(
+                    options
+                        .next()
+                        .ok_or("Missing page limit")?
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|value| (1..=TRANSFERS_PAGE_LIMIT).contains(value))
+                        .ok_or("Choose a page limit from 1 to 8")?,
+                );
             }
             "--json" => json_output = true,
             "--events" => events_output = true,
@@ -91,6 +114,18 @@ pub fn run(args: &[String]) -> control::Result<i32> {
         }
     }
     let managing = matches!(operation, "status" | "recover" | "discard");
+    if limit.is_some() && operation != "transfers" {
+        return Err("--limit applies only to files transfers".into());
+    }
+    if operation == "transfers"
+        && (!paths.is_empty()
+            || !sources.is_empty()
+            || !selected.is_empty()
+            || operation_id.is_some()
+            || name.is_some())
+    {
+        return Err("Use files transfers --safe SAFE [--destination DIRECTORY] [--cursor ID] [--limit 8] --json".into());
+    }
     if (events_output || confirmed) && !matches!(operation, "import" | "export") {
         return Err("--events and --yes apply only to file import or export".into());
     }
@@ -224,7 +259,7 @@ pub fn run(args: &[String]) -> control::Result<i32> {
         }
         return Ok(0);
     }
-    if cursor.is_some() {
+    if cursor.is_some() && operation != "transfers" {
         return Err("--cursor applies to directory listing".into());
     }
     #[derive(Deserialize)]
@@ -246,6 +281,58 @@ pub fn run(args: &[String]) -> control::Result<i32> {
         .is_some_and(|expected| expected != opening.nonce)
     {
         return Err("Safe opening changed; inspect the operation again".into());
+    }
+    if operation == "transfers" {
+        let query = TransfersQuery {
+            safe_id: id,
+            opening: opening.nonce.clone(),
+            direction: if destination.is_some() {
+                Direction::Export
+            } else {
+                Direction::Import
+            },
+            after: cursor,
+            limit: limit.unwrap_or(TRANSFERS_PAGE_LIMIT),
+        };
+        query.validate()?;
+        let page = if let Some(destination) = destination {
+            let destination = Path::new(&destination).canonicalize()?;
+            stream::operations::inventory(
+                &destination.join(".oblivion-transfers"),
+                &destination,
+                &query,
+            )?
+        } else {
+            scope::within(opened.slot, || {
+                file_query::<TransfersPage>(
+                    &opening,
+                    &Request::Transfers {
+                        safe_id: query.safe_id.clone(),
+                        opening: query.opening.clone(),
+                        after: query.after.clone(),
+                        limit: query.limit,
+                    },
+                )
+            })?
+        };
+        page.validate(&query)?;
+        if json_output {
+            println!("{}", serde_json::to_string(&page)?);
+            return Ok(0);
+        }
+        for entry in page.entries {
+            println!("{}\t{:?}", entry.operation_id, entry.name);
+        }
+        if let Some(cursor) = page.next_cursor {
+            eprintln!("More recorded operations: repeat with --cursor {cursor}");
+        }
+        if page.skipped != 0 {
+            eprintln!(
+                "{} unavailable records skipped. Listing does not authorize recovery or discard.",
+                page.skipped
+            );
+        }
+        return Ok(0);
     }
     if managing {
         let operation_id = operation_id.ok_or("Choose an operation ID")?;
@@ -627,25 +714,34 @@ fn console_progress(
 }
 
 fn manage_import(opening: &Opening, operation: &str, action: Action) -> control::Result<Status> {
+    let request = match action {
+        Action::Status => Request::Status {
+            id: operation.into(),
+            safe_id: opening.safe_id.clone(),
+            opening: opening.nonce.clone(),
+        },
+        Action::Recover => Request::Recover {
+            id: operation.into(),
+            safe_id: opening.safe_id.clone(),
+            opening: opening.nonce.clone(),
+        },
+        Action::Discard => Request::Discard {
+            id: operation.into(),
+            safe_id: opening.safe_id.clone(),
+            opening: opening.nonce.clone(),
+        },
+    };
+    let response: Status = file_query(opening, &request)?;
+    response.validate(operation, &opening.safe_id, &opening.nonce)?;
+    Ok(response)
+}
+
+fn file_query<T: serde::de::DeserializeOwned>(
+    opening: &Opening,
+    request: &Request,
+) -> control::Result<T> {
     let (mut connection, lease, client) = control::attach_file(opening)?;
-    let result = (|| -> control::Result<Status> {
-        let request = match action {
-            Action::Status => Request::Status {
-                id: operation.into(),
-                safe_id: opening.safe_id.clone(),
-                opening: opening.nonce.clone(),
-            },
-            Action::Recover => Request::Recover {
-                id: operation.into(),
-                safe_id: opening.safe_id.clone(),
-                opening: opening.nonce.clone(),
-            },
-            Action::Discard => Request::Discard {
-                id: operation.into(),
-                safe_id: opening.safe_id.clone(),
-                opening: opening.nonce.clone(),
-            },
-        };
+    let result = (|| -> control::Result<T> {
         let request = serde_json::to_vec(&request)?;
         connection.write_all(&(request.len() as u32).to_be_bytes())?;
         connection.write_all(&request)?;
@@ -653,9 +749,10 @@ fn manage_import(opening: &Opening, operation: &str, action: Action) -> control:
             File::from(OwnedFd::from(connection)),
             Duration::from_secs(60),
         )?;
-        let response: Status = oblivion_transfer::endpoint::read_message(&mut channel, 8192)?;
-        response.validate(operation, &opening.safe_id, &opening.nonce)?;
-        Ok(response)
+        Ok(oblivion_transfer::endpoint::read_message(
+            &mut channel,
+            8192,
+        )?)
     })();
     let released = control::release_agent(&client, &opening.safe_id);
     drop(lease);
@@ -687,7 +784,7 @@ mod tests {
 
     #[test]
     fn copy_approval_flags_are_rejected_before_non_copy_operations() {
-        for action in ["list", "status", "recover", "discard"] {
+        for action in ["list", "transfers", "status", "recover", "discard"] {
             for flag in ["--events", "--yes"] {
                 let args = [action, "--safe", "research", flag].map(str::to_owned);
                 assert_eq!(
@@ -754,5 +851,41 @@ mod tests {
         let unsafe_name = super::CopySelection::Upload(vec!["/a/note\\draft".into()]);
         assert!(unsafe_name.name(None).is_err());
         assert_eq!(unsafe_name.name(Some("note_draft")).unwrap(), "note_draft");
+    }
+
+    #[test]
+    fn transfer_inventory_rejects_copy_mutations_and_unbounded_pages_before_runtime_access() {
+        for tail in [
+            vec!["--source", "/file"],
+            vec!["--path", "workspace/file"],
+            vec!["--name", "copy"],
+            vec!["--operation", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+        ] {
+            let args = [vec!["transfers", "--safe", "research"], tail]
+                .concat()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            assert!(
+                run(&args)
+                    .unwrap_err()
+                    .to_string()
+                    .starts_with("Use files transfers --safe SAFE")
+            );
+        }
+        for limit in ["0", "9", "-1", "invalid"] {
+            let args = ["transfers", "--safe", "research", "--limit", limit].map(str::to_owned);
+            assert_eq!(
+                run(&args).unwrap_err().to_string(),
+                "Choose a page limit from 1 to 8"
+            );
+        }
+        for operation in ["import", "export", "list", "status", "recover", "discard"] {
+            let args = [operation, "--safe", "research", "--limit", "8"].map(str::to_owned);
+            assert_eq!(
+                run(&args).unwrap_err().to_string(),
+                "--limit applies only to files transfers"
+            );
+        }
     }
 }

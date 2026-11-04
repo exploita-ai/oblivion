@@ -36,6 +36,12 @@ def command(fd):
     if not isinstance(value, dict):
         raise ValueError("invalid_file_request")
     operation = value.get("operation")
+    if operation == "transfers":
+        if set(value) != {"operation", "safe_id", "opening", "after", "limit"} or any(not isinstance(value[key], str) or not re.fullmatch(r"[0-9a-f]{32}", value[key]) for key in ("safe_id", "opening")):
+            raise ValueError("invalid_file_request")
+        if value["after"] is not None and (not isinstance(value["after"], str) or not re.fullmatch(r"[0-9a-f]{32}", value["after"])) or type(value["limit"]) is not int or not 1 <= value["limit"] <= 8:
+            raise ValueError("invalid_file_request")
+        return (["/usr/bin/oblivion-copy", "native-files", "/vault/home/.oblivion-file-staging", "/vault/workspace", "3600000"], json.dumps(value).encode())
     if operation in ("import", "status", "recover", "discard"):
         expected = {"operation", "id", "safe_id", "opening"} | ({"name"} if operation == "import" else set())
         if set(value) != expected or any(not isinstance(value[key], str) or not re.fullmatch(r"[0-9a-f]{32}", value[key]) for key in ("id", "safe_id", "opening")):
@@ -67,7 +73,9 @@ def main():
             # not discard the initial request while systemd starts the worker.
             stream.write(b"ready\n")
             args, metadata = command(fd)
-            if metadata is not None:
+            # Only a new import prepares its receiver. Inventory and status
+            # remain read-only when no staging directory exists yet.
+            if metadata is not None and json.loads(metadata)["operation"] == "import":
                 os.makedirs("/vault/home/.oblivion-file-staging", mode=0o700, exist_ok=True)
             if fd != 3:
                 os.dup2(fd, 3)

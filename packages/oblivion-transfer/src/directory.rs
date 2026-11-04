@@ -1,4 +1,5 @@
 use crate::{MAX_ENTRIES, invalid, require};
+use serde::{Deserialize, Serialize};
 use std::ffi::{CStr, CString};
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -8,6 +9,35 @@ use std::path::Path;
 
 /// All peer paths are resolved one component at a time from pinned descriptors.
 pub(crate) struct Directory(File);
+
+/// A volume UUID identifies the filesystem across device-number reassignment.
+/// It is not authentication against a cloned or attacker-controlled volume.
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "platform", rename_all = "kebab-case", deny_unknown_fields)]
+enum FilesystemIdentity {
+    Linux { kind: i64, uuid: Vec<u8> },
+    MacOs { kind: String, uuid: [u8; 16] },
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FileIdentity {
+    filesystem: FilesystemIdentity,
+    pub inode: u64,
+}
+
+impl FileIdentity {
+    pub fn of(file: &File) -> io::Result<Self> {
+        Ok(Self {
+            filesystem: filesystem_identity(file)?,
+            inode: file.metadata()?.ino(),
+        })
+    }
+
+    pub fn matches(&self, file: &File) -> io::Result<bool> {
+        Ok(*self == Self::of(file)?)
+    }
+}
 
 impl Directory {
     pub fn open(path: &Path) -> io::Result<Self> {
@@ -48,6 +78,10 @@ impl Directory {
 
     pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
         self.0.metadata()
+    }
+
+    pub fn identity(&self) -> io::Result<FileIdentity> {
+        FileIdentity::of(&self.0)
     }
 
     pub fn lock(&self) -> io::Result<()> {
@@ -152,11 +186,23 @@ impl Directory {
         let to = component(to)?;
         #[cfg(target_os = "linux")]
         let result = unsafe {
-            libc::renameat2(self.0.as_raw_fd(), from.as_ptr(), destination.0.as_raw_fd(), to.as_ptr(), libc::RENAME_NOREPLACE)
+            libc::renameat2(
+                self.0.as_raw_fd(),
+                from.as_ptr(),
+                destination.0.as_raw_fd(),
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
         };
         #[cfg(target_os = "macos")]
         let result = unsafe {
-            libc::renameatx_np(self.0.as_raw_fd(), from.as_ptr(), destination.0.as_raw_fd(), to.as_ptr(), libc::RENAME_EXCL)
+            libc::renameatx_np(
+                self.0.as_raw_fd(),
+                from.as_ptr(),
+                destination.0.as_raw_fd(),
+                to.as_ptr(),
+                libc::RENAME_EXCL,
+            )
         };
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let result = return Err(io::Error::from(io::ErrorKind::Unsupported));
@@ -241,6 +287,90 @@ impl Directory {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn filesystem_identity(file: &File) -> io::Result<FilesystemIdentity> {
+    // Linux 6.9+ FS_IOC_GETFSUUID returns the filesystem's complete external
+    // UUID from this descriptor. f_fsid folds ext4's UUID to only 64 bits.
+    #[repr(C)]
+    struct FsUuid {
+        len: u8,
+        uuid: [u8; 16],
+    }
+    let mut uuid = FsUuid {
+        len: 0,
+        uuid: [0; 16],
+    };
+    if unsafe { libc::ioctl(file.as_raw_fd(), libc::_IOR::<FsUuid>(0x15, 0), &mut uuid) } != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "filesystem_identity_unavailable",
+        ));
+    }
+    require((1..=16).contains(&uuid.len), "invalid_filesystem_identity")?;
+    let uuid = uuid.uuid[..usize::from(uuid.len)].to_vec();
+    require(
+        uuid.iter().any(|byte| *byte != 0),
+        "invalid_filesystem_identity",
+    )?;
+    let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(file.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(FilesystemIdentity::Linux {
+        kind: unsafe { stats.assume_init() }.f_type as i64,
+        uuid,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn filesystem_identity(file: &File) -> io::Result<FilesystemIdentity> {
+    #[repr(C)]
+    struct Attributes {
+        length: u32,
+        returned: libc::attribute_set_t,
+        uuid: [u8; 16],
+    }
+    let mut request: libc::attrlist = unsafe { std::mem::zeroed() };
+    request.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
+    request.commonattr = libc::ATTR_CMN_RETURNED_ATTRS;
+    request.volattr = libc::ATTR_VOL_INFO | libc::ATTR_VOL_UUID;
+    let mut value: Attributes = unsafe { std::mem::zeroed() };
+    if unsafe {
+        libc::fgetattrlist(
+            file.as_raw_fd(),
+            (&mut request as *mut libc::attrlist).cast(),
+            (&mut value as *mut Attributes).cast(),
+            std::mem::size_of::<Attributes>(),
+            0,
+        )
+    } != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "filesystem_identity_unavailable",
+        ));
+    }
+    require(
+        value.length as usize == std::mem::size_of::<Attributes>()
+            && value.returned.volattr & libc::ATTR_VOL_UUID != 0
+            && value.uuid.iter().any(|byte| *byte != 0),
+        "invalid_filesystem_identity",
+    )?;
+    let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(file.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stats = unsafe { stats.assume_init() };
+    let kind = unsafe { CStr::from_ptr(stats.f_fstypename.as_ptr()) }
+        .to_str()
+        .map_err(|_| invalid("invalid_filesystem_identity"))?
+        .to_owned();
+    Ok(FilesystemIdentity::MacOs {
+        kind,
+        uuid: value.uuid,
+    })
+}
+
 struct DirectoryStream(*mut libc::DIR);
 
 impl Drop for DirectoryStream {
@@ -275,8 +405,14 @@ mod tests {
 
     #[test]
     fn private_cleanup_supports_every_valid_transfer_directory() {
-        let root = std::env::temp_dir().join(format!("oblivion-cleanup-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let root = std::env::temp_dir().join(format!(
+            "oblivion-cleanup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir(&root).unwrap();
         let directory = Directory::open(&root).unwrap();
         let pending = directory.create_directory("pending").unwrap();
@@ -292,16 +428,30 @@ mod tests {
 
     #[test]
     fn exclusive_move_cannot_replace_an_existing_empty_directory() {
-        let root = std::env::temp_dir().join(format!("oblivion-exclusive-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let root = std::env::temp_dir().join(format!(
+            "oblivion-exclusive-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir(&root).unwrap();
         let directory = Directory::open(&root).unwrap();
         directory.create_directory("source").unwrap();
         directory.create_directory("destination").unwrap();
-        assert_eq!(directory.move_exclusive("source", &directory, "destination").unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            directory
+                .move_exclusive("source", &directory, "destination")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
         assert!(root.join("source").is_dir());
         assert!(root.join("destination").is_dir());
-        directory.move_exclusive("source", &directory, "unused").unwrap();
+        directory
+            .move_exclusive("source", &directory, "unused")
+            .unwrap();
         assert!(!root.join("source").exists());
         assert!(root.join("unused").is_dir());
         std::fs::remove_dir_all(root).unwrap();

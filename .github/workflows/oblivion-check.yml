@@ -117,7 +117,7 @@ jobs:
           rustup toolchain install 1.88.0 --profile minimal
           rustup default 1.88.0
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake make g++ perl libclang-dev python3 zstd
+          sudo apt-get install -y --no-install-recommends cmake make g++ perl libclang-dev python3 zstd util-linux e2fsprogs
       - name: Cache Rust dependencies and build outputs
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -235,7 +235,25 @@ jobs:
           for package in oblivion-gateway oblivion-transfer oblivion-transport oblivion-tor-state; do
             (cd "packages/$package" && cargo check --locked --lib --bins && cargo test --locked --lib)
           done
-          (cd packages/oblivion-transfer && cargo test --locked --offline --test approved --test share --test personal_copy --test native_files --test prepared_files --test multi_files --test endpoint --test relay --test stream && cargo build --locked --offline --bin oblivion-copy)
+          (cd packages/oblivion-transfer && cargo test --locked --offline --test approved --test share --test personal_copy --test native_files --test prepared_files --test multi_files --test transfer_inventory --test endpoint --test relay --test stream && cargo build --locked --offline --bin oblivion-copy)
+      - name: Recover receiver records after a real filesystem remount
+        working-directory: packages/oblivion-transfer
+        run: |
+          test_binary=$(cargo test --locked --test remount --no-run --message-format=json | python3 -c '
+          import json, sys
+          artifacts = [json.loads(line) for line in sys.stdin]
+          binaries = [item["executable"] for item in artifacts if item.get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == "remount" and item.get("profile", {}).get("test") and item.get("executable")]
+          assert len(binaries) == 1, "expected one current remount test executable"
+          print(binaries[0])
+          ')
+          test -x "$test_binary"
+          remount_fixture=verified_transfer_recovers_after_the_same_filesystem_gets_a_different_device_number
+          fixture_listing=$("$test_binary" --list --ignored --exact "$remount_fixture")
+          case "$fixture_listing" in
+            "$remount_fixture: test"*) ;;
+            *) printf 'Required remount fixture is missing: %s\n' "$remount_fixture" >&2; exit 1 ;;
+          esac
+          sudo -n unshare --mount --propagation private "$test_binary" --ignored --exact "$remount_fixture" --nocapture
       - name: Verify Share guest streams with the real copy endpoint
         working-directory: packages/oblivion-history
         env:
@@ -293,7 +311,7 @@ jobs:
         run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
       - name: Verify native file reconciliation and ciphertext-only personal copies
         working-directory: packages/oblivion-transfer
-        run: cargo test --locked --test personal_copy --test native_files --test prepared_files --test multi_files --test endpoint --test relay --test stream
+        run: cargo test --locked --test personal_copy --test native_files --test prepared_files --test multi_files --test transfer_inventory --test endpoint --test relay --test stream
       - name: Check native per-agent Share without source credentials
         working-directory: packages/oblivion-history
         run: |

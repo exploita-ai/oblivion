@@ -31,6 +31,20 @@ class NativeFiles(unittest.TestCase):
             self.assertEqual(json.loads(metadata), request)
             self.assertNotIn(request["id"], command)
 
+    def test_transfers_inventory_uses_only_the_fixed_import_receiver(self):
+        request = {"operation": "transfers", "safe_id": "b" * 32, "opening": "c" * 32, "after": None, "limit": 8}
+        for after in (None, "d" * 32):
+            request["after"] = after
+            command, metadata = self.request(request)
+            self.assertEqual(command, ["/usr/bin/oblivion-copy", "native-files", "/vault/home/.oblivion-file-staging", "/vault/workspace", "3600000"])
+            self.assertEqual(json.loads(metadata), request)
+        for invalid in ({**request, "direction": "export"}, {**request, "root": "/etc"}, {**request, "id": "a" * 32}, {**request, "safe_id": "../safe"},
+                        {**request, "opening": False}, {**request, "after": "../outside"}, {**request, "after": False}, {**request, "limit": True},
+                        {**request, "limit": 0}, {**request, "limit": 9}, {**request, "limit": 1.5}, {**request, "limit": "8"},
+                        {key: value for key, value in request.items() if key != "after"}):
+            with self.assertRaises(ValueError):
+                self.request(invalid)
+
     def test_unknown_fields_bad_ids_and_path_expansion_never_select_another_root(self):
         request = {"operation": "status", "id": "a" * 32, "safe_id": "b" * 32, "opening": "c" * 32}
         for invalid in ({**request, "root": "/etc"}, {**request, "id": "../outside"}, {**request, "opening": None}, {**request, "operation": "remove"},

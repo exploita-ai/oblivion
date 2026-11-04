@@ -3,22 +3,25 @@
 //! undone by recovery or discard.
 use super::{Publication, validate_name, verify_receipt};
 use crate::channel::Channel;
-use crate::directory::Directory;
+use crate::directory::{Directory, FileIdentity};
 use crate::{Limits, Manifest, Receipt, invalid, require, validate_id};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-use crate::native_files::{Action, Context, Direction, Request, State, Status};
+use crate::native_files::{
+    Action, Context, Direction, Request, State, Status, TransferEntry, TransfersPage,
+    TransfersQuery,
+};
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
     version: u8,
     context: Context,
-    device: u64,
-    inode: u64,
+    target: FileIdentity,
 }
 
 pub fn begin(inbox: &Path, target: &Path, context: &Context) -> io::Result<()> {
@@ -32,6 +35,7 @@ pub(super) fn begin_at(root: &Directory, target: &Directory, context: &Context) 
     context.validate()?;
     root.require_private()?;
     target.require_controlled()?;
+    let target = target.identity()?;
     let operations = match root.create_directory("operations") {
         Ok(value) => value,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -41,12 +45,10 @@ pub(super) fn begin_at(root: &Directory, target: &Directory, context: &Context) 
     };
     operations.require_private()?;
     let operation = operations.create_directory(&context.id)?;
-    let metadata = target.metadata()?;
     let record = Record {
         version: 1,
         context: context.clone(),
-        device: metadata.dev(),
-        inode: metadata.ino(),
+        target,
     };
     let mut file = operation.create_file("context.pending")?;
     serde_json::to_writer(&mut file, &record).map_err(|_| invalid("invalid_file_operation"))?;
@@ -102,6 +104,16 @@ fn operation(
         return Ok(None);
     };
     operations.require_private()?;
+    read_operation(&operations, &target.identity()?, id, safe, direction)
+}
+
+fn read_operation(
+    operations: &Directory,
+    target: &FileIdentity,
+    id: &str,
+    safe: &str,
+    direction: Direction,
+) -> io::Result<Option<(Directory, Record)>> {
     let Some(operation) = optional(operations.directory(id))? else {
         return Ok(None);
     };
@@ -110,14 +122,12 @@ fn operation(
         return Ok(None);
     };
     record.context.validate()?;
-    let metadata = target.metadata()?;
     require(
         record.version == 1
             && record.context.id == id
             && record.context.safe_id == safe
             && record.context.direction == direction
-            && record.device == metadata.dev()
-            && record.inode == metadata.ino(),
+            && record.target == *target,
         "file_operation_changed",
     )?;
     Ok(Some((operation, record)))
@@ -193,11 +203,9 @@ fn inspect(
     let output = optional(target.source(&publication.name))?;
     let moved = output
         .as_ref()
-        .map(|file| file.metadata())
+        .map(|file| publication.source.matches(file))
         .transpose()?
-        .is_some_and(|metadata| {
-            metadata.dev() == publication.device && metadata.ino() == publication.inode
-        });
+        .unwrap_or(false);
     if !moved {
         if let Ok(parent) = super::selected_parent(&transaction, &publication.selected) {
             if let Some(file) = optional(
@@ -209,9 +217,7 @@ fn inspect(
                         .ok_or_else(|| invalid("invalid_file_publication"))?,
                 ),
             )? {
-                let metadata = file.metadata()?;
-                status.can_discard =
-                    metadata.dev() == publication.device && metadata.ino() == publication.inode;
+                status.can_discard = publication.source.matches(&file)?;
             }
         }
     }
@@ -279,6 +285,67 @@ pub fn manage(
     }
 }
 
+/// Inventory is a bounded set of receiver references, never permission to
+/// publish or discard. Those actions still inspect fresh state under this lock.
+pub fn inventory(inbox: &Path, target: &Path, query: &TransfersQuery) -> io::Result<TransfersPage> {
+    query.validate()?;
+    let mut page = TransfersPage {
+        safe_id: query.safe_id.clone(),
+        opening: query.opening.clone(),
+        direction: query.direction,
+        entries: Vec::new(),
+        next_cursor: None,
+        skipped: 0,
+    };
+    let target = Directory::open(target)?;
+    target.require_controlled()?;
+    let target_identity = target.identity()?;
+    let Some(root) = optional(Directory::open(inbox))? else {
+        return Ok(page);
+    };
+    root.require_private()?;
+    root.lock()?;
+    let Some(operations) = optional(root.directory("operations"))? else {
+        return Ok(page);
+    };
+    operations.require_private()?;
+    let mut ids = BTreeSet::new();
+    operations.visit(|name| {
+        let Ok(name) = name.to_str() else {
+            return Ok(());
+        };
+        if validate_id(name).is_ok() && query.after.as_deref().is_none_or(|after| name > after) {
+            ids.insert(name.to_owned());
+            if ids.len() > query.limit + 1 {
+                ids.pop_last();
+            }
+        }
+        Ok(())
+    })?;
+    let more = ids.len() > query.limit;
+    for id in ids.into_iter().take(query.limit) {
+        if more {
+            page.next_cursor = Some(id.clone());
+        }
+        match read_operation(
+            &operations,
+            &target_identity,
+            &id,
+            &query.safe_id,
+            query.direction,
+        ) {
+            Ok(Some((_, record))) => page.entries.push(TransferEntry {
+                operation_id: id,
+                source_opening: record.context.opening,
+                name: record.context.name,
+            }),
+            Ok(None) | Err(_) => page.skipped += 1,
+        }
+    }
+    page.validate(query)?;
+    Ok(page)
+}
+
 pub fn serve(
     channel: &mut Channel,
     inbox: &Path,
@@ -286,6 +353,25 @@ pub fn serve(
     request: Request,
 ) -> io::Result<()> {
     match request {
+        Request::Transfers {
+            safe_id,
+            opening,
+            after,
+            limit,
+        } => crate::endpoint::write_message(
+            channel,
+            &inventory(
+                inbox,
+                target,
+                &TransfersQuery {
+                    safe_id,
+                    opening,
+                    direction: Direction::Import,
+                    after,
+                    limit,
+                },
+            )?,
+        ),
         Request::Import {
             id,
             safe_id,
