@@ -167,7 +167,9 @@ fn bounded_bridge_preserves_binary_data_and_flushes_guest_final_bytes() {
     });
     let mut received = Vec::new();
     client.read_to_end(&mut received).unwrap();
-    assert_eq!(received, writer.join().unwrap());
+    let expected = writer.join().unwrap();
+    assert_eq!(received.len(), expected.len(), "bridge truncated its final bytes");
+    assert!(received == expected, "bridge changed the binary stream");
     echo.join().unwrap();
     worker.join().unwrap().unwrap();
 }

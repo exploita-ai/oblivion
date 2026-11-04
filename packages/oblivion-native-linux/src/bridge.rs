@@ -74,7 +74,11 @@ pub fn duplex(mut local: UnixStream, mut guest: UnixStream, stop: Arc<AtomicBool
                     revents: 0,
                 },
                 libc::pollfd {
-                    fd: if guest_closed { -1 } else { guest.as_raw_fd() },
+                    fd: if guest_closed || to_local.writable().is_empty() && to_guest.readable().is_empty() {
+                        -1
+                    } else {
+                        guest.as_raw_fd()
+                    },
                     events: (if to_local.writable().is_empty() {
                         0
                     } else {
@@ -101,6 +105,11 @@ pub fn duplex(mut local: UnixStream, mut guest: UnixStream, stop: Arc<AtomicBool
                     return Ok(());
                 }
                 if polls[index].revents & (libc::POLLIN | libc::POLLHUP) == 0 {
+                    continue;
+                }
+                // POLLHUP is reported even without POLLIN. Reading into a full
+                // buffer returns zero without observing EOF and loses the tail.
+                if destination.writable().is_empty() {
                     continue;
                 }
                 match source.read(destination.writable()) {
