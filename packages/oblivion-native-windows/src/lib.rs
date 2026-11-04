@@ -18,6 +18,8 @@ pub mod auth;
 pub mod bridge;
 pub mod config;
 #[cfg(windows)]
+pub mod client;
+#[cfg(windows)]
 pub mod files;
 #[cfg(windows)]
 pub mod hcs;

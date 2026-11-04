@@ -5,24 +5,30 @@ use crate::{Error, Result};
 use std::io::{self, Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{
-    ERROR_BROKEN_PIPE, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_NO_DATA,
-    ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, GetLastError, HANDLE,
-    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0,
+    ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND, ERROR_IO_INCOMPLETE,
+    ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY,
+    ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, ERROR_SEM_TIMEOUT, GENERIC_READ, GENERIC_WRITE,
+    GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    WAIT_FAILED, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
+    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
+    PIPE_ACCESS_DUPLEX, ReadFile, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+    PIPE_WAIT, WaitNamedPipeW,
 };
-use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows_sys::Win32::System::Threading::{
+    CreateEventW, WaitForMultipleObjects, WaitForSingleObject,
+};
 use zeroize::Zeroizing;
 
 pub(crate) const BUFFER: usize = 65536;
@@ -48,19 +54,47 @@ pub struct Endpoint {
 }
 
 pub struct Pipe {
-    handle: Arc<OwnedHandle>,
+    handle: Arc<PipeHandle>,
+    role: Role,
+    closed: bool,
     read: Option<Operation>,
     write: Option<Operation>,
 }
 
 struct Pending {
-    handle: Arc<OwnedHandle>,
+    handle: Arc<PipeHandle>,
     event: OwnedHandle,
     overlapped: OVERLAPPED,
     bytes: Zeroizing<Vec<u8>>,
     in_flight: bool,
     completed: Option<usize>,
     offset: usize,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Role {
+    Server,
+    Client,
+}
+
+// Outstanding buffers may outlive cancellation, but must not keep a client's
+// kernel handle open. Taking this sole owner closes once even when a pending
+// allocation is retained. No mutex is held across a Win32 call or event wait.
+struct PipeHandle(Mutex<Option<OwnedHandle>>);
+impl PipeHandle {
+    fn raw(&self) -> io::Result<HANDLE> {
+        self.0
+            .lock()
+            .map_err(|_| failed())?
+            .as_ref()
+            .map(AsRawHandle::as_raw_handle)
+            .ok_or_else(closed)
+    }
+    fn close(&self) -> io::Result<()> {
+        let handle = self.0.lock().map_err(|_| failed())?.take();
+        drop(handle);
+        Ok(())
+    }
 }
 
 struct Operation(Option<Box<Pending>>);
@@ -70,7 +104,7 @@ struct Operation(Option<Box<Pending>>);
 unsafe impl Send for Operation {}
 
 impl Operation {
-    fn new(handle: Arc<OwnedHandle>, bytes: Zeroizing<Vec<u8>>) -> io::Result<Self> {
+    fn new(handle: Arc<PipeHandle>, bytes: Zeroizing<Vec<u8>>) -> io::Result<Self> {
         let event = unsafe { CreateEventW(null(), 1, 0, null()) };
         if event.is_null() {
             return Err(failed());
@@ -112,12 +146,12 @@ impl Operation {
         Ok(())
     }
 
-    fn read(handle: Arc<OwnedHandle>) -> io::Result<Self> {
+    fn read(handle: Arc<PipeHandle>) -> io::Result<Self> {
         let mut operation = Self::new(handle, Zeroizing::new(vec![0; BUFFER]))?;
         let pending = operation.pending_mut();
         let success = unsafe {
             ReadFile(
-                pending.handle.as_raw_handle(),
+                pending.handle.raw()?,
                 pending.bytes.as_mut_ptr(),
                 pending.bytes.len() as u32,
                 null_mut(),
@@ -128,12 +162,12 @@ impl Operation {
         Ok(operation)
     }
 
-    fn write(handle: Arc<OwnedHandle>, bytes: &[u8]) -> io::Result<Self> {
+    fn write(handle: Arc<PipeHandle>, bytes: &[u8]) -> io::Result<Self> {
         let mut operation = Self::new(handle, Zeroizing::new(bytes.to_vec()))?;
         let pending = operation.pending_mut();
         let success = unsafe {
             WriteFile(
-                pending.handle.as_raw_handle(),
+                pending.handle.raw()?,
                 pending.bytes.as_ptr(),
                 pending.bytes.len() as u32,
                 null_mut(),
@@ -152,7 +186,7 @@ impl Operation {
         let mut transferred = 0;
         if unsafe {
             GetOverlappedResult(
-                pending.handle.as_raw_handle(),
+                pending.handle.raw()?,
                 &pending.overlapped,
                 &mut transferred,
                 0,
@@ -189,8 +223,12 @@ impl Operation {
             return Ok(());
         }
         let pending = self.pending();
+        let handle = match pending.handle.raw() {
+            Ok(handle) => handle,
+            Err(_) => return Err(self.abandon()),
+        };
         unsafe {
-            CancelIoEx(pending.handle.as_raw_handle(), &pending.overlapped);
+            CancelIoEx(handle, &pending.overlapped);
         }
         if unsafe {
             WaitForSingleObject(
@@ -201,17 +239,21 @@ impl Operation {
         {
             // A signalled completion is safe to release for every result except
             // ERROR_IO_INCOMPLETE. CancelIoEx itself does not provide that proof.
-            let result = self.poll();
-            if !matches!(result, Ok(None)) {
+            let _ = self.poll();
+            if !self.pending().in_flight {
                 return Ok(());
             }
         }
+        Err(self.abandon())
+    }
+
+    fn abandon(&mut self) -> io::Error {
         // Windows forbids releasing an OVERLAPPED or its buffer while pending.
         // Keep only this bounded operation alive until process exit if a broken
         // kernel cancellation cannot finish. Pipe::close disconnected the peer.
         std::mem::forget(self.0.take());
         DRAIN_FAILED.store(true, Ordering::Release);
-        Err(io::Error::other("private_pipe_cancellation_failed"))
+        io::Error::other("private_pipe_cancellation_failed")
     }
 }
 
@@ -292,7 +334,7 @@ impl Endpoint {
         if unsafe { SetHandleInformation(handle.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) } == 0 {
             return Err(Error("private_pipe_bind_failed"));
         }
-        Ok(Pipe::new(Arc::new(handle)))
+        Ok(Pipe::new(handle, Role::Server))
     }
 
     /// One pending listener remains owned between deadline polls. Control
@@ -308,7 +350,13 @@ impl Endpoint {
                     .map_err(|_| Error("private_pipe_accept_failed"))?;
             let pending = operation.pending_mut();
             let connected = unsafe {
-                ConnectNamedPipe(pending.handle.as_raw_handle(), &mut pending.overlapped)
+                ConnectNamedPipe(
+                    pending
+                        .handle
+                        .raw()
+                        .map_err(|_| Error("private_pipe_accept_failed"))?,
+                    &mut pending.overlapped,
+                )
             } != 0;
             if !connected && unsafe { GetLastError() } == ERROR_PIPE_CONNECTED {
                 operation.pending_mut().completed = Some(0);
@@ -347,12 +395,19 @@ impl Endpoint {
         self.connect.take();
         let listener = self.listener.as_ref().expect("owned connected listener");
         let mut pid = 0;
-        let peer =
-            unsafe { GetNamedPipeClientProcessId(listener.handle.as_raw_handle(), &mut pid) } != 0
-                && self
-                    .identity
-                    .permits(pid, self.purpose == Purpose::Bootstrap)
-                    .unwrap_or(false);
+        let peer = unsafe {
+            GetNamedPipeClientProcessId(
+                listener
+                    .handle
+                    .raw()
+                    .map_err(|_| Error("private_peer_check_failed"))?,
+                &mut pid,
+            )
+        } != 0
+            && self
+                .identity
+                .permits(pid, self.purpose == Purpose::Bootstrap)
+                .unwrap_or(false);
         let next = if self.purpose == Purpose::Control {
             Some(self.create(false)?)
         } else {
@@ -374,13 +429,15 @@ impl Endpoint {
 
     pub fn stop_admission(&mut self) -> Result<()> {
         let mut result = Ok(());
-        if let Some(mut listener) = self.listener.take() {
-            if listener.close().is_err() {
+        // The listener's connect operation lives outside Pipe. Cancel it before
+        // closing the kernel handle; completion may never poll a recycled value.
+        if let Some(mut connect) = self.connect.take() {
+            if connect.cancel().is_err() {
                 result = Err(Error("private_pipe_cancellation_failed"));
             }
         }
-        if let Some(mut connect) = self.connect.take() {
-            if connect.cancel().is_err() {
+        if let Some(mut listener) = self.listener.take() {
+            if listener.close().is_err() {
                 result = Err(Error("private_pipe_cancellation_failed"));
             }
         }
@@ -395,9 +452,11 @@ impl Drop for Endpoint {
 }
 
 impl Pipe {
-    fn new(handle: Arc<OwnedHandle>) -> Self {
+    fn new(handle: OwnedHandle, role: Role) -> Self {
         Self {
-            handle,
+            handle: Arc::new(PipeHandle(Mutex::new(Some(handle)))),
+            role,
+            closed: false,
             read: None,
             write: None,
         }
@@ -444,8 +503,16 @@ impl Pipe {
     }
 
     pub fn close(&mut self) -> io::Result<()> {
-        unsafe {
-            DisconnectNamedPipe(self.handle.as_raw_handle());
+        if self.closed {
+            return Ok(());
+        }
+        self.closed = true;
+        if self.role == Role::Server {
+            if let Ok(handle) = self.handle.raw() {
+                unsafe {
+                    DisconnectNamedPipe(handle);
+                }
+            }
         }
         let mut result = Ok(());
         for operation in [&mut self.read, &mut self.write] {
@@ -455,12 +522,48 @@ impl Pipe {
                 }
             }
         }
+        if let Err(error) = self.handle.close() {
+            result = Err(error);
+        }
         result
+    }
+
+    pub(crate) fn wait(&self, deadline: Option<Instant>, read: bool) -> io::Result<()> {
+        if self.closed {
+            return Err(closed());
+        }
+        let mut events = Vec::with_capacity(2);
+        self.events(&mut events, read);
+        if events.is_empty() {
+            return Err(failed());
+        }
+        let milliseconds = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "controller_timeout",
+                    ));
+                }
+                remaining.as_millis().min(100).max(1) as u32
+            }
+            None => 100,
+        };
+        if unsafe { WaitForMultipleObjects(events.len() as u32, events.as_ptr(), 0, milliseconds) }
+            == WAIT_FAILED
+        {
+            return Err(failed());
+        }
+        Ok(())
     }
 }
 
 impl Read for Pipe {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if self.closed {
+            return Err(closed());
+        }
         if drain_failed() {
             return Err(io::Error::other("private_pipe_cancellation_failed"));
         }
@@ -491,6 +594,9 @@ impl Read for Pipe {
 
 impl Write for Pipe {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.closed {
+            return Err(closed());
+        }
         if drain_failed() {
             return Err(io::Error::other("private_pipe_cancellation_failed"));
         }
@@ -511,6 +617,9 @@ impl Write for Pipe {
         Ok(length)
     }
     fn flush(&mut self) -> io::Result<()> {
+        if self.closed {
+            return Err(closed());
+        }
         if drain_failed() {
             return Err(io::Error::other("private_pipe_cancellation_failed"));
         }
@@ -534,14 +643,102 @@ fn would_block() -> io::Error {
     io::Error::from(io::ErrorKind::WouldBlock)
 }
 
+fn closed() -> io::Error {
+    io::Error::new(io::ErrorKind::NotConnected, "controller_channel_closed")
+}
+
+pub(crate) fn connect_control(
+    name: &[u16],
+    identity: &Identity,
+    stop: &AtomicBool,
+    deadline: Instant,
+) -> io::Result<Pipe> {
+    loop {
+        check_connect(stop, deadline)?;
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            let code = unsafe { GetLastError() };
+            if code != ERROR_PIPE_BUSY {
+                return Err(connect_error(code));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let waited = unsafe {
+                WaitNamedPipeW(name.as_ptr(), remaining.as_millis().min(100).max(1) as u32)
+            };
+            if waited == 0 {
+                let code = unsafe { GetLastError() };
+                if !matches!(code, ERROR_SEM_TIMEOUT | ERROR_PIPE_BUSY) {
+                    return Err(connect_error(code));
+                }
+            }
+            continue;
+        }
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+        if unsafe { SetHandleInformation(handle.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) } == 0 {
+            return Err(failed());
+        }
+        let mut pid = 0;
+        if unsafe { GetNamedPipeServerProcessId(handle.as_raw_handle(), &mut pid) } == 0
+            || !identity.permits(pid, false).unwrap_or(false)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "untrusted_runtime_peer",
+            ));
+        }
+        check_connect(stop, deadline)?;
+        return Ok(Pipe::new(handle, Role::Client));
+    }
+}
+
+fn check_connect(stop: &AtomicBool, deadline: Instant) -> io::Result<()> {
+    if stop.load(Ordering::Acquire) {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "controller_cancelled",
+        ));
+    }
+    if drain_failed() {
+        return Err(io::Error::other("private_pipe_cancellation_failed"));
+    }
+    if Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "controller_timeout",
+        ));
+    }
+    Ok(())
+}
+
+fn connect_error(code: u32) -> io::Error {
+    io::Error::new(
+        match code {
+            ERROR_FILE_NOT_FOUND => io::ErrorKind::NotFound,
+            ERROR_ACCESS_DENIED => io::ErrorKind::PermissionDenied,
+            _ => io::ErrorKind::Other,
+        },
+        "runtime_control_unavailable",
+    )
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{Endpoint, Pipe, Purpose, drain_failed};
+    use super::{Endpoint, Pipe, Purpose, Role, connect_control, drain_failed};
     use crate::security::Identity;
     use std::io::{self, Read, Write};
-    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
     use std::ptr::{null, null_mut};
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::atomic::AtomicBool;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::{
         GENERIC_READ, GENERIC_WRITE, GetHandleInformation, HANDLE_FLAG_INHERIT,
@@ -589,7 +786,10 @@ pub(crate) mod tests {
             )
         };
         assert_ne!(client, INVALID_HANDLE_VALUE);
-        let client = Pipe::new(Arc::new(unsafe { OwnedHandle::from_raw_handle(client) }));
+        let client = Pipe::new(
+            unsafe { OwnedHandle::from_raw_handle(client) },
+            Role::Client,
+        );
         let server = endpoint
             .accept(
                 &AtomicBool::new(false),
@@ -632,7 +832,7 @@ pub(crate) mod tests {
         );
         let mut flags = 0;
         assert_ne!(
-            unsafe { GetHandleInformation(server.handle.as_raw_handle(), &mut flags) },
+            unsafe { GetHandleInformation(server.handle.raw().unwrap(), &mut flags) },
             0
         );
         assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
@@ -640,7 +840,7 @@ pub(crate) mod tests {
         assert_eq!(
             unsafe {
                 GetSecurityInfo(
-                    server.handle.as_raw_handle(),
+                    server.handle.raw().unwrap(),
                     SE_KERNEL_OBJECT,
                     DACL_SECURITY_INFORMATION,
                     null_mut(),
@@ -731,6 +931,56 @@ pub(crate) mod tests {
         let started = Instant::now();
         server.close().unwrap();
         assert!(started.elapsed() < Duration::from_millis(2500));
+        assert!(!drain_failed());
+    }
+
+    #[test]
+    fn client_close_cancels_its_read_closes_once_and_never_calls_server_disconnect() {
+        let name = name(Purpose::Control);
+        let mut endpoint = Endpoint::bind(&name, Purpose::Control).unwrap();
+        let wide = name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        let mut client = connect_control(
+            &wide,
+            &Identity::current().unwrap(),
+            &AtomicBool::new(false),
+            Instant::now() + Duration::from_secs(3),
+        )
+        .unwrap();
+        let mut server = endpoint
+            .accept(
+                &AtomicBool::new(false),
+                Instant::now() + Duration::from_secs(3),
+            )
+            .unwrap()
+            .unwrap();
+        let mut flags = 0;
+        assert_ne!(
+            unsafe { GetHandleInformation(client.handle.raw().unwrap(), &mut flags) },
+            0
+        );
+        assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
+        assert_eq!(
+            client.read(&mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        client.close().unwrap();
+        assert!(client.handle.raw().is_err());
+        client.close().unwrap();
+        assert_eq!(
+            client.write(b"after close").unwrap_err().kind(),
+            io::ErrorKind::NotConnected
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            assert!(Instant::now() < deadline);
+            match server.read(&mut [0; 1]) {
+                Ok(0) => break,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1))
+                }
+                result => panic!("unexpected close observation: {result:?}"),
+            }
+        }
         assert!(!drain_failed());
     }
 }
