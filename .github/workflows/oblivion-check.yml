@@ -102,7 +102,9 @@ jobs:
           cargo check --locked --lib --bins
           cargo check --locked --lib --bins --features lab-emulation
           cargo test --locked --lib --bin oblivion --bin oblivion-storage
-          cargo test --locked --test safe_admin --test managed --test terminal_screen --test workspace --test share_control --test channel
+          cargo test --locked --test safe_admin --test delegation --test backup_cli --test managed --test terminal_screen --test workspace --test share_control --test channel
+      - name: Verify native bundle pairing and distribution inventory
+        run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
       - name: Exercise real local PTY and scoped control protocols
         working-directory: packages/oblivion-host
         run: |
@@ -113,6 +115,7 @@ jobs:
           sudo -n env PYTHONDONTWRITEBYTECODE=1 python3 tests/safe-tools-relay.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/managed-job.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/agent-channel.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/credential-delegation.py
       - name: Check native agent configuration preservation
         working-directory: packages/oblivion-host/guest/native-tools
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_configure
@@ -126,9 +129,10 @@ jobs:
       - name: Exercise actual tmux panes and native agent wrappers offline
         working-directory: packages/oblivion-host
         run: sh tests/workspace-guest.sh oblivion-native-guest-fixture
-      - name: Verify Share publication and RAM-child authority in isolated root state
+      - name: Verify Safe publication, child authority and backup revocation in isolated root state
         working-directory: packages/oblivion-host
         run: |
+          cargo build --locked --bin oblivion-storage
           test_binary=$(cargo test --locked --bin oblivion-storage --no-run --message-format=json | python3 -c '
           import json, sys
           artifacts = [json.loads(line) for line in sys.stdin]
@@ -136,10 +140,14 @@ jobs:
           assert len(binaries) == 1, "expected one current storage test executable"
           print(binaries[0])')
           test -x "$test_binary"
-          for fixture in share_import::tests::atomic_collection_publish_and_abort_keep_existing_safes_untouched share_import::tests::retained_request_nonce_expires_at_the_real_host_opening_authorization_boundary storage::agent_safe_tests::closed_ram_child_is_counted_once_and_parent_close_fences_private_lookup ipc::family_tests::child_task_requests_cannot_supply_execution_facts_or_unscoped_authority; do
+          storage_worker="$(dirname "$test_binary")/../oblivion-storage"
+          test -x "$storage_worker"
+          for fixture in share_import::tests::atomic_collection_publish_and_abort_keep_existing_safes_untouched share_import::tests::retained_request_nonce_expires_at_the_real_host_opening_authorization_boundary storage::agent_safe_tests::closed_ram_child_is_counted_once_and_parent_close_fences_private_lookup ipc::family_tests::child_task_requests_cannot_supply_execution_facts_or_unscoped_authority ipc::family_tests::backup_rpc_rejects_unscoped_sources_paths_and_attachment_secrets ipc::family_tests::backup_metadata_failure_does_not_claim_a_live_volume_owner backup_host::tests::lock_revokes_a_real_hashing_process_without_inheriting_controller_locks; do
             docker run --rm --network none --tmpfs /run:rw,nosuid,nodev,noexec,size=16m \
               --mount "type=bind,src=$test_binary,dst=/storage-tests,readonly" \
+              --mount "type=bind,src=$storage_worker,dst=/storage-worker,readonly" \
               --env OBLIVION_SHARE_IMPORT_TEST=1 --env OBLIVION_SHARE_IMPORT_AUTH_TEST=1 --env OBLIVION_RAM_CHILD_TEST=1 --env OBLIVION_CHILD_TASK_RPC_TEST=1 \
+              --env OBLIVION_BACKUP_RPC_TEST=1 --env OBLIVION_BACKUP_PROCESS_TEST=1 --env OBLIVION_BACKUP_WORKER_BINARY=/storage-worker \
               oblivion-native-guest-fixture /bin/sh -ec '
                 fixture_listing=$(/storage-tests --list --exact "$1")
                 case "$fixture_listing" in
@@ -164,7 +172,7 @@ jobs:
           for package in oblivion-gateway oblivion-transfer oblivion-transport oblivion-tor-state; do
             (cd "packages/$package" && cargo check --locked --lib --bins && cargo test --locked --lib)
           done
-          (cd packages/oblivion-transfer && cargo test --locked --offline --test approved --test share && cargo build --locked --offline --bin oblivion-copy)
+          (cd packages/oblivion-transfer && cargo test --locked --offline --test approved --test share --test personal_copy && cargo build --locked --offline --bin oblivion-copy)
       - name: Verify Share guest streams with the real copy endpoint
         working-directory: packages/oblivion-history
         env:
@@ -203,14 +211,20 @@ jobs:
         run: |
           cargo check --locked --lib --bin oblivion
           cargo test --locked --lib --bin oblivion
-          cargo test --locked --test managed --test terminal_screen --test workspace --test share_control --test channel
+          cargo test --locked --test managed --test delegation --test backup_cli --test terminal_screen --test workspace --test share_control --test channel
           PYTHONDONTWRITEBYTECODE=1 python3 tests/activity-client.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/native-overlay.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/managed-job.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/agent-channel.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/credential-delegation.py
       - name: Compile the actual Apple helper
         working-directory: packages/oblivion-native
         run: swift build --configuration release
+      - name: Verify native bundle pairing and distribution inventory
+        run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
+      - name: Verify ciphertext-only personal copy streams
+        working-directory: packages/oblivion-transfer
+        run: cargo test --locked --test personal_copy
       - name: Check portable history without native credentials
         working-directory: packages/oblivion-history
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
