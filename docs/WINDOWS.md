@@ -160,10 +160,10 @@ preserves raw JSON status and binds close requests to the observed slot and Safe
 ID. This is a migrated frontend slice, rather than a second Windows command
 implementation; the remaining orchestration and OS adapters are still open.
 
-Agent `run`, `unlock` and tmux `shell --safe` now share their actual orchestration
+Agent `run`, storage lifecycle and tmux `shell --safe` now share their actual orchestration
 as well. Safe lookup, creation/reopening, mode checks, protected startup and idle
 cleanup use an injected controller and platform hooks; the existing Unix launcher
-consumes them directly. First archive setup, private terminal prompts, clock/wait,
+consumes them directly. Private terminal prompts, confirmation, clock/wait,
 notifications and agent/Workspace attachment remain platform hooks. Run and shell
 syntax is checked before VM startup. Transport, policy and cleanup calls after an
 opening carry both the chosen slot and expected Safe ID. The portable code uses
@@ -171,10 +171,18 @@ the same network-command DTOs as the Linux controller, without linking to its
 Unix services. Real Unix-socket fixtures cover the path; this is not a native
 Windows terminal adapter or Hyper-V implementation.
 
+Archive Init/Unlock/Ephemeral/Lock and network/proxy commands now have one shared
+parser and executor too. First-run setup calls the same Init and Unlock rather
+than an OS-specific initializer. The Unix adapter supplies only private entry and
+confirmation. The network frontend keeps every Safe mutation and final status
+bound to its observed slot/ID; saved proxy listing decodes bounded public metadata.
+Malformed syntax is rejected before VM startup or password entry. These source
+paths and Unix-socket fixtures do not implement the Windows OS adapters below.
+
 Remaining split, without a second command implementation:
 
-1. Move the remaining command orchestration, including archive initialization,
-   Files, network settings, Share and backup, into the portable frontend boundary.
+1. Move the remaining command orchestration, including Files, Safe management,
+   automatic-lock settings, Share and backup, into the portable frontend boundary.
    Keep Linux controller services and storage code in the Linux host package,
    rather than linking them into every desktop executable.
 2. Connect the shared CLI, wire and transfer boundaries to Windows transports

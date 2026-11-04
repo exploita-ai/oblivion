@@ -192,11 +192,14 @@ no Windows PE execution, installed bundle or Hyper-V qualification is claimed.
 
 `status --json`, `safes` and `close NAME` now run through the shared frontend
 parser/executor in `oblivion-cli`, with the same State/Safe lookup used by the
-other existing launcher commands. Agent `run`, `unlock` and tmux `shell` now use
+other existing launcher commands. Agent `run`, storage lifecycle and tmux `shell` now use
 shared orchestration too: Safe creation/reopening, storage-mode checks, protected
 startup and idle cleanup are consumed by the actual Unix launcher. OS adapters
-retain private prompts, first archive setup, monotonic clocks and terminal leases.
-Run and Workspace syntax are checked before runtime startup. Network changes after
+retain private prompts, human confirmation, monotonic clocks and terminal leases.
+The shared `init` creates but leaves the archive locked; incomplete-setup reset
+does not recreate it, and first-run `run` uses those same Init/Unlock operations.
+Storage, run, Workspace, network and proxy syntax are checked before runtime startup.
+Network changes after
 opening, including Egress, carry both the slot and expected Safe ID; malformed
 creation IDs fail before naming or attachment. Actual Unix-socket fixtures cover
 these paths, including opaque argv, RAM-child reuse and failed cleanup. This does
@@ -207,6 +210,15 @@ lifetime boundaries.
 Malformed peer data produces static protocol/state errors instead of repeating
 payload fields. A Windows backend and the remaining portable command
 orchestration are still open.
+
+Network status/set and saved proxy list/add/remove now use the common frontend
+and the same controller DTOs. A network command selects one open Safe and one
+change before any effects; the final status read retains its expected identity.
+Proxy lists admit only bounded public metadata, not credential-bearing fields
+or raw parser diagnostics. Hidden URL/password entry shares one completion path.
+Actual Unix-socket fixtures cover temporary read-only routing, private credential
+entry, unchanged active transports and malformed-listing rejection. They do not
+qualify public Tor/SOCKS5 paths or replace the real-gateway acceptance gates.
 
 Remaining release gates include real login and scoped child-credential delegation,
 chat persistence after cold restart,

@@ -4,12 +4,12 @@ The native launcher consumes the shared command parser and executor in this
 crate. `status --json`, `safes` and `close NAME` use one controller read model;
 `run` owns Safe lookup, creation or reopening, network configuration, protected
 startup and cleanup after a failed attachment. `shell --safe` uses the same
-opening, startup and cleanup for tmux; `unlock` uses the shared storage-mode
-checks and password request. The Windows frontend can consume
+opening, startup and cleanup for tmux. `init`, `unlock`, `ephemeral` and `lock`
+share their storage-mode checks, confirmation and controller operations. The Windows frontend can consume
 the same implementation without reproducing these decisions.
 
 The frontend uses an injected authenticated controller and platform hooks for
-private passwords, initial archive setup, available slots, monotonic time,
+private passwords, human confirmation, available slots, monotonic time,
 waiting, notices and terminal attachment. It does not open sockets, configure a
 VM, read an OS credential store or manage a terminal itself. Controller-side
 authorization remains authoritative; a parsed request does not grant access or
@@ -34,6 +34,19 @@ Attachment failure after a new opening asks the controller to close it only when
 idle. A Safe already used by another client is not closed by that failure path.
 The shared Workspace executor rejects pipes before issuing controller or password
 requests. The launcher rejects malformed Workspace syntax before runtime startup.
+
+Archive creation leaves it locked. Reset only discards a reviewed incomplete
+setup and never recreates or unlocks storage. The first new-Safe `run` uses these
+same creation and unlock operations. Ephemeral mode cannot replace an open
+persistent mode; a global lock addresses the controller without choosing a Safe.
+
+`network status/set` and saved `proxy list/add/remove` use the same frontend too.
+Their full syntax, single-change requirement and explicit proxy URLs are checked
+before runtime startup or private prompts. Network mutations and their final
+status read bind the current Safe and slot. Named-profile listing decodes only
+bounded public metadata, with static errors that cannot repeat rejected peer
+fields. Private URL and proxy-password entry use the shared completion helper;
+adding or removing a saved profile leaves active Safe transports unchanged.
 
 SOCKS5 URLs accept the existing literal IPv4/port syntax and optional percent-
 encoded credentials. Both `socks5://` and `socks5h://` use the existing transport;
