@@ -2,6 +2,7 @@
 use crate::control::{self, Result};
 use crate::desktop_bundle::{self, Binding, Bundle};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -271,6 +272,65 @@ fn copy_boot(bundle: &Bundle, assets: &Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BootRecord {
+    version: u8,
+    runtime_id: String,
+    bundle: Binding,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Uninstalled {
+    version: u8,
+    runtime_id: String,
+}
+
+fn read_record<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let info = file.metadata()?;
+    if !info.is_file()
+        || info.uid() != unsafe { libc::getuid() }
+        || info.mode() & 0o077 != 0
+        || info.nlink() != 1
+    {
+        return Err("unsafe_runtime_record".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(65537).read_to_end(&mut bytes)?;
+    if bytes.len() > 65536 {
+        return Err("runtime_record_limit".into());
+    }
+    Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+fn uninstalled(root: &Path, settings: &Settings) -> Result<bool> {
+    let Some(record) = read_record::<Uninstalled>(&root.join("uninstalled.json"))? else {
+        return Ok(false);
+    };
+    if record.version != 1 || record.runtime_id != settings.runtime_id {
+        return Err("invalid_runtime_uninstall_record".into());
+    }
+    Ok(true)
+}
+
+fn clear_uninstalled(root: &Path, settings: &Settings) -> Result<()> {
+    if uninstalled(root, settings)? {
+        fs::remove_file(root.join("uninstalled.json"))?;
+        fs::File::open(root)?.sync_all()?;
+    }
+    Ok(())
+}
+
 fn verify_boot(settings: &Settings) -> Result<()> {
     for (path, expected) in [&settings.disks[0].path, &settings.kernel, &settings.initrd]
         .into_iter()
@@ -429,13 +489,35 @@ fn commit_pending(root: &Path, bundle: &Bundle) -> Result<bool> {
 }
 
 pub fn install(path: &Path) -> Result<()> {
-    change_bundle(path, false, false)
+    install_runtime(path, false, false)
 }
 pub fn update(path: &Path) -> Result<()> {
-    change_bundle(path, true, false)
+    install_runtime(path, true, false)
 }
 pub fn deploy(path: &Path) -> Result<()> {
-    change_bundle(path, true, true)
+    install_runtime(path, true, true)
+}
+
+fn install_runtime(path: &Path, updating: bool, deploy: bool) -> Result<()> {
+    require_desktop()?;
+    let bundle = Bundle::read(path)?;
+    preflight_with(&bundle.root.join("bin/oblivion-vm"))?;
+    let desktop = DesktopPaths::current()?;
+    private_directory(&desktop.prefix)?;
+    let installation = private_lock(&desktop.prefix.join("install.lock"))?;
+    if !try_lock(&installation)? {
+        return Err("desktop_installation_busy".into());
+    }
+    let root = directory()?;
+    reserve_desktop(&root, &desktop)?;
+    change_bundle(path, updating, deploy)?;
+    bind_desktop(&root, &desktop)?;
+    if collect_locked(&root, &desktop, false).is_err() {
+        eprintln!(
+            "Installation completed; old software cleanup remains pending. Stop the runtime and run oblivion runtime gc."
+        );
+    }
+    Ok(())
 }
 
 fn change_bundle(path: &Path, updating: bool, deploy: bool) -> Result<()> {
@@ -466,6 +548,12 @@ fn change_bundle(path: &Path, updating: bool, deploy: bool) -> Result<()> {
     if previous.is_none() && updating && !deploy && pending(&root)?.is_none() {
         return Err("Runtime is not installed".into());
     }
+    if previous.is_none() && fs::symlink_metadata(root.join("uninstalled.json")).is_ok() {
+        return Err(
+            "Preserved runtime metadata is missing; inspect the retained data before installing"
+                .into(),
+        );
+    }
     let socket = previous
         .as_ref()
         .map(|value| value.control_socket.clone())
@@ -476,11 +564,18 @@ fn change_bundle(path: &Path, updating: bool, deploy: bool) -> Result<()> {
         return Err("Stop the protected runtime before updating its bundle".into());
     }
     if commit_pending(&root, &bundle)? {
+        if let Some(current) = previous.as_ref() {
+            clear_uninstalled(&root, current)?;
+        }
         return Ok(());
     }
     if previous
         .as_ref()
         .is_some_and(|current| current.bundle.bundle_id == bundle.id())
+        && !uninstalled(
+            &root,
+            previous.as_ref().ok_or("runtime_configuration_missing")?,
+        )?
     {
         verify_boot(previous.as_ref().ok_or("runtime_configuration_missing")?)?;
         return Ok(());
@@ -493,6 +588,15 @@ fn change_bundle(path: &Path, updating: bool, deploy: bool) -> Result<()> {
     fs::DirBuilder::new().mode(0o700).create(&assets)?;
     let result = (|| -> Result<()> {
         copy_boot(&bundle, &assets)?;
+        write_record(
+            &assets,
+            "boot.json",
+            &BootRecord {
+                version: 1,
+                runtime_id: runtime_id.clone(),
+                bundle: bundle.binding()?,
+            },
+        )?;
         let mut settings = if let Some(current) = &previous {
             current.clone()
         } else {
@@ -549,6 +653,7 @@ fn change_bundle(path: &Path, updating: bool, deploy: bool) -> Result<()> {
         };
         write_record(&root, "update.pending.json", &pending)?;
         commit_pending(&root, &bundle)?;
+        clear_uninstalled(&root, &pending.settings)?;
         Ok(())
     })();
     if result.is_err()
@@ -558,6 +663,486 @@ fn change_bundle(path: &Path, updating: bool, deploy: bool) -> Result<()> {
         let _ = fs::remove_dir_all(assets);
     }
     result
+}
+
+struct DesktopPaths {
+    prefix: PathBuf,
+    entry: PathBuf,
+    platform: &'static str,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DesktopOwner {
+    version: u8,
+    runtime_directory: PathBuf,
+    identity: DesktopIdentity,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case", deny_unknown_fields)]
+enum DesktopIdentity {
+    Preparing,
+    Installed { runtime_id: String },
+}
+
+fn desktop_owner(
+    root: &Path,
+    desktop: &DesktopPaths,
+    settings: Option<&Settings>,
+    preparing: bool,
+) -> Result<bool> {
+    let Some(owner) = read_record::<DesktopOwner>(&desktop.prefix.join("installation.json"))?
+    else {
+        return Ok(false);
+    };
+    if owner.version != 1 || !owner.runtime_directory.is_absolute() {
+        return Err("invalid_desktop_installation_record".into());
+    }
+    let identity_matches = match owner.identity {
+        DesktopIdentity::Preparing => preparing,
+        DesktopIdentity::Installed { runtime_id } => {
+            hex(&runtime_id, 32)
+                && settings.is_some_and(|settings| settings.runtime_id == runtime_id)
+        }
+    };
+    if owner.runtime_directory != root.canonicalize()? || !identity_matches {
+        return Err("This desktop software belongs to another runtime or its retained metadata is missing; no files were removed. Use a separate desktop installation prefix.".into());
+    }
+    Ok(true)
+}
+
+fn bind_desktop(root: &Path, desktop: &DesktopPaths) -> Result<()> {
+    let installation = private_lock(&root.join("installation.lock"))?;
+    if !try_lock(&installation)? {
+        return Err("runtime_installation_busy".into());
+    }
+    let settings = Settings::read(&root.join("runtime.json"))?;
+    desktop_owner(root, desktop, Some(&settings), true)?;
+    write_record(
+        &desktop.prefix,
+        "installation.json",
+        &DesktopOwner {
+            version: 1,
+            runtime_directory: root.canonicalize()?,
+            identity: DesktopIdentity::Installed {
+                runtime_id: settings.runtime_id,
+            },
+        },
+    )?;
+    Ok(())
+}
+
+fn reserve_desktop(root: &Path, desktop: &DesktopPaths) -> Result<()> {
+    private_directory(root)?;
+    private_directory(&desktop.releases())?;
+    let previous = if fs::symlink_metadata(root.join("runtime.json")).is_ok() {
+        Some(Settings::read(&root.join("runtime.json"))?)
+    } else {
+        None
+    };
+    if desktop_owner(root, desktop, previous.as_ref(), true)? {
+        return Ok(());
+    }
+    if fs::read_dir(desktop.releases())?.next().is_some() || desktop.entry_release()?.is_some() {
+        return Err("Desktop releases have no current installation ownership record; inspect them before installing".into());
+    }
+    // Reserve this prefix before copying a release. Failed first installs can
+    // resume only against this exact runtime directory.
+    write_record(
+        &desktop.prefix,
+        "installation.json",
+        &DesktopOwner {
+            version: 1,
+            runtime_directory: root.canonicalize()?,
+            identity: match previous {
+                Some(settings) => DesktopIdentity::Installed {
+                    runtime_id: settings.runtime_id,
+                },
+                None => DesktopIdentity::Preparing,
+            },
+        },
+    )
+}
+
+impl DesktopPaths {
+    fn current() -> Result<Self> {
+        let home = PathBuf::from(std::env::var_os("HOME").ok_or("home_unavailable")?);
+        let data = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/share"));
+        Ok(Self {
+            prefix: data.join("oblivion-desktop"),
+            entry: home.join(".local/bin/oblivion"),
+            platform: desktop_bundle::platform(),
+        })
+    }
+
+    fn releases(&self) -> PathBuf {
+        self.prefix.join("releases")
+    }
+
+    fn entry_release(&self) -> Result<Option<String>> {
+        let info = match fs::symlink_metadata(&self.entry) {
+            Ok(info) => info,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if !info.file_type().is_symlink() || info.uid() != unsafe { libc::getuid() } {
+            return Err("desktop_command_not_owned_by_installer".into());
+        }
+        let target = fs::read_link(&self.entry)?;
+        let relative = target
+            .strip_prefix(self.releases())
+            .map_err(|_| "desktop_command_not_owned_by_installer")?;
+        let parts: Vec<_> = relative.components().collect();
+        let Some(identity) = parts.first().and_then(|part| part.as_os_str().to_str()) else {
+            return Err("desktop_command_not_owned_by_installer".into());
+        };
+        if !hex(identity, 64)
+            || parts.len() != 3
+            || parts[1].as_os_str() != "bin"
+            || parts[2].as_os_str() != "oblivion"
+        {
+            return Err("desktop_command_not_owned_by_installer".into());
+        }
+        Ok(Some(identity.to_owned()))
+    }
+}
+
+fn hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+struct Removal {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl Removal {
+    fn file(path: PathBuf) -> Result<Self> {
+        let info = fs::symlink_metadata(&path)?;
+        if !info.is_file()
+            || info.uid() != unsafe { libc::getuid() }
+            || info.mode() & 0o022 != 0
+            || info.nlink() != 1
+        {
+            return Err("unsafe_desktop_cleanup_file".into());
+        }
+        Ok(Self {
+            path,
+            device: info.dev(),
+            inode: info.ino(),
+        })
+    }
+
+    fn remove(&self) -> Result<()> {
+        let info = fs::symlink_metadata(&self.path)?;
+        if !info.is_file()
+            || info.dev() != self.device
+            || info.ino() != self.inode
+            || info.nlink() != 1
+        {
+            return Err("desktop_cleanup_file_changed".into());
+        }
+        fs::remove_file(&self.path)?;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct Cleanup {
+    files: Vec<Removal>,
+    directories: BTreeSet<PathBuf>,
+    releases: usize,
+    release_ids: BTreeSet<String>,
+    boot_files: usize,
+    retained: usize,
+}
+
+impl Cleanup {
+    fn remove(self) -> Result<()> {
+        let mut changed = BTreeSet::new();
+        for file in self.files {
+            changed.insert(
+                file.path
+                    .parent()
+                    .ok_or("invalid_cleanup_directory")?
+                    .to_owned(),
+            );
+            file.remove()?;
+        }
+        for directory in changed {
+            fs::File::open(directory)?.sync_all()?;
+        }
+        let mut directories: Vec<_> = self.directories.into_iter().collect();
+        directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        for directory in directories {
+            // Only individually reviewed files are removed. An unexpected file
+            // appearing during collection makes rmdir fail; it is never erased.
+            fs::remove_dir(&directory)?;
+            fs::File::open(directory.parent().ok_or("invalid_cleanup_directory")?)?.sync_all()?;
+        }
+        Ok(())
+    }
+}
+
+fn boot_directory(root: &Path, path: &Path) -> Result<PathBuf> {
+    let parent = path.parent().ok_or("invalid_runtime_asset_path")?;
+    let name = parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("invalid_runtime_asset_path")?;
+    if parent.parent() != Some(root)
+        || !name.strip_prefix("boot-").is_some_and(|name| hex(name, 32))
+    {
+        return Err("runtime_asset_outside_managed_directory".into());
+    }
+    Ok(parent.to_owned())
+}
+
+fn cleanup_plan(
+    root: &Path,
+    desktop: &DesktopPaths,
+    settings: &Settings,
+    uninstall: bool,
+) -> Result<Cleanup> {
+    let active = boot_directory(root, &settings.kernel)?;
+    if settings.kernel != active.join("kernel")
+        || settings.initrd != active.join("initrd")
+        || settings.disks[0].path != active.join("controller.iso")
+    {
+        return Err("runtime_asset_layout_changed".into());
+    }
+    let data = boot_directory(root, &settings.disks[1].path)?;
+    if settings.disks[1].path != data.join("storage.raw") {
+        return Err("runtime_storage_identity_changed".into());
+    }
+    // This file is retained even when its original boot assets are obsolete.
+    Removal::file(settings.disks[1].path.clone())?;
+    let mut protected_releases = BTreeSet::new();
+    let mut protected_boot = BTreeSet::new();
+    if !uninstall {
+        protected_releases.insert(settings.bundle.bundle_id.clone());
+        protected_boot.insert(active);
+        if let Some(identity) = desktop.entry_release()? {
+            protected_releases.insert(identity);
+        }
+        if let Ok(executable) = std::env::current_exe() {
+            if let Some(release) = executable.parent().and_then(Path::parent) {
+                if release.parent() == Some(desktop.releases().as_path()) {
+                    if let Some(identity) = release.file_name().and_then(|name| name.to_str()) {
+                        protected_releases.insert(identity.to_owned());
+                    }
+                }
+            }
+        }
+        if let Some(transaction) = pending(root)? {
+            protected_releases.insert(transaction.settings.bundle.bundle_id);
+            if let Some(previous) = transaction.previous {
+                protected_releases.insert(previous);
+            }
+            protected_boot.insert(boot_directory(root, &transaction.settings.kernel)?);
+        }
+    }
+    let mut plan = Cleanup::default();
+    if desktop.releases().try_exists()? {
+        private_directory(&desktop.releases())?;
+        for (index, entry) in fs::read_dir(desktop.releases())?.enumerate() {
+            if index >= 256 {
+                return Err("desktop_cleanup_inventory_limit".into());
+            }
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(identity) = name.to_str().filter(|name| hex(name, 64)) else {
+                continue;
+            };
+            if protected_releases.contains(identity) {
+                continue;
+            }
+            if !entry.file_type()?.is_dir() {
+                plan.retained += 1;
+                continue;
+            }
+            let bundle = match Bundle::stored(&entry.path(), identity, desktop.platform) {
+                Ok(bundle) => bundle,
+                _ => {
+                    plan.retained += 1;
+                    continue;
+                }
+            };
+            for file in bundle.files() {
+                let path = bundle.root.join(&file.path);
+                let mut parent = path.parent();
+                while let Some(directory) = parent.filter(|path| path.starts_with(&bundle.root)) {
+                    plan.directories.insert(directory.to_owned());
+                    parent = directory.parent();
+                }
+                plan.files.push(Removal::file(path)?);
+            }
+            plan.files
+                .push(Removal::file(bundle.root.join("bundle.json"))?);
+            plan.releases += 1;
+            plan.release_ids.insert(identity.to_owned());
+        }
+    }
+    for (index, entry) in fs::read_dir(root)?.enumerate() {
+        if index >= 256 {
+            return Err("desktop_cleanup_inventory_limit".into());
+        }
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        if !name
+            .to_str()
+            .and_then(|name| name.strip_prefix("boot-"))
+            .is_some_and(|name| hex(name, 32))
+            || protected_boot.contains(&path)
+        {
+            continue;
+        }
+        let reviewed = (|| -> Result<Option<(Vec<Removal>, bool)>> {
+            private_directory(&path)?;
+            let Some(record) = read_record::<BootRecord>(&path.join("boot.json"))? else {
+                return Ok(None);
+            };
+            record.bundle.validate()?;
+            if record.version != 1 || record.runtime_id != settings.runtime_id {
+                return Err("invalid_boot_cleanup_record".into());
+            }
+            for (index, child) in fs::read_dir(&path)?.enumerate() {
+                if index >= 5 {
+                    return Err("boot_cleanup_inventory_limit".into());
+                }
+                let child = child?;
+                let name = child.file_name();
+                if !["boot.json", "controller.iso", "kernel", "initrd"]
+                    .iter()
+                    .any(|expected| name == *expected)
+                    && child.path() != settings.disks[1].path
+                {
+                    return Err("unlisted_boot_cleanup_file".into());
+                }
+            }
+            let mut files = Vec::new();
+            for (name, expected) in ["controller.iso", "kernel", "initrd"]
+                .iter()
+                .zip(record.bundle.boot)
+            {
+                let file = path.join(name);
+                match fs::symlink_metadata(&file) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                    Ok(info) if info.len() == expected.bytes => (),
+                    Ok(_) => return Err("installed_runtime_integrity_failed".into()),
+                }
+                let removal = Removal::file(file.clone())?;
+                if desktop_bundle::digest(&file)? != expected.sha256 {
+                    return Err("installed_runtime_integrity_failed".into());
+                }
+                files.push(removal);
+            }
+            Ok(Some((files, path == data)))
+        })();
+        match reviewed {
+            Ok(Some((files, keeps_data))) => {
+                plan.boot_files += files.len();
+                plan.files.extend(files);
+                if !keeps_data {
+                    plan.files.push(Removal::file(path.join("boot.json"))?);
+                    plan.directories.insert(path);
+                }
+            }
+            _ => plan.retained += 1,
+        }
+    }
+    Ok(plan)
+}
+
+fn collect_locked(root: &Path, desktop: &DesktopPaths, uninstall: bool) -> Result<()> {
+    private_directory(root)?;
+    let installation = private_lock(&root.join("installation.lock"))?;
+    if !try_lock(&installation)? {
+        return Err("runtime_installation_busy".into());
+    }
+    let settings = Settings::read(&root.join("runtime.json"))?;
+    if !desktop_owner(root, desktop, Some(&settings), false)? {
+        return Err("No current desktop installation record; use the matching development bundle installer before removing software".into());
+    }
+    private_directory(
+        settings
+            .control_socket
+            .parent()
+            .ok_or("invalid_runtime_socket")?,
+    )?;
+    let startup = private_lock(&sidecar(&settings.control_socket, ".startup.lock"))?;
+    let running = private_lock(&sidecar(&settings.control_socket, ".lock"))?;
+    if !try_lock(&startup)? || !try_lock(&running)? {
+        return Err("Stop the protected runtime before removing desktop software".into());
+    }
+    if uninstall && pending(root)?.is_some() {
+        return Err("Complete the matching bundle installation before uninstalling; the update journal was preserved".into());
+    }
+    let entry = desktop.entry_release()?;
+    let plan = cleanup_plan(root, desktop, &settings, uninstall)?;
+    if uninstall {
+        if entry
+            .as_ref()
+            .is_some_and(|identity| !plan.release_ids.contains(identity))
+        {
+            return Err(
+                "The installed command release could not be verified; no software was removed"
+                    .into(),
+            );
+        }
+        write_record(
+            root,
+            "uninstalled.json",
+            &Uninstalled {
+                version: 1,
+                runtime_id: settings.runtime_id,
+            },
+        )?;
+        if entry.is_some() {
+            // Recheck the symlink immediately before unlinking the managed entry.
+            if desktop.entry_release()? != entry {
+                return Err("desktop_command_changed".into());
+            }
+            fs::remove_file(&desktop.entry)?;
+            fs::File::open(desktop.entry.parent().ok_or("invalid_desktop_command")?)?.sync_all()?;
+        }
+    }
+    let (releases, boot_files, retained) = (plan.releases, plan.boot_files, plan.retained);
+    plan.remove()?;
+    fs::File::open(root)?.sync_all()?;
+    eprintln!(
+        "Removed {releases} verified desktop releases and {boot_files} boot files; retained {retained} unverified entries. Encrypted data was preserved."
+    );
+    Ok(())
+}
+
+fn collect(uninstall: bool) -> Result<()> {
+    require_desktop()?;
+    let desktop = DesktopPaths::current()?;
+    private_directory(&desktop.prefix)?;
+    let installation = private_lock(&desktop.prefix.join("install.lock"))?;
+    if !try_lock(&installation)? {
+        return Err("desktop_installation_busy".into());
+    }
+    collect_locked(&directory()?, &desktop, uninstall)
+}
+
+/// Stop the runtime first. This removes verified software, never Safe data.
+pub fn uninstall() -> Result<()> {
+    collect(true)
+}
+
+pub fn gc() -> Result<()> {
+    collect(false)
 }
 
 /// Install a development bundle for this account. App release publication and
@@ -579,7 +1164,9 @@ pub fn install_bundle(path: &Path) -> Result<()> {
         return Err("desktop_installation_busy".into());
     }
     let releases = prefix.join("releases");
-    private_directory(&releases)?;
+    let root = directory()?;
+    let desktop = DesktopPaths::current()?;
+    reserve_desktop(&root, &desktop)?;
     let entry_directory = home.join(".local/bin");
     if !entry_directory.exists() {
         fs::DirBuilder::new()
@@ -683,7 +1270,8 @@ pub fn install_bundle(path: &Path) -> Result<()> {
     }
     // A stopped-only transaction preserves runtime identity, storage and CID.
     // If it fails, the previous command symlink stays untouched.
-    deploy(&destination)?;
+    change_bundle(&destination, true, true)?;
+    bind_desktop(&root, &desktop)?;
     let temporary = entry_directory.join(format!("oblivion-pending-{}", random_id()?));
     std::os::unix::fs::symlink(destination.join("bin/oblivion"), &temporary)?;
     if let Err(error) = fs::rename(&temporary, &entry) {
@@ -691,9 +1279,36 @@ pub fn install_bundle(path: &Path) -> Result<()> {
         return Err(error.into());
     }
     fs::File::open(&entry_directory)?.sync_all()?;
+    // Publication of this verified candidate is now durable, so a subsequent
+    // uninstall need not boot the VM merely to complete installer bookkeeping.
+    finish_activation(&root, &bundle)?;
+    if collect_locked(&root, &desktop, false).is_err() {
+        eprintln!(
+            "Installation completed; old software cleanup remains pending. Stop the runtime and run oblivion runtime gc."
+        );
+    }
     eprintln!(
         "Development bundle installed. Run ~/.local/bin/oblivion; add ~/.local/bin to PATH if needed."
     );
+    Ok(())
+}
+
+fn finish_activation(root: &Path, bundle: &Bundle) -> Result<()> {
+    let installation = private_lock(&root.join("installation.lock"))?;
+    if !try_lock(&installation)? {
+        return Err("runtime_installation_busy".into());
+    }
+    let Some(transaction) = pending(root)? else {
+        return Ok(());
+    };
+    let current = Settings::read(&root.join("runtime.json"))?;
+    if transaction.settings.bundle.bundle_id != bundle.id()
+        || serde_json::to_value(&transaction.settings)? != serde_json::to_value(&current)?
+    {
+        return Err("runtime_update_requires_matching_bundle_installer".into());
+    }
+    fs::remove_file(root.join("update.pending.json"))?;
+    fs::File::open(root)?.sync_all()?;
     Ok(())
 }
 
@@ -732,6 +1347,9 @@ fn prepare_connection() -> Result<Settings> {
     }
     private_directory(&root)?;
     let settings = Settings::read(&path)?;
+    if uninstalled(&root, &settings)? {
+        return Err("Desktop software was uninstalled; install a matching development bundle to reuse the preserved encrypted data".into());
+    }
     private_directory(
         settings
             .control_socket
@@ -1012,7 +1630,7 @@ mod tests {
             let path =
                 PathBuf::from("/tmp").join(format!("oblivion-runtime-{}", random_id().unwrap()));
             private_directory(&path).unwrap();
-            Self(path)
+            Self(path.canonicalize().unwrap())
         }
     }
     impl Drop for Fixture {
@@ -1066,6 +1684,316 @@ mod tests {
                 None
             },
         }
+    }
+
+    fn installed_fixture() -> (Fixture, DesktopPaths, Settings, String) {
+        let fixture = Fixture::new();
+        let desktop = DesktopPaths {
+            prefix: fixture.0.join("desktop"),
+            entry: fixture.0.join("bin/oblivion"),
+            platform: if desktop_bundle::platform() == "unsupported" {
+                "linux-x86_64"
+            } else {
+                desktop_bundle::platform()
+            },
+        };
+        private_directory(&desktop.releases()).unwrap();
+        private_directory(desktop.entry.parent().unwrap()).unwrap();
+        let mut old = desktop_bundle::tests::Fixture::new();
+        old.change_source(&"cd".repeat(32));
+        let old_bundle = old.bundle();
+        let new = desktop_bundle::tests::Fixture::new();
+        let new_bundle = new.bundle();
+        let mut current = settings(&fixture.0);
+        let original = fixture.0.join(format!("boot-{}", "11".repeat(16)));
+        let active = fixture.0.join(format!("boot-{}", "22".repeat(16)));
+        for (directory, bundle) in [(&original, &old_bundle), (&active, &new_bundle)] {
+            private_directory(directory).unwrap();
+            copy_boot(bundle, directory).unwrap();
+            write_record(
+                directory,
+                "boot.json",
+                &BootRecord {
+                    version: 1,
+                    runtime_id: current.runtime_id.clone(),
+                    bundle: bundle.binding().unwrap(),
+                },
+            )
+            .unwrap();
+        }
+        current.bundle = new_bundle.binding().unwrap();
+        current.kernel = active.join("kernel");
+        current.initrd = active.join("initrd");
+        current.disks[0].path = active.join("controller.iso");
+        current.disks[1].path = original.join("storage.raw");
+        let mut data = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&current.disks[1].path)
+            .unwrap();
+        data.write_all(b"synthetic encrypted data sentinel")
+            .unwrap();
+        data.sync_all().unwrap();
+        let old_id = old_bundle.id().to_owned();
+        let new_id = new_bundle.id().to_owned();
+        fs::rename(&old.root, desktop.releases().join(&old_id)).unwrap();
+        fs::rename(&new.root, desktop.releases().join(&new_id)).unwrap();
+        std::os::unix::fs::symlink(
+            desktop.releases().join(new_id).join("bin/oblivion"),
+            &desktop.entry,
+        )
+        .unwrap();
+        write_settings(&fixture.0, &current).unwrap();
+        bind_desktop(&fixture.0, &desktop).unwrap();
+        (fixture, desktop, current, old_id)
+    }
+
+    #[test]
+    fn collection_removes_only_verified_old_assets_and_preserves_data_current_and_unknown_files() {
+        let (fixture, desktop, current, old_id) = installed_fixture();
+        let original = current.disks[1].path.parent().unwrap();
+        let unknown = fixture.0.join(format!("boot-{}", "33".repeat(16)));
+        private_directory(&unknown).unwrap();
+        fs::write(unknown.join("personal-document"), b"keep").unwrap();
+        let changed = desktop.releases().join("99".repeat(32));
+        private_directory(&changed).unwrap();
+        fs::write(changed.join("personal-document"), b"keep").unwrap();
+        let config = fs::read(fixture.0.join("runtime.json")).unwrap();
+        let plan = cleanup_plan(&fixture.0, &desktop, &current, false).unwrap();
+        assert_eq!((plan.releases, plan.boot_files, plan.retained), (1, 3, 2));
+        plan.remove().unwrap();
+        assert!(!desktop.releases().join(old_id).exists());
+        assert!(
+            desktop
+                .releases()
+                .join(&current.bundle.bundle_id)
+                .join("bundle.json")
+                .exists()
+        );
+        assert!(
+            current.kernel.is_file() && current.initrd.is_file() && current.disks[0].path.is_file()
+        );
+        assert!(!original.join("kernel").exists() && original.join("boot.json").is_file());
+        assert_eq!(
+            fs::read(&current.disks[1].path).unwrap(),
+            b"synthetic encrypted data sentinel"
+        );
+        assert_eq!(fs::read(fixture.0.join("runtime.json")).unwrap(), config);
+        assert!(
+            unknown.join("personal-document").is_file()
+                && changed.join("personal-document").is_file()
+        );
+    }
+
+    #[test]
+    fn collection_preserves_staged_journal_and_its_previous_release() {
+        let (fixture, desktop, current, old_id) = installed_fixture();
+        write_record(
+            &fixture.0,
+            "update.pending.json",
+            &Pending {
+                version: 1,
+                previous: Some(old_id.clone()),
+                settings: current.clone(),
+            },
+        )
+        .unwrap();
+        let journal = fs::read(fixture.0.join("update.pending.json")).unwrap();
+        let plan = cleanup_plan(&fixture.0, &desktop, &current, false).unwrap();
+        assert_eq!(plan.releases, 0);
+        plan.remove().unwrap();
+        assert_eq!(
+            fs::read(fixture.0.join("update.pending.json")).unwrap(),
+            journal
+        );
+        assert!(
+            desktop
+                .releases()
+                .join(old_id)
+                .join("bundle.json")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn uninstall_is_stopped_only_and_never_touches_identity_or_encrypted_data() {
+        let (fixture, desktop, current, _) = installed_fixture();
+        let lock = private_lock(&sidecar(&current.control_socket, ".lock")).unwrap();
+        assert!(try_lock(&lock).unwrap());
+        assert!(collect_locked(&fixture.0, &desktop, true).is_err());
+        assert!(desktop.entry.exists() && current.kernel.exists());
+        assert!(!fixture.0.join("uninstalled.json").exists());
+        drop(lock);
+        let config = fs::read(fixture.0.join("runtime.json")).unwrap();
+        collect_locked(&fixture.0, &desktop, true).unwrap();
+        assert!(fs::symlink_metadata(&desktop.entry).is_err());
+        assert!(!current.kernel.exists());
+        assert_eq!(fs::read_dir(desktop.releases()).unwrap().count(), 0);
+        assert_eq!(
+            fs::read(&current.disks[1].path).unwrap(),
+            b"synthetic encrypted data sentinel"
+        );
+        assert_eq!(fs::read(fixture.0.join("runtime.json")).unwrap(), config);
+        assert!(uninstalled(&fixture.0, &current).unwrap());
+        collect_locked(&fixture.0, &desktop, true).unwrap();
+        assert_eq!(
+            fs::read(&current.disks[1].path).unwrap(),
+            b"synthetic encrypted data sentinel"
+        );
+    }
+
+    #[test]
+    fn uninstall_refuses_foreign_command_modified_release_and_unfinished_update() {
+        let (fixture, desktop, current, _) = installed_fixture();
+        write_record(
+            &fixture.0,
+            "update.pending.json",
+            &Pending {
+                version: 1,
+                previous: None,
+                settings: current.clone(),
+            },
+        )
+        .unwrap();
+        assert!(collect_locked(&fixture.0, &desktop, true).is_err());
+        assert!(desktop.entry.exists() && !fixture.0.join("uninstalled.json").exists());
+        fs::remove_file(fixture.0.join("update.pending.json")).unwrap();
+        fs::remove_file(&desktop.entry).unwrap();
+        std::os::unix::fs::symlink(fixture.0.join("unrelated"), &desktop.entry).unwrap();
+        assert!(collect_locked(&fixture.0, &desktop, true).is_err());
+        assert!(!fixture.0.join("uninstalled.json").exists());
+        fs::remove_file(&desktop.entry).unwrap();
+        let release = desktop.releases().join(&current.bundle.bundle_id);
+        std::os::unix::fs::symlink(release.join("bin/oblivion"), &desktop.entry).unwrap();
+        fs::write(release.join("bin/oblivion-vm"), b"modified helper").unwrap();
+        assert!(collect_locked(&fixture.0, &desktop, true).is_err());
+        assert!(desktop.entry.exists() && current.kernel.exists());
+        assert!(!fixture.0.join("uninstalled.json").exists());
+    }
+
+    #[test]
+    fn uninstall_receipt_reinstall_preserves_disk_and_rejects_another_identity() {
+        let (fixture, desktop, previous, _) = installed_fixture();
+        collect_locked(&fixture.0, &desktop, true).unwrap();
+        let source = desktop_bundle::tests::Fixture::new();
+        let bundle = source.bundle();
+        let assets = fixture.0.join(format!("boot-{}", "44".repeat(16)));
+        private_directory(&assets).unwrap();
+        copy_boot(&bundle, &assets).unwrap();
+        let mut next = previous.clone();
+        next.bundle = bundle.binding().unwrap();
+        next.kernel = assets.join("kernel");
+        next.initrd = assets.join("initrd");
+        next.disks[0].path = assets.join("controller.iso");
+        write_record(
+            &fixture.0,
+            "update.pending.json",
+            &Pending {
+                version: 1,
+                previous: Some(previous.bundle.bundle_id.clone()),
+                settings: next.clone(),
+            },
+        )
+        .unwrap();
+        assert!(commit_pending(&fixture.0, &bundle).unwrap());
+        let mut wrong = next.clone();
+        wrong.runtime_id = "ee".repeat(16);
+        assert!(clear_uninstalled(&fixture.0, &wrong).is_err());
+        assert!(uninstalled(&fixture.0, &next).unwrap());
+        clear_uninstalled(&fixture.0, &next).unwrap();
+        assert!(!uninstalled(&fixture.0, &next).unwrap());
+        assert_eq!(next.disks[1].path, previous.disks[1].path);
+        assert_eq!(next.runtime_id, previous.runtime_id);
+        assert_eq!(next.guest_cid, previous.guest_cid);
+        assert_eq!(
+            fs::read(&next.disks[1].path).unwrap(),
+            b"synthetic encrypted data sentinel"
+        );
+        finish_activation(&fixture.0, &bundle).unwrap();
+        assert!(pending(&fixture.0).unwrap().is_none());
+    }
+
+    #[test]
+    fn shared_desktop_prefix_cannot_collect_another_runtime_or_changed_identity() {
+        let (fixture, desktop, current, _) = installed_fixture();
+        let other = Fixture::new();
+        let mut impostor = current.clone();
+        impostor.runtime_id = "dd".repeat(16);
+        impostor.command_line = impostor
+            .command_line
+            .replace(&current.runtime_id, &impostor.runtime_id);
+        write_settings(&other.0, &impostor).unwrap();
+        assert!(collect_locked(&other.0, &desktop, true).is_err());
+        assert!(collect_locked(&other.0, &desktop, false).is_err());
+        assert!(bind_desktop(&other.0, &desktop).is_err());
+        assert!(desktop.entry.exists() && current.kernel.is_file());
+        assert!(!other.0.join("uninstalled.json").exists());
+        write_settings(&fixture.0, &impostor).unwrap();
+        assert!(collect_locked(&fixture.0, &desktop, true).is_err());
+        assert!(desktop.entry.exists() && current.disks[1].path.is_file());
+    }
+
+    #[test]
+    fn preparing_install_is_bound_to_directory_but_cannot_authorize_collection() {
+        let (fixture, desktop, current, _) = installed_fixture();
+        write_record(
+            &desktop.prefix,
+            "installation.json",
+            &DesktopOwner {
+                version: 1,
+                runtime_directory: fixture.0.clone(),
+                identity: DesktopIdentity::Preparing,
+            },
+        )
+        .unwrap();
+        assert!(desktop_owner(&fixture.0, &desktop, Some(&current), true).unwrap());
+        assert!(collect_locked(&fixture.0, &desktop, true).is_err());
+        assert!(desktop.entry.exists() && current.kernel.is_file());
+        let other = Fixture::new();
+        assert!(desktop_owner(&other.0, &desktop, None, true).is_err());
+        bind_desktop(&fixture.0, &desktop).unwrap();
+        assert!(desktop_owner(&fixture.0, &desktop, Some(&current), false).unwrap());
+    }
+
+    #[test]
+    fn first_install_reservation_is_retryable_and_cannot_adopt_another_prefix() {
+        let fixture = Fixture::new();
+        let desktop = DesktopPaths {
+            prefix: fixture.0.join("desktop"),
+            entry: fixture.0.join("bin/oblivion"),
+            platform: "linux-x86_64",
+        };
+        private_directory(&desktop.prefix).unwrap();
+        reserve_desktop(&fixture.0, &desktop).unwrap();
+        private_directory(&desktop.releases().join("aa".repeat(32))).unwrap();
+        reserve_desktop(&fixture.0, &desktop).unwrap();
+        let other = Fixture::new();
+        assert!(reserve_desktop(&other.0, &desktop).is_err());
+        assert!(fs::read_dir(desktop.releases()).unwrap().next().is_some());
+        let current = settings(&fixture.0);
+        write_settings(&fixture.0, &current).unwrap();
+        bind_desktop(&fixture.0, &desktop).unwrap();
+        assert!(desktop_owner(&fixture.0, &desktop, Some(&current), false).unwrap());
+        fs::remove_file(desktop.prefix.join("installation.json")).unwrap();
+        assert!(reserve_desktop(&fixture.0, &desktop).is_err());
+    }
+
+    #[test]
+    fn collection_retains_tampered_boot_and_refuses_aliased_data_or_changed_current_layout() {
+        let (fixture, desktop, current, _) = installed_fixture();
+        let old = current.disks[1].path.parent().unwrap().join("kernel");
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&old, b"changed old kernel").unwrap();
+        let plan = cleanup_plan(&fixture.0, &desktop, &current, false).unwrap();
+        assert_eq!(plan.retained, 1);
+        assert_eq!(plan.boot_files, 0);
+        let mut changed = current.clone();
+        changed.initrd = old;
+        assert!(cleanup_plan(&fixture.0, &desktop, &changed, false).is_err());
+        fs::hard_link(&current.disks[1].path, fixture.0.join("raw-alias")).unwrap();
+        assert!(cleanup_plan(&fixture.0, &desktop, &current, false).is_err());
+        assert!(desktop.entry.exists() && current.kernel.is_file());
     }
     #[test]
     fn installation_profile_is_explicit_and_exact() {

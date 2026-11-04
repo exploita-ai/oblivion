@@ -53,6 +53,8 @@ Desktop runtime bundles
   oblivion runtime update BUNDLE
   oblivion runtime deploy BUNDLE
   oblivion runtime start|stop|recover
+  oblivion runtime gc              Remove stopped, verified old software
+  oblivion runtime uninstall       Remove desktop software; keep encrypted data
 
 Files
   oblivion files list --safe SAFE [workspace/PATH] --json
@@ -218,9 +220,11 @@ fn run() -> control::Result<i32> {
                 Some("start") if args.len() == 2 => oblivion_host::native_runtime::start()?,
                 Some("recover") if args.len() == 2 => oblivion_host::native_runtime::recover()?,
                 Some("stop") if args.len() == 2 => oblivion_host::native_runtime::stop()?,
+                Some("gc") if args.len() == 2 => oblivion_host::native_runtime::gc()?,
+                Some("uninstall") if args.len() == 2 => oblivion_host::native_runtime::uninstall()?,
                 _ => {
                     return Err(
-                        "Use oblivion runtime install-bundle BUNDLE or oblivion runtime start".into(),
+                        "Use oblivion runtime install-bundle BUNDLE, start, stop, recover, gc or uninstall".into(),
                     );
                 }
             }

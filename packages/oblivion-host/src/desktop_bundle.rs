@@ -101,7 +101,7 @@ impl Bundle {
         if !root.is_dir() {
             return Err("Use a current desktop bundle directory; arbitrary ISO installation is not supported".into());
         }
-        Self::verified(root, source_id()?, platform(), true)
+        Self::verified(root, Some(source_id()?), platform(), true)
     }
 
     pub fn current() -> Result<Self> {
@@ -110,10 +110,25 @@ impl Bundle {
             .parent()
             .and_then(Path::parent)
             .ok_or("bundle_directory_missing")?;
-        Self::verified(root, source_id()?, platform(), false)
+        Self::verified(root, Some(source_id()?), platform(), false)
     }
 
-    fn verified(root: &Path, source: &str, expected_platform: &str, runtime: bool) -> Result<Self> {
+    /// Collection verifies the same current manifest and full inventory, but an
+    /// older release has its own source identity rather than this binary's.
+    pub(crate) fn stored(root: &Path, identity: &str, expected_platform: &str) -> Result<Self> {
+        let bundle = Self::verified(root, None, expected_platform, true)?;
+        if bundle.id() != identity {
+            return Err("installed_desktop_release_changed".into());
+        }
+        Ok(bundle)
+    }
+
+    fn verified(
+        root: &Path,
+        source: Option<&str>,
+        expected_platform: &str,
+        runtime: bool,
+    ) -> Result<Self> {
         if !root.is_absolute() || !matches!(expected_platform, "darwin-arm64" | "linux-x86_64") {
             return Err("unsupported_desktop_bundle_platform".into());
         }
@@ -147,8 +162,8 @@ impl Bundle {
             || manifest.bundle_id != identity
             || manifest.platform != expected_platform
             || manifest.backend != expected_backend
-            || !hash(source)
-            || manifest.source_sha256 != source
+            || !hash(&manifest.source_sha256)
+            || source.is_some_and(|source| !hash(source) || manifest.source_sha256 != source)
             || manifest.control_protocol != 1
             || manifest.product_version.is_empty()
             || manifest.product_version.len() > 64
@@ -171,6 +186,7 @@ impl Bundle {
             return Err("desktop_bundle_does_not_match_this_build".into());
         }
         let mut files = BTreeMap::new();
+        let mut expected_directories = BTreeSet::new();
         let mut previous = "";
         for file in &manifest.files {
             if !relative(&file.path)
@@ -180,6 +196,11 @@ impl Bundle {
                 || files.insert(file.path.as_str(), file).is_some()
             {
                 return Err("invalid_desktop_bundle_inventory".into());
+            }
+            let mut directory = Path::new(&file.path).parent();
+            while let Some(path) = directory.filter(|path| !path.as_os_str().is_empty()) {
+                expected_directories.insert(path.to_owned());
+                directory = path.parent();
             }
             previous = &file.path;
         }
@@ -216,6 +237,9 @@ impl Bundle {
                 }
                 owned(&info, info.is_dir())?;
                 if info.is_dir() {
+                    if !expected_directories.contains(path.strip_prefix(&root)?) {
+                        return Err("desktop_bundle_unlisted_directory".into());
+                    }
                     directories.push(path);
                     continue;
                 }
@@ -463,7 +487,14 @@ pub(crate) mod tests {
             .unwrap();
         }
         pub fn bundle(&self) -> Bundle {
-            Bundle::verified(&self.root, &self.source, test_platform(), true).unwrap()
+            Bundle::verified(&self.root, Some(&self.source), test_platform(), true).unwrap()
+        }
+        pub fn change_source(&mut self, source: &str) {
+            let mut manifest: Manifest =
+                serde_json::from_slice(&fs::read(self.root.join("bundle.json")).unwrap()).unwrap();
+            manifest.source_sha256 = source.into();
+            self.source = source.into();
+            self.save(manifest);
         }
     }
     impl Drop for Fixture {
@@ -478,10 +509,14 @@ pub(crate) mod tests {
         let bundle = fixture.bundle();
         assert_eq!(bundle.source(), fixture.source);
         assert!(bundle.binding().unwrap().validate().is_ok());
-        assert!(Bundle::verified(&fixture.root, &"cd".repeat(32), test_platform(), true).is_err());
+        assert!(
+            Bundle::verified(&fixture.root, Some(&"cd".repeat(32)), test_platform(), true).is_err()
+        );
         let bytes = fs::read(fixture.root.join("runtime/kernel")).unwrap();
         fs::write(fixture.root.join("runtime/kernel"), vec![b'X'; bytes.len()]).unwrap();
-        assert!(Bundle::verified(&fixture.root, &fixture.source, test_platform(), true).is_err());
+        assert!(
+            Bundle::verified(&fixture.root, Some(&fixture.source), test_platform(), true).is_err()
+        );
         fs::write(fixture.root.join("runtime/kernel"), bytes).unwrap();
         fixture.bundle();
         fs::write(
@@ -489,7 +524,9 @@ pub(crate) mod tests {
             b"synthetic fixture only",
         )
         .unwrap();
-        assert!(Bundle::verified(&fixture.root, &fixture.source, test_platform(), true).is_err());
+        assert!(
+            Bundle::verified(&fixture.root, Some(&fixture.source), test_platform(), true).is_err()
+        );
     }
 
     #[test]
@@ -499,7 +536,9 @@ pub(crate) mod tests {
         let bytes = fs::read(&path).unwrap();
         fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink("initrd", &path).unwrap();
-        assert!(Bundle::verified(&fixture.root, &fixture.source, test_platform(), true).is_err());
+        assert!(
+            Bundle::verified(&fixture.root, Some(&fixture.source), test_platform(), true).is_err()
+        );
         fs::remove_file(&path).unwrap();
         fs::write(&path, bytes).unwrap();
         let mut value: serde_json::Value =
@@ -513,7 +552,23 @@ pub(crate) mod tests {
             serde_json::to_vec(&value).unwrap(),
         )
         .unwrap();
-        assert!(Bundle::verified(&fixture.root, &fixture.source, test_platform(), true).is_err());
+        assert!(
+            Bundle::verified(&fixture.root, Some(&fixture.source), test_platform(), true).is_err()
+        );
         assert!(!relative("../outside") && !relative("runtime/./kernel") && !relative("/absolute"));
+    }
+
+    #[test]
+    fn stored_release_requires_its_current_manifest_identity_and_full_inventory() {
+        let mut fixture = Fixture::new();
+        fixture.change_source(&"cd".repeat(32));
+        let identity = fixture.bundle().id().to_owned();
+        assert!(Bundle::stored(&fixture.root, &identity, test_platform()).is_ok());
+        assert!(Bundle::stored(&fixture.root, &"aa".repeat(32), test_platform()).is_err());
+        fs::create_dir(fixture.root.join("unlisted-empty-directory")).unwrap();
+        assert!(Bundle::stored(&fixture.root, &identity, test_platform()).is_err());
+        fs::remove_dir(fixture.root.join("unlisted-empty-directory")).unwrap();
+        fs::write(fixture.root.join("bin/oblivion-vm"), b"changed helper").unwrap();
+        assert!(Bundle::stored(&fixture.root, &identity, test_platform()).is_err());
     }
 }

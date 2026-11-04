@@ -75,11 +75,67 @@ activating `~/.local/bin/oblivion`. Updates require the existing runtime to be s
 The final launcher symlink is replaced atomically. An unrelated file or
 symlink already named `~/.local/bin/oblivion` is refused.
 
+The private desktop prefix also contains a strict `installation.json` record
+binding it to one canonical runtime directory and runtime identity. Install,
+collection and uninstall refuse another runtime using that prefix; setting
+`OBLIVION_RUNTIME_DIRECTORY` never transfers ownership of an existing app
+installation. `XDG_DATA_HOME` selects a separate prefix, but there is only one
+managed `~/.local/bin/oblivion` command per account. A previous unshipped
+prototype without the current ownership record is not automatically adopted.
+
 Add `~/.local/bin` to your shell's `PATH` if needed, then run `oblivion` to
 start the protected runtime and manager. The existing runtime storage and
 Safe lifecycle remain under the native launcher's control. Installation does
 not use sudo, install QEMU, change system permissions, change swap or sysctl
 settings, or contact a provider.
+
+## Remove old software or uninstall
+
+First close your Safes and stop the protected runtime:
+
+```sh
+oblivion runtime stop
+oblivion runtime gc
+```
+
+`gc` requires the startup and VM lifetime locks to be free. It removes old
+release directories only after verifying their current-format manifest,
+complete inventory, ownership and checksums. It keeps the active release,
+the running command's release, and releases named in a staged update journal.
+Private boot copies carry their own strict inventory; only verified obsolete
+ISO, kernel and initrd files are removed. Unknown, changed or unlisted files
+are retained for inspection. The scan is bounded to 256 entries in each
+managed top-level directory.
+
+Successful bundle installation also attempts this stopped-only cleanup. If
+another process starts the runtime first, installation remains successful
+and tells you to run `runtime gc` later. A durable launcher activation clears
+its matching update journal; interrupted activation still requires rerunning
+the matching bundle installer. Collection never deletes that journal.
+
+To remove the desktop application:
+
+```sh
+oblivion runtime uninstall
+```
+
+Uninstall removes the verified managed `~/.local/bin/oblivion` symlink,
+installed launcher/helper/manager/assets releases and verified boot files.
+It refuses a running runtime, an unfinished update, an unrelated command
+at that path, or a changed release referenced by the installed command.
+An original downloaded or source-built bundle outside the managed release
+directory is retained.
+
+Encrypted Safe data is preserved. So are `runtime.json`, the runtime identity,
+Linux guest CID, lock files, the original `storage.raw` directory and a private
+`uninstalled.json` receipt. The receipt prevents startup until a development
+bundle is installed again. Reinstalling recreates boot assets while reusing
+the same storage path and identity; it does not initialize or copy that disk.
+There is no data-purge option. Uninstall does not modify Debian's separately
+installed direct-controller stack, delete your shell configuration, or change
+host networking or system packages. If removal encounters an I/O error,
+inspect the retained files before retrying from the original bundle's
+`bin/oblivion runtime uninstall` command.
 
 Linux hosts must already provide QEMU/KVM and the access required by the
 native backend. Consult the [Linux helper requirements](../packages/oblivion-native-linux/README.md)
