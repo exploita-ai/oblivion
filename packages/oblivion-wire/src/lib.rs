@@ -10,6 +10,7 @@ pub mod control_client;
 pub mod frame;
 pub mod family_rotation;
 pub mod idle;
+pub mod live_media;
 pub mod managed;
 pub mod runtime_auth;
 pub mod session_title;

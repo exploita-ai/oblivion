@@ -197,7 +197,7 @@ pub(super) fn prepare(root: &Path, path: &Path) -> Result<()> {
         kernel: bundle.root.join(&bundle.runtime().kernel),
         initrd: bundle.root.join(&bundle.runtime().initrd),
         command_line: format!(
-            "boot=live components console=hvc0 quiet loglevel=0 oblivion.runtime=1 oblivion.runtime-backend={} oblivion.runtime-id={}{}",
+            "boot=live components console=hvc0 quiet loglevel=0 oblivion.runtime=1 oblivion.runtime-live=1 oblivion.runtime-backend={} oblivion.runtime-id={}{}",
             backend(),
             data.runtime_id,
             if ephemeral {

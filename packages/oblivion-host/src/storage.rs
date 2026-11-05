@@ -793,7 +793,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         args.len()
             == if matches!(
                 op,
-                "open" | "enter" | "enter-documents" | "discard-session-pending" | "agent-release" | "branch-recover"
+                "open" | "enter" | "enter-documents" | "discard-session-pending" | "agent-release" | "live-media-release" | "branch-recover"
                     | "backup-export-begin" | "backup-discard" | "family-password-preview"
                     | "open-child-documents" | "open-agent-child" | "share-export-source-open" | "share-release" | "share-import-finish"
             ) {
@@ -859,6 +859,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             | "network-policy"
             | "close"
             | "close-idle"
+            | "live-media-release"
             | "idle-close"
             | "idle-lock"
             | "native-start-failed"
@@ -1435,7 +1436,8 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             if path.exists() { fs::remove_file(path).map_err(|_| Error("client_release_failed"))?; }
             crate::vm::remove_copy_port(&lease.client)?;
             if !runtime_record("manual-owner").exists() && clients.exists()
-                && fs::read_dir(&clients).map_err(|_| Error("client_release_failed"))?.next().is_none() {
+                && fs::read_dir(&clients).map_err(|_| Error("client_release_failed"))?.next().is_none()
+                && !crate::ipc::live_media_active()? {
                 crate::ipc::release_family()?;
                 require(config.close_branch(false, None)?, "locked_without_tor_state")?;
             }
@@ -1449,7 +1451,9 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 fs::remove_file(path).map_err(|_| Error("client_release_failed"))?;
             }
             crate::vm::remove_copy_port(&args[3])?;
-            if !runtime_record("manual-owner").exists() && clients.exists() && fs::read_dir(&clients).map_err(|_| Error("client_release_failed"))?.next().is_none() {
+            if !runtime_record("manual-owner").exists() && clients.exists()
+                && fs::read_dir(&clients).map_err(|_| Error("client_release_failed"))?.next().is_none()
+                && !crate::ipc::live_media_active()? {
                 crate::ipc::release_family()?;
                 require(config.close_branch(false, None)?, "locked_without_tor_state")?;
             }
@@ -1503,6 +1507,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             require(mode == "documents", "documents_not_open")?;
             let clients = Path::new(&scope::current().runtime()).join("agent-clients");
             require(!clients.exists() || fs::read_dir(clients).map_err(|_| Error("client_check_failed"))?.next().is_none(), "transfer_active")?;
+            require(!crate::ipc::live_media_active()?, "transfer_active")?;
             require(!crate::onion_host::prepared()? && !crate::transfer_host::prepared()?, "transfer_active")?;
             let access = crate::safe_access_store::status(true)?.current;
             if access == Access::Offline {
@@ -1776,12 +1781,23 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         }
         "open" => config.open(&args[3], &password(false)?),
         "close" | "leave" | "force-leave" => require(config.close_branch(op == "force-leave", branch_latch.as_deref())?, "locked_without_tor_state"),
-        "close-idle" => {
+        "close-idle" | "live-media-release" => {
             require(expected.is_some(), "expected_session_required")?;
+            if op == "live-media-release" {
+                require(crate::ipc::family_channel_available(), "trusted_safe_channel_required")?;
+                validate_id(&args[3])?;
+                let mut bytes = Vec::new();
+                std::io::stdin().take(1025).read_to_end(&mut bytes).map_err(|_| Error("invalid_live_media_release"))?;
+                require(bytes.len() <= 1024, "invalid_live_media_release")?;
+                let authority: oblivion_host::autolock::Activity = serde_json::from_slice(&bytes).map_err(|_| Error("invalid_live_media_release"))?;
+                require(authority.safe.as_ref().is_some_and(|opening| opening.slot == scope::current()
+                    && expected == Some(opening.safe_id.as_str())), "session_changed")?;
+                require_current_idle_activity(&authority)?;
+            }
             let clients = Path::new(&scope::current().runtime()).join("agent-clients");
             let occupied = clients.try_exists().map_err(|_| Error("client_release_failed"))?
                 && fs::read_dir(&clients).map_err(|_| Error("client_release_failed"))?.next().is_some();
-            if occupied || runtime_record("manual-owner").exists() { return Ok(()) }
+            if occupied || runtime_record("manual-owner").exists() || crate::ipc::live_media_active()? { return Ok(()) }
             crate::ipc::release_family()?;
             require(config.close_branch(false, None)?, "locked_without_tor_state")
         }
@@ -4804,6 +4820,7 @@ impl Config {
     }
 
     fn close_slot(&self, force: bool) -> Result<bool> {
+        crate::ipc::revoke_live_media()?;
         crate::ipc::release_family()?;
         if !mapping_open("oblivion-session")?
             && !Path::new(&crate::vm::Role::Gateway.runtime()).exists()

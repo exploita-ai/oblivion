@@ -40,6 +40,8 @@ thread_local! {
 enum FamilyRequest {
     BackupStop,
     BackupDiscard { transaction: String },
+    LiveMediaActive,
+    LiveMediaRevoke { slot: oblivion_host::scope::Slot },
     Retain { safe_id: String, family_id: String },
     Lookup { safe_id: String },
     ChildLookup { child_id: String },
@@ -103,6 +105,26 @@ pub(crate) fn release_family() -> Result<()> {
         let Some(stream) = binding.as_ref() else { return Ok(()) };
         let mut channel = Channel::new(stream, Duration::from_secs(10));
         family_write(&mut channel, &FamilyRequest::Release { slot: oblivion_host::scope::current() })?;
+        family_ack(&mut channel)
+    })
+}
+
+pub(crate) fn live_media_active() -> Result<bool> {
+    WORKER_CHANNEL.with(|binding| {
+        let binding = binding.borrow();
+        let Some(stream) = binding.as_ref() else { return Ok(false) };
+        let mut channel = Channel::new(stream, Duration::from_secs(10));
+        family_write(&mut channel, &FamilyRequest::LiveMediaActive)?;
+        family_read(&mut channel)
+    })
+}
+
+pub(crate) fn revoke_live_media() -> Result<()> {
+    WORKER_CHANNEL.with(|binding| {
+        let binding = binding.borrow();
+        let Some(stream) = binding.as_ref() else { return Ok(()) };
+        let mut channel = Channel::new(stream, Duration::from_secs(10));
+        family_write(&mut channel, &FamilyRequest::LiveMediaRevoke { slot: oblivion_host::scope::current() })?;
         family_ack(&mut channel)
     })
 }
@@ -265,6 +287,15 @@ fn serve_families(stream: UnixStream, families: Families, slot: u8) -> Result<()
             FamilyRequest::BackupDiscard { transaction } => {
                 let allowed = oblivion_host::scope::within(slot.try_into().map_err(Error)?, || crate::backup_host::can_discard(&transaction)).is_ok();
                 family_write(&mut channel, &allowed)?;
+            }
+            FamilyRequest::LiveMediaActive => {
+                family_write(&mut channel, &crate::live_media::registry().active(slot.try_into().map_err(Error)?)?)?;
+            }
+            FamilyRequest::LiveMediaRevoke { slot } => {
+                // Trusted branch/global cleanup may close several slots.
+                // Revocation follows its explicit inner scope.
+                crate::live_media::registry().revoke_slot(slot)?;
+                channel.write_all(b"K").map_err(|_| Error("family_channel_failed"))?;
             }
             FamilyRequest::ChildLookup { child_id } => {
                 let parent = crate::storage::child_family_source(&child_id)?;
@@ -537,16 +568,22 @@ fn tool_worker(config: &Path, families: &Families, tools: &Arc<crate::safe_tools
     Ok(value)
 }
 
-fn file_opening(session: &str, slot: oblivion_host::scope::Slot, secret: &[u8], snapshot: &crate::idle_controller::Snapshot) -> Result<oblivion_host::autolock::Opening> {
-    let opening: oblivion_host::autolock::Opening = serde_json::from_slice(secret).map_err(|_| Error("invalid_file_opening"))?;
+fn validate_file_opening(session: &str, slot: oblivion_host::scope::Slot, opening: &oblivion_host::autolock::Opening, snapshot: &crate::idle_controller::Snapshot) -> Result<()> {
     crate::storage::validate_id(&opening.nonce)?;
-    require(opening.slot == slot && opening.safe_id == session && snapshot.safes.contains(&opening), "session_changed")?;
+    require(opening.slot == slot && opening.safe_id == session && snapshot.safes.contains(opening), "session_changed")?;
     let host = snapshot.host.as_deref().ok_or(Error("idle_opening_changed"))?;
     require(!snapshot.fences.iter().any(|fence| match fence {
         crate::idle_controller::Target::Host { nonce } => nonce == host,
-        crate::idle_controller::Target::Safe { opening: fenced } => fenced == &opening,
-    }), "idle_opening_changed")?;
-    Ok(opening)
+        crate::idle_controller::Target::Safe { opening: fenced } => fenced == opening,
+    }), "idle_opening_changed")
+}
+
+fn require_current_file_opening(session: &str, slot: oblivion_host::scope::Slot, opening: &oblivion_host::autolock::Opening) -> Result<String> {
+    let snapshot = crate::storage::idle_snapshot()?;
+    validate_file_opening(session, slot, opening, &snapshot)?;
+    let host = snapshot.host.ok_or(Error("idle_opening_changed"))?;
+    crate::storage::require_current_idle_activity(&oblivion_host::autolock::Activity { host: host.clone(), safe: Some(opening.clone()) })?;
+    Ok(host)
 }
 
 fn insert_delivery(value: &mut serde_json::Value, parent: &crate::safe_tools::Context, child: &str) -> Result<()> {
@@ -763,8 +800,14 @@ fn idle_worker(config: &Path, families: &Families, target: &crate::idle_controll
     let mut command = Command::new(std::env::current_exe().map_err(|_| Error("executable_unavailable"))?);
     command.arg("--config").arg(config).env_clear().current_dir("/");
     let slot = match target {
-        Target::Host { .. } => { crate::share_export::registry().end(None)?; command.args(["idle-lock", "--slot", "0"]); 0 }
+        Target::Host { nonce } => {
+            crate::live_media::registry().revoke_host(Some(nonce))?;
+            crate::share_export::registry().end(None)?;
+            command.args(["idle-lock", "--slot", "0"]);
+            0
+        }
         Target::Safe { opening } => {
+            crate::live_media::registry().revoke_opening(opening)?;
             crate::share_export::registry().revoke_opening(opening)?;
             command.args(["idle-close", "--slot", &opening.slot.index().to_string(), "--expected-session", &opening.safe_id]);
             opening.slot.index()
@@ -827,6 +870,7 @@ struct ClientLease {
     operation: &'static str,
     secret: Zeroizing<Vec<u8>>,
     export: Option<String>,
+    media: Option<crate::live_media::Lease>,
     _hold: Option<UnixStream>,
     timeout: Option<Duration>,
 }
@@ -908,9 +952,11 @@ fn serve_connection(mut stream: UnixStream, config: std::path::PathBuf, uid: u32
                 // Keep the descriptor peer alive for a transaction-only lease;
                 // disjoint closure capture would otherwise drop it here.
                 let _hold = lease._hold;
-                // A held local connection owns this client. Register cleanup
-                // even if the launcher disappeared during descriptor delivery.
-                if delivered && stream.set_read_timeout(lease.timeout).is_ok() {
+                if let Some(media) = lease.media {
+                    if delivered { media.wait(&stream); }
+                } else if delivered && stream.set_read_timeout(lease.timeout).is_ok() {
+                    // A held local connection owns this client. Register cleanup
+                    // even if the launcher disappeared during descriptor delivery.
                     let mut byte = [0];
                     let _ = stream.read(&mut byte);
                 }
@@ -1034,6 +1080,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
             | Operation::SessionStorage
             | Operation::OpenDocuments
             | Operation::FileAttach
+            | Operation::LiveMediaReserve
             | Operation::ChildTaskStart
             | Operation::ChildTaskRetry
             | Operation::ChildTaskCancel
@@ -1126,7 +1173,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
             let (console, id) = crate::backup_host::attach(transaction)?;
             return Ok(Response { ok: true, output: String::new(), error: None, console: Some(console),
                 lease: Some(ClientLease { backup: Some(transaction.into()), slot: request.slot, id, safe_id: String::new(), operation: "",
-                    secret: Zeroizing::new(Vec::new()), export: None, _hold: None, timeout: Some(Duration::from_secs(3600)) }) });
+                    secret: Zeroizing::new(Vec::new()), export: None, media: None, _hold: None, timeout: Some(Duration::from_secs(3600)) }) });
         }
         let output = if matches!(request.operation, Operation::BackupStatus) {
             serde_json::to_string(&crate::backup_host::status()?).map_err(|_| Error("encode_failed"))?
@@ -1158,7 +1205,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         stream.set_read_timeout(Some(budget)).map_err(|_| Error("share_lease_failed"))?;
         return Ok(Response { ok: true, output: String::new(), error: None, console: Some(console),
             lease: Some(ClientLease { backup: None, slot: request.slot, id: id.clone(), safe_id: String::new(), operation: "",
-                secret: Zeroizing::new(Vec::new()), export: Some(id.clone()), _hold: Some(hold), timeout: Some(budget) }) });
+                secret: Zeroizing::new(Vec::new()), export: Some(id.clone()), media: None, _hold: Some(hold), timeout: Some(budget) }) });
     }
     if matches!(request.operation, Operation::ShareExportEnd) {
         require(request.expected_session.is_none(), "invalid_share_request")?;
@@ -1175,7 +1222,26 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         } else { crate::share_host::attach(expected)? };
         let secret = Zeroizing::new(serde_json::to_vec(&opening).map_err(|_| Error("encode_failed"))?);
         return Ok(Response { ok: true, output: String::new(), error: None, console: Some(console),
-            lease: Some(ClientLease { backup: None, slot: request.slot, id, safe_id: expected.to_owned(), operation: "share-release", secret, export: None, _hold: None, timeout: None }) });
+            lease: Some(ClientLease { backup: None, slot: request.slot, id, safe_id: expected.to_owned(), operation: "share-release", secret, export: None, media: None, _hold: None, timeout: None }) });
+    }
+    if matches!(request.operation, Operation::LiveMediaReserve) {
+        crate::live_media::require_live()?;
+        let selected: oblivion_wire::live_media::Reserve<oblivion_host::scope::Slot> =
+            serde_json::from_slice(&secret).map_err(|_| Error("invalid_live_media_request"))?;
+        require(oblivion_wire::live_media::valid_device_id(&selected.device_id), "invalid_live_media_request")?;
+        let _lock = lock_named("storage.lock")?;
+        let (session, mode) = crate::storage::session_info()?.ok_or(Error("session_not_open"))?;
+        require(matches!(mode.as_str(), "agent" | "documents") && request.expected_session.as_deref() == Some(&session), "session_changed")?;
+        let host = require_current_file_opening(&session, request.slot, &selected.opening)?;
+        let authority = oblivion_host::autolock::Activity { host: host.clone(), safe: Some(selected.opening.clone()) };
+        let secret = Zeroizing::new(serde_json::to_vec(&authority).map_err(|_| Error("encode_failed"))?);
+        let (console, media) = crate::live_media::registry().reserve(selected, host, crate::vm::session_owner()?)?;
+        // Idle lock writes its fence before waiting for storage.lock. Check
+        // again after registration so it cannot miss this lease before the ACK.
+        crate::storage::require_current_idle_activity(&authority)?;
+        return Ok(Response { ok: true, output: String::new(), error: None, console: Some(console),
+            lease: Some(ClientLease { backup: None, slot: request.slot, id: media.id().to_owned(), safe_id: session,
+                operation: "live-media-release", secret, export: None, media: Some(media), _hold: None, timeout: None }) });
     }
     if matches!(request.operation, Operation::AgentAttach | Operation::FileAttach) {
         let _lock = lock_named("storage.lock")?;
@@ -1185,10 +1251,8 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
             && request.expected_session.as_deref() == Some(&session), "session_changed")?;
         crate::storage::require_safe_branch_open(&session)?;
         if matches!(request.operation, Operation::FileAttach) {
-            let snapshot = crate::storage::idle_snapshot()?;
-            let opening = file_opening(&session, request.slot, &secret, &snapshot)?;
-            let host = snapshot.host.ok_or(Error("idle_opening_changed"))?;
-            crate::storage::require_current_idle_activity(&oblivion_host::autolock::Activity { host, safe: Some(opening) })?;
+            let opening = serde_json::from_slice(&secret).map_err(|_| Error("invalid_file_opening"))?;
+            require_current_file_opening(&session, request.slot, &opening)?;
         }
         let id = crate::storage::random_id()?;
         let clients = Path::new(&oblivion_host::scope::current().runtime()).join("agent-clients");
@@ -1215,11 +1279,12 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         return Ok(Response { ok: true, output: String::new(), error: None,
             console: Some(console),
             lease: Some(ClientLease { backup: None, slot: request.slot, id, safe_id: session,
-                operation: "agent-release", secret: Zeroizing::new(Vec::new()), export: None, _hold: None, timeout: None }) });
+                operation: "agent-release", secret: Zeroizing::new(Vec::new()), export: None, media: None, _hold: None, timeout: None }) });
     }
     if matches!(request.operation, Operation::Lock) {
         // Lock is an explicit revocation intent even if physical cleanup fails.
         // A shutdown may instead be refused because protected work is active.
+        crate::live_media::registry().revoke_host(None)?;
         crate::share_export::registry().end(None)?;
         families.lock().map_err(|_| Error("family_cache_failed"))?.clear();
     }
@@ -1275,7 +1340,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         Operation::Transfers => "transfers",
         Operation::Onion => "onion",
         Operation::ChildTaskStatus | Operation::ChildTaskReview | Operation::ChildTaskStart | Operation::ChildTaskRetry | Operation::ChildTaskCancel
-            | Operation::AgentAttach | Operation::FileAttach | Operation::ShareAttach | Operation::ShareImportAttach
+            | Operation::AgentAttach | Operation::FileAttach | Operation::LiveMediaReserve | Operation::ShareAttach | Operation::ShareImportAttach
             | Operation::ShareExportBegin | Operation::ShareExportLease | Operation::ShareExportEnd
             | Operation::BackupAttach | Operation::BackupStatus | Operation::BackupCancel
             | Operation::Activity | Operation::IdleSettings => unreachable!(),
@@ -1796,18 +1861,17 @@ mod file_opening_tests {
         use oblivion_host::autolock::Opening;
         use crate::idle_controller::{Snapshot, Target};
         let opening = Opening { slot: Default::default(), safe_id: "a".repeat(32), nonce: "b".repeat(32) };
-        let bytes = serde_json::to_vec(&opening).unwrap();
         let mut snapshot = Snapshot { host: Some("c".repeat(32)), safes: vec![opening.clone()], fences: vec![], general_open: true, writable: true };
-        assert_eq!(file_opening(&opening.safe_id, opening.slot, &bytes, &snapshot).unwrap_or_else(|error| panic!("{}", error.0)), opening);
-        assert!(file_opening(&"d".repeat(32), opening.slot, &bytes, &snapshot).is_err());
-        assert!(file_opening(&opening.safe_id, oblivion_host::scope::Slot::try_from(1).unwrap(), &bytes, &snapshot).is_err());
+        assert!(validate_file_opening(&opening.safe_id, opening.slot, &opening, &snapshot).is_ok());
+        assert!(validate_file_opening(&"d".repeat(32), opening.slot, &opening, &snapshot).is_err());
+        assert!(validate_file_opening(&opening.safe_id, oblivion_host::scope::Slot::try_from(1).unwrap(), &opening, &snapshot).is_err());
         let mut stale = opening.clone(); stale.nonce = "d".repeat(32);
-        assert!(file_opening(&opening.safe_id, opening.slot, &serde_json::to_vec(&stale).unwrap(), &snapshot).is_err());
+        assert!(validate_file_opening(&opening.safe_id, opening.slot, &stale, &snapshot).is_err());
         snapshot.fences = vec![Target::Host { nonce: "c".repeat(32) }];
-        assert!(file_opening(&opening.safe_id, opening.slot, &bytes, &snapshot).is_err());
+        assert!(validate_file_opening(&opening.safe_id, opening.slot, &opening, &snapshot).is_err());
         snapshot.fences = vec![Target::Safe { opening: opening.clone() }];
-        assert!(file_opening(&opening.safe_id, opening.slot, &bytes, &snapshot).is_err());
+        assert!(validate_file_opening(&opening.safe_id, opening.slot, &opening, &snapshot).is_err());
         snapshot.fences.clear(); snapshot.host = None;
-        assert!(file_opening(&opening.safe_id, opening.slot, &bytes, &snapshot).is_err());
+        assert!(validate_file_opening(&opening.safe_id, opening.slot, &opening, &snapshot).is_err());
     }
 }

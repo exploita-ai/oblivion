@@ -13,6 +13,8 @@ mod ipc;
 #[cfg(target_os = "linux")]
 mod safe_tools;
 #[cfg(target_os = "linux")]
+mod live_media;
+#[cfg(target_os = "linux")]
 mod chat_jobs;
 #[cfg(target_os = "linux")]
 mod child_tasks;
