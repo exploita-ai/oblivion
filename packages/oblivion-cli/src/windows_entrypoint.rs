@@ -14,7 +14,6 @@ use oblivion_native_windows::supervisor;
 use oblivion_wire::idle::Activity;
 use oblivion_wire::slot::Slot;
 use std::io::{IsTerminal, Read};
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -55,9 +54,12 @@ pub fn run() -> Result<i32> {
             if !matches!(
                 command,
                 RuntimeCommand::InstallBundle(_)
+                    | RuntimeCommand::Update(_)
                     | RuntimeCommand::Start
                     | RuntimeCommand::Stop
                     | RuntimeCommand::Recover
+                    | RuntimeCommand::Gc
+                    | RuntimeCommand::Uninstall
             ) =>
         {
             return Err("windows_runtime_operation_not_implemented".into());
@@ -180,14 +182,7 @@ fn runtime_command(root: &Root, command: RuntimeCommand) -> Result<i32> {
     let stop = Arc::new(AtomicBool::new(false));
     match command {
         RuntimeCommand::InstallBundle(path) => {
-            installation::preflight()?;
-            let path = Path::new(&path)
-                .canonicalize()
-                .map_err(|_| "bundle_directory_unavailable")?;
-            // The I/O boundary accepts drive paths, not Win32 extended aliases.
-            let path = path.to_str().ok_or("unsupported_bundle_path")?;
-            let path = path.strip_prefix(r"\\?\").unwrap_or(path);
-            let bundle = VerifiedBundle::open(path, Some(source_id()?), &Identity::current()?)?;
+            let bundle = bundle_input(&path)?;
             let installed = installation::install_bundle(
                 root,
                 bundle,
@@ -200,6 +195,38 @@ fn runtime_command(root: &Root, command: RuntimeCommand) -> Result<i32> {
             );
             println!("{}", installed.launcher());
             println!("Runtime {}", installed.runtime_id());
+            Ok(0)
+        }
+        RuntimeCommand::Update(path) => {
+            let installed = installation::update_bundle(
+                root,
+                bundle_input(&path)?,
+                stop,
+                Instant::now() + STARTUP,
+            )?;
+            println!("Oblivion updated. Encrypted data and runtime identity were preserved.");
+            println!("{}", installed.launcher());
+            println!("Runtime {}", installed.runtime_id());
+            Ok(0)
+        }
+        RuntimeCommand::Gc => {
+            let cleanup = installation::collect(root, stop, Instant::now() + STARTUP)?;
+            println!("{}", serde_json::to_string(&cleanup)?);
+            Ok(0)
+        }
+        RuntimeCommand::Uninstall => {
+            let cleanup = installation::uninstall(root, stop, Instant::now() + STARTUP)?;
+            println!("{}", serde_json::to_string(&cleanup)?);
+            println!(
+                "Encrypted data and runtime identity are retained at {:?}.",
+                root.path()
+            );
+            if !cleanup.software_removed {
+                eprintln!(
+                    "Software removal is incomplete. Close installed programs and retry from a verified external bundle. Unknown files were preserved."
+                );
+                return Ok(2);
+            }
             Ok(0)
         }
         RuntimeCommand::Start => {
@@ -220,11 +247,38 @@ fn runtime_command(root: &Root, command: RuntimeCommand) -> Result<i32> {
             Ok(0)
         }
         RuntimeCommand::Recover => {
-            supervisor::recover(&installation::owned_settings(root)?)?;
+            if let Err(error) = supervisor::recover(
+                &installation::owned_settings(root)?,
+                stop,
+                Instant::now() + Duration::from_secs(180),
+            ) {
+                if error.0 == "runtime_busy" {
+                    return Err("The protected runtime is active. Use oblivion runtime stop before recovery.".into());
+                }
+                return Err(error.into());
+            }
             Ok(0)
         }
         _ => Err("windows_runtime_operation_not_implemented".into()),
     }
+}
+
+fn bundle_input(path: &str) -> Result<VerifiedBundle> {
+    // Resolve lexically. Canonicalizing a user-supplied UNC/junction path would
+    // access it before the native bundle boundary can reject it.
+    let path = std::path::absolute(path)?;
+    let mut path = path
+        .to_str()
+        .ok_or("unsupported_bundle_path")?
+        .replace('/', r"\");
+    if path.as_bytes().first().is_some_and(u8::is_ascii_lowercase) {
+        path.replace_range(..1, &path[..1].to_ascii_uppercase());
+    }
+    Ok(VerifiedBundle::open(
+        &path,
+        Some(source_id()?),
+        &Identity::current()?,
+    )?)
 }
 
 fn forward_activity(root: &Root) -> Result<i32> {

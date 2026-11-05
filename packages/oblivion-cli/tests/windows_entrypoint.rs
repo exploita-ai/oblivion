@@ -93,7 +93,7 @@ fn syntax_and_unimplemented_endpoints_fail_before_hyperv_or_installation_discove
         ),
         (vec!["share", "import"], "Choose an encrypted Share file"),
         (
-            vec!["runtime", "update", "unopened"],
+            vec!["runtime", "deploy", "unopened"],
             "windows_runtime_operation_not_implemented",
         ),
         (

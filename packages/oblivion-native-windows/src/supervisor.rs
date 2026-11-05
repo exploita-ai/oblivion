@@ -14,17 +14,19 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::marker::PhantomData;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::ptr::null_mut;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, GENERIC_READ, GENERIC_WRITE, GetLastError, INVALID_HANDLE_VALUE,
-    WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_FILE_NOT_FOUND, ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE, GetLastError,
+    INVALID_HANDLE_VALUE, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -61,6 +63,32 @@ impl Settings {
         config_sha256: &str,
         source_sha256: &str,
     ) -> Result<Self> {
+        let settings = Self::binding(runtime_id, helper, config, config_sha256, source_sha256)?;
+        settings.verify()?;
+        Ok(settings)
+    }
+
+    /// Installation metadata can still address its stopped journal after the
+    /// owned software has been removed. This conveys no permission to boot.
+    pub fn maintenance(
+        runtime_id: &str,
+        helper: &Path,
+        config: &Path,
+        config_sha256: &str,
+        source_sha256: &str,
+    ) -> Result<Self> {
+        let settings = Self::binding(runtime_id, helper, config, config_sha256, source_sha256)?;
+        settings.verify_configuration()?;
+        Ok(settings)
+    }
+
+    fn binding(
+        runtime_id: &str,
+        helper: &Path,
+        config: &Path,
+        config_sha256: &str,
+        source_sha256: &str,
+    ) -> Result<Self> {
         if !valid_id(runtime_id)
             || runtime_id.bytes().all(|byte| byte == b'0')
             || !digest(config_sha256)
@@ -68,7 +96,7 @@ impl Settings {
         {
             return Err(Error("invalid_supervisor_binding"));
         }
-        let settings = Self {
+        Ok(Self {
             binding: Binding {
                 runtime_id: runtime_id.into(),
                 config_sha256: config_sha256.into(),
@@ -76,9 +104,7 @@ impl Settings {
             },
             helper: helper.to_owned(),
             config: config.to_owned(),
-        };
-        settings.verify()?;
-        Ok(settings)
+        })
     }
 
     pub fn runtime_id(&self) -> &str {
@@ -99,6 +125,21 @@ impl Settings {
     }
 
     fn verify(&self) -> Result<Verified> {
+        let configuration = self.verify_configuration()?;
+        Ok(Verified {
+            _parent: configuration._parent,
+            _config: configuration._config,
+            data: configuration.data,
+            helper: Executable::open(
+                self.helper
+                    .to_str()
+                    .ok_or(Error("invalid_supervisor_path"))?,
+                &Identity::current()?,
+            )?,
+        })
+    }
+
+    fn verify_configuration(&self) -> Result<VerifiedConfiguration> {
         let identity = Identity::current()?;
         let config = self
             .config
@@ -118,18 +159,18 @@ impl Settings {
             return Err(Error("runtime_configuration_binding_changed"));
         }
         parent.verify()?;
-        Ok(Verified {
+        Ok(VerifiedConfiguration {
             _parent: parent,
             _config: file,
             data: PathBuf::from(&configuration.disks[1].path),
-            helper: Executable::open(
-                self.helper
-                    .to_str()
-                    .ok_or(Error("invalid_supervisor_path"))?,
-                &identity,
-            )?,
         })
     }
+}
+
+struct VerifiedConfiguration {
+    _parent: CreationParent,
+    _config: File,
+    data: PathBuf,
 }
 
 struct Verified {
@@ -296,9 +337,11 @@ fn acquire_as(
     stop: Arc<AtomicBool>,
     deadline: Instant,
 ) -> Result<Lease> {
-    let verified = settings.verify()?;
     let identity = Identity::current()?;
     let election = Election::acquire(settings.runtime_id(), &identity, &stop, deadline)?;
+    // Maintenance owns this same mutex. Do not pin old software while waiting
+    // for an update/collection to release it.
+    let verified = settings.verify()?;
     let previous = Journal::read(settings, &identity)?;
     if matches!(boot, Boot::Initialize { .. }) {
         if previous.as_ref().is_some_and(|record| {
@@ -450,15 +493,140 @@ pub fn stop(settings: &Settings, cancelled: Arc<AtomicBool>, deadline: Instant) 
     Ok(())
 }
 
-/// No HCS/HCN/ACL adoption exists here. In particular pipe absence cannot clear
-/// a journal left by an unknown helper exit or a crashed supervisor.
-pub fn recover(settings: &Settings) -> Result<()> {
+/// Exclusive software-maintenance authority. Windows mutex ownership belongs
+/// to the acquiring thread, so this capability cannot move to another thread.
+/// The journal writer also excludes an old supervisor still finishing its exit.
+#[must_use]
+pub struct Stopped {
+    journal: Journal,
+    settings: Settings,
+    _election: Election,
+    _thread: PhantomData<Rc<()>>,
+}
+
+impl Stopped {
+    /// Publish the verified target binding only after the caller has installed
+    /// its artifacts. A failed write leaves the normal recovery fence intact.
+    pub fn rebind(&mut self, target: &Settings) -> Result<()> {
+        same_runtime(&self.settings, target)?;
+        let _verified = target.verify()?;
+        let mut record = self
+            .journal
+            .load()?
+            .ok_or(Error("runtime_generation_missing"))?;
+        if record.phase != Phase::Stopped {
+            return Err(Error("runtime_recovery_required"));
+        }
+        record.binding = target.binding.clone();
+        self.journal.save(&record)?;
+        self.journal.binding = target.binding.clone();
+        self.settings = target.clone();
+        Ok(())
+    }
+}
+
+pub fn stopped(settings: &Settings, stop: Arc<AtomicBool>, deadline: Instant) -> Result<Stopped> {
+    stopped_for(settings, None, stop, deadline)
+}
+
+/// Only a persisted update transaction supplies both exact permitted bindings.
+/// This is not a search for an arbitrary older/newer installation to adopt.
+pub fn stopped_update(
+    base: &Settings,
+    target: &Settings,
+    stop: Arc<AtomicBool>,
+    deadline: Instant,
+) -> Result<Stopped> {
+    same_runtime(base, target)?;
+    stopped_for(base, Some(target), stop, deadline)
+}
+
+fn same_runtime(base: &Settings, target: &Settings) -> Result<()> {
+    if base.runtime_id() != target.runtime_id() || base.config != target.config {
+        return Err(Error("runtime_maintenance_binding_changed"));
+    }
+    Ok(())
+}
+
+fn stopped_for(
+    settings: &Settings,
+    target: Option<&Settings>,
+    stop: Arc<AtomicBool>,
+    deadline: Instant,
+) -> Result<Stopped> {
+    let identity = Identity::current()?;
+    let bindings = match target {
+        Some(target) => vec![&settings.binding, &target.binding],
+        None => vec![&settings.binding],
+    };
+    loop {
+        let election = Election::acquire(settings.runtime_id(), &identity, &stop, deadline)?;
+        let record =
+            Journal::read_for(settings, &bindings, &identity)?.ok_or(Error("runtime_not_owned"))?;
+        if record.phase != Phase::Stopped {
+            return Err(Error("runtime_recovery_required"));
+        }
+        let mut journal = match Journal::writer(settings, &identity, false) {
+            Ok(journal) => journal,
+            Err(Error("supervision_journal_busy")) => {
+                // A stopped supervisor may still be draining its final peer.
+                // Release election so any final failure can publish Recovery.
+                drop(election);
+                check(&stop, deadline)?;
+                std::thread::sleep(Duration::from_millis(25));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let record = read_record_for(
+            journal
+                .file
+                .as_mut()
+                .ok_or(Error("supervision_journal_unavailable"))?,
+            &bindings,
+        )?
+        .ok_or(Error("runtime_generation_missing"))?;
+        if record.phase != Phase::Stopped {
+            return Err(Error("runtime_recovery_required"));
+        }
+        journal.binding = record.binding.clone();
+        return Ok(Stopped {
+            journal,
+            settings: settings.clone(),
+            _election: election,
+            _thread: PhantomData,
+        });
+    }
+}
+
+/// A live, authenticated supervisor may retry its owned shutdown. No HCS/HCN/
+/// ACL adoption exists here: pipe absence cannot clear an unknown helper exit.
+pub fn recover(settings: &Settings, stop: Arc<AtomicBool>, deadline: Instant) -> Result<()> {
     let identity = Identity::current()?;
     match Journal::read(settings, &identity)? {
-        None => Ok(()),
-        Some(record) if record.phase == Phase::Stopped => Ok(()),
-        _ => Err(Error("windows_owned_reconciliation_required")),
+        None => return Err(Error("runtime_not_owned")),
+        Some(record) if record.phase.admitting() => return Err(Error("runtime_busy")),
+        Some(record) if record.phase != Phase::Stopped => {
+            match exchange(
+                settings,
+                Action::Stop,
+                &record.generation,
+                Arc::clone(&stop),
+                deadline,
+                None,
+            ) {
+                Ok((_, reply)) if reply.phase == Phase::Stopped => {}
+                Err(Error("supervisor_unavailable")) => {
+                    return Err(Error("windows_owned_reconciliation_required"));
+                }
+                Err(error) => return Err(error),
+                _ => return Err(Error("runtime_recovery_required")),
+            }
+        }
+        _ => {}
     }
+    drop(stopped(settings, stop, deadline)?);
+    Ok(())
 }
 
 fn exchange(
@@ -919,7 +1087,7 @@ impl Peer {
 }
 
 struct Journal {
-    file: File,
+    file: Option<File>,
     parent: CreationParent,
     path: String,
     identity: Identity,
@@ -927,12 +1095,18 @@ struct Journal {
 }
 impl Journal {
     fn writer(settings: &Settings, identity: &Identity, create: bool) -> Result<Self> {
+        let _election = Election::acquire(
+            settings.runtime_id(),
+            identity,
+            &AtomicBool::new(false),
+            Instant::now() + Duration::from_secs(2),
+        )?;
         let path = settings.journal()?;
         let parent = CreationParent::open(&path, identity)?;
         let file = open(parent.path(), Access::JournalWrite, create, identity)?
             .ok_or(Error("runtime_generation_missing"))?;
         Ok(Self {
-            file,
+            file: Some(file),
             parent,
             path,
             identity: Identity::current()?,
@@ -940,6 +1114,13 @@ impl Journal {
         })
     }
     fn read(settings: &Settings, identity: &Identity) -> Result<Option<Record>> {
+        Self::read_for(settings, &[&settings.binding], identity)
+    }
+    fn read_for(
+        settings: &Settings,
+        bindings: &[&Binding],
+        identity: &Identity,
+    ) -> Result<Option<Record>> {
         let _election = Election::acquire(
             settings.runtime_id(),
             identity,
@@ -951,12 +1132,23 @@ impl Journal {
         let Some(mut file) = open(parent.path(), Access::JournalRead, false, identity)? else {
             return Ok(None);
         };
-        let record = read_record(&mut file, &settings.binding)?;
+        let record = read_record_for(&mut file, bindings)?;
         parent.verify()?;
         Ok(record)
     }
     fn load(&mut self) -> Result<Option<Record>> {
-        read_record(&mut self.file, &self.binding)
+        let _election = Election::acquire(
+            &self.binding.runtime_id,
+            &self.identity,
+            &AtomicBool::new(false),
+            Instant::now() + Duration::from_secs(2),
+        )?;
+        read_record(
+            self.file
+                .as_mut()
+                .ok_or(Error("supervision_journal_unavailable"))?,
+            &self.binding,
+        )
     }
     fn save(&mut self, record: &Record) -> Result<()> {
         let _election = Election::acquire(
@@ -966,21 +1158,62 @@ impl Journal {
             Instant::now() + Duration::from_secs(2),
         )?;
         self.parent.verify()?;
-        files::verify_private(&self.file, &self.path, &self.identity)?;
+        files::verify_private(
+            self.file
+                .as_ref()
+                .ok_or(Error("supervision_journal_unavailable"))?,
+            &self.path,
+            &self.identity,
+        )?;
         let bytes = serde_json::to_vec(record).map_err(|_| Error("invalid_supervision_journal"))?;
         if bytes.len() > LIMIT {
             return Err(Error("invalid_supervision_journal"));
         }
-        self.file
-            .seek(SeekFrom::Start(0))
-            .and_then(|_| self.file.write_all(&bytes))
-            .and_then(|_| self.file.set_len(bytes.len() as u64))
-            .and_then(|_| self.file.sync_all())
+        let path = Path::new(&self.path);
+        let parent = path
+            .parent()
+            .and_then(Path::to_str)
+            .ok_or(Error("invalid_supervisor_path"))?;
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(Error("invalid_supervisor_path"))?;
+        let directory = files::Directory::open(parent, &self.identity, true)?;
+        directory.sync()?;
+        // The current no-delete writer pins this exact file while its identity
+        // is observed. The replacement helper checks that identity again.
+        let previous_id = files::data_file_identity(&self.path)?;
+        let mut pending = directory.create_file(
+            &format!("supervision-{}.pending", random_id()?),
+            &self.identity,
+        )?;
+        pending
+            .writer()
+            .write_all(&bytes)
             .map_err(|_| Error("supervision_journal_write_failed"))?;
+        pending.finish()?;
+        directory.sync()?;
+        // Every reader/writer takes election. No admission can observe this
+        // brief handoff, and the old/new durable record stays whole on crash.
+        drop(self.file.take());
+        let previous = directory.asset(name, &self.identity, true)?;
+        if previous.identity() != previous_id {
+            return Err(Error("supervision_journal_changed"));
+        }
+        let published = pending.replace(previous, &self.identity)?;
+        drop(published);
+        self.file = Some(
+            open(&self.path, Access::JournalWrite, false, &self.identity)?
+                .ok_or(Error("supervision_journal_unavailable"))?,
+        );
+        directory.sync()?;
         self.parent.verify()
     }
 }
 fn read_record(file: &mut File, binding: &Binding) -> Result<Option<Record>> {
+    read_record_for(file, &[binding])
+}
+fn read_record_for(file: &mut File, bindings: &[&Binding]) -> Result<Option<Record>> {
     file.seek(SeekFrom::Start(0))
         .map_err(|_| Error("supervision_journal_unavailable"))?;
     let mut bytes = vec![];
@@ -995,12 +1228,13 @@ fn read_record(file: &mut File, binding: &Binding) -> Result<Option<Record>> {
     }
     let record: Record =
         serde_json::from_slice(&bytes).map_err(|_| Error("invalid_supervision_journal"))?;
-    if record.version != 1 || &record.binding != binding || !valid_id(&record.generation) {
+    if record.version != 1 || !bindings.contains(&&record.binding) || !valid_id(&record.generation)
+    {
         return Err(Error("invalid_supervision_journal"));
     }
     record
         .boot
-        .validate(&binding.runtime_id)
+        .validate(&record.binding.runtime_id)
         .map_err(|_| Error("invalid_supervision_journal"))?;
     Ok(Some(record))
 }
@@ -1041,8 +1275,11 @@ fn open(path: &str, access: Access, create: bool, identity: &Identity) -> Result
         )
     };
     if handle == INVALID_HANDLE_VALUE {
-        return if !create && unsafe { GetLastError() } == ERROR_FILE_NOT_FOUND {
+        let error = unsafe { GetLastError() };
+        return if !create && error == ERROR_FILE_NOT_FOUND {
             Ok(None)
+        } else if matches!(access, Access::JournalWrite) && error == ERROR_SHARING_VIOLATION {
+            Err(Error("supervision_journal_busy"))
         } else {
             Err(Error("private_supervision_file_unavailable"))
         };
@@ -1116,15 +1353,16 @@ fn check(stop: &AtomicBool, deadline: Instant) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, Backend, Binding, Boot, Journal, Phase, Record, Settings, initialize, random_id,
-        recover,
+        Access, Action, Backend, Binding, Boot, Election, Journal, Peer, Phase, Record, Settings,
+        initialize, open, random_id, recover, stopped, stopped_update,
     };
     use crate::client::Client;
     use crate::private::{Endpoint, Purpose};
     use crate::security::Identity;
     use oblivion_wire::control::{Operation, Request};
     use oblivion_wire::slot::Slot;
-    use std::io::Read;
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::os::windows::process::CommandExt;
     use std::path::PathBuf;
@@ -1280,7 +1518,13 @@ mod tests {
             assert_eq!(observed.generation, generation);
         }
         assert_eq!(
-            recover(&settings).unwrap_err().0,
+            recover(
+                &settings,
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_millis(100),
+            )
+            .unwrap_err()
+            .0,
             "windows_owned_reconciliation_required"
         );
         let record = Journal::writer(&settings, &identity, false)
@@ -1296,6 +1540,398 @@ mod tests {
             Journal::read(&changed, &identity).err().unwrap().0,
             "invalid_supervision_journal"
         );
+    }
+
+    #[test]
+    fn stopped_guard_waits_for_supervisor_writer_and_excludes_a_new_election() {
+        let area = Area::new();
+        let settings = area.settings();
+        let identity = Identity::current().unwrap();
+        let mut writer = Journal::writer(&settings, &identity, true).unwrap();
+        writer
+            .save(&Record {
+                version: 1,
+                binding: settings.binding.clone(),
+                generation: random_id().unwrap(),
+                phase: Phase::Stopped,
+                resident: false,
+                boot: Boot::Existing,
+            })
+            .unwrap();
+        let (acquired, waiting) = std::sync::mpsc::sync_channel(0);
+        let (release, released) = std::sync::mpsc::sync_channel(0);
+        let candidate = settings.clone();
+        let worker = std::thread::spawn(move || {
+            let guard = stopped(
+                &candidate,
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(4),
+            )
+            .unwrap();
+            acquired.send(()).unwrap();
+            released.recv().unwrap();
+            drop(guard);
+        });
+        assert!(waiting.recv_timeout(Duration::from_millis(100)).is_err());
+        // A Stopped journal alone is not enough while its old writer survives.
+        drop(writer);
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            Election::acquire(
+                settings.runtime_id(),
+                &identity,
+                &AtomicBool::new(false),
+                Instant::now() + Duration::from_millis(100),
+            )
+            .err()
+            .unwrap()
+            .0,
+            "runtime_start_timeout"
+        );
+        assert_eq!(
+            open(
+                &settings.journal().unwrap(),
+                Access::JournalWrite,
+                false,
+                &identity
+            )
+            .err()
+            .unwrap()
+            .0,
+            "supervision_journal_busy"
+        );
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        drop(
+            Election::acquire(
+                settings.runtime_id(),
+                &identity,
+                &AtomicBool::new(false),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn stopped_update_accepts_only_the_two_transaction_bindings_and_never_recovery() {
+        let area = Area::new();
+        let base = area.settings();
+        let mut target = base.clone();
+        target.binding.source_sha256 = "3".repeat(64);
+        let identity = Identity::current().unwrap();
+        for phase in [Phase::Stopped, Phase::Recovery] {
+            let mut writer = Journal::writer(&base, &identity, true).unwrap();
+            writer
+                .save(&Record {
+                    version: 1,
+                    binding: target.binding.clone(),
+                    generation: random_id().unwrap(),
+                    phase,
+                    resident: false,
+                    boot: Boot::Existing,
+                })
+                .unwrap();
+            drop(writer);
+            assert_eq!(
+                stopped(
+                    &base,
+                    Arc::new(AtomicBool::new(false)),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .err()
+                .unwrap()
+                .0,
+                "invalid_supervision_journal"
+            );
+            let result = stopped_update(
+                &base,
+                &target,
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(1),
+            );
+            if phase == Phase::Stopped {
+                drop(result.unwrap());
+            } else {
+                assert_eq!(result.err().unwrap().0, "runtime_recovery_required");
+            }
+            let mut stranger = target.clone();
+            stranger.binding.source_sha256 = "4".repeat(64);
+            assert_eq!(
+                stopped_update(
+                    &base,
+                    &stranger,
+                    Arc::new(AtomicBool::new(false)),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .err()
+                .unwrap()
+                .0,
+                "invalid_supervision_journal"
+            );
+        }
+    }
+
+    #[test]
+    fn maintenance_after_software_removal_still_requires_config_and_stopped_proof() {
+        let area = Area::new();
+        let mut settings = area.settings();
+        let identity = Identity::current().unwrap();
+        let configuration = crate::config::RuntimeConfig {
+            version: 1,
+            backend: "hcs-hyperv".into(),
+            runtime_id: settings.runtime_id().into(),
+            kernel: area.0.join("vmlinuz").to_str().unwrap().into(),
+            initrd: area.0.join("initrd.img").to_str().unwrap().into(),
+            command_line: format!(
+                "boot=live components quiet loglevel=0 oblivion.runtime=1 oblivion.runtime-backend=hcs-hyperv oblivion.runtime-id={}",
+                settings.runtime_id()
+            ),
+            disks: vec![
+                crate::config::Disk {
+                    path: area.0.join("controller.iso").to_str().unwrap().into(),
+                    read_only: true,
+                },
+                crate::config::Disk {
+                    path: area.0.join("data.vhdx").to_str().unwrap().into(),
+                    read_only: false,
+                },
+            ],
+            cpu_count: 2,
+            memory_mi_b: 1024,
+            control_pipe: format!(r"\\.\pipe\oblivion.{}.control", settings.runtime_id()),
+            control_port: 4050,
+            network: false,
+            serial_stdio: false,
+        };
+        let bytes = serde_json::to_vec(&configuration).unwrap();
+        let mut config = open(
+            settings.config.to_str().unwrap(),
+            Access::JournalWrite,
+            true,
+            &identity,
+        )
+        .unwrap()
+        .unwrap();
+        config.write_all(&bytes).unwrap();
+        config.sync_all().unwrap();
+        drop(config);
+        settings.binding.config_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let maintained = Settings::maintenance(
+            settings.runtime_id(),
+            &settings.helper,
+            &settings.config,
+            &settings.binding.config_sha256,
+            &settings.binding.source_sha256,
+        )
+        .unwrap();
+        assert!(!settings.helper.exists());
+        assert!(
+            super::acquire(
+                &maintained,
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .is_err()
+        );
+        assert!(!PathBuf::from(settings.journal().unwrap()).exists());
+        assert_eq!(
+            stopped(
+                &maintained,
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .err()
+            .unwrap()
+            .0,
+            "runtime_not_owned"
+        );
+        let mut writer = Journal::writer(&settings, &identity, true).unwrap();
+        writer
+            .save(&Record {
+                version: 1,
+                binding: settings.binding.clone(),
+                generation: random_id().unwrap(),
+                phase: Phase::Stopped,
+                resident: false,
+                boot: Boot::Existing,
+            })
+            .unwrap();
+        drop(writer);
+        let mut guard = stopped(
+            &maintained,
+            Arc::new(AtomicBool::new(false)),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        let mut target = settings.clone();
+        target.binding.source_sha256 = "3".repeat(64);
+        // Rebinding still requires a verified target executable. This fixture
+        // is never executed; it exercises file admission and journal ordering.
+        assert!(guard.rebind(&target).is_err());
+        let mut helper = open(
+            settings.helper.to_str().unwrap(),
+            Access::JournalWrite,
+            true,
+            &identity,
+        )
+        .unwrap()
+        .unwrap();
+        helper.write_all(b"not executed").unwrap();
+        helper.sync_all().unwrap();
+        drop(helper);
+        guard.rebind(&target).unwrap();
+        guard.rebind(&target).unwrap();
+        let observed = Journal::read(&target, &identity).unwrap().unwrap();
+        assert_eq!(observed.phase, Phase::Stopped);
+        assert!(observed.binding == target.binding);
+        assert!(Journal::read(&settings, &identity).is_err());
+    }
+
+    #[test]
+    fn recovery_retries_owned_live_stop_and_waits_for_the_supervisor_writer_to_exit() {
+        let area = Area::new();
+        let settings = area.settings();
+        let identity = Identity::current().unwrap();
+        let record = Record {
+            version: 1,
+            binding: settings.binding.clone(),
+            generation: random_id().unwrap(),
+            phase: Phase::Recovery,
+            resident: false,
+            boot: Boot::Existing,
+        };
+        let mut journal = Journal::writer(&settings, &identity, true).unwrap();
+        journal.save(&record).unwrap();
+        let mut endpoint = Endpoint::bind(&settings.name(), Purpose::Supervision).unwrap();
+        let worker = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let pipe = endpoint
+                .accept(&AtomicBool::new(false), deadline)
+                .unwrap()
+                .unwrap();
+            let mut peer = Peer::new(pipe);
+            let message = loop {
+                assert!(Instant::now() < deadline);
+                if let Some(message) = peer.poll() {
+                    break message;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            assert!(matches!(message.action, Action::Stop));
+            assert!(message.binding == record.binding);
+            assert_eq!(message.generation, record.generation);
+            // A real helper is deliberately absent. This fixture models only
+            // the supervisor's authenticated stop-reply/journal handoff.
+            let mut record = record;
+            record.phase = Phase::Stopped;
+            journal.save(&record).unwrap();
+            peer.reply(&record, None, false).unwrap();
+            while !peer.closed {
+                assert!(Instant::now() < deadline);
+                peer.poll();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            drop(journal);
+        });
+        recover(
+            &settings,
+            Arc::new(AtomicBool::new(false)),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        worker.join().unwrap();
+        assert_eq!(
+            Journal::read(&settings, &identity).unwrap().unwrap().phase,
+            Phase::Stopped
+        );
+    }
+
+    #[test]
+    fn recovery_never_stops_a_healthy_starting_or_ready_generation() {
+        let area = Area::new();
+        let settings = area.settings();
+        let identity = Identity::current().unwrap();
+        for phase in [Phase::Starting, Phase::Ready] {
+            let record = Record {
+                version: 1,
+                binding: settings.binding.clone(),
+                generation: random_id().unwrap(),
+                phase,
+                resident: true,
+                boot: Boot::Existing,
+            };
+            let mut writer = Journal::writer(&settings, &identity, true).unwrap();
+            writer.save(&record).unwrap();
+            assert_eq!(
+                recover(
+                    &settings,
+                    Arc::new(AtomicBool::new(false)),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .unwrap_err()
+                .0,
+                "runtime_busy"
+            );
+            let observed = writer.load().unwrap().unwrap();
+            assert_eq!(observed.phase, phase);
+            assert_eq!(observed.generation, record.generation);
+            assert!(observed.resident);
+        }
+    }
+
+    #[test]
+    fn journal_updates_replace_the_whole_private_record_and_retain_writer_exclusion() {
+        let area = Area::new();
+        let settings = area.settings();
+        let identity = Identity::current().unwrap();
+        let mut writer = Journal::writer(&settings, &identity, true).unwrap();
+        let mut record = Record {
+            version: 1,
+            binding: settings.binding.clone(),
+            generation: random_id().unwrap(),
+            phase: Phase::Starting,
+            resident: false,
+            boot: Boot::Existing,
+        };
+        writer.save(&record).unwrap();
+        let previous = crate::files::data_file_identity(&settings.journal().unwrap()).unwrap();
+        record.phase = Phase::Stopped;
+        writer.save(&record).unwrap();
+        let current = crate::files::data_file_identity(&settings.journal().unwrap()).unwrap();
+        assert_ne!(
+            previous, current,
+            "save must replace, rather than overwrite, the old file"
+        );
+        assert_eq!(writer.load().unwrap().unwrap().phase, Phase::Stopped);
+        assert_eq!(
+            Journal::read(&settings, &identity).unwrap().unwrap().phase,
+            Phase::Stopped
+        );
+        assert_eq!(
+            Journal::writer(&settings, &identity, false)
+                .err()
+                .unwrap()
+                .0,
+            "supervision_journal_busy"
+        );
+        drop(writer);
+        drop(
+            stopped(
+                &settings,
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap(),
+        );
+        assert!(std::fs::read_dir(&area.0).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_str()
+                .unwrap()
+                .ends_with(".pending")
+        }));
     }
 
     #[test]

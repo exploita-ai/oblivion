@@ -130,6 +130,43 @@ impl VerifiedBundle {
     /// error retain the new private tree for explicit inspection; never delete
     /// an existing destination or unknown entries by path.
     pub fn publish(self, destination: &str, identity: &Identity) -> Result<Self> {
+        let (parent, name) = destination
+            .rsplit_once('\\')
+            .ok_or(Error("invalid_runtime_asset_path"))?;
+        let parent = Directory::open(parent, identity, true)?;
+        parent.sync()?;
+        match std::fs::symlink_metadata(destination) {
+            Ok(_) => return Err(Error("runtime_release_already_exists")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(Error("runtime_release_unavailable")),
+        }
+        let mut random = [0; 16];
+        getrandom::getrandom(&mut random).map_err(|_| Error("runtime_entropy_unavailable"))?;
+        let suffix = random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let stage = format!(r"{}\.bundle-{suffix}", parent.path());
+        let copied = self.copy_into(&stage, identity)?;
+        let source = copied.source().to_owned();
+        let Self {
+            root,
+            files,
+            manifest_file,
+            ..
+        } = copied;
+        // Rename only the complete tree; interrupted copies never occupy the
+        // final bundle ID and never authorize adoption of a partial release.
+        drop(files);
+        drop(manifest_file);
+        let published = root.move_to(&parent, name, identity)?;
+        parent.sync()?;
+        let result = Self::open(destination, Some(&source), identity);
+        drop(published);
+        result
+    }
+
+    fn copy_into(self, destination: &str, identity: &Identity) -> Result<Self> {
         self.root.verify()?;
         self.manifest_file.verify()?;
         for asset in self.files.values() {
@@ -226,6 +263,44 @@ impl VerifiedBundle {
             initrd: locate(self.root(), &self.manifest.runtime.initrd),
         }
     }
+
+    pub(crate) fn contains_file(&self, identity: (u64, [u8; 16])) -> bool {
+        self.manifest_file.identity() == identity
+            || self.files.values().any(|file| file.identity() == identity)
+    }
+
+    /// Only the exact, complete inventory admitted by open() is removable.
+    /// Acquire every file's DELETE handle first, so a running executable keeps
+    /// its whole release intact instead of producing an incomplete uninstall.
+    pub(crate) fn remove(self, identity: &Identity) -> Result<()> {
+        let mut parents = BTreeMap::from([(String::new(), self.root.clone())]);
+        for relative in directories(&self.manifest)? {
+            let (parent, name) = split(&relative);
+            let child = parents
+                .get(parent)
+                .ok_or(Error("desktop_bundle_file_missing"))?
+                .child(name, identity, true)?;
+            parents.insert(relative, child);
+        }
+        let mut removals = Vec::with_capacity(self.files.len() + 1);
+        for asset in self.files.into_values() {
+            removals.push(asset.removal(identity)?);
+        }
+        removals.push(self.manifest_file.removal(identity)?);
+        for removal in removals {
+            removal.remove()?;
+        }
+        // Children first; rmdir-style deletion preserves any unlisted entry
+        // inserted after review and reports an incomplete cleanup.
+        while let Some((_, directory)) = parents.pop_last() {
+            if directory.path() == self.root.path() {
+                drop(directory);
+                continue;
+            }
+            directory.remove(identity)?;
+        }
+        self.root.remove(identity)
+    }
 }
 
 fn locate(root: &str, relative: &str) -> String {
@@ -290,7 +365,7 @@ fn transfer(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::VerifiedBundle;
     use crate::files::{CreationParent, Directory, Executable};
     use crate::security::Identity;
@@ -312,7 +387,7 @@ mod tests {
     };
     use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, READ_CONTROL, WRITE_DAC};
 
-    struct Fixture {
+    pub(crate) struct Fixture {
         source: Option<Directory>,
         area: PathBuf,
         identity: Identity,
@@ -321,6 +396,9 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::version("")
+        }
+        pub(crate) fn version(version: &str) -> Self {
             let identity = Identity::current().unwrap();
             let mut random = [0; 16];
             getrandom::getrandom(&mut random).unwrap();
@@ -376,8 +454,9 @@ mod tests {
                     }
                     prefix = next;
                 }
-                let bytes =
-                    format!("Non-executable, nonbootable Windows installer fixture {index}\n");
+                let bytes = format!(
+                    "Non-executable, nonbootable Windows installer fixture {index} {version}\n"
+                );
                 let mut file = directories
                     .get(parent)
                     .unwrap()
@@ -401,7 +480,7 @@ mod tests {
                 product_version: "1.0.0~dev-fixture".into(),
                 platform: "windows-x86_64".into(),
                 backend: "hcs-hyperv".into(),
-                source_sha256: "ab".repeat(32),
+                source_sha256: format!("{:x}", Sha256::digest(version.as_bytes())),
                 control_protocol: 1,
                 assets: "lib/manager".into(),
                 runtime: Runtime {
@@ -435,7 +514,7 @@ mod tests {
         fn destination(&self) -> String {
             self.area.join("installed").to_str().unwrap().to_owned()
         }
-        fn open(&self) -> crate::Result<VerifiedBundle> {
+        pub(crate) fn open(&self) -> crate::Result<VerifiedBundle> {
             VerifiedBundle::open(
                 self.source().path(),
                 Some(&self.manifest.source_sha256),

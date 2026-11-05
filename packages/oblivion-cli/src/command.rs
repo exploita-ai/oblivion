@@ -130,7 +130,7 @@ fn runtime(args: &[String]) -> Result<RuntimeCommand> {
         Some("uninstall") if args.len() == 1 => Uninstall,
         _ => {
             return Err(
-                "Use oblivion runtime install-bundle BUNDLE, start, stop, recover, gc or uninstall"
+                "Use oblivion runtime install-bundle BUNDLE, update BUNDLE, start, stop, recover, gc or uninstall"
                     .into(),
             )
         }

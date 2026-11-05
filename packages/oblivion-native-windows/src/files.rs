@@ -9,17 +9,21 @@ use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
+use windows_sys::Wdk::Storage::FileSystem::NtFlushBuffersFileEx;
 use windows_sys::Win32::Foundation::GENERIC_WRITE;
-use windows_sys::Win32::Foundation::{GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{
+    ERROR_SHARING_VIOLATION, GENERIC_READ, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
+    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE,
     FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_TYPE_DISK, FileIdInfo, GetFileInformationByHandle,
+    FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
+    FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
+    FileDispositionInfo, FileIdInfo, FileRenameInfo, GetFileInformationByHandle,
     GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW, OPEN_EXISTING,
-    READ_CONTROL,
+    READ_CONTROL, SetFileInformationByHandle,
 };
 use windows_sys::Win32::Storage::Vhd::{
     GET_VIRTUAL_DISK_INFO, GET_VIRTUAL_DISK_INFO_IDENTIFIER, GET_VIRTUAL_DISK_INFO_IS_LOADED,
@@ -30,6 +34,7 @@ use windows_sys::Win32::Storage::Vhd::{
     VIRTUAL_STORAGE_TYPE_DEVICE_VHDX, VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT,
 };
 use windows_sys::Win32::System::HostComputeSystem::{HcsGrantVmAccess, HcsRevokeVmAccess};
+use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const MAX_DISK: u64 = 1024 * GIB;
@@ -344,6 +349,30 @@ impl Directory {
         Ok(path)
     }
 
+    /// Only an empty, reviewed directory can be removed. An extra child causes
+    /// the kernel operation to fail; no recursive deletion is performed.
+    pub(crate) fn remove(self, identity: &Identity) -> Result<()> {
+        self.verify()?;
+        let pin = Arc::try_unwrap(self.0).map_err(|_| Error("runtime_software_in_use"))?;
+        Mutation::open(pin.file, &pin.path, pin.id, true, identity)?.remove()
+    }
+
+    pub(crate) fn move_to(
+        self,
+        destination: &Directory,
+        name: &str,
+        identity: &Identity,
+    ) -> Result<Self> {
+        self.verify()?;
+        destination.verify()?;
+        let path = destination.child_path(name)?;
+        let pin = Arc::try_unwrap(self.0).map_err(|_| Error("runtime_software_in_use"))?;
+        let mutation = Mutation::open(pin.file, &pin.path, pin.id, true, identity)?;
+        mutation.rename(&path, false)?;
+        drop(mutation);
+        destination.child(name, identity, true)
+    }
+
     pub(crate) fn child(&self, name: &str, identity: &Identity, private: bool) -> Result<Self> {
         let path = self.child_path(name)?;
         self.verify()?;
@@ -387,6 +416,19 @@ impl Directory {
         self.verify()?;
         names.sort();
         Ok(names)
+    }
+
+    pub(crate) fn sync(&self) -> Result<()> {
+        self.verify()?;
+        let file = open_raw(&self.0.path, GENERIC_READ | GENERIC_WRITE, true, true)?;
+        if inspect(&file, &self.0.path, true)?.0 != self.0.id {
+            return Err(Error("runtime_asset_changed"));
+        }
+        let mut status = IO_STATUS_BLOCK::default();
+        if unsafe { NtFlushBuffersFileEx(file.as_raw_handle(), 0, null(), 0, &mut status) } != 0 {
+            return Err(Error("runtime_directory_sync_failed"));
+        }
+        Ok(())
     }
 
     pub(crate) fn asset(&self, name: &str, identity: &Identity, private: bool) -> Result<Asset> {
@@ -488,6 +530,174 @@ impl Asset {
         }
         self.file = read;
         self.verify()
+    }
+
+    pub(crate) fn removal(self, identity: &Identity) -> Result<Removal> {
+        self.verify()?;
+        Ok(Removal {
+            mutation: Mutation::open(self.file, &self.path, self.id, false, identity)?,
+            _parent: self.parent,
+        })
+    }
+
+    pub(crate) fn move_to(
+        self,
+        destination: &Directory,
+        name: &str,
+        identity: &Identity,
+    ) -> Result<Self> {
+        self.rename(destination, name, None, identity)
+    }
+
+    pub(crate) fn replace(self, previous: Asset, identity: &Identity) -> Result<Self> {
+        let parent = previous.parent.clone();
+        let name = previous
+            .path
+            .rsplit('\\')
+            .next()
+            .ok_or(Error("invalid_runtime_asset_path"))?
+            .to_owned();
+        self.rename(&parent, &name, Some(previous), identity)
+    }
+
+    fn rename(
+        self,
+        destination: &Directory,
+        name: &str,
+        previous: Option<Asset>,
+        identity: &Identity,
+    ) -> Result<Self> {
+        self.verify()?;
+        destination.verify()?;
+        let path = destination.child_path(name)?;
+        let replace = previous.is_some();
+        let _previous = previous
+            .map(|asset| {
+                asset.verify()?;
+                if asset.path != path {
+                    return Err(Error("runtime_asset_changed"));
+                }
+                Mutation::open(asset.file, &asset.path, asset.id, false, identity)
+            })
+            .transpose()?;
+        let mutation = Mutation::open(self.file, &self.path, self.id, false, identity)?;
+        mutation.rename(&path, replace)?;
+        drop(mutation);
+        drop(_previous);
+        destination.asset(
+            path.rsplit('\\')
+                .next()
+                .ok_or(Error("invalid_runtime_asset_path"))?,
+            identity,
+            true,
+        )
+    }
+}
+
+pub(crate) struct Removal {
+    mutation: Mutation,
+    _parent: Directory,
+}
+impl Removal {
+    pub(crate) fn remove(self) -> Result<()> {
+        self.mutation.remove()
+    }
+}
+
+struct Mutation {
+    file: File,
+}
+impl Mutation {
+    fn open(
+        original: File,
+        path: &str,
+        expected: FileId,
+        directory: bool,
+        identity: &Identity,
+    ) -> Result<Self> {
+        // Downgrade the immutable read pin before requesting DELETE, while a
+        // metadata handle retains the selected object throughout the handoff.
+        let open = |access| -> Result<File> {
+            let handle = unsafe {
+                CreateFileW(
+                    wide(path).as_ptr(),
+                    access,
+                    FILE_SHARE_READ | FILE_SHARE_DELETE,
+                    null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT
+                        | if directory {
+                            FILE_FLAG_BACKUP_SEMANTICS
+                        } else {
+                            0
+                        },
+                    null_mut(),
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(Error(
+                    if unsafe { GetLastError() } == ERROR_SHARING_VIOLATION {
+                        "runtime_software_in_use"
+                    } else {
+                        "runtime_software_mutation_failed"
+                    },
+                ));
+            }
+            let file = unsafe { File::from_raw_handle(handle) };
+            if inspect(&file, path, directory)?.0 != expected {
+                return Err(Error("runtime_asset_changed"));
+            }
+            permissions(&file, identity.sid(), true)?;
+            Ok(file)
+        };
+        let guard = open(READ_CONTROL | FILE_READ_ATTRIBUTES)?;
+        drop(original);
+        let file = open(READ_CONTROL | FILE_READ_ATTRIBUTES | DELETE)?;
+        drop(guard);
+        Ok(Self { file })
+    }
+    fn rename(&self, path: &str, replace: bool) -> Result<()> {
+        let name = path.encode_utf16().collect::<Vec<_>>();
+        let size = size_of::<FILE_RENAME_INFO>() + name.len() * 2;
+        let mut storage = vec![0usize; size.div_ceil(size_of::<usize>())];
+        let rename = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        unsafe {
+            (*rename).Anonymous.ReplaceIfExists = replace;
+            (*rename).RootDirectory = null_mut();
+            (*rename).FileNameLength = (name.len() * 2) as u32;
+            std::ptr::copy_nonoverlapping(
+                name.as_ptr(),
+                (*rename).FileName.as_mut_ptr(),
+                name.len(),
+            );
+        }
+        if unsafe {
+            SetFileInformationByHandle(
+                self.file.as_raw_handle(),
+                FileRenameInfo,
+                rename.cast(),
+                size as u32,
+            )
+        } == 0
+        {
+            return Err(Error("runtime_software_rename_failed"));
+        }
+        Ok(())
+    }
+    fn remove(self) -> Result<()> {
+        let mut info = FILE_DISPOSITION_INFO { DeleteFile: true };
+        if unsafe {
+            SetFileInformationByHandle(
+                self.file.as_raw_handle(),
+                FileDispositionInfo,
+                (&mut info as *mut FILE_DISPOSITION_INFO).cast(),
+                size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+        } == 0
+        {
+            return Err(Error("runtime_software_remove_failed"));
+        }
+        Ok(())
     }
 }
 

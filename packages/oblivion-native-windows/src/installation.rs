@@ -26,6 +26,8 @@ struct Record {
 enum Phase {
     Pending,
     Ready { data: FileIdentity },
+    Updating { data: FileIdentity, target: Binding },
+    Uninstalled { data: FileIdentity },
 }
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -58,13 +60,36 @@ impl Record {
         }
         .validate()
         .map_err(|_| Error("invalid_installation_record"))?;
-        if let Phase::Ready { data } = &record.phase {
+        if let Phase::Updating { target, .. } = &record.phase {
+            target
+                .validate()
+                .map_err(|_| Error("invalid_installation_record"))?;
+        }
+        if let Some(data) = record.data() {
             if data.file == [0; 16] {
                 return Err(Error("invalid_installation_record"));
             }
         }
         Ok(record)
     }
+
+    fn data(&self) -> Option<&FileIdentity> {
+        match &self.phase {
+            Phase::Pending => None,
+            Phase::Ready { data } | Phase::Updating { data, .. } | Phase::Uninstalled { data } => {
+                Some(data)
+            }
+        }
+    }
+}
+
+#[derive(Default, Serialize)]
+pub struct Cleanup {
+    pub releases_removed: usize,
+    pub boot_files_removed: usize,
+    pub retained: usize,
+    pub in_use: usize,
+    pub software_removed: bool,
 }
 
 fn configuration(root: &str, runtime_id: &str) -> Result<RuntimeConfig> {
@@ -100,16 +125,16 @@ fn configuration(root: &str, runtime_id: &str) -> Result<RuntimeConfig> {
 
 #[cfg(windows)]
 mod native {
-    use super::{FileIdentity, Phase, RECORD_LIMIT, Record, configuration};
+    use super::{Cleanup, FileIdentity, Phase, RECORD_LIMIT, Record, configuration};
     use crate::bundle::VerifiedBundle;
     use crate::config::CONFIG_LIMIT;
-    use crate::files::{self, CreatedDiskLeaf, CreationParent};
+    use crate::files::{self, Asset, CreatedDiskLeaf, CreationParent, Directory};
     use crate::security::Identity;
     use crate::supervisor::{self, Lease, Settings};
     use crate::{Error, Result, hcs};
     use sha2::{Digest, Sha256};
     use std::fs::File;
-    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::io::{Read, Write};
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::path::{Path, PathBuf};
     use std::ptr::{null, null_mut};
@@ -124,8 +149,8 @@ mod native {
         GetTokenInformation, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
+        CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
     };
     use windows_sys::Win32::System::Com::CoTaskMemFree;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -299,9 +324,8 @@ mod native {
             data_bytes: bytes,
             phase: Phase::Pending,
         };
-        let registry_path = root.file("installation.json")?;
-        let mut registry = create_private(&registry_path, &identity)?;
-        save(&mut registry, &record)?;
+        create_record(root, &record, &identity)?;
+        let (mut registry, _) = registry(root, &identity)?;
         // Everything after the durable Pending record is a one-shot setup.
         // Failure retains that record; a subsequent run never reinitializes it.
         ensure_directory(&root.0.join("releases"), &identity)?;
@@ -338,7 +362,7 @@ mod native {
         record.phase = Phase::Ready {
             data: FileIdentity { volume, file },
         };
-        save(&mut registry, &record)?;
+        registry.save(&record)?;
         Ok(Installed {
             root: root.clone(),
             record,
@@ -352,7 +376,7 @@ mod native {
         let _root = root.guard(&identity)?;
         let record = read_record(root, &identity)?;
         let Phase::Ready { data } = &record.phase else {
-            return Err(Error("installation_pending"));
+            return Err(phase_error(&record.phase));
         };
         verify_config(root, &record, &identity)?;
         let actual = files::data_file_identity(&root.file("data.vhdx")?)?;
@@ -375,7 +399,7 @@ mod native {
         let _root = root.guard(&identity)?;
         let record = read_record(root, &identity)?;
         if !matches!(record.phase, Phase::Ready { .. }) {
-            return Err(Error("installation_pending"));
+            return Err(phase_error(&record.phase));
         }
         verify_config(root, &record, &identity)?;
         Ok(record.runtime_id)
@@ -388,8 +412,386 @@ mod native {
         let _root = root.guard(&identity)?;
         let record = read_record(root, &identity)?;
         verify_config(root, &record, &identity)?;
-        let bundle = verified_bundle(root, &record, &identity)?;
-        settings(root, &record, &bundle)
+        maintenance(root, &record, &record.bundle)
+    }
+
+    /// Update never starts or stops a VM. The exclusive supervisor capability
+    /// proves the last owned generation stopped and fences new admission.
+    pub fn update_bundle(
+        root: &Root,
+        incoming: VerifiedBundle,
+        stop: Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Result<Installed> {
+        let identity = Identity::current()?;
+        let _root = root.guard(&identity)?;
+        let mut record = read_record(root, &identity)?;
+        let data = record
+            .data()
+            .cloned()
+            .ok_or(Error("installation_pending"))?;
+        verify_config(root, &record, &identity)?;
+        verify_data(root, &data)?;
+        let target = incoming.binding()?;
+        if let Phase::Updating {
+            target: expected, ..
+        } = &record.phase
+        {
+            if !same_binding(expected, &target)? {
+                return Err(Error("installation_update_requires_matching_bundle"));
+            }
+        }
+        let base = maintenance(root, &record, &record.bundle)?;
+        let next = maintenance(root, &record, &target)?;
+        let mut stopped = supervisor::stopped_update(&base, &next, Arc::clone(&stop), deadline)?;
+        let mut registry = locked_registry(root, &record, &identity)?;
+        check(&stop, deadline)?;
+        if matches!(record.phase, Phase::Ready { .. }) {
+            verify_boot(root, &record, &identity)?;
+        }
+        // A prior complete publication can be reused only by its full manifest,
+        // hashes and identity. A partial/foreign tree is retained and rejected.
+        let release = root.release(&target.bundle_id)?;
+        let bundle = match std::fs::symlink_metadata(&release) {
+            Ok(_) => {
+                let existing =
+                    VerifiedBundle::open(&release, Some(&target.source_sha256), &identity)?;
+                if !same_binding(&existing.binding()?, &target)? {
+                    return Err(Error("installed_runtime_bundle_changed"));
+                }
+                existing
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                incoming.publish(&release, &identity)?
+            }
+            Err(_) => return Err(Error("runtime_release_unavailable")),
+        };
+        let boot = Directory::open(&root.file("boot")?, &identity, true)?;
+        let mut staged = Vec::new();
+        for asset in &target.boot {
+            check(&stop, deadline)?;
+            let leaf = boot_leaf(asset)?;
+            let stage = format!("update-{}-{leaf}", target.bundle_id);
+            if !exists(&format!(r"{}\{stage}", boot.path()))? {
+                let active = boot_asset(&boot, leaf, &identity)?;
+                let already_current = match active.as_ref() {
+                    Some(file) => matches_asset(file, asset)?,
+                    None => false,
+                };
+                if !already_current {
+                    let source = format!(r"{}\{}", bundle.root(), asset.path.replace('/', r"\"));
+                    copy_boot(
+                        &source,
+                        &format!(r"{}\{stage}", boot.path()),
+                        asset,
+                        &identity,
+                    )?;
+                }
+            }
+            let prepared = boot_asset(&boot, &stage, &identity)?;
+            if let Some(file) = &prepared {
+                if !matches_asset(file, asset)? {
+                    return Err(Error("installation_update_staging_changed"));
+                }
+            }
+            staged.push(prepared);
+        }
+        // All source copies are complete before the durable transition. No
+        // Ready installation observes a partly replaced set of boot files.
+        record.phase = Phase::Updating {
+            data: data.clone(),
+            target: target.clone(),
+        };
+        registry.save(&record)?;
+        for ((old, asset), prepared) in record.bundle.boot.iter().zip(&target.boot).zip(staged) {
+            check(&stop, deadline)?;
+            let leaf = boot_leaf(asset)?;
+            if let Some(active) = boot_asset(&boot, leaf, &identity)? {
+                if matches_asset(&active, asset)? {
+                    if let Some(prepared) = prepared {
+                        prepared.removal(&identity)?.remove()?;
+                    }
+                    continue;
+                }
+                if !matches_asset(&active, old)? {
+                    return Err(Error("installed_runtime_boot_changed"));
+                }
+                active.removal(&identity)?.remove()?;
+            }
+            prepared
+                .ok_or(Error("installation_update_staging_missing"))?
+                .move_to(&boot, leaf, &identity)?;
+        }
+        boot.sync()?;
+        let mut ready = record.clone();
+        ready.bundle = target;
+        ready.phase = Phase::Ready { data };
+        verify_boot(root, &ready, &identity)?;
+        stopped.rebind(&next)?;
+        registry.save(&ready)?;
+        Ok(Installed {
+            root: root.clone(),
+            record: ready,
+            bundle,
+        })
+    }
+
+    pub fn collect(root: &Root, stop: Arc<AtomicBool>, deadline: Instant) -> Result<Cleanup> {
+        cleanup(root, false, stop, deadline)
+    }
+
+    /// Software only: configuration, runtime identity, supervisor journal and
+    /// the exact encrypted data file remain available for explicit reinstall.
+    pub fn uninstall(root: &Root, stop: Arc<AtomicBool>, deadline: Instant) -> Result<Cleanup> {
+        cleanup(root, true, stop, deadline)
+    }
+
+    fn cleanup(
+        root: &Root,
+        uninstall: bool,
+        stop: Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Result<Cleanup> {
+        let identity = Identity::current()?;
+        let _root = root.guard(&identity)?;
+        let mut record = read_record(root, &identity)?;
+        if matches!(record.phase, Phase::Updating { .. }) {
+            return Err(Error("installation_update_requires_matching_bundle"));
+        }
+        let data = record
+            .data()
+            .cloned()
+            .ok_or(Error("installation_pending"))?;
+        verify_config(root, &record, &identity)?;
+        verify_data(root, &data)?;
+        let _stopped = supervisor::stopped(
+            &maintenance(root, &record, &record.bundle)?,
+            Arc::clone(&stop),
+            deadline,
+        )?;
+        let mut registry = locked_registry(root, &record, &identity)?;
+        if uninstall {
+            record.phase = Phase::Uninstalled { data };
+            registry.save(&record)?;
+        }
+        let mut report = Cleanup::default();
+        let executable =
+            std::env::current_exe().map_err(|_| Error("current_executable_unavailable"))?;
+        let executable = executable
+            .to_str()
+            .ok_or(Error("current_executable_unavailable"))?;
+        let executable =
+            files::data_file_identity(executable.strip_prefix(r"\\?\").unwrap_or(executable))?;
+        let releases = Directory::open(&root.file("releases")?, &identity, true)?;
+        for name in releases.names(256)? {
+            check(&stop, deadline)?;
+            if !uninstall && name == record.bundle.bundle_id {
+                continue;
+            }
+            if !oblivion_bundle::hash(&name) {
+                report.retained += 1;
+                continue;
+            }
+            let path = root.release(&name)?;
+            match VerifiedBundle::open(&path, None, &identity) {
+                Ok(bundle) if bundle.id() == name && bundle.contains_file(executable) => {
+                    // A mapped PE may reject deletion only after DELETE access
+                    // was admitted. Preserve the complete invoking release.
+                    report.in_use += 1;
+                }
+                Ok(bundle) if bundle.id() == name => match bundle.remove(&identity) {
+                    Ok(()) => report.releases_removed += 1,
+                    Err(Error("runtime_software_in_use")) => report.in_use += 1,
+                    Err(_) => report.retained += 1,
+                },
+                _ => report.retained += 1,
+            }
+        }
+        releases.sync()?;
+        if uninstall {
+            let boot = Directory::open(&root.file("boot")?, &identity, true)?;
+            let mut removals = Vec::new();
+            for expected in &record.bundle.boot {
+                check(&stop, deadline)?;
+                if let Some(asset) = boot_asset(&boot, boot_leaf(expected)?, &identity)? {
+                    if !matches_asset(&asset, expected)? {
+                        report.retained += 1;
+                        continue;
+                    }
+                    match asset.removal(&identity) {
+                        Ok(removal) => removals.push(removal),
+                        Err(Error("runtime_software_in_use")) => report.in_use += 1,
+                        Err(_) => report.retained += 1,
+                    }
+                }
+            }
+            for removal in removals {
+                match removal.remove() {
+                    Ok(()) => report.boot_files_removed += 1,
+                    Err(_) => report.retained += 1,
+                }
+            }
+            boot.sync()?;
+            let remaining = boot.names(256)?;
+            report.retained += remaining
+                .iter()
+                .filter(|name| {
+                    !record
+                        .bundle
+                        .boot
+                        .iter()
+                        .any(|asset| asset.path.rsplit('/').next() == Some(name.as_str()))
+                })
+                .count();
+            report.software_removed = releases.names(256)?.is_empty() && remaining.is_empty();
+        }
+        Ok(report)
+    }
+
+    fn phase_error(phase: &Phase) -> Error {
+        match phase {
+            Phase::Updating { .. } => Error("installation_update_requires_matching_bundle"),
+            Phase::Uninstalled { .. } => Error("runtime_software_uninstalled"),
+            _ => Error("installation_pending"),
+        }
+    }
+    fn maintenance(
+        root: &Root,
+        record: &Record,
+        binding: &oblivion_bundle::Binding,
+    ) -> Result<Settings> {
+        Settings::maintenance(
+            &record.runtime_id,
+            Path::new(&format!(
+                r"{}\bin\oblivion-vm.exe",
+                root.release(&binding.bundle_id)?
+            )),
+            Path::new(&root.file("vm.json")?),
+            &record.config_sha256,
+            &binding.source_sha256,
+        )
+    }
+    fn verify_data(root: &Root, data: &FileIdentity) -> Result<()> {
+        if files::data_file_identity(&root.file("data.vhdx")?)? != (data.volume, data.file) {
+            return Err(Error("installed_data_identity_changed"));
+        }
+        Ok(())
+    }
+    fn same_binding(
+        left: &oblivion_bundle::Binding,
+        right: &oblivion_bundle::Binding,
+    ) -> Result<bool> {
+        Ok(
+            serde_json::to_vec(left).map_err(|_| Error("invalid_runtime_bundle_binding"))?
+                == serde_json::to_vec(right)
+                    .map_err(|_| Error("invalid_runtime_bundle_binding"))?,
+        )
+    }
+    fn exists(path: &str) -> Result<bool> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(_) => Err(Error("runtime_software_unavailable")),
+        }
+    }
+    fn boot_leaf(asset: &oblivion_bundle::File) -> Result<&str> {
+        asset
+            .path
+            .rsplit('/')
+            .next()
+            .ok_or(Error("invalid_runtime_bundle_binding"))
+    }
+    fn boot_asset(directory: &Directory, name: &str, identity: &Identity) -> Result<Option<Asset>> {
+        if !exists(&format!(r"{}\{name}", directory.path()))? {
+            return Ok(None);
+        }
+        directory.asset(name, identity, true).map(Some)
+    }
+    fn matches_asset(asset: &Asset, expected: &oblivion_bundle::File) -> Result<bool> {
+        let mut file = asset.reader()?;
+        let (bytes, sha256) = hash_stream(&mut file)?;
+        Ok(bytes == expected.bytes && sha256 == expected.sha256)
+    }
+    struct Registry {
+        directory: Directory,
+        current: Option<Asset>,
+    }
+    impl Registry {
+        fn save(&mut self, record: &Record) -> Result<()> {
+            let bytes = serde_json::to_vec(record)
+                .map_err(|_| Error("installation_record_encode_failed"))?;
+            Record::decode(&bytes)?;
+            self.directory.sync()?;
+            let identity = Identity::current()?;
+            let mut pending = self
+                .directory
+                .create_file(&format!("installation-{}.pending", random_id()?), &identity)?;
+            pending
+                .writer()
+                .write_all(&bytes)
+                .map_err(|_| Error("installation_commit_failed"))?;
+            pending.finish()?;
+            self.directory.sync()?;
+            let previous = self
+                .current
+                .take()
+                .ok_or(Error("installation_record_unavailable"))?;
+            self.current = Some(pending.replace(previous, &identity)?);
+            self.directory.sync()
+        }
+    }
+    fn registry(root: &Root, identity: &Identity) -> Result<(Registry, Record)> {
+        let directory = Directory::open(
+            root.path()
+                .to_str()
+                .ok_or(Error("unsupported_installation_path"))?,
+            identity,
+            true,
+        )?;
+        // Check durable publication support before changing any boot software.
+        directory.sync()?;
+        let current = directory.asset("installation.json", identity, true)?;
+        let mut file = current.reader()?;
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take((RECORD_LIMIT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Error("installation_record_unavailable"))?;
+        Ok((
+            Registry {
+                directory,
+                current: Some(current),
+            },
+            Record::decode(&bytes)?,
+        ))
+    }
+    fn locked_registry(root: &Root, expected: &Record, identity: &Identity) -> Result<Registry> {
+        let (registry, actual) = registry(root, identity)?;
+        if serde_json::to_vec(&actual).map_err(|_| Error("invalid_installation_record"))?
+            != serde_json::to_vec(expected).map_err(|_| Error("invalid_installation_record"))?
+        {
+            return Err(Error("installation_record_changed"));
+        }
+        Ok(registry)
+    }
+    fn create_record(root: &Root, record: &Record, identity: &Identity) -> Result<()> {
+        let bytes =
+            serde_json::to_vec(record).map_err(|_| Error("installation_record_encode_failed"))?;
+        Record::decode(&bytes)?;
+        let directory = Directory::open(
+            root.path()
+                .to_str()
+                .ok_or(Error("unsupported_installation_path"))?,
+            identity,
+            true,
+        )?;
+        directory.sync()?;
+        let mut file = directory.create_file("installation.json", identity)?;
+        file.writer()
+            .write_all(&bytes)
+            .map_err(|_| Error("installation_commit_failed"))?;
+        file.finish()?;
+        directory.sync()
     }
 
     fn settings(root: &Root, record: &Record, bundle: &VerifiedBundle) -> Result<Settings> {
@@ -488,7 +890,12 @@ mod native {
         identity: &Identity,
     ) -> Result<()> {
         let mut input = File::open(source).map_err(|_| Error("runtime_boot_source_unavailable"))?;
-        let mut output = create_private(destination, identity)?;
+        let (parent, name) = destination
+            .rsplit_once('\\')
+            .ok_or(Error("invalid_runtime_asset_path"))?;
+        let parent = Directory::open(parent, identity, true)?;
+        parent.sync()?;
+        let mut output = parent.create_file(&format!("boot-{}.pending", random_id()?), identity)?;
         let mut hash = Sha256::new();
         let mut count = 0u64;
         let mut bytes = [0; 65536];
@@ -507,15 +914,17 @@ mod native {
             }
             hash.update(&bytes[..size]);
             output
+                .writer()
                 .write_all(&bytes[..size])
                 .map_err(|_| Error("runtime_boot_copy_failed"))?;
         }
         if count != asset.bytes || format!("{:x}", hash.finalize()) != asset.sha256 {
             return Err(Error("runtime_boot_source_changed"));
         }
-        output
-            .sync_all()
-            .map_err(|_| Error("runtime_boot_copy_failed"))
+        output.finish()?;
+        parent.sync()?;
+        output.move_to(&parent, name, identity)?;
+        parent.sync()
     }
     fn hash_stream(input: &mut File) -> Result<(u64, String)> {
         let mut hash = Sha256::new();
@@ -599,7 +1008,7 @@ mod native {
             CreateFileW(
                 name.as_ptr(),
                 GENERIC_READ | READ_CONTROL,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 null(),
                 OPEN_EXISTING,
                 FILE_FLAG_OPEN_REPARSE_POINT,
@@ -627,16 +1036,6 @@ mod native {
         }
         Ok(bytes)
     }
-    fn save(file: &mut File, record: &Record) -> Result<()> {
-        let bytes =
-            serde_json::to_vec(record).map_err(|_| Error("installation_record_encode_failed"))?;
-        Record::decode(&bytes)?;
-        file.seek(SeekFrom::Start(0))
-            .and_then(|_| file.write_all(&bytes))
-            .and_then(|_| file.set_len(bytes.len() as u64))
-            .and_then(|_| file.sync_all())
-            .map_err(|_| Error("installation_commit_failed"))
-    }
     fn random_id() -> Result<String> {
         let mut bytes = [0; 16];
         getrandom::getrandom(&mut bytes).map_err(|_| Error("runtime_entropy_unavailable"))?;
@@ -655,12 +1054,20 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::{
-            FileIdentity, Phase, Record, Root, configuration, control_id, create_private,
-            ensure_directory, random_id, save,
+            FileIdentity, Phase, Record, Root, boot_asset, boot_leaf, collect, configuration,
+            control_id, copy_boot, create_private, create_record, ensure_directory, maintenance,
+            random_id, read_record, registry, uninstall, update_bundle,
         };
+        use crate::bundle::tests::Fixture;
+        use crate::files::{self, Directory, Executable};
         use crate::security::Identity;
+        use crate::supervisor;
+        use serde_json::json;
         use sha2::{Digest, Sha256};
         use std::io::Write;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
 
         struct Area(Root);
         impl Area {
@@ -679,6 +1086,244 @@ mod native {
             fn drop(&mut self) {
                 let _ = std::fs::remove_dir_all(self.0.path());
             }
+        }
+
+        // No VHDX or HCS is fabricated: this filesystem fixture represents the
+        // already-recorded file identity, while supervisor Stopped is admitted
+        // through its actual private journal and exclusive writer.
+        fn prepared(area: &Area, source: &Fixture) -> Record {
+            let root = &area.0;
+            let identity = Identity::current().unwrap();
+            for child in ["releases", "boot"] {
+                ensure_directory(&root.path().join(child), &identity).unwrap();
+            }
+            let bundle = source.open().unwrap();
+            let binding = bundle.binding().unwrap();
+            let bundle = bundle
+                .publish(&root.release(&binding.bundle_id).unwrap(), &identity)
+                .unwrap();
+            let runtime_id = random_id().unwrap();
+            let config = serde_json::to_vec(
+                &configuration(root.path().to_str().unwrap(), &runtime_id).unwrap(),
+            )
+            .unwrap();
+            let mut file = create_private(&root.file("vm.json").unwrap(), &identity).unwrap();
+            file.write_all(&config).unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+            let mut data = create_private(&root.file("data.vhdx").unwrap(), &identity).unwrap();
+            data.write_all(b"Synthetic file-identity fixture; not a VHDX or bootable data.")
+                .unwrap();
+            data.sync_all().unwrap();
+            drop(data);
+            let (volume, file) =
+                files::data_file_identity(&root.file("data.vhdx").unwrap()).unwrap();
+            for asset in &binding.boot {
+                copy_boot(
+                    &format!(r"{}\{}", bundle.root(), asset.path.replace('/', r"\")),
+                    &root
+                        .file(&format!(r"boot\{}", boot_leaf(asset).unwrap()))
+                        .unwrap(),
+                    asset,
+                    &identity,
+                )
+                .unwrap();
+            }
+            let record = Record {
+                version: 1,
+                runtime_id,
+                bundle: binding,
+                config_sha256: format!("{:x}", Sha256::digest(&config)),
+                data_bytes: 8 * 1024 * 1024 * 1024,
+                phase: Phase::Ready {
+                    data: FileIdentity { volume, file },
+                },
+            };
+            create_record(root, &record, &identity).unwrap();
+            let mut journal =
+                create_private(&root.file("vm.json.supervision.json").unwrap(), &identity).unwrap();
+            journal.write_all(&serde_json::to_vec(&json!({"version":1,
+                "binding":{"runtime_id":record.runtime_id,"config_sha256":record.config_sha256,"source_sha256":record.bundle.source_sha256},
+                "generation":random_id().unwrap(),"phase":"stopped","resident":false,"boot":"existing"})).unwrap()).unwrap();
+            journal.sync_all().unwrap();
+            record
+        }
+
+        #[test]
+        fn stopped_update_collection_and_software_only_uninstall_preserve_data_and_unknown_entries()
+        {
+            let area = Area::new();
+            let base = Fixture::version("base");
+            let next = Fixture::version("next");
+            let record = prepared(&area, &base);
+            let identity = Identity::current().unwrap();
+            let root = &area.0;
+            let config = std::fs::read(root.path().join("vm.json")).unwrap();
+            let data = std::fs::read(root.path().join("data.vhdx")).unwrap();
+            let installed = update_bundle(
+                root,
+                next.open().unwrap(),
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(10),
+            )
+            .unwrap();
+            assert_eq!(installed.runtime_id(), record.runtime_id);
+            let helper = installed.bundle.helper().to_owned();
+            let current = installed.record.bundle.bundle_id.clone();
+            drop(installed);
+            let releases =
+                Directory::open(&root.file("releases").unwrap(), &identity, true).unwrap();
+            let mut unknown = releases.create_file("personal-note", &identity).unwrap();
+            unknown
+                .writer()
+                .write_all(b"Never delete unknown files")
+                .unwrap();
+            unknown.finish().unwrap();
+            drop(unknown);
+            let report = collect(
+                root,
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap();
+            assert_eq!(
+                (report.releases_removed, report.retained, report.in_use),
+                (1, 1, 0)
+            );
+            assert!(
+                !std::path::Path::new(&root.release(&record.bundle.bundle_id).unwrap()).exists()
+            );
+            let running_command = Executable::open(&helper, &identity).unwrap();
+            let report = uninstall(
+                root,
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap();
+            assert!(!report.software_removed);
+            assert_eq!(report.in_use, 1);
+            assert_eq!(report.boot_files_removed, 3);
+            assert!(std::path::Path::new(&root.release(&current).unwrap()).exists());
+            assert!(matches!(
+                read_record(root, &identity).unwrap().phase,
+                Phase::Uninstalled { .. }
+            ));
+            assert_eq!(
+                control_id(root).unwrap_err().0,
+                "runtime_software_uninstalled"
+            );
+            drop(running_command);
+            let report = uninstall(
+                root,
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap();
+            assert_eq!((report.releases_removed, report.retained), (1, 1));
+            assert!(!report.software_removed);
+            assert_eq!(
+                std::fs::read(root.path().join(r"releases\personal-note")).unwrap(),
+                b"Never delete unknown files"
+            );
+            std::fs::remove_file(root.path().join(r"releases\personal-note")).unwrap();
+            let report = uninstall(
+                root,
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap();
+            assert!(report.software_removed);
+            let preserved = read_record(root, &identity).unwrap();
+            assert_eq!(preserved.runtime_id, record.runtime_id);
+            assert_eq!(std::fs::read(root.path().join("vm.json")).unwrap(), config);
+            assert_eq!(std::fs::read(root.path().join("data.vhdx")).unwrap(), data);
+            assert!(root.path().join("vm.json.supervision.json").exists());
+        }
+
+        #[test]
+        fn interrupted_update_accepts_only_its_target_after_the_stopped_journal_was_rebound() {
+            let area = Area::new();
+            let base = Fixture::version("base");
+            let next = Fixture::version("next");
+            let foreign = Fixture::version("foreign");
+            let mut record = prepared(&area, &base);
+            let root = &area.0;
+            let identity = Identity::current().unwrap();
+            let target = next.open().unwrap();
+            let binding = target.binding().unwrap();
+            let target = target
+                .publish(&root.release(&binding.bundle_id).unwrap(), &identity)
+                .unwrap();
+            let data = record.data().unwrap().clone();
+            record.phase = Phase::Updating {
+                data,
+                target: binding.clone(),
+            };
+            let (mut registry, _) = registry(root, &identity).unwrap();
+            registry.save(&record).unwrap();
+            drop(registry);
+            let boot = Directory::open(&root.file("boot").unwrap(), &identity, true).unwrap();
+            for asset in &binding.boot {
+                let leaf = boot_leaf(asset).unwrap();
+                let stage = format!("update-{}-{leaf}", binding.bundle_id);
+                copy_boot(
+                    &format!(r"{}\{}", target.root(), asset.path.replace('/', r"\")),
+                    &format!(r"{}\{stage}", boot.path()),
+                    asset,
+                    &identity,
+                )
+                .unwrap();
+                boot_asset(&boot, leaf, &identity)
+                    .unwrap()
+                    .unwrap()
+                    .removal(&identity)
+                    .unwrap()
+                    .remove()
+                    .unwrap();
+                boot_asset(&boot, &stage, &identity)
+                    .unwrap()
+                    .unwrap()
+                    .move_to(&boot, leaf, &identity)
+                    .unwrap();
+            }
+            let base_settings = maintenance(root, &record, &record.bundle).unwrap();
+            let target_settings = maintenance(root, &record, &binding).unwrap();
+            let mut stopped = supervisor::stopped_update(
+                &base_settings,
+                &target_settings,
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap();
+            stopped.rebind(&target_settings).unwrap();
+            drop(stopped);
+            drop(target);
+            assert_eq!(
+                update_bundle(
+                    root,
+                    foreign.open().unwrap(),
+                    Arc::new(AtomicBool::new(false)),
+                    Instant::now() + Duration::from_secs(5)
+                )
+                .err()
+                .unwrap()
+                .0,
+                "installation_update_requires_matching_bundle"
+            );
+            assert_eq!(
+                control_id(root).unwrap_err().0,
+                "installation_update_requires_matching_bundle"
+            );
+            let installed = update_bundle(
+                root,
+                next.open().unwrap(),
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap();
+            assert_eq!(installed.record.bundle.bundle_id, binding.bundle_id);
+            assert!(matches!(installed.record.phase, Phase::Ready { .. }));
+            assert_eq!(installed.runtime_id(), record.runtime_id);
         }
 
         #[test]
@@ -703,9 +1348,10 @@ mod native {
                 data_bytes: 8 * 1024 * 1024 * 1024,
                 phase: Phase::Pending,
             };
-            let mut registry =
-                create_private(&root.file("installation.json").unwrap(), &identity).unwrap();
-            save(&mut registry, &record).unwrap();
+            create_record(root, &record, &identity).unwrap();
+            let (mut registry, _) = registry(root, &identity).unwrap();
+            let initial_file =
+                files::data_file_identity(&root.file("installation.json").unwrap()).unwrap();
             assert_eq!(control_id(root).unwrap_err().0, "installation_pending");
             let mut configuration =
                 create_private(&root.file("vm.json").unwrap(), &identity).unwrap();
@@ -718,7 +1364,11 @@ mod native {
                     file: [1; 16],
                 },
             };
-            save(&mut registry, &record).unwrap();
+            registry.save(&record).unwrap();
+            assert_ne!(
+                files::data_file_identity(&root.file("installation.json").unwrap()).unwrap(),
+                initial_file
+            );
             assert_eq!(control_id(root).unwrap(), runtime_id);
             assert!(!root.path().join("boot").exists());
             assert!(!root.path().join("data.vhdx").exists());
@@ -735,7 +1385,8 @@ mod native {
 }
 #[cfg(windows)]
 pub use native::{
-    Installed, Root, control_id, discover, install_bundle, owned_settings, preflight,
+    Installed, Root, collect, control_id, discover, install_bundle, owned_settings, preflight,
+    uninstall, update_bundle,
 };
 
 #[cfg(test)]
@@ -786,6 +1437,28 @@ mod tests {
                 .0,
             "invalid_installation_record"
         );
+    }
+    #[test]
+    fn update_target_and_uninstalled_states_retain_the_same_data_authority() {
+        let mut value = record();
+        let data = json!({"volume":4,"file":vec![1;16]});
+        value["phase"] = json!({"kind":"updating","data":data,"target":value["bundle"]});
+        let updating = Record::decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(matches!(updating.phase, Phase::Updating { .. }));
+        assert_eq!(updating.data().unwrap().file, [1; 16]);
+        value["phase"]["target"]["source_sha256"] = json!("PRIVATE_CANARY");
+        assert_eq!(
+            Record::decode(&serde_json::to_vec(&value).unwrap())
+                .err()
+                .unwrap()
+                .0,
+            "invalid_installation_record"
+        );
+        value["phase"] = json!({"kind":"uninstalled","data":data});
+        let removed = Record::decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(matches!(removed.phase, Phase::Uninstalled { .. }));
+        assert_eq!(removed.runtime_id, ID);
+        assert_eq!(removed.data().unwrap().file, [1; 16]);
     }
     #[test]
     fn malformed_or_foreign_record_fields_have_only_static_diagnostics() {
