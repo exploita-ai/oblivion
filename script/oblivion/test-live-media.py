@@ -1,13 +1,18 @@
 #!/usr/bin/python3
 """Exercise Live USB discovery with proc and sysfs snapshots."""
 
+from contextlib import contextmanager
 import importlib.util
 import os
 from pathlib import Path
+import socket
 import stat
+import struct
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 
 spec = importlib.util.spec_from_file_location('live_media', Path(__file__).with_name('live-media.py'))
@@ -155,6 +160,174 @@ class Discovery(unittest.TestCase):
         self.assertEqual(len(self.list()), 64)
         self.nodes['usb00'] = SimpleNamespace(st_mode=stat.S_IFBLK, st_rdev=os.makedev(8, 9))
         self.assertEqual([entry['name'] for entry in self.list()], [f'usb{index:02}' for index in range(1, 65)])
+
+    @contextmanager
+    def block_descriptor(self, *, major_minor=17, bytes_count=4194304, diskseq=17, after_open=None):
+        opened = []
+        requests = []
+        with (self.proc / 'cmdline').open('rb') as source:
+            def open_block(path, flags):
+                self.assertEqual(path, self.dev / 'sdb1')
+                self.assertEqual(flags, os.O_RDONLY | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC)
+                if after_open is not None:
+                    after_open()
+                fd = os.dup(source.fileno())
+                opened.append(fd)
+                return fd
+
+            def ioctl(fd, request, buffer):
+                self.assertEqual(fd, opened[0])
+                self.assertEqual(len(buffer), 8)
+                requests.append(request)
+                return struct.pack('=Q', {0x80081272: bytes_count, 0x80081280: diskseq}[request])
+
+            block_info = SimpleNamespace(st_mode=stat.S_IFBLK, st_rdev=os.makedev(8, major_minor))
+            with (patch.object(media.os, 'open', side_effect=open_block),
+                  patch.object(media.os, 'fstat', return_value=block_info),
+                  patch.object(media.fcntl, 'ioctl', side_effect=ioctl)):
+                yield opened, requests
+
+    def pin(self, device_id):
+        return media.open_media(device_id, self.proc, self.sys, self.dev, self.stat_path)
+
+    def test_pins_the_exact_visible_partition_and_transfers_fd_ownership(self):
+        disk = self.disk('sdb', 16)
+        self.part(disk, 1, 17)
+        selected = self.list()[0]
+        with self.block_descriptor() as (opened, requests):
+            fd, metadata = self.pin(selected['id'])
+        try:
+            self.assertEqual(opened, [fd])
+            self.assertEqual(requests, [0x80081272, 0x80081280])
+            self.assertEqual(metadata, selected)
+            self.assertFalse(os.get_inheritable(fd))
+            self.assertEqual(os.read(fd, 5), b'quiet')
+        finally:
+            os.close(fd)
+
+    def test_refuses_a_stale_or_invalid_selection_before_opening(self):
+        disk = self.disk('sdb', 16)
+        self.part(disk, 1, 17)
+        selected = self.list()[0]
+        self.put(disk / 'diskseq', 500)
+        with self.block_descriptor() as (opened, requests):
+            with self.assertRaisesRegex(ValueError, 'invalid_live_media_id'):
+                self.pin('/dev/sdb1')
+            with self.assertRaisesRegex(ValueError, 'live_media_unavailable'):
+                self.pin(selected['id'])
+        self.assertEqual(opened, [])
+        self.assertEqual(requests, [])
+
+    def test_closes_fd_if_its_identity_or_post_open_observation_differs(self):
+        disk = self.disk('sdb', 16)
+        self.part(disk, 1, 17)
+        sibling = self.part(disk, 2, 18, start=16384)
+        selected = self.list()[0]
+        for options in ({'major_minor': 18}, {'bytes_count': 4096}, {'diskseq': 500},
+                        {'after_open': lambda: (sibling / 'holders/dm-0').mkdir()}):
+            with self.subTest(options=options), self.block_descriptor(**options) as (opened, requests):
+                with self.assertRaisesRegex(ValueError, 'live_media_device_changed'):
+                    self.pin(selected['id'])
+            self.assertEqual(len(opened), 1)
+            with self.assertRaises(OSError):
+                os.fstat(opened[0])
+
+    def test_cannot_follow_a_replaced_device_node(self):
+        disk = self.disk('sdb', 16)
+        self.part(disk, 1, 17)
+        selected = self.list()[0]
+        self.dev.mkdir()
+        (self.dev / 'sdb1').symlink_to(self.proc / 'cmdline')
+        with self.assertRaises(OSError):
+            self.pin(selected['id'])
+
+
+@unittest.skipUnless(sys.platform == 'linux' and os.geteuid() == 0,
+                     'requires an isolated Linux root fixture for SO_PEERCRED and root-owned profiles')
+class Lease(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.profile = Path(temp.name) / 'installation.json'
+        self.profile.write_text('{"version":1,"mode":"live-launcher"}\n')
+
+    def live_pair(self):
+        os.seteuid(1000)
+        try:
+            return socket.socketpair()
+        finally:
+            os.seteuid(0)
+
+    def test_sends_one_byte_and_one_fd_to_a_live_uid_peer(self):
+        sender, receiver = self.live_pair()
+        descriptor = os.open(self.profile, os.O_RDONLY | os.O_CLOEXEC)
+        with sender, receiver, patch.dict(os.environ, {'SUDO_UID': '1000'}), patch.object(
+                media, 'open_media', return_value=(descriptor, {})) as pinned:
+            media.lease_media('a' * 64, sender, self.profile)
+            pinned.assert_called_once_with('a' * 64)
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+            receiver.settimeout(1)
+            data, rights, flags, _ = receiver.recvmsg(2, socket.CMSG_SPACE(4), socket.MSG_CMSG_CLOEXEC)
+            self.assertEqual(data, b'M')
+            self.assertFalse(flags & socket.MSG_CTRUNC)
+            self.assertEqual(len(rights), 1)
+            level, kind, payload = rights[0]
+            self.assertEqual((level, kind, len(payload)), (socket.SOL_SOCKET, socket.SCM_RIGHTS, 4))
+            received, = struct.unpack('=i', payload)
+            try:
+                self.assertEqual(os.read(received, 1), b'{')
+            finally:
+                os.close(received)
+
+    def test_requires_exact_sudo_uid_and_real_peer_before_opening(self):
+        sender, receiver = socket.socketpair()
+        with sender, receiver, patch.object(media, 'open_media') as pinned:
+            with patch.dict(os.environ, {'SUDO_UID': '01000'}):
+                with self.assertRaisesRegex(ValueError, 'live_media_lease_requires_live_sudo'):
+                    media.lease_media('a' * 64, sender, self.profile)
+            with patch.dict(os.environ, {'SUDO_UID': '1000'}):
+                with self.assertRaisesRegex(ValueError, 'invalid_live_media_lease_peer'):
+                    media.lease_media('a' * 64, sender, self.profile)
+                with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as datagram:
+                    with self.assertRaisesRegex(ValueError, 'invalid_live_media_lease_socket'):
+                        media.lease_media('a' * 64, datagram, self.profile)
+            pinned.assert_not_called()
+
+    def test_refuses_unsafe_or_invalid_installation_profiles(self):
+        media.require_live_profile(self.profile)
+        second_link = self.profile.with_name('second-link')
+        os.link(self.profile, second_link)
+        with self.assertRaisesRegex(ValueError, 'unsafe_installation_profile'):
+            media.require_live_profile(self.profile)
+        second_link.unlink()
+        self.profile.chmod(0o666)
+        with self.assertRaisesRegex(ValueError, 'unsafe_installation_profile'):
+            media.require_live_profile(self.profile)
+        self.profile.chmod(0o644)
+        for content in ('{"version":true,"mode":"live-launcher"}',
+                        '{"version":1,"mode":"live-launcher","mode":"live-launcher"}',
+                        '{"version":1,"mode":"controller-runtime"}',
+                        self.profile.read_text() + ' ' * 1024):
+            with self.subTest(content=content[:50]):
+                self.profile.write_text(content)
+                with self.assertRaisesRegex(ValueError, 'invalid_installation_profile'):
+                    media.require_live_profile(self.profile)
+
+    def test_closes_pinned_descriptor_when_receiver_exits_before_send(self):
+        sender, receiver = self.live_pair()
+        descriptor = os.open(self.profile, os.O_RDONLY | os.O_CLOEXEC)
+
+        def pin_after_receiver_exits(_):
+            receiver.close()
+            return descriptor, {}
+
+        with sender, receiver, patch.dict(os.environ, {'SUDO_UID': '1000'}), patch.object(
+                media, 'open_media', side_effect=pin_after_receiver_exits):
+            with self.assertRaises(BrokenPipeError):
+                media.lease_media('a' * 64, sender, self.profile)
+        with self.assertRaises(OSError):
+            os.fstat(descriptor)
 
 
 if __name__ == '__main__':

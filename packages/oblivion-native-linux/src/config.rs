@@ -129,7 +129,7 @@ impl RuntimeConfig {
     }
 }
 
-fn data_size(file: &File) -> Result<u64> {
+pub(crate) fn data_size(file: &File) -> Result<u64> {
     let metadata = file
         .metadata()
         .map_err(|_| Error("runtime_disk_unavailable"))?;

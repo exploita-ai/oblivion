@@ -1,9 +1,10 @@
 use crate::{Error, Result, config::RuntimeConfig, private};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -145,6 +146,8 @@ pub struct Qmp {
     events: VecDeque<Value>,
     event_overflow: bool,
     sequence: u32,
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) media: Option<crate::media::Attachment>,
 }
 impl Qmp {
     pub fn connect(path: &Path, deadline: Instant) -> Result<Self> {
@@ -158,6 +161,8 @@ impl Qmp {
             events: VecDeque::new(),
             event_overflow: false,
             sequence: 0,
+            #[cfg(any(target_os = "linux", test))]
+            media: None,
         };
         let greeting = qmp.until_wire(deadline)?;
         if !greeting.get("QMP").is_some_and(Value::is_object) {
@@ -168,51 +173,116 @@ impl Qmp {
     }
 
     pub fn command(&mut self, name: &str, deadline: Instant) -> Result<Value> {
+        self.request::<()>(name, None, None, deadline)
+    }
+
+    pub(crate) fn request<A: Serialize>(
+        &mut self,
+        name: &str,
+        arguments: Option<A>,
+        mut descriptor: Option<BorrowedFd<'_>>,
+        deadline: Instant,
+    ) -> Result<Value> {
+        #[derive(Serialize)]
+        struct Request<'a, A> {
+            execute: &'a str,
+            id: u32,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            arguments: Option<A>,
+        }
         if self.event_overflow {
             return Err(Error("qmp_event_queue_overflow"));
         }
-        self.sequence += 1;
-        let data = json!({"execute":name,"id":self.sequence}).to_string() + "\n";
-        self.stream
-            .set_write_timeout(Some(deadline.saturating_duration_since(Instant::now())))
-            .map_err(|_| Error("qmp_failed"))?;
-        // Requests are fixed short control messages, not paths or guest data.
-        let mut remaining = data.as_bytes();
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(Error("qmp_sequence_exhausted"))?;
+        let mut data = serde_json::to_vec(&Request {
+            execute: name,
+            id: self.sequence,
+            arguments,
+        })
+        .map_err(|_| Error("invalid_qmp_request"))?;
+        if data.len() >= 4096 {
+            return Err(Error("qmp_request_too_large"));
+        }
+        data.push(b'\n');
+        let mut remaining = data.as_slice();
         while !remaining.is_empty() {
             if Instant::now() >= deadline {
                 return Err(Error("qmp_timeout"));
             }
-            match self.stream.write(remaining) {
+            let sent = match descriptor {
+                Some(file) => send_descriptor(&self.stream, remaining, file),
+                None => self.stream.write(remaining),
+            };
+            match sent {
                 Ok(0) => return Err(Error("qmp_disconnected")),
-                Ok(length) => remaining = &remaining[length..],
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        && Instant::now() < deadline =>
-                {
+                Ok(length) => {
+                    // A partial send has already transferred the descriptor.
+                    descriptor = None;
+                    remaining = &remaining[length..];
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     self.wait(libc::POLLOUT, deadline)?
                 }
                 Err(_) => return Err(Error("qmp_failed")),
             }
         }
         loop {
-            let value = self.until_wire(deadline)?;
+            let mut value = self.until_wire(deadline)?;
             if value.get("event").is_some() {
-                if self.events.len() == MAX_PENDING_EVENTS {
-                    // Missing an event makes this monitor's state uncertain.
-                    self.events.clear();
-                    self.event_overflow = true;
-                    return Err(Error("qmp_event_queue_overflow"));
-                }
-                self.events.push_back(value);
+                self.queue_event(value)?;
                 continue;
             }
             if value.get("id").and_then(Value::as_u64) != Some(u64::from(self.sequence)) {
                 continue;
             }
+            if value.get("error").is_some() {
+                return Err(Error("qmp_command_failed"));
+            }
             return value
-                .get("return")
-                .cloned()
-                .ok_or(Error("qmp_command_failed"));
+                .as_object_mut()
+                .and_then(|reply| reply.remove("return"))
+                .ok_or(Error("invalid_qmp_reply"));
+        }
+    }
+
+    fn queue_event(&mut self, value: Value) -> Result<()> {
+        if self.events.len() == MAX_PENDING_EVENTS {
+            // Missing an event makes this monitor's state uncertain.
+            self.events.clear();
+            self.event_overflow = true;
+            return Err(Error("qmp_event_queue_overflow"));
+        }
+        self.events.push_back(value);
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn wait_event(
+        &mut self,
+        matches: impl Fn(&Value) -> bool,
+        deadline: Instant,
+    ) -> Result<Value> {
+        if self.event_overflow {
+            return Err(Error("qmp_event_queue_overflow"));
+        }
+        if let Some(position) = self.events.iter().position(&matches) {
+            return self
+                .events
+                .remove(position)
+                .ok_or(Error("invalid_qmp_event"));
+        }
+        loop {
+            let event = self.until_wire(deadline)?;
+            if event.get("event").is_some() {
+                if matches(&event) {
+                    return Ok(event);
+                }
+                self.queue_event(event)?;
+            }
         }
     }
 
@@ -288,15 +358,46 @@ impl Qmp {
     }
 }
 
+fn send_descriptor(
+    stream: &UnixStream,
+    bytes: &[u8],
+    descriptor: BorrowedFd<'_>,
+) -> std::io::Result<usize> {
+    let mut control = [0usize; 8];
+    let mut data = libc::iovec {
+        iov_base: bytes.as_ptr().cast_mut().cast(),
+        iov_len: bytes.len(),
+    };
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &mut data;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as u32) } as _;
+    let sent = unsafe {
+        let header = libc::CMSG_FIRSTHDR(&message);
+        (*header).cmsg_level = libc::SOL_SOCKET;
+        (*header).cmsg_type = libc::SCM_RIGHTS;
+        (*header).cmsg_len = libc::CMSG_LEN(size_of::<RawFd>() as u32) as _;
+        libc::CMSG_DATA(header)
+            .cast::<RawFd>()
+            .write_unaligned(descriptor.as_raw_fd());
+        libc::sendmsg(stream.as_raw_fd(), &message, libc::MSG_NOSIGNAL)
+    };
+    if sent < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(sent as usize)
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{MAX_PENDING_EVENTS, Qmp};
     use std::collections::VecDeque;
     use std::io::Write;
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
 
-    fn socket_pair() -> (Qmp, UnixStream) {
+    pub(crate) fn socket_pair() -> (Qmp, UnixStream) {
         let (stream, peer) = UnixStream::pair().unwrap();
         stream.set_nonblocking(true).unwrap();
         (
@@ -306,6 +407,7 @@ mod tests {
                 events: VecDeque::new(),
                 event_overflow: false,
                 sequence: 0,
+                media: None,
             },
             peer,
         )

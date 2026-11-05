@@ -5,6 +5,10 @@ pub mod config;
 pub mod enrollment;
 pub mod kvm;
 pub mod lifetime;
+#[cfg(target_os = "linux")]
+pub mod live_media;
+#[cfg(any(target_os = "linux", test))]
+pub mod media;
 pub mod private;
 pub mod qemu;
 pub mod runtime;
