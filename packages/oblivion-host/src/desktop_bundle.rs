@@ -15,6 +15,16 @@ pub(crate) struct Bundle {
     manifest: Manifest,
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) const PACKAGE_ROOT: &str = "/usr/lib/oblivion-desktop";
+
+pub fn packaged_entry() -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    return Ok(std::env::current_exe()? == Path::new(PACKAGE_ROOT).join("bin/oblivion"));
+    #[cfg(not(target_os = "linux"))]
+    Ok(false)
+}
+
 pub(crate) fn platform() -> &'static str {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     return "darwin-arm64";
@@ -59,6 +69,16 @@ impl Bundle {
         Ok(bundle)
     }
 
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn deployed(root: &Path, binding: &Binding, platform: &str) -> Result<Self> {
+        let bundle = Self::verified(root, Some(&binding.source_sha256), platform, false)?;
+        if serde_json::to_value(bundle.binding()?)? != serde_json::to_value(binding)? {
+            return Err("installed_desktop_release_changed".into());
+        }
+        bundle.verify_native()?;
+        Ok(bundle)
+    }
+
     fn verified(
         root: &Path,
         source: Option<&str>,
@@ -70,9 +90,14 @@ impl Bundle {
         }
         oblivion_bundle::target(expected_platform)?;
         let root = root.canonicalize()?;
+        #[cfg(target_os = "linux")]
+        let root_owned = root == Path::new(PACKAGE_ROOT);
+        #[cfg(not(target_os = "linux"))]
+        let root_owned = false;
         let metadata = fs::symlink_metadata(&root)?;
-        owned(&metadata, true)?;
+        owned(&metadata, true, root_owned)?;
         let mut reader = open(&root.join("bundle.json"))?;
+        owned(&reader.metadata()?, false, root_owned)?;
         let mut bytes = Vec::new();
         reader
             .by_ref()
@@ -107,7 +132,7 @@ impl Bundle {
                 if count > 4096 {
                     return Err("desktop_bundle_inventory_limit".into());
                 }
-                owned(&info, info.is_dir())?;
+                owned(&info, info.is_dir(), root_owned)?;
                 if info.is_dir() {
                     if !expected_directories.contains(path.strip_prefix(&root)?) {
                         return Err("desktop_bundle_unlisted_directory".into());
@@ -205,12 +230,12 @@ fn open(path: &Path) -> Result<fs::File> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?;
-    owned(&file.metadata()?, false)?;
+    owned(&file.metadata()?, false, false)?;
     Ok(file)
 }
 
-fn owned(metadata: &fs::Metadata, directory: bool) -> Result<()> {
-    if (metadata.uid() != unsafe { libc::getuid() } && metadata.uid() != 0)
+fn owned(metadata: &fs::Metadata, directory: bool, root_owned: bool) -> Result<()> {
+    if (metadata.uid() != 0 && (root_owned || metadata.uid() != unsafe { libc::getuid() }))
         || metadata.mode() & 0o022 != 0
         || if directory {
             !metadata.is_dir()

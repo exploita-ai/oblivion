@@ -9,6 +9,8 @@ pub mod desktop_bundle;
 pub mod diagnostics;
 #[cfg(target_os = "linux")]
 pub mod display;
+#[cfg(target_os = "linux")]
+pub mod linux_access;
 pub mod egress;
 pub mod family;
 pub use oblivion_wire::family_rotation;

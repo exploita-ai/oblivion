@@ -73,6 +73,38 @@ fn run() -> control::Result<i32> {
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
+        #[cfg(target_os = "linux")]
+        if oblivion_host::desktop_bundle::packaged_entry()? {
+            let launcher = match &command {
+                command::Command::Controller(controller::Command::StatusJson) => {
+                    oblivion_host::native_runtime::observe_packaged()?;
+                    return controller::execute(
+                        &mut control::Client::new(),
+                        controller::Command::StatusJson,
+                        &mut std::io::stdout().lock(),
+                    );
+                }
+                command::Command::Runtime(command::RuntimeCommand::Start) => {
+                    Some(oblivion_host::native_runtime::packaged_launcher(false)?)
+                }
+                command::Command::Runtime(
+                    command::RuntimeCommand::InstallBundle(_)
+                    | command::RuntimeCommand::Install(_)
+                    | command::RuntimeCommand::Update(_)
+                    | command::RuntimeCommand::Deploy(_),
+                ) => {
+                    return Err("Install or update the Oblivion desktop package through APT, then run oblivion as your regular user.".into());
+                }
+                command::Command::Runtime(_) => None,
+                _ => Some(oblivion_host::native_runtime::packaged_launcher(true)?),
+            };
+            if let Some(launcher) = launcher {
+                return Err(Command::new(launcher)
+                    .args(std::env::args_os().skip(1))
+                    .exec()
+                    .into());
+            }
+        }
         if let command::Command::Runtime(command) = &command {
             use command::RuntimeCommand;
             match command {
