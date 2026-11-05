@@ -40,6 +40,26 @@ class Planning(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'insufficient_unallocated_live_space'):
             storage.plan(table, 8 * 1024**3, '/dev/sdb', '8:16')
 
+    def test_identity_is_synced_and_decoded_without_touching_preceding_bytes(self):
+        with tempfile.TemporaryDirectory(prefix='oblivion-live-identity-') as directory:
+            path = Path(directory) / 'data.raw'
+            path.write_bytes(b'keep' * 1024 + bytes(4096))
+            with path.open('r+b') as target:
+                storage.write_identity(target, 4096, 'a' * 32)
+            data = path.read_bytes()
+            self.assertEqual(data[:4096], b'keep' * 1024)
+            self.assertEqual(storage.decode_identity(data[4096:]), 'a' * 32)
+            self.assertIsNone(storage.decode_identity(b'unknown data' + bytes(4084)))
+
+    def test_raw_identity_staging_refuses_a_regular_file_before_writing(self):
+        with tempfile.TemporaryDirectory(prefix='oblivion-live-non-device-') as directory:
+            path = Path(directory) / 'not-a-device'
+            path.write_bytes(b'preserve this file')
+            value = storage.plan(self.table(), 8 * 1024**3, str(path), '8:16')
+            with self.assertRaisesRegex(ValueError, 'live_boot_device_changed'):
+                storage.stage_identity(value, 'a' * 32)
+            self.assertEqual(path.read_bytes(), b'preserve this file')
+
     @unittest.skipUnless(shutil.which('sfdisk'), 'requires util-linux sfdisk')
     def test_actual_gpt_relocation_and_append_preserve_existing_partition(self):
         with tempfile.TemporaryDirectory(prefix='oblivion-live-table-') as directory:
@@ -57,6 +77,14 @@ class Planning(unittest.TestCase):
             self.assertTrue(value['relocate_gpt_backup'])
             value['boot_device'] = str(disk)
             value['partitions'] = [{key: part[key] for key in ('node', 'start', 'size', 'type')} for part in original['partitions']]
+            # Commit the identity before the table. Stopping immediately after
+            # append models the old crash window before partx/udev/node setup.
+            offset = value['start'] * value['sector_bytes']
+            old_data = original['partitions'][0]['start'] * original['sectorsize']
+            with disk.open('r+b') as output:
+                output.seek(old_data)
+                output.write(b'PREVIOUS_PARTITION_DATA')
+                storage.write_identity(output, offset, 'a' * 32)
             added = storage.append_partition(value)
             current = json.loads(subprocess.check_output(['sfdisk', '--json', str(disk)]))['partitiontable']
             self.assertEqual(current['id'], original['id'])
@@ -64,6 +92,11 @@ class Planning(unittest.TestCase):
             self.assertEqual(added['start'], value['start'])
             self.assertEqual(added['size'], value['sectors'])
             self.assertGreater(current['lastlba'], original['lastlba'])
+            with disk.open('rb') as source:
+                source.seek(offset)
+                self.assertEqual(storage.decode_identity(source.read(4096)), 'a' * 32)
+                source.seek(old_data)
+                self.assertEqual(source.read(23), b'PREVIOUS_PARTITION_DATA')
 
 
 if __name__ == '__main__':

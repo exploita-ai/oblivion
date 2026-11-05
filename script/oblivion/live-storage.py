@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import struct
 import subprocess
 import sys
 import uuid
@@ -63,6 +64,7 @@ def plan(table, device_bytes, boot_device, device_number):
     if not free or size * sector < MIN_BYTES:
         raise ValueError('insufficient_unallocated_live_space')
     value = {'version': 1, 'boot_device': boot_device, 'device_number': device_number,
+             'device_bytes': device_bytes,
              'table': table['label'], 'table_id': table.get('id'), 'sector_bytes': sector,
              'partitions': geometry, 'number': free[0], 'start': start, 'sectors': size,
              'bytes': size * sector, 'relocate_gpt_backup': relocate}
@@ -111,12 +113,44 @@ def identity(path):
         if not stat.S_ISBLK(os.fstat(source.fileno()).st_mode):
             raise ValueError('live_partition_required')
         first = source.read(4096)
+    return decode_identity(first)
+
+
+def decode_identity(first):
     marker = re.fullmatch(rb'OBLIVION-RUNTIME-1\n([a-f0-9]{32})\n\x00*', first)
     if marker:
         return marker[1].decode()
     if len(first) == 4096 and first[1080:1082] == b'\x53\xef' and first[1144:1160] == b'OBLIVION-RUNTIME':
         return uuid.UUID(bytes=first[1128:1144]).hex
     return None
+
+
+def write_identity(target, offset, identifier):
+    marker = f'OBLIVION-RUNTIME-1\n{identifier}\n'.encode()
+    marker += bytes(4096 - len(marker))
+    target.seek(offset)
+    target.write(marker)
+    target.flush()
+    os.fsync(target.fileno())
+    target.seek(offset)
+    if target.read(4096) != marker:
+        raise ValueError('live_identity_write_unconfirmed')
+
+
+def stage_identity(value, identifier):
+    descriptor = os.open(value['boot_device'], os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(descriptor, 'r+b') as target:
+        metadata = os.fstat(target.fileno())
+        number = f'{os.major(metadata.st_rdev)}:{os.minor(metadata.st_rdev)}'
+        if not stat.S_ISBLK(metadata.st_mode) or number != value['device_number']:
+            raise ValueError('live_boot_device_changed')
+        device_bytes = struct.unpack('Q', fcntl.ioctl(target.fileno(), 0x80081272, bytes(8)))[0]
+        if device_bytes != value['device_bytes']:
+            raise ValueError('live_boot_device_changed')
+        # Publish the new partition only after its identity is durable. A crash
+        # after sfdisk/partx then leaves a recognizable partition on the next
+        # boot, rather than an unknown partition that could hide user data.
+        write_identity(target, value['start'] * value['sector_bytes'], identifier)
 
 
 def review():
@@ -200,6 +234,8 @@ def prepare(expected):
         raise ValueError('live_storage_review_changed')
     if 'existing' in value:
         return authorize(value['existing'])
+    identifier = uuid.uuid4().hex
+    stage_identity(value, identifier)
     added = append_partition(value)
     run('/usr/bin/partx', '--add', '--nr', str(value['number']), value['boot_device'])
     run('/usr/bin/udevadm', 'settle', '--timeout=10')
@@ -207,12 +243,8 @@ def prepare(expected):
     metadata = path.lstat()
     if not stat.S_ISBLK(metadata.st_mode):
         raise ValueError('live_partition_unavailable')
-    identifier = uuid.uuid4().hex
-    descriptor = os.open(path, os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    with os.fdopen(descriptor, 'wb', buffering=0) as target:
-        marker = f'OBLIVION-RUNTIME-1\n{identifier}\n'.encode()
-        target.write(marker + bytes(4096 - len(marker)))
-        os.fsync(target.fileno())
+    if identity(path) != identifier:
+        raise ValueError('live_data_partition_changed')
     return authorize({'path': str(path), 'runtime_id': identifier,
                       'device_number': f'{os.major(metadata.st_rdev)}:{os.minor(metadata.st_rdev)}',
                       'bytes': value['bytes']})
