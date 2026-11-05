@@ -420,28 +420,30 @@ run `oblivion runtime stop`, wait for shutdown, then run
 again. Selecting an incompatible mode while a runtime is configured fails
 before starting or changing storage.
 
-Linux ARM64 requires a kernel exposing `KVM_CAP_ARM_EL2` (introduced in Linux
-6.16) and a QEMU version supporting nested EL2. The source build now selects
-the official Debian `trixie-backports` ARM64 kernel by default for both the
-outer Live OS and private controller, using one shared build stage. Safe and
-gateway guests keep Debian stable. AMD64 hypervisors keep the stable kernel.
-`OBLIVION_HOST_KERNEL_VERSION` remains an explicit development-only exact
-meta-package version override; ARM64 versions below the required ABI are
-refused. Previous boot kernels are purged from the final root. Both artifact
-inventories record the selected package/version/ABI and kernel SHA-256;
-packing rejects extra boot kernels, missing KVM configuration, changed images
-or a mismatch between the outer Live and controller kernels. The native
-capability probe still verifies actual hardware support before data setup.
-The ARM64 **outer Live OS** selects `kvm-arm.mode=nested` so it can present
-virtual EL2 to the controller VM. Linux documents this as an experimental mode
-requiring ARMv8.4 FEAT_NV2. The controller itself uses ordinary VHE/nVHE to run
-EL1 Safe/gateway guests; it does not request another nested EL2 level. The
-shared kernel record therefore declares separate boot arguments for the two
-roles. Kernel selection alone does not qualify a machine. [ARM kernel parameters](https://docs.kernel.org/6.16/admin-guide/kernel-parameters.html).
-Older host kernels fail that check. [Linux 6.16 KVM API](https://docs.kernel.org/6.16/virt/kvm/api.html),
-[Debian ARM64 backports kernel](https://packages.debian.org/trixie-backports/kernel/linux-image-arm64). There is no
-software-emulation or direct-controller fallback. Live inside another VM adds
-another nesting level and needs separate qualification.
+The Linux ARM64 host needs Linux 6.16 or newer with `KVM_CAP_ARM_EL2` and a
+QEMU version that supports nested EL2. The ARM64 **outer Live OS** selects the
+official Debian `trixie-backports` kernel and boots with `kvm-arm.mode=nested`
+to present virtual EL2 to the controller VM. Linux documents that mode as
+experimental and requires ARMv8.4 FEAT_NV2.
+
+The private controller runs EL1 Safe and gateway guests using ordinary
+VHE/nVHE. Its default ARM64 kernel is Debian stable (currently the 6.12 LTS
+series), including signed `trixie-security` updates. Desktop and Live
+continue to use the same controller ISO per architecture. Safe and gateway
+guests and the AMD64 hypervisors also keep Debian stable.
+
+`OBLIVION_HOST_KERNEL_VERSION` still accepts an exact backports meta-package
+version for development. ARM64 overrides must meet the minimum for each
+selected role: 6.12 for the controller and 6.16 for outer Live. Packing
+rejects extra boot kernels, missing KVM configuration, and changed boot
+images. The Live artifacts record the two roles separately and check that
+the embedded controller's kernel and initramfs match both its ISO and the
+launcher's detached boot files. The native probe still verifies host
+capabilities before data setup. [ARM kernel parameters](https://docs.kernel.org/6.16/admin-guide/kernel-parameters.html),
+[Linux 6.16 KVM API](https://docs.kernel.org/6.16/virt/kvm/api.html),
+[Debian ARM64 backports kernel](https://packages.debian.org/trixie-backports/kernel/linux-image-arm64).
+There is no software-emulation or direct-controller fallback. Live inside
+another VM adds a nesting level and needs separate qualification.
 
 The source includes these paths and sparse-file partition tests. The
 three-second boot wordmark overlaps controller startup and appears once per

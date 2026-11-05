@@ -34,14 +34,22 @@ COPY script/oblivion/vm-common-setup.sh /tmp/setup
 COPY script/oblivion/journald-forwarding.conf /etc/systemd/journald.conf.d/90-oblivion-forwarding.conf
 RUN sh /tmp/setup && rm /tmp/setup
 
-# Only OS layers that run nested guests need ARM EL2 support. Other roles keep
-# Debian stable. Desktop and Live share this exact controller kernel selection.
-FROM os AS nested-hypervisor-os
+# Desktop and Live share this controller. Its Safe and gateway guests run at EL1.
+FROM os AS controller-kernel-os
 ARG TARGETARCH
 ARG OBLIVION_HOST_KERNEL_VERSION=""
 COPY script/oblivion/hypervisor-kernel.py /tmp/hypervisor-kernel.py
 RUN apt-get update && apt-get install -y --no-install-recommends python3 \
-    && python3 -B /tmp/hypervisor-kernel.py install "$TARGETARCH" --version "$OBLIVION_HOST_KERNEL_VERSION" \
+    && python3 -B /tmp/hypervisor-kernel.py install "$TARGETARCH" --role controller --version "$OBLIVION_HOST_KERNEL_VERSION" \
+    && rm /tmp/hypervisor-kernel.py && rm -rf /var/lib/apt/lists/*
+
+# The outer ARM64 Live OS exposes EL2 to that controller.
+FROM os AS live-kernel-os
+ARG TARGETARCH
+ARG OBLIVION_HOST_KERNEL_VERSION=""
+COPY script/oblivion/hypervisor-kernel.py /tmp/hypervisor-kernel.py
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && python3 -B /tmp/hypervisor-kernel.py install "$TARGETARCH" --role outer-live --version "$OBLIVION_HOST_KERNEL_VERSION" \
     && rm /tmp/hypervisor-kernel.py && rm -rf /var/lib/apt/lists/*
 
 FROM os AS rust-toolchain
@@ -455,7 +463,7 @@ USER 1000:1000
 ENTRYPOINT ["/usr/bin/python3", "-B", "/usr/lib/oblivion/vm-onion-recipient.py"]
 
 # Private Debian controller; never installed as the outer Live OS.
-FROM nested-hypervisor-os AS controller-host
+FROM controller-kernel-os AS controller-host
 ARG TARGETARCH
 ARG MANAGER_BINARY=artifacts/oblivion-manager/bun-linux-x64/oblivion-manager
 ARG MANAGER_ASSETS=artifacts/oblivion-manager/bun-linux-x64/assets
@@ -617,7 +625,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends dpkg-dev libstd
 FROM scratch AS desktop-debian-artifacts
 COPY --from=desktop-debian-build /out/ /
 
-FROM nested-hypervisor-os AS live-launcher
+FROM live-kernel-os AS live-launcher
 ARG TARGETARCH
 COPY script/oblivion/hypervisor-qemu.py /tmp/hypervisor-qemu.py
 RUN sed -i 's/^Components: main$/Components: main non-free-firmware/' /etc/apt/sources.list.d/debian.sources \
@@ -642,7 +650,8 @@ COPY --from=vbox-clipboard /out/ /usr/lib/oblivion/virtualbox/
 COPY script/oblivion/live-storage.py script/oblivion/live-media.py /usr/lib/oblivion/
 COPY script/oblivion/live-os/ /usr/lib/oblivion/live-os/
 COPY script/oblivion/live-setup.sh /tmp/live-setup
-RUN chmod 0755 /usr/lib/oblivion/live-storage.py /usr/lib/oblivion/live-media.py && sh /tmp/live-setup && rm /tmp/live-setup \
+COPY script/oblivion/hypervisor-kernel.py /tmp/hypervisor-kernel.py
+RUN chmod 0755 /usr/lib/oblivion/live-storage.py /usr/lib/oblivion/live-media.py && sh /tmp/live-setup && rm /tmp/live-setup /tmp/hypervisor-kernel.py \
     && ln -s /usr/lib/oblivion/desktop/bin/oblivion /usr/bin/oblivion
 COPY script/oblivion/display/*.service script/oblivion/display/*.socket script/oblivion/display/manager.conf script/oblivion/display/foot.ini script/oblivion/display/start.sh script/oblivion/display/70-oblivion-clipboard.rules /usr/lib/oblivion/display/
 COPY script/oblivion/display/install.sh /tmp/display-setup

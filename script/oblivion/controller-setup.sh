@@ -41,7 +41,7 @@ printf 'loop\ndm_crypt\nkvm\nvsock\nvmw_vsock_virtio_transport\n' > /etc/modules
 printf 'MODULES=most\nCOMPRESS=gzip\nRESUME=none\nRUNSIZE=40%%\n' > /etc/initramfs-tools/conf.d/oblivion
 # Preserve VirtIO and explicitly include the same amd64 controller's Hyper-V
 # storage/network/vsock modules. Built-in drivers need no archive entry.
-python3 -B /tmp/hypervisor-kernel.py initramfs-modules / >> /etc/initramfs-tools/modules
+python3 -B /tmp/hypervisor-kernel.py initramfs-modules / --role controller >> /etc/initramfs-tools/modules
 update-initramfs -u -k all
 ln -sf /usr/lib/systemd/system/multi-user.target /etc/systemd/system/default.target
 printf 'Oblivion private controller runtime\n' > /etc/issue

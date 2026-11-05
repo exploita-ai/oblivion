@@ -86,6 +86,7 @@ printf '[connectivity]\nenabled=false\n[keyfile]\npath=/run/NetworkManager/syste
 printf 'kvm\nvhost_vsock\nvsock\n' > /etc/modules-load.d/oblivion-live.conf
 printf 'MODULES=most\nCOMPRESS=gzip\nRESUME=none\n' > /etc/initramfs-tools/conf.d/oblivion
 printf 'squashfs\noverlay\next4\niso9660\nloop\nvirtio_gpu\nvirtio_console\nxhci_pci\nusb_storage\nusbhid\n' > /etc/initramfs-tools/modules
+python3 -B /tmp/hypervisor-kernel.py initramfs-modules / --role outer-live >> /etc/initramfs-tools/modules
 update-initramfs -u -k all
 systemctl enable oblivion-manager.service NetworkManager.service oblivion-network-console.service \
     oblivion-os-keyboard-console.service oblivion-os-timezone-console.service oblivion-live-keymap.path
