@@ -1,4 +1,8 @@
 # Machine-level defaults are merged with the Safe's native user profiles.
+[features]
+# A private daemon pins a second copy of the Codex executable inside the Safe.
+daemon_auto_start = false
+
 [mcp_servers.oblivion]
 command = "/usr/lib/oblivion/node/bin/node"
 args = ["/usr/lib/oblivion/tools/server.mjs"]

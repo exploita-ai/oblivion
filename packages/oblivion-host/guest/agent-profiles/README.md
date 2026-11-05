@@ -36,6 +36,12 @@ Codex defaults disable analytics, feedback and each log, metrics and trace
 exporter. Explicit OTLP exporters otherwise work independently of the analytics
 switch. [Codex configuration reference](https://developers.openai.com/codex/config-reference/).
 
+The machine profile also disables automatic daemon startup. The daemon pins a
+second copy of the installed Codex package in the Safe, which can crowd out
+chat history and workspace files on a small Safe. The user profile and native
+CLI can still select daemon mode.
+[Codex daemon configuration](https://learn.chatgpt.com/docs/environments/network-file-systems#2-stop-codex-on-every-host).
+
 Claude defaults disable nonessential traffic, surveys, feedback submission,
 error reports, optional exporters and automatic official marketplace installs.
 The initial settings also disable the WebFetch preflight, which otherwise sends
