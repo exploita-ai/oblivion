@@ -13,11 +13,18 @@ use std::path::Path;
 /// One selection, one approval and one receipt. No listener or retry loop.
 /// The controller supplies a private channel and owns the user's decision.
 pub fn send(channel: &mut Channel, root: &Path) -> io::Result<()> {
-    send_from(channel, root, false)
+    let request = source_request(channel, root, false)?;
+    validate_id(&request.id)?;
+    let mut selection = Selection::prepare(root, &request.paths, request.limits)?;
+    send_selection(channel, &mut selection, &request.id)
 }
 
 pub fn documents(channel: &mut Channel, root: &Path) -> io::Result<()> {
-    send_from(channel, root, true)
+    send_collection(channel, root, true)
+}
+
+pub fn media_source(channel: &mut Channel, root: &Path) -> io::Result<()> {
+    send_collection(channel, root, false)
 }
 
 /// Ciphertext-only backup source. The parent selects the descriptor and byte
@@ -177,19 +184,17 @@ fn source_request(channel: &mut Channel, root: &Path, documents: bool) -> io::Re
     }
 }
 
-fn send_from(channel: &mut Channel, root: &Path, documents: bool) -> io::Result<()> {
+fn send_collection(channel: &mut Channel, root: &Path, documents: bool) -> io::Result<()> {
     let request = source_request(channel, root, documents)?;
     validate_id(&request.id)?;
-    let mut selection = if documents {
-        let (selection, plan, directories) =
-            Selection::document_collection(root, &request.paths, request.limits, &mut || {
-                channel.check()
-            })?;
-        write_message(channel, &SelectionOffer { directories, plan })?;
-        selection
+    let mut check = || channel.check();
+    let (mut selection, plan, directories) = if documents {
+        Selection::document_collection(root, &request.paths, request.limits, &mut check)?
     } else {
-        Selection::prepare(root, &request.paths, request.limits)?
+        require(request.limits.bytes <= crate::MAX_DOCUMENT_BYTES, "invalid_byte_limit")?;
+        Selection::rooted_collection(root, &request.paths, request.limits, &mut check)?
     };
+    write_message(channel, &SelectionOffer { directories, plan })?;
     send_selection(channel, &mut selection, &request.id)
 }
 

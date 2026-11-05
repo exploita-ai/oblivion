@@ -79,6 +79,7 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
                 | "import"
                 | "recover"
                 | "documents"
+                | "media-source"
                 | "export"
                 | "export-portable"
         )
@@ -105,6 +106,9 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args[0] == "documents" {
         endpoint::documents(&mut channel, Path::new(&args[1]))?;
+    }
+    if args[0] == "media-source" {
+        endpoint::media_source(&mut channel, Path::new(&args[1]))?;
     }
     if args[0] == "export" {
         endpoint::export(

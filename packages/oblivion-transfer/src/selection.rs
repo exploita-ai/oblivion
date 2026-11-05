@@ -33,16 +33,7 @@ pub struct Plan {
 }
 
 pub fn validate_paths(paths: &[String]) -> io::Result<()> {
-    require(
-        (1..=MAX_SELECTIONS).contains(&paths.len()),
-        "selection_limit",
-    )?;
-    let bytes = paths.iter().try_fold(0usize, |total, path| {
-        total
-            .checked_add(path.len())
-            .ok_or_else(|| invalid("selection_byte_limit"))
-    })?;
-    require(bytes <= MAX_SELECTION_BYTES, "selection_byte_limit")?;
+    validate_path_budget(paths)?;
     for path in paths {
         require(
             !path.is_empty() && path.len() <= 4096 && !path.chars().any(unsafe_character),
@@ -82,14 +73,41 @@ pub fn validate_paths(paths: &[String]) -> io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn validate_rooted_paths(paths: &[String]) -> io::Result<()> {
+    validate_path_budget(paths)?;
+    for path in paths {
+        crate::validate_path(path)?;
+    }
+    Ok(())
+}
+
+fn validate_path_budget(paths: &[String]) -> io::Result<()> {
+    require(
+        (1..=MAX_SELECTIONS).contains(&paths.len()),
+        "selection_limit",
+    )?;
+    let bytes = paths.iter().try_fold(0usize, |total, path| {
+        total
+            .checked_add(path.len())
+            .ok_or_else(|| invalid("selection_byte_limit"))
+    })?;
+    require(bytes <= MAX_SELECTION_BYTES, "selection_byte_limit")
+}
+
 impl Plan {
     pub fn new(inputs: &[Input]) -> io::Result<Self> {
-        validate_paths(
-            &inputs
-                .iter()
-                .map(|input| input.path.clone())
-                .collect::<Vec<_>>(),
-        )?;
+        Self::with_path_validation(inputs, validate_paths)
+    }
+
+    pub(crate) fn rooted(inputs: &[Input]) -> io::Result<Self> {
+        Self::with_path_validation(inputs, validate_rooted_paths)
+    }
+
+    fn with_path_validation(
+        inputs: &[Input],
+        validate: fn(&[String]) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        validate(&inputs.iter().map(|input| input.path.clone()).collect::<Vec<_>>())?;
         for input in inputs {
             require(
                 inputs

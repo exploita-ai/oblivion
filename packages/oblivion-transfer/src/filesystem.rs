@@ -172,7 +172,7 @@ impl Selection {
                 .ok_or_else(|| invalid("invalid_source_root"))?;
             chosen.push(choose(&mut roots, Directory::open(parent)?, name, key)?);
         }
-        Self::collection(roots, chosen, limits, check)
+        Self::collection(roots, chosen, limits, check, Plan::new)
     }
 
     /// Every guest source is resolved beneath the fixed Documents authority.
@@ -183,17 +183,28 @@ impl Selection {
         limits: Limits,
         check: &mut dyn FnMut() -> io::Result<()>,
     ) -> io::Result<(Self, Plan, Vec<bool>)> {
-        selection::validate_paths(paths)?;
+        require(
+            paths.iter().all(|path| {
+                matches!(path.split('/').next(), Some("workspace" | "imports"))
+            }),
+            "invalid_document_selection",
+        )?;
+        Self::rooted_collection(root, paths, limits, check)
+    }
+
+    /// The read-only media VM uses its fixed mount as the source authority.
+    pub(crate) fn rooted_collection(
+        root: &Path,
+        paths: &[String],
+        limits: Limits,
+        check: &mut dyn FnMut() -> io::Result<()>,
+    ) -> io::Result<(Self, Plan, Vec<bool>)> {
+        selection::validate_rooted_paths(paths)?;
         let root = Directory::open(root)?;
         let mut roots = Vec::new();
         let mut chosen = Vec::new();
         for path in paths {
             check()?;
-            validate_path(path)?;
-            require(
-                matches!(path.split('/').next(), Some("workspace" | "imports")),
-                "invalid_document_selection",
-            )?;
             let mut components = path.split('/').collect::<Vec<_>>();
             let name = components.pop().ok_or_else(|| invalid("invalid_path"))?;
             let parent = components
@@ -201,7 +212,7 @@ impl Selection {
                 .try_fold(root.clone()?, |parent, name| parent.directory(name))?;
             chosen.push(choose(&mut roots, parent, name, path.clone())?);
         }
-        Self::collection(roots, chosen, limits, check)
+        Self::collection(roots, chosen, limits, check, Plan::rooted)
     }
 
     fn collection(
@@ -209,8 +220,9 @@ impl Selection {
         chosen: Vec<Chosen>,
         limits: Limits,
         check: &mut dyn FnMut() -> io::Result<()>,
+        plan: fn(&[Input]) -> io::Result<Plan>,
     ) -> io::Result<(Self, Plan, Vec<bool>)> {
-        let plan = Plan::new(
+        let plan = plan(
             &chosen
                 .iter()
                 .map(|source| Input {

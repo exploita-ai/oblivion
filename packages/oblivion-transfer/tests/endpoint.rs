@@ -56,6 +56,78 @@ fn unavailable_directory_replies_and_keeps_the_document_channel_usable() {
 }
 
 #[test]
+fn media_source_browses_and_offers_only_the_selected_relative_files() {
+    use oblivion_transfer::browser::{Request, Response};
+    use oblivion_transfer::endpoint::SourceRequest;
+    let source = Tree::new();
+    fs::create_dir(source.0.join("projects")).unwrap();
+    fs::write(source.0.join("projects/note.txt"), CONTENT).unwrap();
+    fs::write(source.0.join("other.txt"), b"unselected").unwrap();
+    std::os::unix::fs::symlink("../other.txt", source.0.join("projects/link")).unwrap();
+    let browse = Request {
+        path: "projects".into(),
+        after: None,
+        limit: 10,
+    };
+    let mut sender = Endpoint::start("media-source", &source, 5000);
+    write_message(&mut sender.channel, &SourceRequest::Browse { browse }).unwrap();
+    let response: Response = read_message(&mut sender.channel, 65536).unwrap();
+    let Response::Page(page) = response else {
+        panic!("media directory unavailable");
+    };
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].name, "note.txt");
+    write_message(
+        &mut sender.channel,
+        &OfferRequest {
+            paths: vec!["projects/note.txt".into()],
+            ..request()
+        },
+    )
+    .unwrap();
+    let offer: SelectionOffer = read_message(&mut sender.channel, 65536).unwrap();
+    assert_eq!(offer.plan.selected, "note.txt");
+    let manifest = Manifest::read(&mut sender.channel, LIMITS).unwrap();
+    assert_eq!(manifest.entries().len(), 1);
+    assert_eq!(manifest.entries()[0].path(), "note.txt");
+    write_message(&mut sender.channel, &approval(&manifest)).unwrap();
+    let mut data = vec![0; CONTENT.len() + 8];
+    sender.channel.read_exact(&mut data).unwrap();
+    assert_eq!(&data[..CONTENT.len()], CONTENT);
+    assert_eq!(&data[CONTENT.len()..], b"OBLVEND1");
+    write_message(
+        &mut sender.channel,
+        &Receipt {
+            id: ID.into(),
+            manifest_sha256: manifest.sha256(),
+            entries: 1,
+            bytes: CONTENT.len() as u64,
+        },
+    )
+    .unwrap();
+    let mut completed = [0; 7];
+    sender.channel.read_exact(&mut completed).unwrap();
+    assert_eq!(&completed, b"copied\n");
+    sender.finish(true);
+
+    for path in ["../other.txt", "/other.txt", "projects/link"] {
+        let mut sender = Endpoint::start("media-source", &source, 5000);
+        write_message(
+            &mut sender.channel,
+            &OfferRequest {
+                paths: vec![path.into()],
+                ..request()
+            },
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        sender.channel.read_to_end(&mut output).unwrap();
+        assert!(output.is_empty());
+        sender.finish(false);
+    }
+}
+
+#[test]
 fn document_sender_refuses_session_state_and_only_exports_approved_document_roots() {
     let source = Tree::new();
     fs::create_dir(source.0.join("state")).unwrap();
