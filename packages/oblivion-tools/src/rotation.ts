@@ -34,7 +34,7 @@ export function rotationResult(status: number, body: string): RotationResult {
 export async function rotate(signal: AbortSignal) {
   const token = Buffer.alloc(65)
   try {
-    const file = await open("/run/oblivion-api/token", constants.O_RDONLY | constants.O_NOFOLLOW)
+    const file = await open("/run/oblivion-network/token", constants.O_RDONLY | constants.O_NOFOLLOW)
     const size = await file.read(token).then((result) => result.bytesRead).finally(() => file.close())
     if (size !== 64 || !/^[a-f0-9]{64}$/.test(token.subarray(0, 64).toString("ascii"))) return { error: "The rotation capability is unavailable for this opening. Open this Safe with Tor first." }
     // The fixed private gateway is reached directly. User proxy variables must
