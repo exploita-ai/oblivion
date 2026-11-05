@@ -102,14 +102,16 @@ impl Repository {
         if !self.staged(id)? { return Ok(()) }
         let directory = self.pending(id);
         private_directory(&directory, false)?;
-        let has_volume = directory.join("volume.luks").try_exists().map_err(|_| Error("restore_cleanup_required"))?;
+        let volume = directory.join("volume.luks");
+        let has_volume = volume.try_exists().map_err(|_| Error("restore_cleanup_required"))?;
         if has_volume { read_record(&directory, id)?; }
         let mut files = Vec::new();
         let mut profile = None;
         for entry in fs::read_dir(&directory).map_err(|_| Error("restore_cleanup_required"))? {
             let entry = entry.map_err(|_| Error("restore_cleanup_required"))?;
             match entry.file_name().to_str() {
-                Some("record.json" | "record.pending" | "volume.luks" | "title") => { trusted_file(&entry.path())?; files.push(entry.path()); }
+                Some("volume.luks") => { trusted_file(&entry.path())?; }
+                Some("record.json" | "record.pending" | "title") => { trusted_file(&entry.path())?; files.push(entry.path()); }
                 Some("profile") => {
                     private_directory(&entry.path(), false)?;
                     for child in fs::read_dir(entry.path()).map_err(|_| Error("restore_cleanup_required"))? {
@@ -122,6 +124,9 @@ impl Repository {
                 _ => return Err(Error("restore_cleanup_required")),
             }
         }
+        if has_volume { fs::remove_file(volume).map_err(|_| Error("restore_cleanup_required"))?; }
+        // A retry can observe a previous unlink before it reached disk.
+        sync(&directory)?;
         for file in files { fs::remove_file(file).map_err(|_| Error("restore_cleanup_required"))?; }
         if let Some(profile) = profile { fs::remove_dir(profile).map_err(|_| Error("restore_cleanup_required"))?; }
         fs::remove_dir(directory).map_err(|_| Error("restore_cleanup_required"))?;
