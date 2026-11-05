@@ -4,6 +4,7 @@ import { theme } from "./theme"
 import { createManagerClipboard } from "./clipboard"
 import { SafeManager } from "./safe-manager"
 import { createNativeFileClient } from "./native-file-process"
+import { createNativeUsbClient } from "./native-usb"
 import { Startup } from "./startup"
 import { chooseLiveStorage, nativeLauncher, nativeOverlay, nativePreview, readNativeJson, readNativeStatus, reportNativeActivity, statusReader, type NativeRuntime } from "./native-control"
 
@@ -37,8 +38,10 @@ async function launch(args: string[]) {
 }
 
 const fileClient = { current: createNativeFileClient(nativeLauncher()) }
+const usb = liveStorage ? createNativeUsbClient(nativeLauncher()) : undefined
 const runtime: NativeRuntime = demonstration ? nativePreview(exit) : {
   get files() { return fileClient.current },
+  usb,
   status: statusReader((initial) => readNativeStatus(nativeLauncher(), initial && !overlay ? 400_000 : 10_000)),
   query: (args) => readNativeJson(nativeLauncher(), args),
   activity: (input) => reportNativeActivity(nativeLauncher(), input),
@@ -46,10 +49,15 @@ const runtime: NativeRuntime = demonstration ? nativePreview(exit) : {
   ...(liveStorage && !overlay ? { chooseLiveStorage: () => chooseLiveStorage(fileClient.current, launch, exit,
     () => { fileClient.current = createNativeFileClient(nativeLauncher()) }) } : {}),
   async exit() {
+    const usbClosed = await usb?.close().then(() => true, () => false) ?? true
     await fileClient.current.close()
-    if (overlay) { exit(); return }
+    if (overlay) {
+      if (!usbClosed) throw new Error("USB removal was not confirmed. Check the runtime before continuing.")
+      exit(); return
+    }
     const result = await launch(process.env.OBLIVION_RUNTIME_MODE === "desktop" ? ["runtime", "stop"] : ["lock"])
     if (result !== 0) throw new Error("Oblivion could not lock cleanly. Check the runtime before exiting.")
+    if (!usbClosed) throw new Error("Oblivion is locked. USB removal could not be confirmed.")
     exit()
   },
 }

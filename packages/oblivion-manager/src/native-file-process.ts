@@ -41,7 +41,7 @@ export function createNativeFileClient(launcher: string, schedule: Schedule = (m
         stopping = (async () => {
           if (exited) return
           try { child.stdin.write(JSON.stringify({ action: "cancel", operation_id: request.identity.operation_id }) + "\n"); await child.stdin.end() } catch { /* EOF is also a cancellation boundary. */ }
-          if (await within(10_000)) return
+          if (await within(request.args.includes("--usb") ? 85_000 : 10_000)) return
           child.kill("SIGTERM")
           if (await within(2_000)) return
           child.kill("SIGKILL")

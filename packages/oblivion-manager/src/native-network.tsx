@@ -1,12 +1,12 @@
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
-import { z } from "zod"
 import { ActionBar } from "./action-bar"
 import { Menu } from "./menu"
 import { PageHeader } from "./page-header"
 import { FormView } from "./form"
 import { capacity, nativeStatus, type NativeRuntime, type NativeStatus } from "./native-control"
 import { theme } from "./theme"
+import { liveMedia, type LiveDevice } from "./native-usb"
 
 export type NetworkObservation = { safe: string; state: NativeStatus; received: number }
 
@@ -148,18 +148,8 @@ export function NativeSystem(props: { state?: NativeStatus; live?: NativeRuntime
   </box>
 }
 
-const liveMedia = z.object({
-  version: z.literal(1),
-  devices: z.array(z.object({
-    id: z.string().regex(/^[0-9a-f]{64}$/),
-    name: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
-    bytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-    read_only: z.boolean(),
-  })).max(64),
-})
-
 function LiveMedia(props: { runtime: NativeRuntime }) {
-  const [devices, setDevices] = createSignal<z.infer<typeof liveMedia>["devices"]>()
+  const [devices, setDevices] = createSignal<LiveDevice[]>()
   const [reading, setReading] = createSignal(false)
   let stopped = false
   async function refresh() {

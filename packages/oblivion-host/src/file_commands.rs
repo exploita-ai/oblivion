@@ -9,7 +9,7 @@ use oblivion_transfer::native_files::{
     Action, Context, Direction, Request, Status, TransfersPage, TransfersQuery,
 };
 use oblivion_transfer::selection::{self, Plan};
-use oblivion_transfer::stream::{PreparedDownload, PreparedUpload};
+use oblivion_transfer::stream::{PreparedDownload, PreparedMediaImport, PreparedUpload};
 use oblivion_transfer::{stream, Receipt};
 use serde_json::json;
 use std::fs::File;
@@ -116,6 +116,7 @@ pub fn run(command: CopyCommand) -> control::Result<i32> {
     } = command;
     let exporting = matches!(&selection, CopyInput::Download { .. });
     let selection = match selection {
+        CopyInput::Media { device, sources } => CopySelection::Media { device, sources },
         CopyInput::Upload(sources) => {
             let sources = sources
                 .iter()
@@ -187,6 +188,7 @@ pub fn run(command: CopyCommand) -> control::Result<i32> {
 
 enum CopySelection {
     Upload(Vec<PathBuf>),
+    Media { device: String, sources: Vec<String> },
     Download {
         selected: Vec<String>,
         destination: PathBuf,
@@ -199,6 +201,7 @@ impl CopySelection {
             Self::Upload(sources) if sources.len() == 1 => {
                 sources[0].file_name().and_then(|name| name.to_str())
             }
+            Self::Media { sources, .. } if sources.len() == 1 => sources[0].rsplit('/').next(),
             Self::Download { selected, .. } if selected.len() == 1 => {
                 selected[0].rsplit('/').next()
             }
@@ -217,6 +220,7 @@ impl CopySelection {
 
 enum PreparedCopy {
     Upload(PreparedUpload),
+    Media(PreparedMediaImport<Channel>),
     Download(PreparedDownload<Channel>),
 }
 
@@ -224,12 +228,14 @@ impl PreparedCopy {
     fn plan(&self) -> &Plan {
         match self {
             Self::Upload(prepared) => prepared.plan(),
+            Self::Media(prepared) => prepared.plan(),
             Self::Download(prepared) => prepared.plan(),
         }
     }
     fn summary(&self) -> std::io::Result<Summary> {
         match self {
             Self::Upload(prepared) => prepared.summary(),
+            Self::Media(prepared) => prepared.summary(),
             Self::Download(prepared) => prepared.summary(),
         }
     }
@@ -263,6 +269,7 @@ fn copy(
     // Retain the exact client even if its request or source preparation fails.
     // Dropping its private lease is the last-resort revocation on process death.
     let mut attachment = None;
+    let mut media = None;
     let result = (|| -> control::Result<Copied> {
         let prepared = match &selection {
             CopySelection::Upload(sources) => PreparedCopy::Upload(PreparedUpload::prepare(
@@ -274,6 +281,15 @@ fn copy(
                         .map_or(Ok(()), super::file_events::Control::check)
                 },
             )?),
+            CopySelection::Media { device, sources } => {
+                let source = super::live_media_commands::Source::open(&opening, device)?;
+                let mut channel = source.channel(Duration::from_secs(15 * 60))?;
+                media = Some(source);
+                if let Some(events) = &events {
+                    channel.watch(events.watch()?);
+                }
+                PreparedCopy::Media(PreparedMediaImport::prepare(channel, sources, context.clone())?)
+            }
             CopySelection::Download {
                 selected,
                 destination,
@@ -317,23 +333,27 @@ fn copy(
             }
             console_progress(phase, bytes, summary.bytes, &mut last_progress)
         };
+        let import = || {
+            // Only a reviewed manifest can acquire the import destination.
+            let request = Request::Import {
+                id: context.id.clone(),
+                safe_id: context.safe_id.clone(),
+                opening: context.opening.clone(),
+                name: context.name.clone(),
+            };
+            file_channel(&opening, &request, watch, &mut attachment)
+        };
         let receipt = match prepared {
-            PreparedCopy::Upload(prepared) => {
-                // The import destination is not contacted until this exact
-                // prepared manifest has received the reviewed approval.
-                let request = Request::Import {
-                    id: context.id.clone(),
-                    safe_id: context.safe_id.clone(),
-                    opening: context.opening.clone(),
-                    name: context.name.clone(),
-                };
-                let mut channel = file_channel(&opening, &request, watch, &mut attachment)?;
-                prepared.send(&mut channel, &digest, &mut observer)?
-            }
+            PreparedCopy::Upload(prepared) => prepared.send(&mut import()?, &digest, &mut observer)?,
+            PreparedCopy::Media(prepared) => prepared.send(&mut import()?, &digest, &mut observer)?,
             PreparedCopy::Download(prepared) => prepared.receive(&digest, &mut observer)?,
         };
         Ok(Copied::Complete(receipt))
     })();
+    let media_cleanup = media.map(super::live_media_commands::Source::finish).transpose();
+    let media_confirmed = !matches!(&selection, CopySelection::Media { .. })
+        || media_cleanup.as_ref().is_ok_and(Option::is_some);
+    let result = media_cleanup.and(result);
     let released = if let Some((lease, client)) = attachment {
         let result = control::release_agent(&client, &opening.safe_id);
         drop(lease);
@@ -342,7 +362,7 @@ fn copy(
         Ok(())
     };
     if let Some(events) = &mut events {
-        let outcome = if released.is_ok() {
+        let outcome = if released.is_ok() && media_confirmed {
             match &result {
                 Ok(Copied::Complete(_)) if events.check().is_ok() => Outcome::Completed,
                 Ok(Copied::Cancelled) => Outcome::CancelledBeforeCopy,
@@ -412,11 +432,13 @@ fn review(
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
+        CopySelection::Media { sources, .. } => sources.clone(),
         CopySelection::Download { selected, .. } => selected.clone(),
     };
     let destination = match selection {
         CopySelection::Download { destination, .. } => Some(destination.as_path()),
         CopySelection::Upload(_) => None,
+        CopySelection::Media { .. } => None,
     };
     oblivion_cli::file_review::write(
         &mut std::io::stderr(),

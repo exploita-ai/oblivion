@@ -277,15 +277,7 @@ pub fn execute<B: Backend>(
         };
         page.validate(&request)?;
         if command.json {
-            let entries=page.entries.iter().map(|entry|json!({
-                "name":entry.name,"path":if page.path.is_empty(){entry.name.clone()}else{format!("{}/{}",page.path,entry.name)},
-                "kind":if entry.directory{"directory"}else{"file"},"bytes":entry.bytes
-            })).collect::<Vec<_>>();
-            writeln!(
-                output,
-                "{}",
-                json!({"path":page.path,"entries":entries,"next_cursor":page.next,"skipped":page.skipped})
-            )?;
+            write_directory_page(output, &page)?;
         } else {
             for entry in page.entries {
                 writeln!(
@@ -352,4 +344,19 @@ pub fn execute<B: Backend>(
         CommandAction::List(_) => unreachable!("listing handled before opening admission"),
     }
     Ok(0)
+}
+
+pub fn write_directory_page(output: &mut impl Write, page: &browser::Page) -> std::io::Result<()> {
+    let entries = page.entries.iter().map(|entry| json!({
+        "name": entry.name,
+        "path": if page.path.is_empty() { entry.name.clone() } else { format!("{}/{}", page.path, entry.name) },
+        "kind": if entry.directory { "directory" } else { "file" },
+        "bytes": entry.bytes,
+    })).collect::<Vec<_>>();
+    writeln!(output, "{}", json!({
+        "path": page.path,
+        "entries": entries,
+        "next_cursor": page.next,
+        "skipped": page.skipped,
+    }))
 }

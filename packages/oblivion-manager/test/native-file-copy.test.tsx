@@ -108,6 +108,54 @@ async function prepare(app: Awaited<ReturnType<typeof testRender>>, state: Await
   await visible(app, "Preparing recursive copy review")
 }
 
+test("USB selection waits for browser detachment before preparing the reviewed import", async () => {
+  const state = await fixture()
+  const device = { id: "a".repeat(64), name: "sdb1", bytes: 1024 ** 3, read_only: false }
+  const released = Promise.withResolvers<void>()
+  const requested = Promise.withResolvers<void>()
+  const runtime = {
+    ...state.runtime,
+    async query(args: string[]) {
+      if (args[0] === "runtime") return { version: 1, devices: [device] }
+      return state.runtime.query(args)
+    },
+    usb: {
+      open(id: string, selected: string, nonce: string) {
+        expect([id, selected, nonce]).toEqual([safe, device.id, opening])
+        return {
+          async page() { return { path: "", next_cursor: null, entries: [{ name: "notes.md", path: "notes.md", kind: "file", bytes: 12 }] } },
+          close() { requested.resolve(); return released.promise },
+        }
+      },
+      async close() {},
+    },
+  }
+  const app = await testRender(() => <NativeFiles safe={safe} name="Research" opening={opening} transfers={state.transfers} runtime={runtime} run={state.run} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await app.renderOnce()
+    await app.mockInput.pressArrow("down")
+    await app.mockInput.pressEnter()
+    await visible(app, "sdb1")
+    await app.mockInput.pressEnter()
+    await visible(app, "notes.md")
+    await app.mockInput.pressKey(" ")
+    await visible(app, "1 selected")
+    await app.mockInput.pressKey("c")
+    await visible(app, "Disconnecting USB device")
+    await requested.promise
+    expect(state.requests).toHaveLength(0)
+    released.resolve()
+    await visible(app, "Name the imported copy")
+    await app.mockInput.pressEnter()
+    await app.mockInput.pressEnter()
+    await visible(app, "Preparing recursive copy review")
+    await state.started
+    expect(state.requests[0]?.args).toContain(device.id)
+    expect(state.requests[0]?.sources).toEqual(["notes.md"])
+    expect(state.approvals).toHaveLength(0)
+  } finally { released.resolve(); await app.dispose(); await rm(state.root, { recursive: true }) }
+})
+
 test.each([[80, 24], [160, 50]])("recursive manifest approval and actual progress remain in the rendered Files page at %ix%i", async (width, height) => {
   const state = await fixture()
   const app = await testRender(() => <NativeFiles safe={safe} name="Research" opening={state.nonce()} transfers={state.transfers} runtime={state.runtime} run={state.run} back={() => {}} />, { width, height, kittyKeyboard: true })

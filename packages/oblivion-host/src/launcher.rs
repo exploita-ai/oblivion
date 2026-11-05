@@ -20,6 +20,7 @@ mod file_commands;
 mod file_events;
 mod idle_commands;
 mod init_commands;
+mod live_media_commands;
 mod native_overlay;
 mod network_commands;
 mod proxy_commands;
@@ -58,6 +59,14 @@ fn run() -> control::Result<i32> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     let command = command::parse(&args, oblivion_cli::file_copy::parse, oblivion_cli::share::parse)?;
+    let live_media = match &command {
+        command::Command::Files(command::Files::MediaBrowse(_)) => true,
+        command::Command::Files(command::Files::Copy(command)) => command.needs_live_media(),
+        _ => false,
+    };
+    if live_media && oblivion_host::native_runtime::mode()? != oblivion_host::native_runtime::Mode::Live {
+        return Err("USB transfers are available only on Oblivion Live".into());
+    }
     match &command {
         command::Command::Help => {
             print!("{}", command::HELP);
@@ -185,6 +194,7 @@ fn run() -> control::Result<i32> {
             file_commands::inspect(command)
         }
         command::Command::Files(command::Files::Copy(command)) => file_commands::run(command),
+        command::Command::Files(command::Files::MediaBrowse(command)) => live_media_commands::browse(command),
         command::Command::Share(command) => share_commands::run(command),
         command::Command::Help
         | command::Command::Version

@@ -49,6 +49,22 @@ fn entrypoints_and_runtime_grammar_are_shared_without_platform_effects() {
 }
 
 #[test]
+fn usb_transfer_grammar_accepts_only_a_device_identity_and_relative_sources() {
+    let device = "a".repeat(64);
+    let opening = "b".repeat(32);
+    assert!(matches!(parse(&["files", "usb-browse", "--safe", "GB", "--usb", &device, "--opening", &opening]).unwrap(),
+        Command::Files(Files::MediaBrowse(command)) if command.device == device && command.opening == opening));
+    let parse_copy = |values: &[&str]| oblivion_cli::file_copy::parse(&args(values));
+    assert!(matches!(parse_copy(&["import", "--safe", "GB", "--usb", &device, "--source", "notes/report.md"]).unwrap().selection,
+        oblivion_cli::file_copy::CopyInput::Media { device: id, sources } if id == device && sources == ["notes/report.md"]));
+    for path in ["/etc/passwd", "../secret", ""] {
+        assert!(parse_copy(&["import", "--safe", "GB", "--usb", &device, "--source", path]).is_err());
+    }
+    assert!(parse_copy(&["import", "--safe", "GB", "--usb", "/dev/sdb1", "--source", "file"]).is_err());
+    assert!(parse_copy(&["export", "--safe", "GB", "--usb", &device, "--path", "workspace/file", "--destination", "/tmp"]).is_err());
+}
+
+#[test]
 fn all_control_families_dispatch_to_their_existing_typed_grammar() {
     assert!(matches!(
         parse(&["status", "--json"]).unwrap(),

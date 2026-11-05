@@ -20,6 +20,7 @@ pub fn parse(args: &[String]) -> Result<CopyCommand> {
     let mut operation_id = None;
     let mut expected_opening = None;
     let mut destination = None;
+    let mut device = None;
     let mut events_output = false;
     let mut confirmed = false;
     let mut options = args.iter().skip(1);
@@ -58,6 +59,9 @@ pub fn parse(args: &[String]) -> Result<CopyCommand> {
                 );
             }
             "--source" => sources.push(options.next().ok_or("Missing source path")?.clone()),
+            "--usb" if device.is_none() => {
+                device = Some(options.next().ok_or("Missing USB device ID")?.clone());
+            }
             "--path" => selected.push(options.next().ok_or("Missing Safe path")?.clone()),
             "--name" => {
                 if name.is_some() {
@@ -88,6 +92,7 @@ pub fn parse(args: &[String]) -> Result<CopyCommand> {
             && (!paths.is_empty()
                 || selected.is_empty()
                 || !sources.is_empty()
+                || device.is_some()
                 || destination.is_none())
     {
         return Err("Use files import --safe SAFE --source PATH [--source PATH...], or files export --safe SAFE --path workspace/PATH [--path imports/PATH...] --destination DIRECTORY".into());
@@ -117,7 +122,24 @@ pub fn parse(args: &[String]) -> Result<CopyCommand> {
             .map_err(|_| "Choose a valid destination name with --name")?;
     }
     let selection = if operation == "import" {
-        CopyInput::Upload(sources)
+        match device {
+            Some(device) => {
+                validate_device(&device)?;
+                for path in &sources {
+                    if path.is_empty() {
+                        return Err("Choose a relative file or folder on the USB".into());
+                    }
+                    oblivion_transfer::browser::Request {
+                        path: path.clone(),
+                        after: None,
+                        limit: 1,
+                    }
+                    .validate()?;
+                }
+                CopyInput::Media { device, sources }
+            }
+            None => CopyInput::Upload(sources),
+        }
     } else {
         selection::validate_paths(&selected)?;
         if selected
@@ -154,8 +176,55 @@ pub struct CopyCommand {
     pub confirmed: bool,
 }
 
+impl CopyCommand {
+    pub fn needs_live_media(&self) -> bool {
+        matches!(&self.selection, CopyInput::Media { .. })
+    }
+}
+
+pub struct MediaBrowse {
+    pub safe: String,
+    pub device: String,
+    pub opening: String,
+}
+
+impl MediaBrowse {
+    pub fn parse(args: &[String]) -> Result<Self> {
+        let mut safe = None;
+        let mut device = None;
+        let mut opening = None;
+        let mut args = args.iter();
+        while let Some(key) = args.next() {
+            let target = match key.as_str() {
+                "--safe" => &mut safe,
+                "--usb" => &mut device,
+                "--opening" => &mut opening,
+                _ => return Err("Unknown USB browser option".into()),
+            };
+            if target.is_some() {
+                return Err("Duplicate USB browser option".into());
+            }
+            *target = Some(args.next().ok_or("Missing USB browser value")?.clone());
+        }
+        let safe = safe.ok_or("Choose a Safe with --safe NAME")?;
+        oblivion_wire::session_title::validate(&safe)?;
+        let device = device.ok_or("Choose a USB device with --usb ID")?;
+        validate_device(&device)?;
+        let opening = opening.filter(|value| valid_id(value)).ok_or("Invalid opening ID")?;
+        Ok(Self { safe, device, opening })
+    }
+}
+
+fn validate_device(device: &str) -> Result<()> {
+    if !oblivion_wire::live_media::valid_device_id(device) {
+        return Err("Invalid USB device ID".into());
+    }
+    Ok(())
+}
+
 pub enum CopyInput {
     Upload(Vec<String>),
+    Media { device: String, sources: Vec<String> },
     Download {
         selected: Vec<String>,
         destination: String,

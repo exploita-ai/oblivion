@@ -2,6 +2,7 @@ import { z } from "zod"
 import { managerLauncherPath, systemManagerTarget } from "./manager-target"
 import type { FileOutcome } from "./native-file-transfers"
 import type { FileEvent, NativeFileClient, RunningFileCopy } from "./native-file-events"
+import type { NativeUsbClient } from "./native-usb"
 
 const opening = z.object({ slot: z.number().int().min(0).max(31), safe_id: z.string().regex(/^[a-f0-9]{32}$/), nonce: z.string().regex(/^[a-f0-9]{32}$/) })
 export const nativeActivity = z.object({ host: z.string().regex(/^[a-f0-9]{32}$/), safe: opening.nullable() })
@@ -59,6 +60,7 @@ export type NativeRuntime = {
   run: (args: string[]) => Promise<number>
   query: (args: string[]) => Promise<unknown>
   files: NativeFileClient
+  usb?: NativeUsbClient
   activity: (input: z.infer<typeof nativeActivity>) => Promise<void>
   chooseLiveStorage?: () => Promise<void>
   exit: () => Promise<void> | void

@@ -2,7 +2,7 @@
 //! supply typed parsers; the common dispatcher never passes unparsed argv on.
 use crate::controller::Result;
 use crate::{
-    backup, child_task, controller, family_password, files, network, proxy, proxy_profiles, run,
+    backup, child_task, controller, family_password, file_copy, files, network, proxy, proxy_profiles, run,
     safe, settings, shell, storage,
 };
 
@@ -36,6 +36,7 @@ pub enum Command<F, S> {
 pub enum Files<F> {
     Inspect(files::Command),
     Copy(F),
+    MediaBrowse(file_copy::MediaBrowse),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -92,6 +93,9 @@ pub fn parse<F, S>(
         }
         "safe" => Command::Safe(safe::parse(&args[1..])?),
         "backup" => Command::Backup(backup::parse(&args[1..])?),
+        "files" if args.get(1).is_some_and(|value| value == "usb-browse") => {
+            Command::Files(Files::MediaBrowse(file_copy::MediaBrowse::parse(&args[2..])?))
+        }
         "files" => Command::Files(match files::parse(&args[1..])? {
             Some(command) => Files::Inspect(command),
             None => Files::Copy(files_copy(&args[1..])?),
@@ -187,6 +191,7 @@ Desktop runtime bundles
 Files
   oblivion files list --safe SAFE [workspace/PATH] --json
   oblivion files import --safe SAFE --source PATH [--source PATH...] [--name NAME]
+  On Live, add --usb ID and use paths relative to the selected USB.
   oblivion files export --safe SAFE --path workspace/PATH [--path imports/PATH...]
                        --destination DIR [--name NAME]
   Multiple selections require --name NAME and publish one collection.
