@@ -57,6 +57,9 @@ pub fn read_message<T: for<'de> Deserialize<'de>>(
 ) -> io::Result<T> {
     let mut size = [0; 4];
     reader.read_exact(&mut size)?;
+    // Guest relays emit "failed!\n" when an endpoint exits with an error.
+    // Reject its prefix immediately so an invalid frame cannot prolong the read.
+    require(&size != b"fail", "transfer_peer_failed")?;
     let size = u32::from_be_bytes(size) as usize;
     require(size > 0 && size <= limit, "message_limit")?;
     let mut bytes = vec![0; size];

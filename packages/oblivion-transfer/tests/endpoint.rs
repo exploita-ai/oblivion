@@ -23,6 +23,20 @@ const LIMITS: Limits = Limits {
 };
 
 #[test]
+fn framing_distinguishes_a_guest_failure_from_an_invalid_length() {
+    let mut failure = &b"failed!\n"[..];
+    assert_eq!(
+        read_message::<Receipt>(&mut failure, 1024).unwrap_err().to_string(),
+        "transfer_peer_failed"
+    );
+    assert_eq!(failure, b"ed!\n");
+    assert_eq!(
+        read_message::<Receipt>(&mut &b"bad!"[..], 1024).unwrap_err().to_string(),
+        "message_limit"
+    );
+}
+
+#[test]
 fn unavailable_directory_replies_and_keeps_the_document_channel_usable() {
     use oblivion_transfer::browser::{Request, Response};
     use oblivion_transfer::endpoint::SourceRequest;
