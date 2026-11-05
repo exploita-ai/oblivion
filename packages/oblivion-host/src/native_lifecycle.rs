@@ -1,7 +1,7 @@
 //! Native process intents are bound to one runtime generation. Backend signals
 //! are authorized only by the supervisor's unreaped Child, never these records.
 use super::{
-    Cleanup, Removal, Settings, identity, private_directory, private_lock, random_id, sidecar,
+    Cleanup, PrivateLock, Removal, Settings, identity, private_directory, private_lock, random_id, sidecar,
     try_lock, write_record,
 };
 use crate::control::Result;
@@ -122,7 +122,7 @@ impl Registry {
         })
     }
 
-    fn lock(&self) -> Result<fs::File> {
+    fn lock(&self) -> Result<PrivateLock> {
         let file = private_lock(&self.root.join("lock"))?;
         if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) } != 0 {
             return Err(std::io::Error::last_os_error().into());
@@ -890,7 +890,7 @@ pub(super) fn recovered(settings: &Settings) -> Result<()> {
 /// Atomic removal holds the startup and backend locks before taking this
 /// inventory. Keep the registry lock inode so old callers cannot split it.
 pub(super) struct AtomicCleanup {
-    _lock: Option<fs::File>,
+    _lock: Option<PrivateLock>,
     plan: Cleanup,
 }
 

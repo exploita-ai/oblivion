@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -701,7 +701,7 @@ fn installed_settings(root: &Path) -> Result<Option<Settings>> {
     }
 }
 
-fn stopped_locks(socket: &Path) -> Result<Option<(fs::File, fs::File)>> {
+fn stopped_locks(socket: &Path) -> Result<Option<(PrivateLock, PrivateLock)>> {
     let startup = private_lock(&sidecar(socket, ".startup.lock"))?;
     let running = private_lock(&sidecar(socket, ".lock"))?;
     if !try_lock(&startup)? || !try_lock(&running)? {
@@ -993,7 +993,7 @@ impl DesktopPaths {
         Ok(previous.is_none() || desktop_owner(root, self, previous.as_ref(), true)?)
     }
 
-    fn lock_installation(&self) -> Result<fs::File> {
+    fn lock_installation(&self) -> Result<PrivateLock> {
         private_directory(&self.prefix)?;
         let lock = private_lock(&self.prefix.join("install.lock"))?;
         if !try_lock(&lock)? {
@@ -2212,7 +2212,22 @@ fn remove_disconnected_sockets(disconnected: Vec<(PathBuf, u64, u64)>) -> Result
     Ok(())
 }
 
-fn private_lock(path: &Path) -> Result<fs::File> {
+struct PrivateLock(fs::File);
+
+impl AsRawFd for PrivateLock {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+impl Drop for PrivateLock {
+    fn drop(&mut self) {
+        // A concurrent fork can keep the open file description alive until exec.
+        unsafe { libc::flock(self.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+fn private_lock(path: &Path) -> Result<PrivateLock> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -2228,10 +2243,10 @@ fn private_lock(path: &Path) -> Result<fs::File> {
     {
         return Err("unsafe_runtime_lock".into());
     }
-    Ok(file)
+    Ok(PrivateLock(file))
 }
 
-fn try_lock(file: &fs::File) -> Result<bool> {
+fn try_lock(file: &PrivateLock) -> Result<bool> {
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
         return Ok(true);
     }
@@ -3035,10 +3050,13 @@ mod tests {
         let path = fixture.0.join("runtime.lock");
         let first = private_lock(&path).unwrap();
         assert!(try_lock(&first).unwrap());
+        // A child before exec can still hold a reference to the same flock.
+        let inherited = first.0.try_clone().unwrap();
         let next = private_lock(&path).unwrap();
         assert!(!try_lock(&next).unwrap());
         drop(first);
         assert!(try_lock(&next).unwrap());
+        drop(inherited);
         fs::hard_link(&path, fixture.0.join("another-lock")).unwrap();
         assert!(private_lock(&path).is_err());
     }
