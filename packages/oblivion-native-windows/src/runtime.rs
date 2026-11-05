@@ -186,13 +186,33 @@ pub fn main() -> Result<()> {
             Data::Existing,
             &mut resources,
         )?,
-        (Some("install"), [option, mib]) if option == "--data-mib" => {
+        (Some("initialize"), [mib_option, mib, volume_option, volume, file_option, file])
+            if mib_option == "--data-mib"
+                && volume_option == "--data-volume"
+                && file_option == "--data-file-id" =>
+        {
             let bytes = mib
                 .to_str()
                 .and_then(|value| value.parse::<u64>().ok())
                 .and_then(|value| value.checked_mul(1024 * 1024))
                 .ok_or(Error("invalid_runtime_disk_size"))?;
-            install_for(config, lifetime, client, storage, bytes, &mut resources)?;
+            let volume = volume
+                .to_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or(Error("invalid_runtime_disk_identity"))?;
+            let file = initialization_file_id(
+                file.to_str()
+                    .ok_or(Error("invalid_runtime_disk_identity"))?,
+            )?;
+            initialize_for(
+                config,
+                lifetime,
+                client,
+                storage,
+                bytes,
+                (volume, file),
+                &mut resources,
+            )?;
         }
         _ => return Err(Error("invalid_arguments")),
     }
@@ -200,14 +220,15 @@ pub fn main() -> Result<()> {
     Ok(())
 }
 
-/// Only this fresh creation path can grant guest initialization. Ordinary run
-/// never manufactures authority from a configuration flag or an existing file.
-fn install_for(
+/// Only the installer's protected Pending identity may resume initialization.
+/// Ordinary run never manufactures authority from a path or VHDX header.
+fn initialize_for(
     config: RuntimeConfig,
     lifetime: Lifetime,
     client: Identity,
     storage: Identity,
     bytes: u64,
+    identity: (u64, [u8; 16]),
     resources: &mut resources::Journal,
 ) -> Result<()> {
     lifetime.check()?;
@@ -215,8 +236,15 @@ fn install_for(
     if !available(&hcs::capabilities()?) {
         return Err(Error("hcs_nested_virtualization_required"));
     }
-    let created = crate::disk::create(&config.disks[1].path, &config.runtime_id, bytes, &storage)?;
+    let created = crate::disk::resume(
+        &config.disks[1].path,
+        &config.runtime_id,
+        bytes,
+        identity,
+        &storage,
+    )?;
     let evidence = created.evidence()?;
+    evidence.verify()?;
     let data = Data::NewDisk {
         runtime_id: evidence.runtime_id().to_owned(),
         bytes: evidence.bytes(),
@@ -224,6 +252,15 @@ fn install_for(
     let result = run_with_data(config, lifetime, client, storage, data, resources);
     drop(created);
     result
+}
+
+fn initialization_file_id(value: &str) -> Result<[u8; 16]> {
+    if !oblivion_wire::control::valid_id(value) || value.bytes().all(|byte| byte == b'0') {
+        return Err(Error("invalid_runtime_disk_identity"));
+    }
+    u128::from_str_radix(value, 16)
+        .map(u128::to_be_bytes)
+        .map_err(|_| Error("invalid_runtime_disk_identity"))
 }
 
 fn run_with_data(
@@ -544,4 +581,30 @@ fn finish_workers(
 
 fn report(event: &'static str) {
     eprintln!("{}", serde_json::json!({"event":event}));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::initialization_file_id;
+
+    #[test]
+    fn initialization_file_identity_is_exact_opaque_native_bytes() {
+        let bytes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 255];
+        assert_eq!(
+            initialization_file_id("000102030405060708090a0b0c0d0eff").unwrap(),
+            bytes
+        );
+        for invalid in [
+            "",
+            "1",
+            "00000000000000000000000000000000",
+            "000102030405060708090A0b0c0d0eff",
+            "000102030405060708090a0b0c0d0eff.extra",
+        ] {
+            assert_eq!(
+                initialization_file_id(invalid).unwrap_err().0,
+                "invalid_runtime_disk_identity"
+            );
+        }
+    }
 }

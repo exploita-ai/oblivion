@@ -5,7 +5,7 @@ use crate::client::{Channel, Client};
 use crate::files::{self, CreationParent, Executable};
 use crate::private::{self, Endpoint, Pipe, Purpose};
 use crate::security::Identity;
-use crate::{Error, Result, resources};
+use crate::{Error, Result, disk, resources};
 use oblivion_wire::agent;
 use oblivion_wire::control::{Operation, Request, valid_id};
 use oblivion_wire::runtime_auth::Data;
@@ -303,29 +303,43 @@ struct Record {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 enum Action {
     Join,
-    JoinInit { bytes: u64 },
+    JoinInit {
+        bytes: u64,
+        volume: u64,
+        file: [u8; 16],
+    },
     Status,
     Resident,
     Stop,
+    CancelInitialization,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum Boot {
     Existing,
-    Initialize { bytes: u64 },
+    Initialize {
+        bytes: u64,
+        volume: u64,
+        file: [u8; 16],
+    },
 }
 
 impl Boot {
     fn validate(self, runtime_id: &str) -> Result<()> {
         match self {
             Self::Existing => Ok(()),
-            Self::Initialize { bytes } => Data::NewDisk {
-                runtime_id: runtime_id.into(),
-                bytes,
+            Self::Initialize { bytes, file, .. } => {
+                if file == [0; 16] {
+                    return Err(Error("invalid_runtime_data_authority"));
+                }
+                Data::NewDisk {
+                    runtime_id: runtime_id.into(),
+                    bytes,
+                }
+                .validate()
+                .map_err(|_| Error("invalid_runtime_data_authority"))
             }
-            .validate()
-            .map_err(|_| Error("invalid_runtime_data_authority")),
         }
     }
     fn admit(self, action: Action, phase: Phase, joined: bool, started: bool) -> Result<()> {
@@ -336,11 +350,19 @@ impl Boot {
                 }
                 Ok(())
             }
-            Action::JoinInit { bytes }
-                if phase == Phase::Starting
-                    && !joined
-                    && !started
-                    && self == (Self::Initialize { bytes }) =>
+            Action::JoinInit {
+                bytes,
+                volume,
+                file,
+            } if phase == Phase::Starting
+                && !joined
+                && !started
+                && self
+                    == (Self::Initialize {
+                        bytes,
+                        volume,
+                        file,
+                    }) =>
             {
                 Ok(())
             }
@@ -407,23 +429,33 @@ impl Lease {
 /// A private startup mutex serializes only journal/election. It is released
 /// before boot/status RPCs, so a slow controller never holds admission locks.
 pub fn acquire(settings: &Settings, stop: Arc<AtomicBool>, deadline: Instant) -> Result<Lease> {
-    acquire_as(settings, Boot::Existing, stop, deadline)
+    acquire_as(settings, Boot::Existing, None, stop, deadline)
 }
 
 pub fn initialize(
     settings: &Settings,
-    bytes: u64,
+    evidence: &disk::Evidence<'_>,
     stop: Arc<AtomicBool>,
     deadline: Instant,
 ) -> Result<Lease> {
-    let boot = Boot::Initialize { bytes };
+    evidence.verify()?;
+    if evidence.runtime_id() != settings.runtime_id() {
+        return Err(Error("invalid_runtime_data_authority"));
+    }
+    let (volume, file) = evidence.file_identity();
+    let boot = Boot::Initialize {
+        bytes: evidence.bytes(),
+        volume,
+        file,
+    };
     boot.validate(settings.runtime_id())?;
-    acquire_as(settings, boot, stop, deadline)
+    acquire_as(settings, boot, Some(evidence), stop, deadline)
 }
 
 fn acquire_as(
     settings: &Settings,
     boot: Boot,
+    evidence: Option<&disk::Evidence<'_>>,
     stop: Arc<AtomicBool>,
     deadline: Instant,
 ) -> Result<Lease> {
@@ -440,10 +472,15 @@ fn acquire_as(
         }) {
             return Err(Error("runtime_initialization_unavailable"));
         }
-        match std::fs::symlink_metadata(&verified.data) {
-            Ok(_) => return Err(Error("runtime_data_already_exists")),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => return Err(Error("runtime_data_unavailable")),
+        let evidence = evidence.ok_or(Error("invalid_runtime_data_authority"))?;
+        evidence.verify()?;
+        if evidence.path()
+            != verified
+                .data
+                .to_str()
+                .ok_or(Error("invalid_supervisor_path"))?
+        {
+            return Err(Error("invalid_runtime_data_authority"));
         }
     }
     let starting = previous
@@ -468,6 +505,9 @@ fn acquire_as(
             })?;
             drop(journal);
             verified.helper.verify()?;
+            if let Some(evidence) = evidence {
+                evidence.verify()?;
+            }
             let result = Command::new(verified.helper.path())
                 .args(["supervise", "--config"])
                 .arg(&settings.config)
@@ -523,7 +563,15 @@ fn acquire_as(
             settings,
             match boot {
                 Boot::Existing => Action::Join,
-                Boot::Initialize { bytes } => Action::JoinInit { bytes },
+                Boot::Initialize {
+                    bytes,
+                    volume,
+                    file,
+                } => Action::JoinInit {
+                    bytes,
+                    volume,
+                    file,
+                },
             },
             &generation,
             Arc::clone(&stop),
@@ -587,6 +635,56 @@ pub fn stop(settings: &Settings, cancelled: Arc<AtomicBool>, deadline: Instant) 
         return Err(Error("runtime_recovery_required"));
     }
     Ok(())
+}
+
+/// The Pending installer owns the setup lock and has not published a usable
+/// installation. It can retire its previous bootstrap, then reconcile only the
+/// recorded generation before obtaining another initialization lease.
+pub fn prepare_setup(settings: &Settings, stop: Arc<AtomicBool>, deadline: Instant) -> Result<()> {
+    let identity = settings.storage_identity();
+    let election = Election::acquire(settings.runtime_id(), &identity, &stop, deadline)?;
+    let Some(record) = Journal::read(settings, &identity)? else {
+        return Ok(());
+    };
+    if record.phase == Phase::Stopped {
+        drop(election);
+        drop(stopped(settings, stop, deadline)?);
+        return Ok(());
+    }
+    if matches!(record.boot, Boot::Existing) {
+        return Err(Error("runtime_initialization_unavailable"));
+    }
+    drop(election);
+    // The reply/transport outcome never proves cleanup. Even after a lost
+    // response, wait for exclusive writer ownership before receipt recovery.
+    let _ = exchange(
+        settings,
+        Action::CancelInitialization,
+        &record.generation,
+        Arc::clone(&stop),
+        deadline.min(Instant::now() + Duration::from_secs(60)),
+        None,
+    );
+    loop {
+        check(&stop, deadline)?;
+        let election = Election::acquire(settings.runtime_id(), &identity, &stop, deadline)?;
+        match Journal::writer(settings, &identity, false) {
+            Ok(mut journal) => {
+                let current = journal.load()?.ok_or(Error("runtime_not_owned"))?;
+                if current.generation != record.generation || current.boot != record.boot {
+                    return Err(Error("runtime_generation_changed"));
+                }
+                drop(journal);
+                drop(election);
+                return recover(settings, stop, deadline);
+            }
+            Err(Error("supervision_journal_busy")) => {
+                drop(election);
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Exclusive software-maintenance authority. Windows mutex ownership belongs
@@ -834,6 +932,7 @@ pub fn supervise(settings: Settings, generation: &str) -> Result<()> {
     let mut peers: Vec<Peer> = Vec::new();
     let mut backend: Option<Backend> = None;
     let mut first_owner = false;
+    let mut cancelling_initialization = false;
     let first_deadline = Instant::now() + Duration::from_secs(10);
     let startup_deadline = Instant::now() + Duration::from_secs(390);
     let mut next_probe = Instant::now();
@@ -843,7 +942,7 @@ pub fn supervise(settings: Settings, generation: &str) -> Result<()> {
             if private::drain_failed() {
                 return Err(Error("private_pipe_cancellation_failed"));
             }
-            if peers.len() < CLIENTS {
+            if !cancelling_initialization && peers.len() < CLIENTS {
                 if let Some(pipe) =
                     endpoint.accept(&stop, Instant::now() + Duration::from_millis(1))?
                 {
@@ -851,6 +950,18 @@ pub fn supervise(settings: Settings, generation: &str) -> Result<()> {
                 }
             }
             for peer in &mut peers {
+                if cancelling_initialization {
+                    peer.lease = false;
+                    if peer.waiting {
+                        peer.closed = true;
+                        continue;
+                    }
+                    let _ = peer.poll();
+                    if peer.outbound.is_empty() {
+                        peer.closed = true;
+                    }
+                    continue;
+                }
                 let Some(message) = peer.poll() else {
                     continue;
                 };
@@ -884,6 +995,24 @@ pub fn supervise(settings: Settings, generation: &str) -> Result<()> {
                         None
                     }
                     Action::Resident => Some("runtime_closing"),
+                    Action::CancelInitialization => {
+                        if matches!(record.boot, Boot::Existing) {
+                            Some("runtime_initialization_unavailable")
+                        } else {
+                            record.phase = Phase::Recovery;
+                            record.resident = false;
+                            journal.save(&record)?;
+                            let result = backend
+                                .as_mut()
+                                .map_or(Ok(()), |backend| backend.cancel_initialization());
+                            if result.is_ok() {
+                                record.phase = Phase::Stopped;
+                            }
+                            journal.save(&record)?;
+                            cancelling_initialization = true;
+                            result.err().map(|_| "runtime_recovery_required")
+                        }
+                    }
                     Action::Stop => {
                         record.phase = Phase::StopRequested;
                         record.resident = false;
@@ -904,6 +1033,13 @@ pub fn supervise(settings: Settings, generation: &str) -> Result<()> {
                 peer.reply(&record, error, peer.lease)?;
             }
             peers.retain(|peer| !peer.closed);
+            if cancelling_initialization {
+                if peers.is_empty() {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(25));
+                continue;
+            }
             let owners = peers.iter().filter(|peer| peer.lease).count();
             if record.phase == Phase::Starting && backend.is_none() && owners > 0 {
                 backend = Some(Backend::start(
@@ -1009,7 +1145,7 @@ impl Backend {
             .arg(if matches!(boot, Boot::Existing) {
                 "run"
             } else {
-                "install"
+                "initialize"
             })
             .arg("--config")
             .arg(&settings.config)
@@ -1027,9 +1163,38 @@ impl Backend {
                 "--source-sha256",
                 &settings.binding.source_sha256,
             ]);
-        if let Boot::Initialize { bytes } = boot {
-            command.args(["--data-mib", &(bytes / (1024 * 1024)).to_string()]);
-        }
+        let initialization = match boot {
+            Boot::Existing => None,
+            Boot::Initialize {
+                bytes,
+                volume,
+                file,
+            } => {
+                let disk = disk::resume(
+                    verified
+                        .data
+                        .to_str()
+                        .ok_or(Error("invalid_supervisor_path"))?,
+                    settings.runtime_id(),
+                    bytes,
+                    (volume, file),
+                    &settings.storage_identity(),
+                )?;
+                disk.evidence()?.verify()?;
+                command.args([
+                    "--data-mib",
+                    &(bytes / (1024 * 1024)).to_string(),
+                    "--data-volume",
+                    &volume.to_string(),
+                    "--data-file-id",
+                    &file
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                ]);
+                Some(disk)
+            }
+        };
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -1037,6 +1202,7 @@ impl Backend {
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|_| Error("runtime_helper_start_failed"))?;
+        drop(initialization);
         let writer = child
             .stdin
             .take()
@@ -1115,6 +1281,17 @@ impl Backend {
     fn close_lifetime(&mut self) -> Result<()> {
         self.writer.take();
         self.wait_exit()
+    }
+
+    fn cancel_initialization(&mut self) -> Result<()> {
+        let outcome = self.close_lifetime();
+        // A process-observation error cannot release the supervisor's writer
+        // while its helper may still own HCS/HCN cleanup. The setup caller has
+        // a separate deadline; keep this owner fenced until actual child exit.
+        while !matches!(self.child.try_wait(), Ok(Some(_))) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        outcome
     }
 
     fn wait_exit(&mut self) -> Result<()> {
@@ -1590,13 +1767,21 @@ mod tests {
     }
 
     #[test]
-    fn initialization_authority_is_only_the_first_matching_starting_join() {
+    fn initialization_authority_is_only_the_first_exact_disk_starting_join() {
         let bytes = 8 * 1024 * 1024 * 1024;
-        let boot = Boot::Initialize { bytes };
-        assert!(
-            boot.admit(Action::JoinInit { bytes }, Phase::Starting, false, false)
-                .is_ok()
-        );
+        let volume = 29;
+        let file = [0x41; 16];
+        let boot = Boot::Initialize {
+            bytes,
+            volume,
+            file,
+        };
+        let action = Action::JoinInit {
+            bytes,
+            volume,
+            file,
+        };
+        assert!(boot.admit(action, Phase::Starting, false, false).is_ok());
         assert_eq!(
             boot.admit(Action::Join, Phase::Starting, false, false)
                 .unwrap_err()
@@ -1614,9 +1799,7 @@ mod tests {
             (Phase::Recovery, false, false),
         ] {
             assert_eq!(
-                boot.admit(Action::JoinInit { bytes }, phase, joined, started)
-                    .unwrap_err()
-                    .0,
+                boot.admit(action, phase, joined, started).unwrap_err().0,
                 "runtime_initialization_unavailable"
             );
         }
@@ -1627,44 +1810,129 @@ mod tests {
         );
         assert_eq!(
             Boot::Existing
-                .admit(Action::JoinInit { bytes }, Phase::Starting, false, false)
+                .admit(action, Phase::Starting, false, false)
+                .unwrap_err()
+                .0,
+            "runtime_initialization_unavailable"
+        );
+        for changed in [
+            Action::JoinInit {
+                bytes: bytes + 1024 * 1024,
+                volume,
+                file,
+            },
+            Action::JoinInit {
+                bytes,
+                volume: volume + 1,
+                file,
+            },
+            Action::JoinInit {
+                bytes,
+                volume,
+                file: [0x42; 16],
+            },
+        ] {
+            assert_eq!(
+                boot.admit(changed, Phase::Starting, false, false)
+                    .unwrap_err()
+                    .0,
+                "runtime_initialization_unavailable"
+            );
+        }
+        let encoded = serde_json::to_vec(&boot).unwrap();
+        assert!(serde_json::from_slice::<Boot>(&encoded).unwrap() == boot);
+        for invalid in [
+            r#"{"kind":"initialize","bytes":8589934592}"#,
+            r#"{"kind":"initialize","bytes":8589934592,"volume":29,"file":[1]}"#,
+            r#"{"kind":"initialize","bytes":8589934592,"volume":29,"file":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"path":"foreign"}"#,
+        ] {
+            assert!(serde_json::from_str::<Boot>(invalid).is_err());
+        }
+        for bytes in [1, 4 * 1024 * 1024 * 1024 + 1, 1025 * 1024 * 1024 * 1024] {
+            assert_eq!(
+                Boot::Initialize {
+                    bytes,
+                    volume,
+                    file
+                }
+                .validate(&"1".repeat(32))
+                .unwrap_err()
+                .0,
+                "invalid_runtime_data_authority"
+            );
+        }
+        assert_eq!(
+            Boot::Initialize {
+                bytes,
+                volume,
+                file: [0; 16]
+            }
+            .validate(&"1".repeat(32))
+            .unwrap_err()
+            .0,
+            "invalid_runtime_data_authority"
+        );
+    }
+
+    #[test]
+    fn initialize_requires_real_disk_evidence_bound_to_the_runtime_before_access() {
+        let area = Area::new();
+        let settings = area.settings();
+        let disk = crate::disk::create(
+            area.0.join("data.vhdx").to_str().unwrap(),
+            &random_id().unwrap(),
+            4 * 1024 * 1024 * 1024,
+            &Identity::current().unwrap(),
+        )
+        .unwrap();
+        let evidence = disk.evidence().unwrap();
+        let error = initialize(
+            &settings,
+            &evidence,
+            Arc::new(AtomicBool::new(false)),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.0, "invalid_runtime_data_authority");
+        assert!(!PathBuf::from(settings.journal().unwrap()).exists());
+    }
+
+    #[test]
+    fn setup_preparation_does_not_boot_a_missing_or_existing_runtime() {
+        let area = Area::new();
+        let settings = area.settings();
+        let stop = Arc::new(AtomicBool::new(false));
+        super::prepare_setup(
+            &settings,
+            Arc::clone(&stop),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(!PathBuf::from(settings.journal().unwrap()).exists());
+        let identity = Identity::current().unwrap();
+        let mut journal = Journal::writer(&settings, &identity, true).unwrap();
+        journal
+            .save(&Record {
+                version: 1,
+                binding: settings.binding.clone(),
+                generation: random_id().unwrap(),
+                phase: Phase::Ready,
+                resident: false,
+                boot: Boot::Existing,
+            })
+            .unwrap();
+        drop(journal);
+        assert_eq!(
+            super::prepare_setup(&settings, stop, Instant::now() + Duration::from_secs(1))
                 .unwrap_err()
                 .0,
             "runtime_initialization_unavailable"
         );
         assert_eq!(
-            boot.admit(
-                Action::JoinInit {
-                    bytes: bytes + 1024 * 1024
-                },
-                Phase::Starting,
-                false,
-                false
-            )
-            .unwrap_err()
-            .0,
-            "runtime_initialization_unavailable"
+            Journal::read(&settings, &identity).unwrap().unwrap().phase,
+            Phase::Ready
         );
-    }
-
-    #[test]
-    fn invalid_new_disk_authority_is_rejected_before_config_or_runtime_access() {
-        let area = Area::new();
-        let settings = area.settings();
-        // The fixture has no configuration/helper. Reaching either would fail
-        // differently; size validation must precede any runtime side effect.
-        for bytes in [1, 4 * 1024 * 1024 * 1024 + 1, 1025 * 1024 * 1024 * 1024] {
-            let error = initialize(
-                &settings,
-                bytes,
-                Arc::new(AtomicBool::new(false)),
-                Instant::now() + Duration::from_secs(1),
-            )
-            .err()
-            .unwrap();
-            assert_eq!(error.0, "invalid_runtime_data_authority");
-            assert!(!PathBuf::from(settings.journal().unwrap()).exists());
-        }
     }
 
     #[test]
@@ -2232,6 +2500,23 @@ mod tests {
             unsafe { WaitForSingleObject(observed.as_raw_handle(), 5000) },
             WAIT_OBJECT_0
         );
+    }
+
+    #[test]
+    fn initialization_cancellation_waits_for_its_actual_owned_child() {
+        let mut child = lifetime_child();
+        let writer = child.stdin.take().unwrap();
+        let client =
+            Client::for_child(&random_id().unwrap(), &child, &Identity::current().unwrap())
+                .unwrap();
+        let mut backend = Backend {
+            child,
+            writer: Some(writer),
+            client,
+        };
+        backend.cancel_initialization().unwrap();
+        assert!(backend.writer.is_none());
+        assert!(backend.child.try_wait().unwrap().unwrap().success());
     }
 
     #[test]

@@ -381,6 +381,16 @@ mod native {
                 network::reconcile(network, &|| check(stop, deadline))?;
             }
             check(stop, deadline)?;
+            if record.clean {
+                // Cleanup may have committed its receipt before the supervisor
+                // could record Stopped. Re-admit the original ungranted files
+                // rather than issue another revoke for an already-clean VM.
+                let files = files::Lease::acquire(config, &self.storage)?;
+                if files.evidence() != record.files {
+                    return Err(Error("runtime_file_evidence_changed"));
+                }
+                return check(stop, deadline);
+            }
             files::reconcile(config, &self.storage, &record.files)?;
             check(stop, deadline)?;
             self.clean()

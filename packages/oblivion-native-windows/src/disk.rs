@@ -62,7 +62,7 @@ mod native {
     }
 
     /// This view cannot be constructed or deserialized by a caller. It is valid
-    /// only while the freshly created object and its directory pins remain held.
+    /// only while the original pending disk and its directory pins remain held.
     pub struct Evidence<'a> {
         disk: &'a CreatedDisk,
     }
@@ -71,14 +71,43 @@ mod native {
         /// Obtain this before HCS loads the VHDX. An already loaded disk cannot
         /// acquire fresh initialization authority, even with the same UUID.
         pub fn evidence(&self) -> Result<Evidence<'_>> {
-            self.parent.verify()?;
-            self.leaf
-                .verify(&self.specification.runtime_id, self.specification.bytes)?;
-            Ok(Evidence { disk: self })
+            let evidence = Evidence { disk: self };
+            evidence.verify()?;
+            Ok(evidence)
+        }
+
+        /// The protected Pending record already stores this original FileID.
+        /// Publication moves that exact object and never replaces a target.
+        pub fn publish(self, destination: &str, identity: &Identity) -> Result<Self> {
+            self.evidence()?;
+            let specification = Specification::new(
+                destination,
+                &self.specification.runtime_id,
+                self.specification.bytes,
+            )?;
+            let parent = CreationParent::open(&specification.path, identity)?;
+            self.parent.sync(identity)?;
+            parent.sync(identity)?;
+            let leaf = self.leaf.publish(&specification.path, identity)?;
+            self.parent.sync(identity)?;
+            parent.sync(identity)?;
+            leaf.verify(&specification.runtime_id, specification.bytes)?;
+            Ok(Self {
+                specification,
+                parent,
+                leaf,
+            })
         }
     }
 
     impl Evidence<'_> {
+        pub fn verify(&self) -> Result<()> {
+            self.disk.parent.verify()?;
+            self.disk.leaf.verify(
+                &self.disk.specification.runtime_id,
+                self.disk.specification.bytes,
+            )
+        }
         pub fn path(&self) -> &str {
             &self.disk.specification.path
         }
@@ -91,6 +120,30 @@ mod native {
         pub fn file_identity(&self) -> (u64, [u8; 16]) {
             self.disk.leaf.identity()
         }
+    }
+
+    /// Only the installation's protected Pending receipt supplies `expected`.
+    /// No missing file, matching name or matching VHDX UUID grants authority.
+    pub(crate) fn resume(
+        path: &str,
+        runtime_id: &str,
+        bytes: u64,
+        expected: (u64, [u8; 16]),
+        identity: &Identity,
+    ) -> Result<CreatedDisk> {
+        let specification = Specification::new(path, runtime_id, bytes)?;
+        let parent = CreationParent::open(&specification.path, identity)?;
+        let leaf = CreatedDiskLeaf::open(&specification.path, identity)?;
+        if leaf.identity() != expected {
+            return Err(Error("runtime_disk_identity_mismatch"));
+        }
+        leaf.verify(&specification.runtime_id, specification.bytes)?;
+        parent.verify()?;
+        Ok(CreatedDisk {
+            specification,
+            parent,
+            leaf,
+        })
     }
 
     pub fn create(
@@ -169,6 +222,8 @@ mod native {
         // Get-info reopening then verifies the actual native UUID and capacity.
         drop(handle);
         leaf.verify(&specification.runtime_id, specification.bytes)?;
+        leaf.sync(identity)?;
+        parent.sync(identity)?;
         Ok(CreatedDisk {
             specification,
             parent,
@@ -177,6 +232,8 @@ mod native {
     }
 }
 
+#[cfg(windows)]
+pub(crate) use native::resume;
 #[cfg(windows)]
 pub use native::{CreatedDisk, Evidence, create};
 
@@ -237,7 +294,7 @@ mod tests {
 
 #[cfg(all(test, windows))]
 mod windows_tests {
-    use super::{GIB, create};
+    use super::{GIB, create, resume};
     use crate::security::Identity;
     use std::fs::File;
     use std::io::{Read, Write};
@@ -415,5 +472,112 @@ mod windows_tests {
             "runtime_disk_already_exists"
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"DO_NOT_REPLACE_CANARY");
+    }
+
+    #[test]
+    fn staged_sdk_disk_publishes_same_file_id_and_resumes_only_the_protected_identity() {
+        let identity = Identity::current().unwrap();
+        let area = Area::new(&identity);
+        let stage = area.path(".data-0123456789abcdef0123456789abcdef.vhdx");
+        let destination = area.path("data.vhdx");
+        let runtime = "0123456789abcdef0123456789abcdef";
+        let disk = create(&stage, runtime, 4 * GIB, &identity).unwrap();
+        let expected = disk.evidence().unwrap().file_identity();
+        let disk = disk.publish(&destination, &identity).unwrap();
+        let evidence = disk.evidence().unwrap();
+        evidence.verify().unwrap();
+        assert_eq!(evidence.file_identity(), expected);
+        assert_eq!(evidence.path(), destination);
+        assert!(!std::path::Path::new(&stage).exists());
+        assert!(std::fs::rename(&destination, area.path("replacement.vhdx")).is_err());
+        drop(disk);
+        let disk = resume(&destination, runtime, 4 * GIB, expected, &identity).unwrap();
+        assert_eq!(disk.evidence().unwrap().file_identity(), expected);
+        drop(disk);
+
+        let mut wrong = expected;
+        wrong.1[0] ^= 1;
+        assert_eq!(
+            resume(&destination, runtime, 4 * GIB, wrong, &identity)
+                .err()
+                .unwrap()
+                .0,
+            "runtime_disk_identity_mismatch"
+        );
+        assert_eq!(
+            resume(&destination, runtime, 8 * GIB, expected, &identity)
+                .err()
+                .unwrap()
+                .0,
+            "runtime_disk_capacity_mismatch"
+        );
+        assert_eq!(
+            resume(
+                &destination,
+                "fedcba9876543210fedcba9876543210",
+                4 * GIB,
+                expected,
+                &identity
+            )
+            .err()
+            .unwrap()
+            .0,
+            "runtime_disk_identity_mismatch"
+        );
+        assert_eq!(
+            resume(&stage, runtime, 4 * GIB, expected, &identity)
+                .err()
+                .unwrap()
+                .0,
+            "runtime_file_unavailable"
+        );
+        assert_eq!(
+            crate::files::data_file_identity(&destination).unwrap(),
+            expected
+        );
+        let mut signature = [0; 8];
+        File::open(&destination)
+            .unwrap()
+            .read_exact(&mut signature)
+            .unwrap();
+        assert_eq!(&signature, b"vhdxfile");
+    }
+
+    #[test]
+    fn publication_never_overwrites_a_foreign_target_or_adopts_same_uuid_foreign_disk() {
+        let identity = Identity::current().unwrap();
+        let area = Area::new(&identity);
+        let runtime = "0123456789abcdef0123456789abcdef";
+        let stage = area.path(".data-0123456789abcdef0123456789abcdef.vhdx");
+        let target = area.path("data.vhdx");
+        let disk = create(&stage, runtime, 4 * GIB, &identity).unwrap();
+        let expected = disk.evidence().unwrap().file_identity();
+        File::create(&target)
+            .unwrap()
+            .write_all(b"PRESERVE_FOREIGN_TARGET")
+            .unwrap();
+        assert!(disk.publish(&target, &identity).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"PRESERVE_FOREIGN_TARGET");
+        let disk = resume(&stage, runtime, 4 * GIB, expected, &identity).unwrap();
+        assert_eq!(disk.evidence().unwrap().file_identity(), expected);
+        drop(disk);
+        let foreign = create(&area.path("foreign.vhdx"), runtime, 4 * GIB, &identity).unwrap();
+        assert_ne!(foreign.evidence().unwrap().file_identity(), expected);
+        drop(foreign);
+        assert_eq!(
+            resume(
+                &area.path("foreign.vhdx"),
+                runtime,
+                4 * GIB,
+                expected,
+                &identity
+            )
+            .err()
+            .unwrap()
+            .0,
+            "runtime_disk_identity_mismatch"
+        );
+        assert!(std::path::Path::new(&stage).exists());
+        assert!(std::path::Path::new(&area.path("foreign.vhdx")).exists());
     }
 }

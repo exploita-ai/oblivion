@@ -1,5 +1,5 @@
-//! Per-user installed-runtime metadata. Pending setup never authorizes a second
-//! disk initialization; the VHDX is outside immutable, replaceable bundles.
+//! Per-user installed-runtime metadata. Interrupted setup resumes only its
+//! recorded disk identity; the VHDX is outside replaceable software bundles.
 #![cfg(any(windows, test))]
 
 use crate::config::{Disk, RuntimeConfig};
@@ -24,10 +24,18 @@ struct Record {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum Phase {
-    Pending,
+    Pending { disk: PendingDisk },
     Ready { data: FileIdentity },
     Updating { data: FileIdentity, target: Binding },
     Uninstalled { data: FileIdentity },
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum PendingDisk {
+    Uncreated,
+    Staged { data: FileIdentity, leaf: String },
+    Published { data: FileIdentity },
 }
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -70,17 +78,39 @@ impl Record {
                 return Err(Error("invalid_installation_record"));
             }
         }
+        if let Phase::Pending { disk } = &record.phase {
+            let data = match disk {
+                PendingDisk::Uncreated => None,
+                PendingDisk::Staged { data, leaf } => {
+                    if !data_stage(leaf) {
+                        return Err(Error("invalid_installation_record"));
+                    }
+                    Some(data)
+                }
+                PendingDisk::Published { data } => Some(data),
+            };
+            if data.is_some_and(|data| data.file == [0; 16]) {
+                return Err(Error("invalid_installation_record"));
+            }
+        }
         Ok(record)
     }
 
     fn data(&self) -> Option<&FileIdentity> {
         match &self.phase {
-            Phase::Pending => None,
+            Phase::Pending { .. } => None,
             Phase::Ready { data } | Phase::Updating { data, .. } | Phase::Uninstalled { data } => {
                 Some(data)
             }
         }
     }
+}
+
+fn data_stage(value: &str) -> bool {
+    value
+        .strip_prefix(".data-")
+        .and_then(|value| value.strip_suffix(".vhdx"))
+        .is_some_and(valid_id)
 }
 
 #[derive(Default, Serialize)]
@@ -125,13 +155,14 @@ fn configuration(root: &str, runtime_id: &str) -> Result<RuntimeConfig> {
 
 #[cfg(windows)]
 mod native {
-    use super::{Cleanup, FileIdentity, Phase, RECORD_LIMIT, Record, configuration};
+    use super::{Cleanup, FileIdentity, PendingDisk, Phase, RECORD_LIMIT, Record, configuration};
     use crate::bundle::VerifiedBundle;
     use crate::config::CONFIG_LIMIT;
-    use crate::files::{self, Asset, CreatedDiskLeaf, CreationParent, Directory};
+    use crate::files::{self, Asset, CreationParent, Directory};
     use crate::security::Identity;
     use crate::supervisor::{self, Lease, Settings};
     use crate::{Error, Result, hcs};
+    use oblivion_wire::runtime_auth::Data;
     use sha2::{Digest, Sha256};
     use std::fs::File;
     use std::io::{Read, Write};
@@ -141,15 +172,19 @@ mod native {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;
+    #[cfg(test)]
+    use windows_sys::Win32::Foundation::ERROR_FILE_EXISTS;
     use windows_sys::Win32::Foundation::{
-        ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND, GENERIC_READ, GENERIC_WRITE,
-        GetLastError, INVALID_HANDLE_VALUE,
+        ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GENERIC_READ, GENERIC_WRITE, GetLastError,
+        INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Security::{
         GetTokenInformation, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
     };
+    #[cfg(test)]
+    use windows_sys::Win32::Storage::FileSystem::CREATE_NEW;
     use windows_sys::Win32::Storage::FileSystem::{
-        CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        CreateDirectoryW, CreateFileW, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
     };
     use windows_sys::Win32::System::Com::CoTaskMemFree;
@@ -342,12 +377,12 @@ mod native {
 
     pub fn install_bundle(
         root: &Root,
-        bundle: VerifiedBundle,
+        incoming: VerifiedBundle,
         bytes: u64,
         stop: Arc<AtomicBool>,
         deadline: Instant,
     ) -> Result<Installed> {
-        oblivion_wire::runtime_auth::Data::NewDisk {
+        Data::NewDisk {
             runtime_id: "1".repeat(32),
             bytes,
         }
@@ -355,96 +390,105 @@ mod native {
         .map_err(|_| Error("invalid_runtime_data_authority"))?;
         preflight()?;
         check(&stop, deadline)?;
-        let identity = root.storage.clone();
         root.create()?;
         let _root = root.guard()?;
-        if root.broker && exists(&root.file("installation.json")?)? {
+        let _setup = setup_lock(root)?;
+        let identity = root.storage.clone();
+        let requested = incoming.binding()?;
+        let mut record = if exists(&root.file("installation.json")?)? {
             let record = read_record(root, &identity)?;
-            if !matches!(record.phase, Phase::Ready { .. })
-                || !same_binding(&record.bundle, &bundle.binding()?)?
-            {
-                return Err(Error("installation_already_present_or_pending"));
+            if !same_binding(&record.bundle, &requested)? || record.data_bytes != bytes {
+                return Err(Error("installation_resume_requires_matching_bundle"));
             }
-            // A failed SCM registration does not grant a second disk-create
-            // capability. Retry only the exact, fully verified Ready bundle.
-            let installed = discover(root)?;
-            let _stopped = supervisor::stopped(
-                &maintenance(root, &record, &record.bundle)?,
-                Arc::clone(&stop),
-                deadline,
+            match record.phase {
+                Phase::Pending { .. } => record,
+                Phase::Ready { .. } => {
+                    let installed = discover(root)?;
+                    let _stopped = supervisor::stopped(
+                        &maintenance(root, &record, &record.bundle)?,
+                        Arc::clone(&stop),
+                        deadline,
+                    )?;
+                    if root.broker {
+                        crate::scm::quiesce(&root.client, Arc::clone(&stop), deadline)?;
+                        crate::scm::install(&root.client, Path::new(installed.helper()))?;
+                    }
+                    return Ok(installed);
+                }
+                _ => return Err(Error("installation_already_present_or_pending")),
+            }
+        } else {
+            empty_setup(root)?;
+            let runtime_id = random_id()?;
+            let config = configuration(
+                root.path()
+                    .to_str()
+                    .ok_or(Error("unsupported_installation_path"))?,
+                &runtime_id,
             )?;
-            crate::scm::quiesce(&root.client, Arc::clone(&stop), deadline)?;
-            crate::scm::install(&root.client, Path::new(installed.helper()))?;
-            return Ok(installed);
-        }
-        if std::fs::read_dir(root.path())
-            .map_err(|_| Error("installation_directory_unavailable"))?
-            .next()
-            .transpose()
-            .map_err(|_| Error("installation_directory_unavailable"))?
-            .is_some()
-        {
-            return Err(Error("installation_already_present_or_pending"));
-        }
-        let runtime_id = random_id()?;
-        let config = configuration(
-            root.path()
-                .to_str()
-                .ok_or(Error("unsupported_installation_path"))?,
-            &runtime_id,
-        )?;
-        let config_bytes = serde_json::to_vec(&config)
-            .map_err(|_| Error("runtime_configuration_encode_failed"))?;
-        let mut record = Record {
-            version: 1,
-            runtime_id,
-            bundle: bundle.binding()?,
-            config_sha256: format!("{:x}", Sha256::digest(&config_bytes)),
-            data_bytes: bytes,
-            phase: Phase::Pending,
+            let config_bytes = serde_json::to_vec(&config)
+                .map_err(|_| Error("runtime_configuration_encode_failed"))?;
+            let record = Record {
+                version: 1,
+                runtime_id,
+                bundle: requested,
+                config_sha256: format!("{:x}", Sha256::digest(&config_bytes)),
+                data_bytes: bytes,
+                phase: Phase::Pending {
+                    disk: PendingDisk::Uncreated,
+                },
+            };
+            create_record(root, &record, &identity)?;
+            record
         };
-        create_record(root, &record, &identity)?;
         let (mut registry, _) = registry(root, &identity)?;
-        // Everything after the durable Pending record is a one-shot setup.
-        // Failure retains that record; a subsequent run never reinitializes it.
         ensure_directory(&root.path.join("releases"), &identity)?;
         ensure_directory(&root.path.join("boot"), &identity)?;
         check(&stop, deadline)?;
-        let bundle = bundle.publish(
-            &root.release(&record.bundle.bundle_id)?,
-            &identity,
-            &root.client,
-        )?;
+        let release = root.release(&record.bundle.bundle_id)?;
+        let bundle = if exists(&release)? {
+            verified_bundle(root, &record, &identity)?
+        } else {
+            incoming.publish(&release, &identity, &root.client)?
+        };
+        prepare_configuration(root, &record, &identity)?;
+        let settings = settings(root, &record, &bundle)?;
+        // Pending has no user-visible broker or Safe. Cancel only an earlier
+        // owned initialization, then reconcile its receipt before reusing data.
+        supervisor::prepare_setup(&settings, Arc::clone(&stop), deadline)?;
         for asset in &record.bundle.boot {
             check(&stop, deadline)?;
-            let source = format!(r"{}\{}", bundle.root(), asset.path.replace('/', r"\"));
-            let leaf = asset
-                .path
-                .rsplit('/')
-                .next()
-                .ok_or(Error("invalid_runtime_bundle_binding"))?;
+            let leaf = boot_leaf(asset)?;
             let destination = root.file(&format!(r"boot\{leaf}"))?;
+            if exists(&destination)? {
+                let boot = Directory::open(&root.file("boot")?, &identity, true)?;
+                let existing = boot.asset(leaf, &identity, true)?;
+                if !matches_asset(&existing, asset)? {
+                    return Err(Error("installed_runtime_boot_changed"));
+                }
+                continue;
+            }
+            let source = format!(r"{}\{}", bundle.root(), asset.path.replace('/', r"\"));
             copy_boot(&source, &destination, asset, &identity)?;
         }
-        let mut config_file = create_private(&root.file("vm.json")?, &identity)?;
-        config_file
-            .write_all(&config_bytes)
-            .and_then(|_| config_file.sync_all())
-            .map_err(|_| Error("runtime_configuration_write_failed"))?;
-        drop(config_file);
-        let settings = settings(root, &record, &bundle)?;
-        let mut lease = supervisor::initialize(&settings, bytes, Arc::clone(&stop), deadline)?;
-        // First boot proves controller IPC, not an initialized user archive.
-        // Stop before inspecting the strict ungranted VHDX identity and commit;
-        // subsequent startup always uses ordinary run with the existing disk.
+        let disk = prepare_disk(root, &mut record, &mut registry, &identity)?;
+        let evidence = disk.evidence()?;
+        let mut lease = supervisor::initialize(&settings, &evidence, Arc::clone(&stop), deadline)?;
         supervisor::stop(&settings, Arc::clone(&stop), deadline)?;
         lease.close()?;
-        let disk = CreatedDiskLeaf::open(&root.file("data.vhdx")?, &identity)?;
-        disk.verify(&record.runtime_id, record.data_bytes)?;
-        let (volume, file) = disk.identity();
-        record.phase = Phase::Ready {
-            data: FileIdentity { volume, file },
+        let _stopped = supervisor::stopped(&settings, Arc::clone(&stop), deadline)?;
+        let evidence = disk.evidence()?;
+        let (volume, file) = evidence.file_identity();
+        let Phase::Pending {
+            disk: PendingDisk::Published { data },
+        } = &record.phase
+        else {
+            return Err(Error("installation_disk_publication_unconfirmed"));
         };
+        if (volume, file) != (data.volume, data.file) {
+            return Err(Error("installed_data_identity_changed"));
+        }
+        record.phase = Phase::Ready { data: data.clone() };
         registry.save(&record)?;
         if root.broker {
             crate::scm::install(&root.client, Path::new(bundle.helper()))?;
@@ -454,6 +498,203 @@ mod native {
             record,
             bundle,
         })
+    }
+
+    struct SetupLock {
+        _file: File,
+        _parent: CreationParent,
+    }
+
+    fn setup_lock(root: &Root) -> Result<SetupLock> {
+        let path = root.file("setup.lock")?;
+        let parent = CreationParent::open(&path, &root.storage)?;
+        let descriptor = root.storage.file_descriptor()?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.as_ptr(),
+            bInheritHandle: 0,
+        };
+        let name = path.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE | READ_CONTROL,
+                0,
+                &attributes,
+                windows_sys::Win32::Storage::FileSystem::OPEN_ALWAYS,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(Error(
+                if unsafe { GetLastError() }
+                    == windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION
+                {
+                    "installation_setup_in_progress"
+                } else {
+                    "installation_setup_lock_failed"
+                },
+            ));
+        }
+        let file = unsafe { File::from_raw_handle(handle) };
+        files::verify_private(&file, &path, &root.storage)?;
+        if file
+            .metadata()
+            .map_err(|_| Error("installation_setup_lock_failed"))?
+            .len()
+            != 0
+        {
+            return Err(Error("invalid_installation_setup_lock"));
+        }
+        parent.verify()?;
+        Ok(SetupLock {
+            _file: file,
+            _parent: parent,
+        })
+    }
+
+    fn empty_setup(root: &Root) -> Result<()> {
+        let directory = Directory::open(
+            root.path()
+                .to_str()
+                .ok_or(Error("unsupported_installation_path"))?,
+            &root.storage,
+            true,
+        )?;
+        for name in directory.names(256)? {
+            if name == "setup.lock" {
+                continue;
+            }
+            // A crash before the first atomic record publication can retain a
+            // partial metadata staging file. It is preserved, never adopted.
+            if !name
+                .strip_prefix("installation-")
+                .and_then(|name| name.strip_suffix(".pending"))
+                .is_some_and(oblivion_wire::control::valid_id)
+            {
+                return Err(Error("installation_already_present_or_pending"));
+            }
+            if directory.asset(&name, &root.storage, true)?.bytes() > RECORD_LIMIT as u64 {
+                return Err(Error("installation_already_present_or_pending"));
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_configuration(root: &Root, record: &Record, identity: &Identity) -> Result<()> {
+        let path = root.file("vm.json")?;
+        if exists(&path)? {
+            return verify_config(root, record, identity);
+        }
+        let bytes = serde_json::to_vec(&configuration(
+            root.path()
+                .to_str()
+                .ok_or(Error("unsupported_installation_path"))?,
+            &record.runtime_id,
+        )?)
+        .map_err(|_| Error("runtime_configuration_encode_failed"))?;
+        if format!("{:x}", Sha256::digest(&bytes)) != record.config_sha256 {
+            return Err(Error("installed_runtime_configuration_changed"));
+        }
+        let directory = Directory::open(
+            root.path()
+                .to_str()
+                .ok_or(Error("unsupported_installation_path"))?,
+            identity,
+            true,
+        )?;
+        directory.sync()?;
+        let mut stage =
+            directory.create_file(&format!("configuration-{}.pending", random_id()?), identity)?;
+        stage
+            .writer()
+            .write_all(&bytes)
+            .map_err(|_| Error("runtime_configuration_write_failed"))?;
+        stage.finish()?;
+        directory.sync()?;
+        stage.move_to(&directory, "vm.json", identity)?;
+        directory.sync()?;
+        verify_config(root, record, identity)
+    }
+
+    fn prepare_disk(
+        root: &Root,
+        record: &mut Record,
+        registry: &mut Registry,
+        identity: &Identity,
+    ) -> Result<crate::disk::CreatedDisk> {
+        let Phase::Pending { disk } = &record.phase else {
+            return Err(Error("installation_pending"));
+        };
+        let target = root.file("data.vhdx")?;
+        let disk = match disk {
+            PendingDisk::Uncreated => {
+                if exists(&target)? {
+                    return Err(Error("unrecognized_installation_disk"));
+                }
+                let leaf = format!(".data-{}.vhdx", random_id()?);
+                let staged = crate::disk::create(
+                    &root.file(&leaf)?,
+                    &record.runtime_id,
+                    record.data_bytes,
+                    identity,
+                )?;
+                let (volume, file) = staged.evidence()?.file_identity();
+                record.phase = Phase::Pending {
+                    disk: PendingDisk::Staged {
+                        data: FileIdentity { volume, file },
+                        leaf,
+                    },
+                };
+                // Bind the actual new FileID durably before its fixed name is
+                // visible. An SDK-created but unrecorded partial is never reused.
+                registry.save(record)?;
+                staged
+            }
+            PendingDisk::Staged { data, leaf } => {
+                let stage = root.file(leaf)?;
+                match (exists(&stage)?, exists(&target)?) {
+                    (true, false) => crate::disk::resume(
+                        &stage,
+                        &record.runtime_id,
+                        record.data_bytes,
+                        (data.volume, data.file),
+                        identity,
+                    )?,
+                    (false, true) => crate::disk::resume(
+                        &target,
+                        &record.runtime_id,
+                        record.data_bytes,
+                        (data.volume, data.file),
+                        identity,
+                    )?,
+                    _ => return Err(Error("installation_disk_publication_unconfirmed")),
+                }
+            }
+            PendingDisk::Published { data } => {
+                return crate::disk::resume(
+                    &target,
+                    &record.runtime_id,
+                    record.data_bytes,
+                    (data.volume, data.file),
+                    identity,
+                );
+            }
+        };
+        let disk = if disk.evidence()?.path() == target {
+            disk
+        } else {
+            disk.publish(&target, identity)?
+        };
+        let (volume, file) = disk.evidence()?.file_identity();
+        record.phase = Phase::Pending {
+            disk: PendingDisk::Published {
+                data: FileIdentity { volume, file },
+            },
+        };
+        registry.save(record)?;
+        Ok(disk)
     }
 
     pub fn discover(root: &Root) -> Result<Installed> {
@@ -902,11 +1143,14 @@ mod native {
             true,
         )?;
         directory.sync()?;
-        let mut file = directory.create_file("installation.json", identity)?;
+        let mut file =
+            directory.create_file(&format!("installation-{}.pending", random_id()?), identity)?;
         file.writer()
             .write_all(&bytes)
             .map_err(|_| Error("installation_commit_failed"))?;
         file.finish()?;
+        directory.sync()?;
+        file.move_to(&directory, "installation.json", identity)?;
         directory.sync()
     }
 
@@ -1088,6 +1332,7 @@ mod native {
         )?;
         Ok(())
     }
+    #[cfg(test)]
     fn create_private(path: &str, identity: &Identity) -> Result<File> {
         let parent = CreationParent::open(path, identity)?;
         let descriptor = identity.file_descriptor()?;
@@ -1172,9 +1417,10 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::{
-            FileIdentity, Phase, Record, Root, boot_asset, boot_leaf, collect, configuration,
-            control_id, copy_boot, create_private, create_record, ensure_directory, maintenance,
-            random_id, read_record, registry, uninstall, update_bundle,
+            FileIdentity, PendingDisk, Phase, Record, Root, boot_asset, boot_leaf, collect,
+            configuration, control_id, copy_boot, create_private, create_record, empty_setup,
+            ensure_directory, maintenance, prepare_disk, random_id, read_record, registry,
+            setup_lock, uninstall, update_bundle,
         };
         use crate::bundle::tests::Fixture;
         use crate::files::{self, Directory, Executable};
@@ -1182,7 +1428,7 @@ mod native {
         use crate::supervisor;
         use serde_json::json;
         use sha2::{Digest, Sha256};
-        use std::io::Write;
+        use std::io::{Read, Write};
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
         use std::time::{Duration, Instant};
@@ -1204,6 +1450,171 @@ mod native {
             fn drop(&mut self) {
                 let _ = std::fs::remove_dir_all(self.0.path());
             }
+        }
+
+        fn pending(area: &Area) -> Record {
+            let manifest: oblivion_bundle::Manifest = serde_json::from_str(include_str!(
+                "../../oblivion-bundle/tests/fixtures/windows-v1.json"
+            ))
+            .unwrap();
+            let runtime_id = random_id().unwrap();
+            let config = serde_json::to_vec(
+                &configuration(area.0.path().to_str().unwrap(), &runtime_id).unwrap(),
+            )
+            .unwrap();
+            Record {
+                version: 1,
+                runtime_id,
+                bundle: manifest.binding().unwrap(),
+                config_sha256: format!("{:x}", Sha256::digest(config)),
+                data_bytes: 4 * 1024 * 1024 * 1024,
+                phase: Phase::Pending {
+                    disk: PendingDisk::Uncreated,
+                },
+            }
+        }
+
+        #[test]
+        fn setup_lock_and_atomic_first_record_preserve_incomplete_metadata_staging() {
+            let area = Area::new();
+            let identity = Identity::current().unwrap();
+            let root = &area.0;
+            let owner = setup_lock(root).unwrap();
+            assert_eq!(
+                setup_lock(root).err().unwrap().0,
+                "installation_setup_in_progress"
+            );
+            let directory =
+                Directory::open(root.path().to_str().unwrap(), &identity, true).unwrap();
+            let name = format!("installation-{}.pending", random_id().unwrap());
+            let mut interrupted = directory.create_file(&name, &identity).unwrap();
+            interrupted.writer().write_all(b"{\"version\":").unwrap();
+            interrupted.finish().unwrap();
+            empty_setup(root).unwrap();
+            let record = pending(&area);
+            create_record(root, &record, &identity).unwrap();
+            assert_eq!(
+                read_record(root, &identity).unwrap().runtime_id,
+                record.runtime_id
+            );
+            assert_eq!(
+                directory.asset(&name, &identity, true).unwrap().identity(),
+                interrupted.identity()
+            );
+            drop(owner);
+            setup_lock(root).unwrap();
+        }
+
+        #[test]
+        fn pending_disk_recovers_exact_identity_after_rename_before_registry_commit() {
+            let area = Area::new();
+            let identity = Identity::current().unwrap();
+            let root = &area.0;
+            let mut record = pending(&area);
+            create_record(root, &record, &identity).unwrap();
+            let (mut registry, _) = registry(root, &identity).unwrap();
+            let leaf = format!(".data-{}.vhdx", random_id().unwrap());
+            let created = crate::disk::create(
+                &root.file(&leaf).unwrap(),
+                &record.runtime_id,
+                record.data_bytes,
+                &identity,
+            )
+            .unwrap();
+            let expected = created.evidence().unwrap().file_identity();
+            record.phase = Phase::Pending {
+                disk: PendingDisk::Staged {
+                    data: FileIdentity {
+                        volume: expected.0,
+                        file: expected.1,
+                    },
+                    leaf: leaf.clone(),
+                },
+            };
+            registry.save(&record).unwrap();
+            let target = root.file("data.vhdx").unwrap();
+            let published = created.publish(&target, &identity).unwrap();
+            let mut before = [0; 4096];
+            std::fs::File::open(&target)
+                .unwrap()
+                .read_exact(&mut before)
+                .unwrap();
+            drop(published);
+            let resumed = prepare_disk(root, &mut record, &mut registry, &identity).unwrap();
+            assert_eq!(resumed.evidence().unwrap().file_identity(), expected);
+            let mut after = [0; 4096];
+            std::fs::File::open(&target)
+                .unwrap()
+                .read_exact(&mut after)
+                .unwrap();
+            assert_eq!(after, before);
+            assert!(!root.path().join(leaf).exists());
+            assert!(matches!(
+                read_record(root, &identity).unwrap().phase,
+                Phase::Pending {
+                    disk: PendingDisk::Published { .. }
+                }
+            ));
+        }
+
+        #[test]
+        fn pending_disk_refuses_a_replacement_with_the_same_vhdx_uuid_without_overwriting_it() {
+            let area = Area::new();
+            let identity = Identity::current().unwrap();
+            let root = &area.0;
+            let mut record = pending(&area);
+            create_record(root, &record, &identity).unwrap();
+            let (mut registry, _) = registry(root, &identity).unwrap();
+            let leaf = format!(".data-{}.vhdx", random_id().unwrap());
+            let created = crate::disk::create(
+                &root.file(&leaf).unwrap(),
+                &record.runtime_id,
+                record.data_bytes,
+                &identity,
+            )
+            .unwrap();
+            let expected = created.evidence().unwrap().file_identity();
+            record.phase = Phase::Pending {
+                disk: PendingDisk::Staged {
+                    data: FileIdentity {
+                        volume: expected.0,
+                        file: expected.1,
+                    },
+                    leaf,
+                },
+            };
+            registry.save(&record).unwrap();
+            let original = created
+                .publish(&root.file("retained.vhdx").unwrap(), &identity)
+                .unwrap();
+            let foreign = crate::disk::create(
+                &root.file("data.vhdx").unwrap(),
+                &record.runtime_id,
+                record.data_bytes,
+                &identity,
+            )
+            .unwrap();
+            let foreign_id = foreign.evidence().unwrap().file_identity();
+            assert_ne!(expected, foreign_id);
+            drop(foreign);
+            assert_eq!(
+                prepare_disk(root, &mut record, &mut registry, &identity)
+                    .err()
+                    .unwrap()
+                    .0,
+                "runtime_disk_identity_mismatch"
+            );
+            assert_eq!(
+                files::data_file_identity(&root.file("data.vhdx").unwrap()).unwrap(),
+                foreign_id
+            );
+            assert_eq!(original.evidence().unwrap().file_identity(), expected);
+            assert!(matches!(
+                read_record(root, &identity).unwrap().phase,
+                Phase::Pending {
+                    disk: PendingDisk::Staged { .. }
+                }
+            ));
         }
 
         #[test]
@@ -1491,7 +1902,9 @@ mod native {
                 bundle: manifest.binding().unwrap(),
                 config_sha256: format!("{:x}", Sha256::digest(&config)),
                 data_bytes: 8 * 1024 * 1024 * 1024,
-                phase: Phase::Pending,
+                phase: Phase::Pending {
+                    disk: super::PendingDisk::Uncreated,
+                },
             };
             create_record(root, &record, &identity).unwrap();
             let (mut registry, _) = registry(root, &identity).unwrap();
@@ -1560,12 +1973,17 @@ mod tests {
         ))
         .unwrap();
         json!({"version":1,"runtime_id":ID,"bundle":manifest.binding().unwrap(),
-            "config_sha256":"3".repeat(64),"data_bytes":8_u64*1024*1024*1024,"phase":{"kind":"pending"}})
+            "config_sha256":"3".repeat(64),"data_bytes":8_u64*1024*1024*1024,"phase":{"kind":"pending","disk":{"kind":"uncreated"}}})
     }
     #[test]
     fn pending_is_a_distinct_current_format_and_never_an_installed_ready_record() {
         let pending = Record::decode(&serde_json::to_vec(&record()).unwrap()).unwrap();
-        assert!(matches!(pending.phase, Phase::Pending));
+        assert!(matches!(
+            pending.phase,
+            Phase::Pending {
+                disk: super::PendingDisk::Uncreated
+            }
+        ));
         let mut ready = record();
         ready["phase"] = json!({"kind":"ready","data":{"volume":4,"file":vec![1;16]}});
         assert!(matches!(
@@ -1582,6 +2000,29 @@ mod tests {
                 .0,
             "invalid_installation_record"
         );
+    }
+    #[test]
+    fn pending_stages_require_an_explicit_original_disk_identity_and_local_stage_leaf() {
+        let mut value = record();
+        let data = json!({"volume":1,"file":vec![2;16]});
+        value["phase"] = json!({"kind":"pending","disk":{"kind":"staged","data":data,"leaf":format!(".data-{}.vhdx","a".repeat(32))}});
+        Record::decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+        for leaf in [
+            r"..\data.vhdx",
+            r"C:\other\data.vhdx",
+            "data.vhdx",
+            ".data-invalid.vhdx",
+        ] {
+            value["phase"]["disk"]["leaf"] = json!(leaf);
+            assert!(Record::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+        value["phase"] = json!({"kind":"pending","disk":{"kind":"published","data":data}});
+        let decoded = Record::decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(decoded.data().is_none()); // Pending does not grant update/uninstall authority.
+        value["phase"]["disk"]["data"]["file"] = json!(vec![0; 16]);
+        assert!(Record::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+        value["phase"] = json!({"kind":"pending"});
+        assert!(Record::decode(&serde_json::to_vec(&value).unwrap()).is_err());
     }
     #[test]
     fn update_target_and_uninstalled_states_retain_the_same_data_authority() {

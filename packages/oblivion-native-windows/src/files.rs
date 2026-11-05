@@ -310,6 +310,16 @@ impl CreationParent {
     pub(crate) fn verify(&self) -> Result<()> {
         verify_parents(&self.parents)
     }
+
+    pub(crate) fn sync(&self, identity: &Identity) -> Result<()> {
+        self.verify()?;
+        let parent = self
+            .parents
+            .last()
+            .ok_or(Error("invalid_runtime_asset_path"))?;
+        Directory::open(&parent.0, identity, true)?.sync()?;
+        self.verify()
+    }
 }
 
 pub(crate) struct Executable(Pinned);
@@ -345,6 +355,40 @@ impl CreatedDiskLeaf {
 
     pub(crate) fn identity(&self) -> (u64, [u8; 16]) {
         (self.0.id.volume, self.0.id.file)
+    }
+
+    pub(crate) fn sync(&self, identity: &Identity) -> Result<()> {
+        self.0.verify()?;
+        let file = open_raw(&self.0.path, GENERIC_WRITE | READ_CONTROL, true, false)?;
+        if inspect(&file, &self.0.path, false)?.0 != self.0.id {
+            return Err(Error("runtime_asset_changed"));
+        }
+        permissions(&file, identity.sid(), true)?;
+        file.sync_all()
+            .map_err(|_| Error("runtime_disk_sync_failed"))?;
+        self.0.verify()
+    }
+
+    pub(crate) fn publish(self, destination: &str, identity: &Identity) -> Result<Self> {
+        self.0.verify()?;
+        let parent = CreationParent::open(destination, identity)?;
+        let expected = self.0.id;
+        let Pinned {
+            path,
+            file,
+            parents,
+            ..
+        } = self.0;
+        let mutation = Mutation::open(file, &path, expected, false, true, identity)?;
+        mutation.rename(destination, false)?;
+        drop(mutation);
+        let published = Self::open(destination, identity)?;
+        if published.0.id != expected {
+            return Err(Error("runtime_asset_changed"));
+        }
+        parent.verify()?;
+        verify_parents(&parents)?;
+        Ok(published)
     }
 }
 

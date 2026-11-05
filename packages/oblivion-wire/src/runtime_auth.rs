@@ -15,7 +15,8 @@ pub const ACK: &[u8; 8] = b"OBLVAUT1";
 pub const DATA_LIMIT: usize = 512;
 
 /// The host may authorize initialization only while it owns the capability
-/// returned by creating a fresh disk. Paths and device selectors are excluded.
+/// for a freshly created disk, or its exact protected Pending setup identity
+/// during resume. Paths and device selectors are excluded.
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Data {
