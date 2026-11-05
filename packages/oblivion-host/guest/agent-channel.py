@@ -4,6 +4,8 @@ The host sends u32be JSON length followed by a tagged agent or workspace request
 is null for pipes or {rows, cols} for a PTY. Frames are u8 kind + u32be length
 + payload. Kinds: stdin=0, stdout=1, stderr=2, resize=3 (u16be rows, cols),
 exit=4 (i32be status), stdin EOF=5, signal=6 (i32be Linux signal number).
+Empty stderr immediately before exit 125 identifies a relay failure. Older
+readers ignore the empty frame and retain the diagnostic and status 125.
 """
 from contextlib import contextmanager
 import errno
@@ -260,6 +262,20 @@ def run(fd, value):
                 os.close(master)
 
 
+def serve(fd):
+    try:
+        os.write(fd, b"ready\n")
+        run(fd, request(fd))
+    except (ValueError, EOFError, OSError):
+        # Request data, arguments and subprocess exceptions can contain
+        # secrets. Child output is never emitted in empty frames.
+        try:
+            os.write(fd, frame(2, b"The agent connection could not be completed.\n")
+                     + frame(2, b"") + frame(4, struct.pack(">i", 125)))
+        except OSError:
+            pass
+
+
 def main():
     if os.geteuid() not in (0, 1000) or len(sys.argv) != 2:
         raise ValueError("invalid_agent_service")
@@ -273,17 +289,7 @@ def main():
     signal.signal(signal.SIGTERM, stop_channel)
     signal.signal(signal.SIGHUP, stop_channel)
     with open(path, "r+b", buffering=0) as stream:
-        fd = stream.fileno()
-        try:
-            stream.write(b"ready\n")
-            run(fd, request(fd))
-        except (ValueError, EOFError, OSError, json.JSONDecodeError):
-            # Request data, arguments and subprocess exceptions can contain
-            # secrets. Only fixed protocol feedback crosses this boundary.
-            try:
-                os.write(fd, frame(2, b"The agent connection could not be completed.\n") + frame(4, struct.pack(">i", 125)))
-            except OSError:
-                pass
+        serve(stream.fileno())
 
 
 if __name__ == "__main__":

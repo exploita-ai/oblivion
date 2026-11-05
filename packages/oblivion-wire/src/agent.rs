@@ -1,6 +1,8 @@
 //! Existing agent stream: one kind byte, u32-BE payload length, then raw bytes.
 //! Linux signal numbers carried by kind 6 belong to the guest protocol, never
 //! to the desktop OS. Agent argv remains data, not shell source.
+//! Empty stderr followed by exit 125 is a relay failure. Older readers
+//! ignore the empty frame and see the legacy status.
 use crate::frame;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
@@ -8,6 +10,7 @@ use std::io::{self, Read, Write};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub const LIMIT: usize = 65536;
+pub const RELAY_FAILURE_STATUS: i32 = 125;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

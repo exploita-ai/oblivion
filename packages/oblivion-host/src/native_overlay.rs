@@ -2,6 +2,7 @@
 
 use oblivion_cli::terminal_overlay::{self, Chrome, Keys, Page};
 use oblivion_host::{agent, control};
+use oblivion_wire::agent::RELAY_FAILURE_STATUS;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
@@ -138,6 +139,17 @@ impl std::fmt::Display for AgentDisconnected {
 
 impl std::error::Error for AgentDisconnected {}
 
+#[derive(Debug)]
+pub struct AgentRelayFailure;
+
+impl std::fmt::Display for AgentRelayFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("The agent connection could not be completed.")
+    }
+}
+
+impl std::error::Error for AgentRelayFailure {}
+
 fn agent_channel<T>(result: control::Result<T>) -> control::Result<T> {
     result.map_err(|error| -> Box<dyn std::error::Error> {
         match error.downcast::<io::Error>() {
@@ -180,6 +192,7 @@ fn forward(
     keys.set_viewport(viewport);
     let mut human = oblivion_host::activity::HumanInput::default();
     let mut overlay: Option<Overlay> = None;
+    let mut relay_failure = false;
     loop {
         if let Some(child) = overlay.as_mut() {
             if child.poll()?.is_some() {
@@ -250,7 +263,14 @@ fn forward(
         }
         if polls[0].revents != 0 {
             let (kind, bytes) = agent_channel(agent::read_frame(stream))?;
+            if relay_failure {
+                if kind == 4 && bytes == RELAY_FAILURE_STATUS.to_be_bytes() {
+                    return Err(AgentRelayFailure.into());
+                }
+                return Err("Invalid agent response".into());
+            }
             match kind {
+                2 if bytes.is_empty() => relay_failure = true,
                 1 | 2 => {
                     if let Some(chrome) = chrome.as_deref_mut() {
                         chrome.process(&bytes);

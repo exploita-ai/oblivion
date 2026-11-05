@@ -488,17 +488,17 @@ fn agent_outcome(
         released.as_ref().err().and_then(|error| error.downcast_ref()),
         Some(oblivion_wire::control_client::Error::Rejected(reason)) if reason == "session_changed"
     );
-    if !stale_release {
-        released?;
-        return result;
-    }
+    if !stale_release { released?; }
+    let relay_failure = result.as_ref().is_err_and(|error| error.is::<native_overlay::AgentRelayFailure>());
     // The controller rejected the release for this Safe and slot. Before
     // describing a lost agent channel as a closure, require verified teardown.
-    if result.as_ref().is_err_and(|error| error.is::<native_overlay::AgentDisconnected>())
+    if stale_release
+        && (relay_failure || result.as_ref().is_err_and(|error| error.is::<native_overlay::AgentDisconnected>()))
         && verified_closed()
     {
         return Err("safe_closed_before_agent_exit".into());
     }
+    if relay_failure { return Ok(oblivion_wire::agent::RELAY_FAILURE_STATUS); }
     result
 }
 fn size() -> agent::Size {
@@ -518,29 +518,42 @@ mod tests {
 
     #[test]
     fn only_a_lost_agent_channel_with_verified_stale_release_reports_closure() {
-        fn bridge(code: Option<i32>) -> control::Result<i32> {
+        fn bridge(frames: &[(u8, &[u8])]) -> control::Result<i32> {
             let (mut stream, mut guest) = std::os::unix::net::UnixStream::pair().unwrap();
-            if let Some(code) = code {
-                agent::write_frame(&mut guest, 4, &code.to_be_bytes()).unwrap();
+            for (kind, payload) in frames {
+                agent::write_frame(&mut guest, *kind, payload).unwrap();
             }
-            drop(guest);
+            guest.shutdown(std::net::Shutdown::Write).unwrap();
             native_overlay::bridge(&mut stream, None, "test-safe", "opencode2", unsafe { std::mem::zeroed() }, None)
         }
 
         let stale_release = || Err(oblivion_wire::control_client::Error::Rejected("session_changed".into()).into());
-        for code in [0, 1, 19, 137] {
-            assert_eq!(agent_outcome(bridge(Some(code)), stale_release(), || panic!("guest exit is known")).unwrap(), code);
+        for code in [0i32, 1, 19, 125, 137] {
+            assert_eq!(agent_outcome(bridge(&[(4, &code.to_be_bytes())]), stale_release(), || panic!("guest exit is known")).unwrap(), code);
         }
         assert_eq!(
-            agent_outcome(bridge(None), stale_release(), || true).unwrap_err().to_string(),
+            agent_outcome(bridge(&[]), stale_release(), || true).unwrap_err().to_string(),
             "safe_closed_before_agent_exit"
         );
-        assert!(agent_outcome(bridge(None), stale_release(), || false).unwrap_err().is::<native_overlay::AgentDisconnected>());
-        assert!(agent_outcome(bridge(None), Ok(()), || panic!("release is current")).unwrap_err().is::<native_overlay::AgentDisconnected>());
+        assert!(agent_outcome(bridge(&[]), stale_release(), || false).unwrap_err().is::<native_overlay::AgentDisconnected>());
+        assert!(agent_outcome(bridge(&[]), Ok(()), || panic!("release is current")).unwrap_err().is::<native_overlay::AgentDisconnected>());
         assert_eq!(
-            agent_outcome(bridge(None), Err("controller_busy".into()), || panic!("release is unverified")).unwrap_err().to_string(),
+            agent_outcome(bridge(&[]), Err("controller_busy".into()), || panic!("release is unverified")).unwrap_err().to_string(),
             "controller_busy"
         );
+
+        let status = oblivion_wire::agent::RELAY_FAILURE_STATUS.to_be_bytes();
+        let diagnostic = b"The agent connection could not be completed.\n";
+        let native_exit = bridge(&[(2, diagnostic), (4, &status)]);
+        assert_eq!(agent_outcome(native_exit, stale_release(), || panic!("guest exit is known")).unwrap(), 125);
+        let relay_failure = || bridge(&[(2, b""), (4, &status)]);
+        assert_eq!(agent_outcome(relay_failure(), stale_release(), || true).unwrap_err().to_string(),
+            "safe_closed_before_agent_exit");
+        assert_eq!(agent_outcome(relay_failure(), stale_release(), || false).unwrap(), 125);
+        assert_eq!(agent_outcome(relay_failure(), Ok(()), || panic!("release is current")).unwrap(), 125);
+        let malformed = bridge(&[(2, b""), (4, &1i32.to_be_bytes())]);
+        assert_eq!(agent_outcome(malformed, stale_release(), || panic!("response is malformed")).unwrap_err().to_string(),
+            "Invalid agent response");
     }
 
     fn parse(values: &[&str]) -> control::Result<Options> {
