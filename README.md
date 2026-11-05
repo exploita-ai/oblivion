@@ -178,13 +178,11 @@ or `--path` for export; multiple selections require `--name`. One approved
 manifest covers the whole collection, including destination names and overlapping
 selections. A single selected item keeps its existing layout.
 
-In the manager, open **Files → Import**, then press **P** for **Enter path**.
-Paste a local path or `file://` URL, inspect it and choose it before confirming
-the copy. Terminals that paste a path on drop can use the same field. This is
-an explicit local selection, with no shared folder or virtual exchange disk.
-Existing literal paths take precedence. A single surrounding quote pair or a
-terminal-escaped path is also accepted, without running a shell or expanding
-environment variables, globs or multiple selections.
+In the manager, open **Files → Import**. In terminals that send a bracketed
+paste on drop, drop files or folders into the picker. Review the resolved
+paths and add them to your selection. **P** opens **Enter path** to type,
+paste or drop one local path or `file://` URL. Both paths lead to the same
+copy review and approval.
 
 Before approval, Oblivion prepares the selected content and shows recursive file
 and folder counts, total bytes and the manifest digest. The same prepared

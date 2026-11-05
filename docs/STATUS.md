@@ -14,12 +14,15 @@ export, guest review, encrypted streams, fresh-volume import, atomic collection
 publication and explicit import recovery. These source statements do not imply
 that all end-to-end paths have passed in an installed candidate.
 
-The local chooser accepts an explicitly pasted path or local file URL,
-reviews its type and resolved location, and leaves the existing copy review
-in place. Existing literal paths take precedence; a pinned MIT parser also
-accepts a single terminal-escaped path without executing a shell, expanding
-variables or globs. Nothing is imported by pasting. Actual terminal drop gestures
-and OS-native drag-and-drop APIs remain unqualified or unimplemented respectively.
+The import picker handles bracketed pastes directly and reviews one or more
+resolved paths before adding them to the selection. Enter path still accepts
+one literal path, a terminal-escaped path or a local file URL. The Windows
+parser preserves native separators and rejects UNC and device path syntax.
+Neither entry path starts a copy before the existing manifest approval.
+On Unix the Files overlay requests paste framing at handoff and drops queued
+overlay input before restoring input to the agent. Physical drop gestures and
+OS-native drag-and-drop APIs remain open. Windows uses the separate manager for
+Files while an agent runs.
 
 Native copies now have stable operation IDs and receiver-side outcome records.
 CLI and manager distinguish unknown, incomplete, ready, published and discarded
