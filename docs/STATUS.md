@@ -351,3 +351,29 @@ Its new work/output tree has private current-user/System ACLs. Repository text
 uses LF across platforms for exact source pairing. The Python inventory and
 builder suite passes; PowerShell parsing is registered in Windows CI, while a
 real Windows build has not been executed on the development Mac.
+
+Live startup diagnostics now stay on the delegated PTY. Real-process tests verify
+stderr, termios restoration, owned-child cleanup and explicit R after failed or
+normal exits. The locked Live manager offers Change storage mode, stops file
+workers and the runtime, then exits to that explicit retry screen. Failed switches
+pause automatic status requests and preserve a usable file adapter after confirmed
+worker shutdown. Codex selection explains native Device Code login without
+rewriting agent arguments or forwarding a callback port.
+
+New USB setup durably writes its identity to the reviewed free extent before
+publishing the new partition entry. The existing partition geometry and sample
+data survive the actual sfdisk sparse-file test, and the new identity remains
+readable without completing kernel node setup. Unknown partitions are not
+formatted as recovery. Physical USB, kernel discovery and full power-loss tests
+remain open.
+
+Interactive OpenCode2 process trees now enter a Safe-owned systemd scope. The
+native elected server and native restarts can outlive their first TUI without
+belonging to the attachment's cgroup. Private managed --standalone jobs retain
+the original service cgroup and fixed native entrypoint. TERM/HUP cleanup was
+exercised with actual process groups and a detached server-style process. The
+pinned ARM64 2.0.1 binary passed two actual TUI clients, first-client closure and
+session ID/title recovery through its API and SQLite after a server restart.
+This covers native metadata, not provider/tool conversations, real scope/PID1
+behavior, encrypted Safe reboot, SIGKILL/OOM or forced-cancel execution recovery.
+No new image was built for this increment.

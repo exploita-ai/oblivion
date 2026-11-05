@@ -46,8 +46,32 @@ product decision.
 Changing virtual consoles does not close a Safe. Oblivion's existing inactivity
 locks continue to apply while its screen is in the background.
 
+To switch between persistent and RAM-only storage, lock Oblivion and choose
+**Change storage mode** on its welcome screen. The action is available only
+after active work is closed and no runtime recovery is pending. It stops the
+controller and clears the current Live storage selection; existing encrypted
+data on the boot device is preserved. On the closed display, press **R** to
+start Oblivion and choose the next mode. Closing the manager otherwise leaves
+that display waiting for R; it does not open a host shell or restart immediately.
+If the action fails, the manager shows an error and waits for an explicit R
+before inspecting the runtime again.
+
 These are source features awaiting the Live hardware acceptance described in the
 [roadmap](oblivion1.0-roadmap.md). They do not qualify a published ISO by themselves.
+
+If the launcher cannot start, its diagnostics stay visible in the terminal.
+Press **R** to retry after correcting the problem, or **Ctrl+Q** to pause while
+using the Debian consoles. A normal manager exit also waits for R; it does not
+immediately restart the setup or repeatedly initialize storage. These diagnostics
+are terminal output and are not saved as a disk log.
+
+New USB preparation writes and flushes the runtime identity into the reviewed
+free extent before publishing its partition-table entry. If setup stops after
+the table is written but before kernel partition discovery, the next boot can
+recognize that identity. Existing partitions and their data are preserved.
+Unknown partitions are still refused, rather than automatically formatted or
+treated as an interrupted Oblivion setup. This ordering is covered with real
+`sfdisk` on sparse files; power-loss recovery on physical USB remains a gate.
 
 Debian interfaces: [NetworkManager](https://manpages.debian.org/trixie/network-manager/nmtui.1.en.html),
 [keyboard configuration](https://manpages.debian.org/trixie/keyboard-configuration/keyboard.5.en.html),

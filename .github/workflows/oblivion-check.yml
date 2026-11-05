@@ -180,7 +180,9 @@ jobs:
           rustup toolchain install 1.88.0 --profile minimal
           rustup default 1.88.0
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake make g++ perl libclang-dev python3 zstd util-linux e2fsprogs initramfs-tools-core cpio
+          sudo apt-get install -y --no-install-recommends cmake make g++ perl libclang-dev python3 zstd util-linux fdisk e2fsprogs initramfs-tools-core cpio
+      - name: Verify Live identity staging and actual GPT append without physical media
+        run: python3 -B script/oblivion/test-live-storage.py
       - name: Cache Rust dependencies and build outputs
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -195,7 +197,7 @@ jobs:
           cargo check --locked --lib --bins
           cargo check --locked --lib --bins --features lab-emulation
           cargo test --locked --lib --bin oblivion --bin oblivion-storage
-          cargo test --locked --test frontend_command --test frontend --test frontend_safes --test frontend_files --test frontend_settings --test frontend_family --test frontend_tasks --test frontend_backup --test safe_admin --test delegation --test backup_cli --test file_attachment --test managed --test terminal_screen --test workspace --test share_control --test channel
+          cargo test --locked --test display --test frontend_command --test frontend --test frontend_safes --test frontend_files --test frontend_settings --test frontend_family --test frontend_tasks --test frontend_backup --test safe_admin --test delegation --test backup_cli --test file_attachment --test managed --test terminal_screen --test workspace --test share_control --test channel
       - name: Exercise the portable private wire
         working-directory: packages/oblivion-wire
         run: cargo test --locked
@@ -219,6 +221,7 @@ jobs:
           sudo -n env PYTHONDONTWRITEBYTECODE=1 python3 tests/safe-tools-relay.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/managed-job.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/agent-channel.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/agent-cleanup.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/credential-delegation.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/native-runtime.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/runtime-disk-fd.py
