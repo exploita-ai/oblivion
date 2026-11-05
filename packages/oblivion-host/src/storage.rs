@@ -826,13 +826,15 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
     if matches!(op, "lock" | "recover") {
         mark_recovery()?;
     }
-    let _lock = if matches!(op, "lock" | "recover" | "child-start-close" | "share-release" | "share-export-cancel" | "share-export-cleanup" | "share-import-finish" | "share-import-abort" | "share-import-discard") || branch_latch.is_some() {
+    let lock = if matches!(op, "lock" | "recover" | "child-start-close" | "share-release" | "share-export-cancel" | "share-export-cleanup" | "share-import-finish" | "share-import-abort" | "share-import-discard") || branch_latch.is_some() {
         recovery_lock()?
     } else if matches!(op, "status" | "create" | "enter-documents" | "session-storage" | "start-agent" | "close-idle" | "agent-release") {
         admission_lock()?
     } else {
         lock()?
     };
+    // Disk tools must keep the worker's lock if the worker is killed.
+    inherit_lock(&lock)?;
     // A delayed view callback cannot operate on a new session which reused
     // its old slot. Verify under the same lock as the operation itself.
     require(!matches!(op, "share-export-source-open" | "backup-export-begin" | "family-password-preview") || expected.is_some(), "expected_session_required")?;
@@ -3817,6 +3819,31 @@ mod status_tests {
 
     #[test]
     #[ignore = "requires isolated root-owned tmpfs /run; no production state"]
+    fn resident_storage_lock_is_not_inherited_by_workers() {
+        assert_eq!(std::env::var("OBLIVION_IDLE_CONTROLLER_TEST").as_deref(), Ok("1"));
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        assert!(!Path::new(RUN).exists());
+        fs::DirBuilder::new().mode(0o700).create(RUN).unwrap();
+        let storage = lock().unwrap_or_else(|error| panic!("{}", error.0));
+        let mut worker = Command::new("/bin/sleep").arg("10").spawn().unwrap();
+        drop(storage);
+        let reacquired = lock();
+        worker.kill().unwrap();
+        worker.wait().unwrap();
+        reacquired.unwrap_or_else(|error| panic!("{}", error.0));
+
+        let storage = lock().unwrap_or_else(|error| panic!("{}", error.0));
+        inherit_lock(&storage).unwrap_or_else(|error| panic!("{}", error.0));
+        let mut worker = Command::new("/bin/sleep").arg("10").spawn().unwrap();
+        drop(storage);
+        let reacquired = lock();
+        worker.kill().unwrap();
+        worker.wait().unwrap();
+        assert!(matches!(reacquired, Err(Error("controller_busy"))));
+    }
+
+    #[test]
+    #[ignore = "requires isolated root-owned tmpfs /run; no production state"]
     fn status_waits_for_short_storage_contention() {
         assert_eq!(std::env::var("OBLIVION_IDLE_CONTROLLER_TEST").as_deref(), Ok("1"));
         assert_eq!(unsafe { libc::geteuid() }, 0);
@@ -4294,14 +4321,15 @@ pub(crate) fn lock_named(name: &str) -> Result<File> {
             libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0,
             "controller_busy",
         )?;
-        // Trusted workers inherit the lock so a killed parent cannot release it
-        // while cryptsetup or mkfs is still modifying a volume.
-        require(
-            libc::fcntl(file.as_raw_fd(), libc::F_SETFD, 0) == 0,
-            "lock_inheritance_failed",
-        )?;
     }
+    // Resident threads can hold the storage lock while the daemon starts a
+    // worker. The worker must acquire its own lock after exec.
+    if name != "storage.lock" { inherit_lock(&file)?; }
     Ok(file)
+}
+
+fn inherit_lock(file: &File) -> Result<()> {
+    require(unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, 0) == 0 }, "lock_inheritance_failed")
 }
 
 pub(crate) fn recovery_required() -> Result<bool> {
