@@ -53,24 +53,22 @@ pub fn capabilities() -> Capabilities {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     {
-        let (virtualization, nested) = probe();
-        result.virtualization = virtualization;
-        result.nested = nested;
-        result.vsock = vsock();
-        result.reason = if !virtualization {
-            Some("usable_kvm_required")
-        } else if !nested {
-            Some("nested_virtualization_unavailable")
-        } else if !result.vsock {
-            Some("vhost_vsock_unavailable")
-        } else {
-            match qemu() {
+        let kvm = probe();
+        let vsock = vsock();
+        result.virtualization = kvm.is_ok();
+        result.nested = kvm.as_ref().is_ok_and(|nested| *nested);
+        result.vsock = vsock.is_ok();
+        result.reason = match kvm {
+            Err(error) => Some(error.0),
+            Ok(false) => Some("nested_virtualization_unavailable"),
+            Ok(true) if vsock.is_err() => vsock.err().map(|error| error.0),
+            Ok(true) => match qemu() {
                 None => Some("qemu_system_required"),
                 Some(path) if !qemu_compatible(path, std::env::consts::ARCH) => {
                     Some("qemu_nested_version_required")
                 }
                 Some(_) => None,
-            }
+            },
         };
         result.supported = result.reason.is_none();
     }
@@ -265,30 +263,9 @@ printf 'QEMU emulator version {release} (Debian fixture)\n'
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn probe() -> (bool, bool) {
-    use std::fs::OpenOptions;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
-    let Ok(kvm) = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open("/dev/kvm")
-    else {
-        return (false, false);
-    };
-    if !kvm
-        .metadata()
-        .is_ok_and(|info| info.file_type().is_char_device())
-        || unsafe { libc::ioctl(kvm.as_raw_fd(), 0xae00) } != 12
-    {
-        return (false, false);
-    }
-    let vm = unsafe { libc::ioctl(kvm.as_raw_fd(), 0xae01, 0) };
-    if vm < 0 {
-        return (false, false);
-    }
-    drop(unsafe { OwnedFd::from_raw_fd(vm) });
+fn probe() -> crate::Result<bool> {
+    use std::os::fd::AsRawFd;
+    let (kvm, _vm) = create_vm()?;
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct Entry {
@@ -315,7 +292,7 @@ fn probe() -> (bool, bool) {
     if unsafe { libc::ioctl(kvm.as_raw_fd(), 0xc008ae05, cpuid.as_mut() as *mut Cpuid) } != 0
         || cpuid.count > 1024
     {
-        return (true, false);
+        return Ok(false);
     }
     let supported = &cpuid.entries[..cpuid.count as usize];
     let intel = supported
@@ -328,71 +305,98 @@ fn probe() -> (bool, bool) {
         std::fs::read_to_string(format!("/sys/module/{module}/parameters/nested"))
             .is_ok_and(|value| matches!(value.trim(), "1" | "Y" | "y"))
     };
-    (
-        true,
-        intel && enabled("kvm_intel") || amd && enabled("kvm_amd"),
-    )
+    Ok(intel && enabled("kvm_intel") || amd && enabled("kvm_amd"))
 }
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-fn probe() -> (bool, bool) {
-    use std::fs::OpenOptions;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
-    let Ok(kvm) = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open("/dev/kvm")
-    else {
-        return (false, false);
-    };
-    if !kvm
-        .metadata()
-        .is_ok_and(|info| info.file_type().is_char_device())
-        || unsafe { libc::ioctl(kvm.as_raw_fd(), 0xae00) } != 12
-    {
-        return (false, false);
-    }
-    let vm = unsafe { libc::ioctl(kvm.as_raw_fd(), 0xae01, 0) };
-    if vm < 0 {
-        return (false, false);
-    }
-    let vm = unsafe { OwnedFd::from_raw_fd(vm) };
+fn probe() -> crate::Result<bool> {
+    use std::os::fd::AsRawFd;
+    let (_kvm, vm) = create_vm()?;
     // Linux UAPI KVM_CAP_ARM_EL2=240. Older kernels deliberately fail the
     // capability check; there is no emulation or single-level fallback.
-    (
-        true,
-        unsafe { libc::ioctl(vm.as_raw_fd(), 0xae03, 240) } > 0,
-    )
+    Ok(unsafe { libc::ioctl(vm.as_raw_fd(), 0xae03, 240) } > 0)
 }
 
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-fn vsock() -> bool {
-    use std::fs::OpenOptions;
+fn create_vm() -> crate::Result<(std::fs::File, std::os::fd::OwnedFd)> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let kvm = open_device(Device::Kvm)?;
+    if unsafe { libc::ioctl(kvm.as_raw_fd(), 0xae00) } != 12 {
+        return Err(crate::Error("usable_kvm_required"));
+    }
+    let vm = unsafe { libc::ioctl(kvm.as_raw_fd(), 0xae01, 0) };
+    if vm < 0 {
+        return Err(crate::Error("usable_kvm_required"));
+    }
+    Ok((kvm, unsafe { OwnedFd::from_raw_fd(vm) }))
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn vsock() -> crate::Result<()> {
     use std::os::fd::{FromRawFd, OwnedFd};
+    let _device = open_device(Device::VhostVsock)?;
+    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(crate::Error("vhost_vsock_unavailable"));
+    }
+    drop(unsafe { OwnedFd::from_raw_fd(fd) });
+    Ok(())
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+enum Device {
+    Kvm,
+    VhostVsock,
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn open_device(device: Device) -> crate::Result<std::fs::File> {
+    use crate::enrollment;
+    use std::fs::OpenOptions;
     use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
-    let Ok(file) = OpenOptions::new()
+    let (path, missing, denied, unavailable) = match device {
+        Device::Kvm => (
+            enrollment::KVM,
+            "kvm_device_missing",
+            "kvm_device_access_denied",
+            "usable_kvm_required",
+        ),
+        Device::VhostVsock => (
+            enrollment::VHOST_VSOCK,
+            "vhost_vsock_device_missing",
+            "vhost_vsock_device_access_denied",
+            "vhost_vsock_unavailable",
+        ),
+    };
+    let file = OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open("/dev/vhost-vsock")
-    else {
-        return false;
-    };
+        .open(path)
+        .map_err(|error| {
+            crate::Error(match error.raw_os_error() {
+                Some(libc::ENOENT | libc::ENODEV | libc::ENXIO) => missing,
+                Some(libc::EACCES | libc::EPERM) => enrollment::required(path).unwrap_or(denied),
+                _ => unavailable,
+            })
+        })?;
     if !file
         .metadata()
         .is_ok_and(|info| info.file_type().is_char_device())
     {
-        return false;
+        return Err(crate::Error(unavailable));
     }
-    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
-    if fd < 0 {
-        return false;
-    }
-    drop(unsafe { OwnedFd::from_raw_fd(fd) });
-    true
+    Ok(file)
 }

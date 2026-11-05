@@ -1,6 +1,8 @@
 pub mod auth;
 pub mod bridge;
 pub mod config;
+#[cfg(target_os = "linux")]
+pub mod enrollment;
 pub mod kvm;
 pub mod lifetime;
 pub mod private;

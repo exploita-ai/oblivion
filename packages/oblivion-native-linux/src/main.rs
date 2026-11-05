@@ -14,6 +14,14 @@ fn main() {
         }
     }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    #[cfg(target_os = "linux")]
+    if args.len() == 1 && args[0] == "enroll" {
+        if let Err(error) = oblivion_native_linux::enrollment::enroll() {
+            runtime::report(error.0);
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.len() == 1 && args[0] == "capabilities" {
         match serde_json::to_string(&kvm::capabilities()) {
             Ok(value) => println!("{value}"),
