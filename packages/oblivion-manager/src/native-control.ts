@@ -60,7 +60,17 @@ export type NativeRuntime = {
   query: (args: string[]) => Promise<unknown>
   files: NativeFileClient
   activity: (input: z.infer<typeof nativeActivity>) => Promise<void>
+  chooseLiveStorage?: () => Promise<void>
   exit: () => Promise<void> | void
+}
+
+export async function chooseLiveStorage(files: Pick<NativeFileClient, "close">, run: NativeRuntime["run"], exit: () => void, restoreFiles: () => void) {
+  await files.close()
+  try {
+    if (await run(["runtime", "stop"]) !== 0) throw new Error("The Live runtime could not stop. Storage mode is unchanged.")
+    if (await run(["runtime", "choose-storage"]) !== 0) throw new Error("The next Live storage choice could not be prepared.")
+  } catch (error) { restoreFiles(); throw error }
+  exit()
 }
 
 export function capacity(bytes: number) {

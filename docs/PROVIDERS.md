@@ -10,6 +10,25 @@ refresh tokens, client databases and API keys saved by the client live inside
 that Safe's encrypted volume. Two agents in the same Safe can access data
 permitted by that guest's user account; different Safes have separate filesystems.
 
+For the first ChatGPT login in Codex, choose **Sign in with Device Code** in the
+native client and open the displayed link in a browser outside the Safe, for
+example on your desktop or phone. Browser login uses a `localhost:1455` callback
+inside the Safe; opening its URL on the physical computer does not connect that
+callback to the guest. Device Code uses the client's supported headless flow
+when enabled for your account. An OpenAI API key remains a separate native login
+choice with its own billing. See the [pinned Codex login implementation](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/tui/src/onboarding/auth.rs).
+
+The explicit CLI login can use the same named Safe:
+
+```sh
+oblivion run --name work codex login --device-auth
+oblivion run --safe work codex
+```
+
+After closing it, use `oblivion run --safe work codex resume --last` to reopen
+that Safe and continue its latest native Codex conversation. Oblivion forwards
+the client arguments unchanged and does not forward an OAuth callback port.
+
 Agent-created children have a controller-managed startup path. It exports only
 the requested client's supported credential from the parent, seals it to the
 family, child and creation request while booting, installs it in the child's

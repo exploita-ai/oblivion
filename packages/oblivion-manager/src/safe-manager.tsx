@@ -21,7 +21,7 @@ import { NativePassword } from "./native-password"
 import { conversationArgs } from "./native-conversation"
 
 const agents = [
-  { id: "codex", name: "Codex", description: "Open the official Codex CLI. Its login, tools and conversation history stay inside this Safe." },
+  { id: "codex", name: "Codex", description: "Official Codex. First login: choose Sign in with Device Code for ChatGPT, then open its link outside the Safe. Its browser callback stays inside." },
   { id: "claude", name: "Claude Code", description: "Open the official Claude Code CLI with this Safe's files and native conversation history." },
   { id: "opencode2", name: "OpenCode 2", description: "Open the official OpenCode 2 TUI and choose your provider inside this Safe." },
 ] as const
@@ -263,6 +263,27 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
     catch { setNotice(props.overlay ? "The Safe panel could not close. Try again." : "Oblivion could not lock cleanly. Check the runtime before exiting.") }
   }
 
+  const canChooseLiveStorage = () => !!props.liveStorage && !props.overlay && !!props.runtime.chooseLiveStorage
+    && !!state() && !state()!.app_open && state()!.app_mode === "locked" && !state()!.general_open
+    && !active().length && !state()!.recovery_required && !hostClosing()
+    && !state()!.idle_lock.safes.some((entry) => entry.closing) && !error()
+
+  async function chooseStorage() {
+    if (!canChooseLiveStorage() || attached() || busy()) return
+    setAttached(true)
+    setNotice("")
+    awaitingInitialRetry = true
+    try {
+      await props.runtime.chooseLiveStorage!()
+    } catch {
+      setError("Live storage selection could not be prepared. Press R to inspect the runtime before retrying.")
+    } finally {
+      // A status request can start the runtime. After stopping, only an explicit
+      // retry may do that; the successful path exits to the display's R prompt.
+      setAttached(false)
+    }
+  }
+
   function lock(quit = false) {
     if (!state()?.app_open) { if (quit) void leave(); return }
     setQuitAfterLock(quit)
@@ -309,6 +330,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
         run: () => { if (state()?.general_present) { void execute(["unlock"]); return }; reviewStorage(state()?.general_incomplete ?? false) },
       }]),
       ...(props.liveStorage === "persistent" ? [] : [{ name: "Ephemeral mode", badge: "RAM only", description: `Work in RAM for this run${state()?.ephemeral_session_bytes ? ` with ${capacity(state()!.ephemeral_session_bytes!)} per Safe` : ""}. New Safes and files are discarded when they close or the computer restarts.`, action: "Enter ephemeral mode", run: () => { void execute(["ephemeral"]) } }]),
+      ...(canChooseLiveStorage() ? [{ name: "Change storage mode", description: "Stop the Live runtime and choose persistent or RAM-only storage at the next start. Existing encrypted data is preserved. Press R on the closed screen to start the new choice.", action: "Choose next mode", run: () => { void chooseStorage() } }] : []),
     ]
     return safeRows().map(({ id, depth }) => {
       const opened = active().find((safe) => safe.id === id)
@@ -424,7 +446,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
       <Show when={page() === "rename" || page() === "grow"}><FormView form={{ title: page() === "rename" ? "Rename Safe" : "Increase storage", description: safeTitle(), fields: [{ id: "value", label: page() === "rename" ? "Safe name" : "New total capacity (MiB)", value: page() === "rename" ? safeTitle() : String(Math.max(2048, Math.ceil((state()?.session_sizes?.[safe()!] ?? 0) / 1024 ** 2) + 1024)), validate: (value) => page() === "rename" ? !value.trim() || value.trim() !== value ? "Enter a name without leading or trailing spaces." : undefined : !/^\d+$/.test(value) || Number(value) < 512 ? "Enter a capacity of at least 512 MiB." : undefined }], submit: page() === "rename" ? "Rename" : "Increase storage", run: async () => {} }} cancel={() => section("settings")} submit={(values) => { void execute(["safe", page() === "rename" ? "rename" : "grow", safe()!, values.value]) }} /></Show>
       <Show when={["safes", "settings", "name", "agents", "lock"].includes(page())}>
       <Show when={page() === "name"} fallback={<Menu title={page() === "settings" ? "Settings" : page() === "lock" ? "Close and lock" : page() === "agents" ? "Choose an agent" : state()?.app_open ? "Your Safes" : "Welcome to Oblivion"}
-        description={page() === "settings" ? `${safeTitle()} · Network and storage apply to the selected Safe. Automatic lock applies to Oblivion.` : page() === "agents" ? target() ? `${state()?.session_titles[target()!] ?? target()!.slice(0, 8)} · Shared files, independent agent conversations\nEnter starts a new conversation. C continues the highlighted agent's latest saved conversation.` : ephemeral() ? "Create an isolated Safe in RAM. Its contents are discarded when closed." : `${safeName() ?? "New Safe"} · Separate password, encrypted files and virtual machine.` : page() === "lock" ? "Active work stops when its Safe is locked." : state()?.app_open ? "Choose a Safe to continue, or create a separate environment." : props.liveStorage === "ephemeral" ? "RAM-only Live run. Persistent storage is not attached. To change mode, exit Oblivion and run: oblivion runtime choose-storage." : props.liveStorage === "persistent" ? "Persistent Live run. Your encrypted data stays on the selected boot device. To change mode, exit Oblivion and run: oblivion runtime choose-storage." : "Run your coding agent in an isolated VM. Choose how to keep your work."}
+        description={page() === "settings" ? `${safeTitle()} · Network and storage apply to the selected Safe. Automatic lock applies to Oblivion.` : page() === "agents" ? target() ? `${state()?.session_titles[target()!] ?? target()!.slice(0, 8)} · Shared files, independent agent conversations\nEnter starts a new conversation. C continues the highlighted agent's latest saved conversation.` : ephemeral() ? "Create an isolated Safe in RAM. Its contents are discarded when closed." : `${safeName() ?? "New Safe"} · Separate password, encrypted files and virtual machine.` : page() === "lock" ? "Active work stops when its Safe is locked." : state()?.app_open ? "Choose a Safe to continue, or create a separate environment." : props.liveStorage ? `${props.liveStorage === "ephemeral" ? "RAM-only Live run. Persistent storage is not attached." : "Persistent Live run. Encrypted data stays on the selected boot device."} ${canChooseLiveStorage() ? "Use Change storage mode below to choose again." : "Close active work and complete recovery before changing modes."}` : "Run your coding agent in an isolated VM. Choose how to keep your work."}
         items={items()} selected={selected()} change={setSelected} focused={area() === "list"} disabled={attached() || busy() || !!error()}
         choose={(index) => { const item = items()[index]; if (item && !item.disabled) item.run() }}
         toolbar={toolbar()} actionsFocused={area() === "actions"} focusActions={() => setArea("actions")} focus={() => setArea("list")}
