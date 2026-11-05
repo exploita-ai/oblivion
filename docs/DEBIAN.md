@@ -5,7 +5,8 @@ It belongs inside the headless controller VM, on desktop and Live alike. It
 contains Safe/gateway roles and controller services; it is not the native
 launcher package and does not turn the physical Debian host into a controller.
 
-Use the [native bundle](DESKTOP.md) on an ordinary Linux desktop. The Live image
+Use the [desktop package](DESKTOP.md#debian-desktop-package) or the native
+bundle on an ordinary Linux desktop. The Live image
 preinstalls that same launcher and virtualizer on its outer Debian OS, then
 starts the private controller VM. The controller package's installation marker
 is `controller-runtime`; the native launcher refuses it rather than adopting a

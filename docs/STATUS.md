@@ -162,6 +162,18 @@ install/remove/purge/reinstall fixtures preserve configuration and data, and
 validate payload ownership and inventory schemas. Actual role builds and the
 service lifecycle on a real systemd/KVM host remain open. See [Debian](DEBIAN.md).
 
+The Linux desktop package is separate from the private controller package.
+It declares host dependencies and exposes `/usr/bin/oblivion`. First launch
+checks host readiness and publishes a private per-user release. The package
+entry point defers an APT update while the runtime is in use, then applies it
+at the next launch after shutdown with the same disk and runtime identity.
+The Polkit helper can enroll the authenticated local caller in Debian's
+`kvm` group after explicit consent. The VM runs under the user's account.
+Debian ARM64 packaging fixtures, Linux socket-credential tests, private
+release fixtures on Linux and macOS, and the canonical root check passed.
+Full artifact builds and APT, Polkit and nested-VM tests on target hosts
+remain open. See [Debian desktop setup](DESKTOP.md#debian-desktop-package).
+
 Local fixtures have checked terminal and control framing, stale ownership,
 canary-protected RAM mode, idle locks, actual native history readers/importers,
 SafeAdmin, managed jobs, file hashes and Share authentication. Gateway socket

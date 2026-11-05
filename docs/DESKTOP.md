@@ -143,6 +143,55 @@ Safe lifecycle remain under the native launcher's control. Installation does
 not use sudo, install QEMU, change system permissions, change swap or sysctl
 settings, or contact a provider.
 
+## Debian desktop package
+
+On a compatible Debian host, install the development desktop package with APT,
+then run the normal command as your own user.
+
+```sh
+sudo apt install ./oblivion-desktop_1.0.0~dev20261105_amd64.deb
+oblivion
+# Or go straight to an agent in a new Safe.
+oblivion run codex
+```
+
+APT installs QEMU and the host dependencies and exposes `/usr/bin/oblivion`.
+The first launch verifies the root-owned bundle and prepares a private copy for
+the current user. When the KVM devices require membership in Debian's `kvm`
+group, Oblivion asks for consent and opens a Polkit administrator prompt. After
+enrollment, sign out and back in, or reconnect the SSH session, if the current
+login still holds the old groups. The VM runs as the ordinary user. Firmware,
+nested KVM, missing device nodes and device permissions are reported separately.
+
+The ARM64 package needs a booted kernel with nested EL2 support and QEMU
+10.1 or newer. On Debian trixie these require the appropriate backports
+packages and host boot configuration. APT resolves dependencies before it
+installs Oblivion, so configure that host baseline first.
+
+An APT upgrade installs a new source bundle. A running runtime keeps its
+private release until it stops. The next normal launch then activates the new
+release using the same runtime identity and encrypted data disk. If an
+activation was interrupted, the launcher finishes that exact verified release
+before applying a newer package. Use APT for package upgrades. To remove the
+private software as well as the package, close the Safes, stop the runtime,
+run `oblivion runtime uninstall`, then run `sudo apt remove oblivion-desktop`.
+Removing the package alone preserves the user's installed release and data.
+
+From a checkout with the pinned Bun and Docker Buildx, build the development
+package for either `amd64` or `arm64`.
+
+```sh
+bun install --frozen-lockfile
+OBLIVION_ARCH=amd64 OBLIVION_DEB_VERSION=1.0.0~dev20261105 \
+  sh script/oblivion/build-desktop-deb.sh
+```
+
+The package and checksum are written to `artifacts/oblivion-desktop-deb-<arch>/`.
+The manual [Debian desktop workflow](../.github/workflows/oblivion-desktop-deb.yml)
+builds both architectures as development artifacts. The package embeds the
+verified controller image and build inventory. Installed APT, Polkit and
+nested-VM acceptance on target hosts remains open.
+
 ## Windows development setup and maintenance
 
 From a produced Windows bundle, run `install.cmd` in a normal terminal. The
@@ -320,8 +369,7 @@ Older host kernels fail that check. [Linux 6.16 KVM API](https://docs.kernel.org
 software-emulation or direct-controller fallback. Live inside another VM adds
 another nesting level and needs separate qualification.
 
-The source includes these paths and sparse-file partition tests. A complete
-Live build, physical USB preparation/reboots and the RAM-mode unchanged-disk
-acceptance test remain required before distribution. The boot wordmark still
-starts after runtime preparation; overlapping its three seconds with VM boot
-remains an open UI integration task.
+The source includes these paths and sparse-file partition tests. The
+three-second boot wordmark overlaps controller startup and appears once per
+boot. A complete Live build, physical USB preparation and reboots, and the
+RAM-mode unchanged-disk acceptance test remain required before distribution.

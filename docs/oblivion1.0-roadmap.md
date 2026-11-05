@@ -78,6 +78,15 @@ La distribuzione dei tre client ufficiali ora ha una policy separata dall’inte
 
 Il bundle Windows ora include `install.cmd`, che avvia il setup nativo dalla CLI normale. Lo staging contiene solo software verificato, leggibile dall’amministratore UAC; l’identità destinataria deriva dal token autenticato della pipe, anche quando UAC usa un altro account. Il helper prepara Hyper-V solo dopo conferma nel terminale originale, distingue il riavvio necessario e non riavvia automaticamente. Verifica build Windows 11+, edizione e capacità osservate prima dei dati runtime. Prerequisiti e installazione condividono l’annullamento e il controllo di EOF; il parent attende l’uscita del helper e verifica il proprio broker prima del successo. Update, GC e uninstall usano lo stesso helper con operazione autenticata; il bundle nuovo porta la propria source identity e il chiamante trattiene i pin del software fino all’uscita del helper. La reinstallazione ripristina il software intorno al disco conservato senza inizializzarlo. Il parent originale registra o rimuove solo la propria voce PATH utente, preserva le altre e chiede di riaprire il terminale; nessun wrapper ricostruisce gli argomenti. La rimozione di software in uso resta incompleta ed esplicita. Passano 39 test portabili, i controlli dei bundle e la compilazione MSVC del backend e della CLI. UAC reale, registro Windows, uninstall/reinstall, Windows pulito con Hyper-V disabilitato, servicing e boot annidato restano gate. Non è stata prodotta una nuova ISO.
 
+Il desktop Linux ha un percorso `.deb` di sviluppo per amd64 e arm64, distinto
+dal pacchetto privato del controller. APT prepara le dipendenze e il primo avvio
+pubblica la copia privata dell’utente. L’eventuale accesso al gruppo `kvm`
+richiede consenso e passa da Polkit. Gli aggiornamenti del pacchetto entrano
+in uso dopo l’arresto del runtime e conservano disco e identità. Passano le
+fixture di packaging su Debian ARM64 e quelle di attivazione su Linux e
+macOS. Build complete, installazione, Polkit e boot annidato sui sistemi
+target restano da collaudare. [Setup desktop Debian](DESKTOP.md#debian-desktop-package).
+
 ## 1. Vocabolario, distribuzioni e confini
 
 | Termine | Significato per la 1.0 |
