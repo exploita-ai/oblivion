@@ -197,8 +197,10 @@ policy. The native personal-backup CLI provides full-volume export/import,
 explicit finish after a wrong password, metadata-only status and discard.
 The manager provides the corresponding path chooser, contents review and
 transaction recovery screens, with passwords handled only by the private CLI.
-Lock revokes copy workers before releasing the archive. An actual VM
-backup/restore round trip remains an acceptance gate.
+Lock revokes copy workers before releasing the archive. A headless Mac test
+restored an encrypted backup into a second archive with the original Safe ID,
+password, file and OpenCode 2 conversation. Release-image qualification remains
+open; this test used the diagnostic Debian 6.12 controller.
 
 Family password changes now preview the complete local family, bind the review
 to the current host opening and header digest, and preflight actual keyslots
@@ -257,13 +259,66 @@ checks include remote destination names, proxy authentication, revocation,
 public TCP/passive FTP and collector blocks. They do not replace packet-level
 acceptance with two actual Safe gateways.
 
-On the test Mac M4 Pro, cached full-synchronization disk I/O fixed the reproduced
-outer Debian memory-corruption failures in subsequent host cycles. The inner
-Safe KVM guest still fails before Oblivion services. Software emulation reaches
-userspace and has verified a synthetic encrypted file round trip across restart;
-this diagnostic result does not qualify Mac hardware acceleration. There is no
-production emulation fallback. Linux hardware acceptance and the Windows backend
-remain open.
+On the test Mac M4 Pro with macOS 15.7.3, cached full-synchronization disk I/O
+fixed the reproduced outer Debian memory-corruption failures in subsequent
+host cycles. Under Apple VZ, a Debian 7.2.11 controller reproduced a synchronous
+abort in a minimal Debian 6.12.115 nested guest without networking or disks.
+With Debian 6.12.115 as the outer kernel, the minimal guest booted four times.
+The original Safe image also booted twice with KVM, mounted a synthetic ext4
+volume and sent its Documents readiness marker over virtio serial. A separate
+development bundle built with the stable controller kernel booted from the
+native macOS launcher. It created LUKS storage, started all three official
+clients with `--version` in the offline Safe, and imported and recovered an
+identical test file after shutting down and restarting the controller. After
+enabling the Safe network service, Codex started in Tor Strict mode. The
+controller reported 100% Tor bootstrap, a fresh observation and blocked direct
+access. The same launcher ran two offline Safes concurrently with separate
+workspaces. Closing one left the OpenCode client in the other active. The
+native OpenCode session ID and a shell transcript survived a Safe close and
+controller restart. A one-minute Safe timeout closed a pinned Safe with the
+archive still open, and a RAM-only run left the persistent catalog unchanged.
+Early tests observed intermittent `controller_busy` during password entry or
+client release and stop requests that lost their acknowledgement. The shared
+production kernel profile and live provider conversations still require
+qualification. There is no production emulation fallback. Linux hardware
+acceptance and the Windows backend remain open.
+
+Mac maintenance acceptance found that the immutable Safe image lacked logind's
+state directory. Creating it at image build kept the maintenance root read-only
+and restored Share and Resize guest readiness. The rebuilt launcher grew an
+encrypted Safe from 2048 to 2304 MiB and recovered the original file. Personal
+backup advanced to the SafeAdmin channel and then reported `safe_admin_failed`.
+A nested diagnostic guest reproduced the unit exiting at `setuid(1000)` with
+`EPERM` before its channel greeting. Passing `CAP_SETUID` through the existing
+capability bound restored the greeting and a storage usage request in the
+diagnostic guest. After dropping privileges it had UID/GID 1000 and no
+permitted, effective or ambient capabilities. Portable Share listed the
+expected files, then reported `remote_control_failed` after review. The
+controller's private RPC rejected the scoped Safe opening sent with
+`share-release` before reading its body. The handler now accepts that opening
+and still requires the expected Safe ID. A Unix-socket regression test checks
+that missing IDs, empty openings and truncated openings are rejected.
+
+With both fixes installed, the headless Mac launcher exported and restored a
+2 GiB personal backup, and exported and imported a passphrase-encrypted Share,
+using a separate receiving archive. Both recovered the original file and
+OpenCode 2 conversation and opened offline. Backup kept the original Safe ID
+and password. Share assigned a new ID and password and renamed the incoming
+Safe around a title conflict without disturbing the existing Safe. The first
+restore was interrupted while the Mac ran out of space; the successful rerun
+used clean test archives and sufficient space. It used a diagnostic Debian 6.12
+controller on Apple Silicon and did not launch UTM.
+
+The two Unix password entries now use one activity reporter, so reporting input
+cannot collide with an unnecessary status read before the confirmation prompt.
+Status also waits up to one second for short storage lock contention before
+returning `controller_busy`. This wait occurs before the worker reads state; it
+never replays an import. An isolated Linux fixture checks short contention and
+the timeout under a held lock. The headless Mac rerun restored the 2 GiB backup
+and completed three Share imports on their first attempt without
+`controller_busy`. Each imported Safe opened offline with a distinct ID and the
+new password, with the original file and OpenCode history. One runtime stop
+still lost its acknowledgement; `runtime recover` verified disconnection.
 
 Portable CLI run/proxy parsing, private wire framing and Files validation now
 compile for Windows MSVC; the Windows CI job includes their portable tests. The shared

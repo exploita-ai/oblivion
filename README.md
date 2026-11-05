@@ -310,6 +310,8 @@ publish an image as a qualified release.
 The [Debian package guide](docs/DEBIAN.md) covers dependencies, installation and
 data-preserving removal for a dedicated controller or Debian runtime VM.
 Native desktop packaging also needs the platform launcher and headless helper.
+For terminal workflows and platform-specific commands, see the
+[CLI reference](docs/CLI.md).
 
 Contributions should target `dev`, use synthetic fixtures and document the trust
 boundary affected by a change. See [CONTRIBUTING.md](CONTRIBUTING.md), the

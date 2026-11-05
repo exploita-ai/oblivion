@@ -27,9 +27,11 @@ its family authority. Calls after opening, including transport changes and idle
 cleanup, carry the selected slot and expected Safe identity. A malformed creation
 reply is rejected without echoing its contents or using it as a name.
 
-Only `gateway_not_ready` is retried, at 500 ms intervals within a 240-second retry
-window. The authenticated transport owns each RPC deadline; this window is not a
-hard limit on the total command duration. No direct-network fallback is added.
+Agent startup retries `gateway_not_ready` every 500 ms within a 240-second
+window. A `controller_busy` response uses the same interval for up to three
+seconds of consecutive contention, with the same Safe identity on each request.
+The authenticated transport owns each RPC deadline. These windows govern retries,
+while the connection remains subject to the configured gateway policy.
 Attachment failure after a new opening asks the controller to close it only when
 idle. A Safe already used by another client is not closed by that failure path.
 The shared Workspace executor rejects pipes before issuing controller or password

@@ -57,8 +57,11 @@ committed Safes are never discarded through this command.
 Lock stops and reaps copy workers before releasing the general archive. An
 interrupted output can leave an encrypted partial file in the chosen external
 directory. It is not a confirmed backup. This path has local stream, filesystem
-and process-revocation fixtures; a complete installed-VM backup/restore round
-trip is still a release gate.
+and process-revocation fixtures. A headless Apple Silicon test restored a 2 GiB
+backup into a separate archive with the original Safe ID, password, file and
+OpenCode 2 history. It used a diagnostic controller image; release-image
+qualification remains open. A restore writes a complete volume, so when using
+the native launcher, leave enough free space on the disk backing its VM.
 
 The current Unix and Windows command adapters use one backup workflow for
 preflight, password entry, copy receipts, controller reconciliation and restore.

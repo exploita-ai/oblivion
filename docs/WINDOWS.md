@@ -119,8 +119,9 @@ owner as the Unix launcher. Official agent arguments remain opaque. Invalid
 syntax and currently unavailable local endpoints fail before installation
 discovery, private prompts or VM startup.
 
-Produced Windows development bundles include `install.cmd`. Run it from a normal
-terminal in the bundle directory; it invokes the same `runtime install-bundle`
+The standalone Windows x64 development bundle is a ZIP that includes
+`install.cmd`. Run it from a normal terminal in the bundle directory. It invokes
+the same `runtime install-bundle`
 operation. PowerShell 7, Python, Rust and the Windows SDK are builder dependencies,
 not installer prerequisites. The native setup requests UAC only for its helper;
 the terminal and any later manager remain unelevated. Starting setup as a normal
@@ -240,8 +241,7 @@ The caller keeps its source bundle pinned through helper exit, so uninstall from
 an installed CLI retains that complete in-use release rather than deleting part
 of it. A verified external bundle can finish removal. Both reinstall through
 `install.cmd` and `runtime update BUNDLE` restore software around the retained
-data and identity; they never regain a new-disk initialization capability.
-No data-purge or delete-at-reboot operation is introduced.
+data and identity.
 
 After authenticated installation or update, the original parent registers the
 verified `releases/BUNDLE_ID/bin` directory in its own HKCU PATH. There is no
@@ -254,6 +254,30 @@ or unrelated changes are preserved and reported. A registration failure returns
 code 2 without reporting that the completed software operation was rolled back.
 Windows receives an environment-change notification, but the calling terminal's
 inherited PATH cannot be changed: open a new terminal after installation/update.
+
+## Permanent removal with Atomic
+
+Close all Safes and run `oblivion runtime stop`. Exit the manager and other
+Oblivion processes. From the matching verified bundle extracted outside the
+managed installation, open a normal terminal and run:
+
+```powershell
+& .\bin\oblivion.exe runtime atomic
+```
+
+The command requests UAC, shows the runtime and encrypted archive selected for
+removal, and asks you to type `ATOMIC`. It removes the verified runtime software,
+the service, the owned PATH entry and the encrypted VHDX. Separate backups and
+exports remain available.
+
+Windows keeps the installed release while its executable is in use. If removal
+returns exit code 2 or is interrupted, close the installed processes and retry
+from the same verified external bundle. The encrypted archive is removed after
+verified software cleanup succeeds.
+
+A small installation receipt allows a retry if removal of the owned PATH
+entry was interrupted. Once cleanup finishes, reinstalling creates a new
+runtime and a new disk.
 
 `runtime recover` refuses a healthy supervisor that still owns its journal.
 A live supervisor already stopping can retry its authenticated stop. If the
