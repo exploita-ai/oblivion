@@ -104,8 +104,9 @@ they do not hash the ISO or boot a stopped runtime. Files browsing and guest
 transfer status/recovery use private, opening-scoped messages. Local Files import
 and export now use the same manifest, reviewed approval, payload protocol and
 receiver journal as Unix. Personal-backup streams also use native file endpoints
-and the shared restore workflow. Share, software update/removal and the Live
-storage selector remain explicitly unavailable on Windows.
+and the shared restore workflow. Share also uses its common reviewed workflow.
+Software update/removal and the Live storage selector remain explicitly
+unavailable on Windows.
 
 ## Local Files copies
 
@@ -151,6 +152,28 @@ This is distinct from the explicit AgentRelease used by Files. Native file
 authority stays pinned through review/copy/publication, without adding a new
 UUID requirement to Unix raw-backup destinations. The Windows execution and
 installed backup/restore acceptance gates remain open.
+
+## Share streams
+
+The installed Windows entrypoint now accepts the shared Share grammar and
+executes the same export/import/status/discard engine as Unix. Container format,
+source review, credential exclusions, fresh destination mapping and final
+authentication are unchanged. The desktop only reads the explicitly selected
+ciphertext input and writes a private ciphertext output. Source and import
+streams stay bound to their captured Safe opening, slot and native client.
+
+The export signal is an independent authority: EOF or revocation interrupts
+pending source I/O through bounded native wait slices. Dropping its owner also
+revokes watchers that still hold references. Core acknowledges ShareRelease,
+ShareImportFinish or ShareExportEnd before closing the corresponding native
+lease; cleanup uses a fresh authenticated cancellation scope. No AgentRelease
+substitution, detached worker or direct-network fallback is introduced.
+
+Real Unix stream tests cover the two export reviews, receipt and cleanup before
+publication, changed-plan refusal and import receipt failure. Windows named-pipe
+fixtures are compiled for MSVC, not executed here. Neither this source increment
+nor successful Linux controller compilation qualifies installed Windows Share
+or transfer between two actual installations.
 
 The executable smoke tests exercise help, version and pre-startup rejection on
 Windows without starting a VM. The actual installed lifecycle and HCS permissions
@@ -379,8 +402,8 @@ retain POSIX paths. The source-bound bundle validator supports Windows assets
 without depending on Unix ownership APIs. Compilation and fixture definitions
 do not qualify the installed manager or Hyper-V path.
 
-Remaining work is the Windows Share streaming endpoints, a normal-user
-privilege broker, update/removal and explicit reconciliation of owned HCS,
+Remaining work is a normal-user privilege broker, update/removal and explicit
+reconciliation of owned HCS,
 network and ACL grants after uncertain shutdown or interrupted setup. The full
 installed path must then pass the acceptance gates below. There is no second
 Windows command grammar, beta compatibility reader or automatic emulation fallback.

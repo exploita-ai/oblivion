@@ -6,7 +6,8 @@ The receiver creates new Safes and uses their own provider accounts. This is
 different from a personal disk backup, which can contain saved provider logins.
 
 The CLI and manager paths described here are implemented in the current 1.0
-source. They still require acceptance between two installed candidates; old
+source, with one workflow for Unix and Windows launchers. They still require
+Windows execution and acceptance between two installed candidates; old
 0.x images do not contain this workflow.
 
 ## Export
@@ -141,3 +142,10 @@ checking its outcome; a lost success response does not mean publication failed.
 Share uses the existing explicit file-transfer paths for delivery. Qualification
 of large packages over public Tor/OnionShare is separate from local Share
 verification.
+
+The current native adapters retain separate ownership for the export signal
+and each source stream. Revoking or dropping the export owner stops source I/O;
+only the common workflow decides release, import finish and export end. Local
+input/output authorities are shared with personal backups, while Share keeps
+its distinct passphrase-encrypted container and credential-exclusion policy.
+The Windows fixtures are currently compiled evidence, not installed acceptance.

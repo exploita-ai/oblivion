@@ -330,7 +330,7 @@ read bounded private metadata and use the existing pipe without hashing the ISO
 or implicitly starting a stopped runtime. Windows Files reads guest pages and
 receiver outcomes through opening-bound attachments, releasing before pipe close.
 Local Files payload copies are now connected to the shared protocol and consent
-flow. Share and software update/removal remain explicitly
+flow. Software update/removal remains explicitly
 unavailable there and fail before installation discovery/boot.
 
 Windows setup now records Pending before bundle publication, configuration or
@@ -396,7 +396,7 @@ boundaries now flush before awaiting the peer, with actual buffered Unix
 socket regressions. Windows filesystem, event-pipe and copy-orchestration fixtures
 are compiled for MSVC and registered in Windows CI; they have not been executed
 on this Mac. This does not qualify HCS boot, installed transfer persistence,
-Windows durability or the unfinished Share/software-lifecycle endpoints.
+Windows durability or the unfinished software-lifecycle endpoints.
 
 Focused Unix verification passed 25 transfer cases, six copy-parser cases and
 ten real launcher/event cases. They include buffered import/export, interrupted
@@ -421,3 +421,28 @@ and four actual Unix frontend/attachment cases. The canonical root check and
 MSVC checks for the complete CLI/entrypoint/tests and Transfer library passed.
 Windows named-pipe and synthetic 32 MiB ciphertext adapter fixtures were compiled,
 not executed; CI definitions do not replace that missing runtime evidence.
+
+Share now has one native export/import/status/discard workflow consumed by both
+actual launchers. Grammar and review live in the CLI; import/export control DTOs
+have one owner in Share and are used by the controller producer. Native filesystem
+authority is shared with personal backups through local_file Input/Target/Output.
+There are no retained Unix-only command copies, converted chat catalogs or
+plaintext staging paths. Known provider stores stay excluded; content scanning
+remains best effort and reviewed documents/messages can still contain secrets.
+
+Export reopens the reviewed set and refuses a changed plan before publication.
+Its source lease revokes pending I/O independently of the source channel and
+owner drop revokes surviving watchers. Core sends the exact release/finish/end
+operation before local lease close. Import publishes only with the Verified
+proof returned after final age authentication, and reconciles a lost commit
+without replay. Windows uses bounded native wait slices and fresh authenticated
+cleanup, without detached I/O workers or an AgentRelease substitution.
+
+Passed checks: shared grammar/review/import and control fixtures (13 cases),
+actual export over UnixStream (one test, success and changed-plan scenarios),
+local file authority and backup reuse (four cases), Unix lease owner-drop,
+four private control fixtures and two compiled frontend cases. The Linux
+controller oblivion-storage compiles, as do the full Windows CLI/entrypoint/tests
+and Share library for MSVC. The canonical root check passed. Windows named-pipe
+fixtures have been compiled rather than executed. Share between two installed
+candidates, actual Windows execution and the hardware acceptance matrix remain open.
