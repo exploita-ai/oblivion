@@ -16,6 +16,7 @@ Safe also accept its full ID from `oblivion safes`.
 | `oblivion safes` | List Safe names, full IDs and current modes. |
 | `oblivion status --json` | Read the controller's current state. |
 | `oblivion safe open research` | Open the Safe offline for Files. |
+| `oblivion safe open research --already-open` | Keep an open Safe available for Files. Fails without prompting if Oblivion or the Safe is locked. |
 | `oblivion safe rename research "Field notes"` | Change the Safe's display name. |
 | `oblivion safe grow research 4096` | Increase a closed persistent Safe to 4096 MiB. |
 | `oblivion close research` | Close and lock one Safe. |
