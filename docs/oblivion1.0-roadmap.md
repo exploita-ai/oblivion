@@ -87,6 +87,13 @@ fixture di packaging su Debian ARM64 e quelle di attivazione su Linux e
 macOS. Build complete, installazione, Polkit e boot annidato sui sistemi
 target restano da collaudare. [Setup desktop Debian](DESKTOP.md#debian-desktop-package).
 
+La CI manuale desktop collega i controller amd64 e arm64 ai bundle Windows x64
+e Apple Silicon della stessa revisione. Il tar conserva i permessi eseguibili e
+lo ZIP Windows si estrae in una directory privata dell'utente. Entrambi hanno
+checksum e mostrano la versione del bundle con `oblivion --version`. La prima
+esecuzione completa su GitHub e l'installazione dagli archivi rimangono prove
+aperte. [Distribuzione desktop di sviluppo](DESKTOP.md#build).
+
 ## 1. Vocabolario, distribuzioni e confini
 
 | Termine | Significato per la 1.0 |

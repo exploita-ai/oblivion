@@ -32,6 +32,14 @@ this requirement; their receiver is inside the current Debian Safe image.
 
 ## Build
 
+Run the manual [native desktop workflow](../.github/workflows/oblivion-desktop.yml)
+to produce the Apple Silicon tar and Windows x64 ZIP for one source revision.
+The Linux jobs build the matching private controller and the generated MCP
+bundle. The native jobs verify that source pairing before compiling the
+launcher, helper and manager. Each archive has a SHA-256 sidecar. The
+[Debian desktop workflow](../.github/workflows/oblivion-desktop-deb.yml)
+builds the Linux packages. All three downloads are development artifacts.
+
 Build on the matching host platform. Install the Bun version pinned in root
 `package.json`, Rust and its cached locked dependencies, and the native compiler
 tools. macOS also needs the Swift toolchain and `codesign`; Linux needs
@@ -87,6 +95,13 @@ during compilation. Outputs must be new paths and retain their private ACLs.
 This is an unsigned development build, not proof of Windows installer support
 or bit-identical binaries across different Windows SDK/linker versions.
 
+For an existing CI controller, `-ToolsBundle PATH` with `-Runtime` reuses the
+generated `server.mjs` from that controller build. The regular source inventory
+still checks the exact bytes. The hosted workflow runs the Windows builder
+with a restricted token for the same runner account, so the builder creates
+its output under the caller's identity. The installed launcher reports the
+bundle's product version through `oblivion --version`.
+
 Before compiling the launcher, the builder requires exactly the expected ISO
 and fixed evidence filenames in `SHA256SUMS`, verifies every entry, and compares
 the exact `host-sources.sha256` bytes against a freshly generated source inventory. It
@@ -115,6 +130,17 @@ python3 -B script/oblivion/native-bundle/host-sources.py \
 
 Use a bundle produced from trusted source. A checksum identifies contents;
 it is not a publisher signature.
+
+For an Apple Silicon Actions artifact, verify the sidecar next to the tar file,
+then extract the tar with its executable modes intact.
+
+```sh
+shasum -a 256 --check oblivion-VERSION-darwin-arm64.tar.sha256
+tar -xf oblivion-VERSION-darwin-arm64.tar
+sh oblivion-VERSION-darwin-arm64/install.sh
+```
+
+Replace `VERSION` with the version in the downloaded filename.
 
 ```sh
 sh /path/to/bundle/install.sh
@@ -193,6 +219,36 @@ verified controller image and build inventory. Installed APT, Polkit and
 nested-VM acceptance on target hosts remains open.
 
 ## Windows development setup and maintenance
+
+The Windows Actions artifact contains the bundle ZIP and its SHA-256 sidecar.
+Extract the ZIP into a new private folder on a local NTFS volume. The ZIP
+carries the files and manifest. Windows assigns permissions on extraction.
+The following commands use the built-in Windows PowerShell as your regular
+user. Set `$archive` to the downloaded ZIP beside its checksum file.
+
+```powershell
+& {
+    $ErrorActionPreference = 'Stop'
+    $archive = Get-Item -LiteralPath '.\oblivion-VERSION-windows-x86_64.zip'
+    $expected = (Get-Content -LiteralPath "$($archive.FullName).sha256" -Raw).Trim()
+    $hash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($expected -cne "$hash  $($archive.Name)") { throw 'Bundle checksum mismatch.' }
+
+    $folder = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) ("Oblivion-download-" + [Guid]::NewGuid().ToString('N'))
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $acl = [Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetOwner($identity.User)
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @($identity.User, [Security.Principal.SecurityIdentifier]::new('S-1-5-18'))) {
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+        $acl.AddAccessRule($rule)
+    }
+    New-Item -ItemType Directory -Path $folder | Out-Null
+    Set-Acl -LiteralPath $folder -AclObject $acl
+    Expand-Archive -LiteralPath $archive.FullName -DestinationPath $folder
+    & (Join-Path $folder 'install.cmd')
+}
+```
 
 From a produced Windows bundle, run `install.cmd` in a normal terminal. The
 bundled CLI verifies and stages the software before requesting UAC for its

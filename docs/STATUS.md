@@ -174,6 +174,16 @@ release fixtures on Linux and macOS, and the canonical root check passed.
 Full artifact builds and APT, Polkit and nested-VM tests on target hosts
 remain open. See [Debian desktop setup](DESKTOP.md#debian-desktop-package).
 
+The native desktop workflow pairs both controller architectures with the
+Apple Silicon and Windows x64 builders from one checkout revision. It retains
+the generated MCP bytes, emits a tar with executable modes or a Windows ZIP,
+and uploads each archive with a SHA-256 sidecar as a development artifact.
+The Windows build child uses a restricted token for the original runner SID,
+with a separate CI check for user identity, default file ownership and exit
+status. Native bundles now report their product version through
+`oblivion --version`. The workflow and hosted token checks await their first
+run. Signing, installed-platform and nested-VM acceptance remain open.
+
 Local fixtures have checked terminal and control framing, stale ownership,
 canary-protected RAM mode, idle locks, actual native history readers/importers,
 SafeAdmin, managed jobs, file hashes and Share authentication. Gateway socket
