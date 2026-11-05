@@ -73,6 +73,7 @@ pub fn validate_paths(paths: &[String]) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 pub(crate) fn validate_rooted_paths(paths: &[String]) -> io::Result<()> {
     validate_path_budget(paths)?;
     for path in paths {
@@ -99,6 +100,7 @@ impl Plan {
         Self::with_path_validation(inputs, validate_paths)
     }
 
+    #[cfg(unix)]
     pub(crate) fn rooted(inputs: &[Input]) -> io::Result<Self> {
         Self::with_path_validation(inputs, validate_rooted_paths)
     }
