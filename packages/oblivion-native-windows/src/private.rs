@@ -46,6 +46,7 @@ pub enum Purpose {
     Control,
     Supervision,
     Broker,
+    Setup,
 }
 
 pub struct Endpoint {
@@ -299,6 +300,7 @@ impl Endpoint {
             Purpose::Control => id(runtime) && role == "control",
             Purpose::Supervision => id(runtime) && role == "supervision",
             Purpose::Bootstrap => id(runtime) && role.strip_prefix("auth.").is_some_and(id),
+            Purpose::Setup => id(runtime) && role == "setup",
         };
         if !valid {
             return Err(Error("invalid_private_pipe_name"));
@@ -332,7 +334,7 @@ impl Endpoint {
                         0
                     },
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                if self.purpose == Purpose::Bootstrap {
+                if matches!(self.purpose, Purpose::Bootstrap | Purpose::Setup) {
                     1
                 } else {
                     65
@@ -428,12 +430,16 @@ impl Endpoint {
         {
             return Err(Error("private_peer_check_failed"));
         }
+        // An elevated setup helper must not query a foreign user's process
+        // token. Its single caller is authenticated from the bounded message's
+        // kernel pipe token before any request is decoded or dispatched.
         let peer = identified
-            && self
-                .identity
-                .permits(pid, self.purpose != Purpose::Broker)
-                .unwrap_or(false);
-        let next = if self.purpose != Purpose::Bootstrap {
+            && (self.purpose == Purpose::Setup
+                || self
+                    .identity
+                    .permits(pid, self.purpose != Purpose::Broker)
+                    .unwrap_or(false));
+        let next = if !matches!(self.purpose, Purpose::Bootstrap | Purpose::Setup) {
             Some(self.create(false)?)
         } else {
             None
@@ -853,6 +859,7 @@ pub(crate) mod tests {
                 Purpose::Supervision => "supervision".to_owned(),
                 Purpose::Bootstrap => format!("auth.{id}"),
                 Purpose::Broker => "broker".to_owned(),
+                Purpose::Setup => "setup".to_owned(),
             }
         )
     }

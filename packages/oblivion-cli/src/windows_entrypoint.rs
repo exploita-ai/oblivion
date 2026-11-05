@@ -177,19 +177,45 @@ fn runtime_command(root: &Root, command: RuntimeCommand) -> Result<i32> {
     match command {
         RuntimeCommand::InstallBundle(path) => {
             let bundle = bundle_input(&path)?;
-            let installed = installation::install_bundle(
-                root,
+            let outcome = oblivion_native_windows::setup::install(
                 bundle,
                 DATA_BYTES,
                 stop,
                 Instant::now() + STARTUP,
+                &mut || {
+                    eprintln!(
+                        "Oblivion needs the Windows Hyper-V feature. Setup may require a restart."
+                    );
+                    crate::windows_terminal::confirm("ENABLE", |_| {})
+                        .map_err(|_| oblivion_native_windows::Error("setup_review_interrupted"))
+                },
             )?;
-            println!(
-                "Oblivion installed. Open the installed launcher to create encrypted storage:"
-            );
-            println!("{}", installed.launcher());
-            println!("Runtime {}", installed.runtime_id());
-            Ok(0)
+            match outcome {
+                oblivion_native_windows::setup::Outcome::Installed {
+                    runtime_id,
+                    launcher,
+                } => {
+                    println!(
+                        "Oblivion installed. Open the installed launcher to create encrypted storage:"
+                    );
+                    println!("\"{launcher}\"");
+                    println!("Runtime {runtime_id}");
+                    Ok(0)
+                }
+                oblivion_native_windows::setup::Outcome::RebootRequired => {
+                    println!(
+                        "Windows needs a restart before setup can continue. Restart Windows, then run this installer again."
+                    );
+                    Ok(2)
+                }
+                oblivion_native_windows::setup::Outcome::Declined => {
+                    println!("Setup cancelled.");
+                    Ok(0)
+                }
+                oblivion_native_windows::setup::Outcome::Blocked { reason } => {
+                    Err(format!("Windows setup prerequisites are unavailable: {reason}").into())
+                }
+            }
         }
         RuntimeCommand::Update(path) => {
             let installed = installation::update_bundle(

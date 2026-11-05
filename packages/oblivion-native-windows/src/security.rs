@@ -43,6 +43,52 @@ pub struct Identity {
 
 pub struct Descriptor(PSECURITY_DESCRIPTOR);
 
+pub(crate) fn file_owner(file: &File) -> Result<Identity> {
+    let mut owner = null_mut();
+    let mut document = null_mut();
+    if unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut document,
+        )
+    } != 0
+    {
+        return Err(Error("setup_owner_unavailable"));
+    }
+    let _document = Security(document);
+    Identity::from_sid(&sid_text(owner)?)
+}
+
+pub fn elevated() -> Result<bool> {
+    use windows_sys::Win32::Security::{TOKEN_ELEVATION, TokenElevation};
+    let mut token = null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(Error("setup_token_unavailable"));
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut length = 0;
+    if unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevation,
+            (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut length,
+        )
+    } == 0
+    {
+        return Err(Error("setup_token_unavailable"));
+    }
+    Ok(elevation.TokenIsElevated != 0)
+}
+
 impl Identity {
     pub fn from_sid(value: &str) -> Result<Self> {
         if value.len() > 184
@@ -439,11 +485,22 @@ pub(crate) fn pipe_permissions(pipe: HANDLE, expected: &Identity) -> Result<()> 
 /// Publish only the broker process's query/liveness capability to its owner.
 /// The normal CLI obtains neither VM-memory access nor process mutation rights.
 pub(crate) fn expose_broker_process(owner: &Identity) -> Result<()> {
+    require_system_process(unsafe { GetCurrentProcess() })?;
+    expose_process(owner)
+}
+
+pub(crate) fn expose_setup_process(owner: &Identity) -> Result<()> {
+    if !elevated()? {
+        return Err(Error("windows_administrator_required"));
+    }
+    expose_process(owner)
+}
+
+fn expose_process(owner: &Identity) -> Result<()> {
     use windows_sys::Win32::Security::Authorization::{SE_KERNEL_OBJECT, SetSecurityInfo};
     use windows_sys::Win32::Security::{
         GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION,
     };
-    require_system_process(unsafe { GetCurrentProcess() })?;
     let descriptor = descriptor(&format!(
         "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x101000;;;{})",
         owner.sid

@@ -152,7 +152,7 @@ impl VerifiedBundle {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let stage = format!(r"{}\.bundle-{suffix}", parent.path());
-        let copied = self.copy_into(&stage, identity, client)?;
+        let copied = self.copy_into(Directory::create(&stage, identity)?, identity, client)?;
         let source = copied.source().to_owned();
         let Self {
             root,
@@ -171,13 +171,39 @@ impl VerifiedBundle {
         result
     }
 
-    fn copy_into(self, destination: &str, identity: &Identity, client: &Identity) -> Result<Self> {
+    /// Only immutable product bytes enter UAC staging. A distinct administrator
+    /// may read/execute them but never modify them or gain access to Safe data.
+    pub(crate) fn stage(self, destination: &str, owner: &Identity) -> Result<Self> {
+        let copied = self.copy_into(
+            Directory::create_setup(destination, owner)?,
+            owner,
+            &Identity::administrators()?,
+        )?;
+        let source = copied.source().to_owned();
+        let Self {
+            root,
+            files,
+            manifest_file,
+            ..
+        } = copied;
+        // Image loading must not inherit our writable copy handles.
+        drop(files);
+        drop(manifest_file);
+        let readonly = Self::open(destination, Some(&source), owner);
+        drop(root);
+        readonly
+    }
+
+    pub(crate) fn manifest_sha256(&self) -> &str {
+        &self.manifest_sha256
+    }
+
+    fn copy_into(self, root: Directory, identity: &Identity, client: &Identity) -> Result<Self> {
         self.root.verify()?;
         self.manifest_file.verify()?;
         for asset in self.files.values() {
             asset.verify()?;
         }
-        let root = Directory::create(destination, identity)?;
         let mut parents = BTreeMap::from([(String::new(), root.clone())]);
         for relative in directories(&self.manifest)? {
             let (parent, name) = split(&relative);
@@ -772,5 +798,42 @@ pub(crate) mod tests {
             "private_runtime_file_required"
         );
         assert!(!std::path::Path::new(&fixture.destination()).exists());
+    }
+
+    #[test]
+    fn setup_stage_keeps_the_exact_inventory_pinned_and_administrator_access_read_only() {
+        let fixture = Fixture::new();
+        let stage_path = fixture.area.join("setup").to_str().unwrap().to_owned();
+        let stage = fixture
+            .open()
+            .unwrap()
+            .stage(&stage_path, &fixture.identity)
+            .unwrap();
+        let (pin, owner) = Directory::setup_owner(&stage_path).unwrap();
+        assert_eq!(owner.sid(), fixture.identity.sid());
+        assert_eq!(stage.source(), fixture.manifest.source_sha256);
+        assert_eq!(stage.id(), fixture.manifest.bundle_id);
+        for asset in stage.files.values() {
+            crate::security::file_permissions(
+                &asset.reader().unwrap(),
+                owner.sid(),
+                crate::security::FilePolicy::Immutable,
+            )
+            .unwrap();
+            assert!(
+                crate::security::file_permissions(
+                    &asset.reader().unwrap(),
+                    owner.sid(),
+                    crate::security::FilePolicy::Private
+                )
+                .is_err()
+            );
+        }
+        assert!(OpenOptions::new().write(true).open(stage.helper()).is_err());
+        assert!(std::fs::rename(&stage_path, fixture.area.join("changed")).is_err());
+        drop(pin);
+        stage.remove(&fixture.identity).unwrap();
+        assert!(!std::path::Path::new(&stage_path).exists());
+        fixture.open().unwrap();
     }
 }

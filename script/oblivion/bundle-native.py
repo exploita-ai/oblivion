@@ -178,6 +178,7 @@ def assemble(args):
     if args.platform != "windows-x86_64":
         copy(REPO / "script/oblivion/desktop/install.sh", args.prepared / "install.sh", executable=True)
     if args.platform == "windows-x86_64":
+        copy(REPO / "script/oblivion/desktop/install.cmd", args.prepared / "install.cmd")
         copy(REPO / "docs/WINDOWS.md", args.prepared / "docs/WINDOWS.md")
     copy(REPO / "docs/DESKTOP.md", args.prepared / "docs/DESKTOP.md")
     required = (*binaries,

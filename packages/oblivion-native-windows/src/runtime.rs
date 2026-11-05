@@ -27,6 +27,14 @@ pub fn main() -> Result<()> {
         return Err(Error("windows_x86_64_required"));
     }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if let [operation, staging_option, staging, pipe_option, pipe] = args.as_slice() {
+        if operation == "setup" && staging_option == "--staging" && pipe_option == "--pipe" {
+            return crate::setup::service(
+                staging.to_str().ok_or(Error("invalid_setup_path"))?,
+                pipe.to_str().ok_or(Error("invalid_private_pipe_name"))?,
+            );
+        }
+    }
     if let [operation, option, sid] = args.as_slice() {
         if operation == "broker" && option == "--owner" {
             if Identity::current()?.sid() != "S-1-5-18" {

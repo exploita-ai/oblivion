@@ -160,6 +160,10 @@ impl Client {
 }
 
 impl Channel {
+    pub(crate) fn authenticate_setup(&self, owner: &Identity) -> crate::Result<()> {
+        self.pipe.authenticate_client(owner)
+    }
+
     /// Named-pipe impersonation identifies the token of the last message read.
     /// Broker admission calls this only after consuming its bounded request.
     pub(crate) fn authenticate_broker(&self, owner: &Identity) -> crate::Result<()> {

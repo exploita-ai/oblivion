@@ -429,6 +429,40 @@ pub(crate) struct Asset {
 }
 
 impl Directory {
+    /// Setup may create a fresh private software staging tree under the
+    /// standard shared ProgramData parent. No existing leaf is adopted.
+    pub(crate) fn create_setup(path: &str, identity: &Identity) -> Result<Self> {
+        let parent = CreationParent::ancestors(path)?;
+        parent.verify()?;
+        create_directory(path, identity)?;
+        let directory = Self::open(path, identity, true)?;
+        parent.verify()?;
+        Ok(directory)
+    }
+
+    /// This identity is only a candidate restriction until the setup pipe's
+    /// actual caller token matches it. It never authorizes a target user alone.
+    pub(crate) fn setup_owner(path: &str) -> Result<(Self, Identity)> {
+        let ancestors = pin_parents(path)?;
+        let file = open_raw(path, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?;
+        let (id, _) = inspect(&file, path, true)?;
+        let owner = crate::security::file_owner(&file)?;
+        if matches!(owner.sid(), "S-1-5-18" | "S-1-5-32-544") {
+            return Err(Error("setup_user_owner_required"));
+        }
+        permissions(&file, owner.sid(), false)?;
+        Ok((
+            Self(Arc::new(DirectoryPin {
+                path: path.into(),
+                file,
+                id,
+                ancestors,
+                parent: None,
+            })),
+            owner,
+        ))
+    }
+
     pub(crate) fn open(path: &str, identity: &Identity, private: bool) -> Result<Self> {
         let ancestors = pin_parents(path)?;
         let file = open_raw(path, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?;

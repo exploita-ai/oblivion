@@ -48,7 +48,7 @@ class DesktopBundle(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("source fixture " + name + "\n")
         shutil.copyfile(REPO / "script/oblivion/native-bundle/host-sources.py", self.repo / "script/oblivion/native-bundle/host-sources.py")
-        for name in ("script/oblivion/desktop/install.sh", "docs/DESKTOP.md", "docs/WINDOWS.md"):
+        for name in ("script/oblivion/desktop/install.sh", "script/oblivion/desktop/install.cmd", "docs/DESKTOP.md", "docs/WINDOWS.md"):
             target = self.repo / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("distribution fixture\n")
@@ -174,6 +174,8 @@ class DesktopBundle(unittest.TestCase):
         self.assertEqual(manifest["backend"], "hcs-hyperv")
         self.assertTrue((args.output / "lib/manager/@opentui/core-win32-x64/opentui.dll").is_file())
         self.assertFalse((args.output / "install.sh").exists())
+        self.assertEqual((args.output / "install.cmd").read_bytes(), (self.repo / "script/oblivion/desktop/install.cmd").read_bytes())
+        self.assertIn("install.cmd", {item["path"] for item in manifest["files"]})
         self.assertTrue((args.output / "docs/WINDOWS.md").is_file())
         binaries = {"bin/oblivion.exe", "bin/oblivion-vm.exe", "bin/oblivion-manager.exe"}
         self.assertEqual({item["path"] for item in manifest["files"] if item["executable"]}, binaries)

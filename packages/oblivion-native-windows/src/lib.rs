@@ -36,6 +36,7 @@ pub mod lifetime;
 #[cfg(windows)]
 pub mod network;
 pub mod network_model;
+pub mod prerequisites;
 #[cfg(windows)]
 pub mod private;
 pub mod resources;
@@ -45,5 +46,6 @@ pub mod runtime;
 pub mod scm;
 #[cfg(windows)]
 pub mod security;
+pub mod setup;
 #[cfg(windows)]
 pub mod supervisor;
