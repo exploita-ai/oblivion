@@ -536,3 +536,46 @@ cases and one mount case skipped for missing capabilities. Windows SDK creation,
 publish/resume, setup-lock and owned-child cancellation fixtures are compiled
 evidence only. Installed Windows setup, forced interruption and power-loss
 durability remain unqualified. No new ISO was built for this increment.
+
+Official-client distribution now distinguishes permissive licenses from Claude's
+native commercial integration conditions. The image installer checks pinned
+upstream LICENSE/NOTICE bytes before network access, preserves the complete
+original package and installs the required documentation in the Safe filesystem.
+Its evidence records only the installed clients and architecture, executable and
+notice hashes, distribution policy and retained upstream notices. Partial or
+unlisted installations fail before new downloads or evidence publication.
+The notices are inputs to compiler/runtime pairing and survive Safe SquashFS,
+controller, Debian and Live packing. Seven actual temporary-root installation
+fixtures pass; they use synthetic archives without network access. The canonical
+root check passes. These controls identify delivered bytes and conditions; they
+do not record legal acceptance or establish exhaustive upstream license compliance.
+
+Windows development bundles now include `install.cmd`, consumed by the ordinary
+CLI's native UAC setup. Only verified software enters a fresh pinned staging tree;
+the owner and SYSTEM retain full access while administrators receive read/execute.
+The parent pins the exact ShellExecute process before sending a bounded request.
+The helper authenticates the actual pipe token before interpreting it and selects
+the original user's root without trusting a message SID or target path. The
+original parent verifies its own broker after helper exit; the elevated helper
+never substitutes the administrator's broker during another-account UAC.
+
+Setup checks the actual Windows build, edition, feature state and HCS capability.
+Enabling Hyper-V requires explicit confirmation and runs only fixed System32 DISM
+arguments. Pending feature changes return a restart-required outcome before any
+Oblivion service, VM or data disk, without rebooting automatically. Requirements,
+servicing and installation share caller-EOF cancellation and scoped owned workers.
+Interrupted Windows servicing remains unconfirmed and is re-queried on retry.
+Human-readable diagnostics preserve the distinction between unavailable hardware
+observations and a proved firmware setting. PowerShell 7, Python and the SDK are
+builder dependencies only. User PATH/shortcuts and maintenance UAC are unfinished.
+
+Verification passed all 33 portable native-backend library cases. Full bundle
+fixtures passed 16 cases with one case-alias test skipped on the Mac's
+case-insensitive filesystem. Native Windows all-targets and the full Windows CLI
+library/entrypoint/tests compile for MSVC without warnings, including the new
+staging ACL and authenticated setup pipe fixtures. Those Windows kernel-object
+cases have not been executed here. Actual same-account/other-account UAC, servicing
+cancellation, clean Windows PE startup with Hyper-V disabled, reboot continuation
+and nested-Safe boot remain acceptance gates. SDK import declarations do not prove
+that ComputeCore/ComputeNetwork can load on that clean baseline. No ISO, VM or
+Windows OS settings were changed for this increment.

@@ -14,7 +14,8 @@ contract. The Windows command entrypoint, initial managed setup and bundle
 verification, Files, backup, Share and stopped-only software maintenance are
 connected in source, including an ordinary-user SCM broker backed by protected
 per-user installations, receipt-bound owned-resource recovery and exact-identity
-Pending setup resume. Installed/hardware qualification remains unfinished; see
+Pending setup resume. Initial installation now uses a native UAC helper and
+reviewed Hyper-V preparation. Installed/hardware qualification remains unfinished; see
 [Windows status](WINDOWS.md). Do not substitute the Unix launcher in a Windows bundle.
 
 Linux ARM64 additionally requires QEMU 10.1 or newer for its outer nested
@@ -142,7 +143,22 @@ Safe lifecycle remain under the native launcher's control. Installation does
 not use sudo, install QEMU, change system permissions, change swap or sysctl
 settings, or contact a provider.
 
-## Windows development maintenance
+## Windows development setup and maintenance
+
+From a produced Windows bundle, run `install.cmd` in a normal terminal. The
+bundled CLI verifies and stages the software before requesting UAC for its
+one-shot setup helper. That helper authenticates the original caller; entering
+another administrator's credentials does not change the intended user. Only
+the helper is elevated. No PowerShell 7, Python, Rust or SDK is needed to run it.
+
+If Hyper-V must be enabled, the normal terminal asks for explicit confirmation.
+The helper uses the fixed System32 DISM command and never restarts Windows.
+When a restart is required, no Oblivion VM, service or data disk is created;
+restart Windows and rerun the same installer. The parent reports the installed
+launcher after confirming the helper's exit and the original user's broker.
+PATH registration and desktop shortcuts are not implemented by this development
+entrypoint. Clean Windows startup, UAC with a different administrator and actual
+Hyper-V preparation remain acceptance gates.
 
 The Windows entrypoint uses the same `runtime update BUNDLE`, `runtime gc` and
 `runtime uninstall` grammar. Stop the protected runtime first; maintenance holds
@@ -151,9 +167,10 @@ Use the new verified bundle's CLI for an update to another source version.
 Uninstall preserves runtime identity, configuration, the supervision journal and
 the exact encrypted data VHDX. Its cleanup report distinguishes removed software,
 unknown retained files and binaries still in use; exit code 2 means incomplete
-removal, to retry from a verified external bundle. Windows setup and maintenance
-require elevation; ordinary launch uses the per-user SCM broker and leaves the
-CLI and manager unelevated. Maintenance stops that broker while holding the same
+removal, to retry from a verified external bundle. Maintenance still requires an
+explicitly elevated process; only initial installation has the native UAC
+handoff. Ordinary launch uses the per-user SCM broker and leaves the CLI and
+manager unelevated. Maintenance stops that broker while holding the same
 observed-Stopped guard. Actual Windows lifecycle is still unqualified; see
 [Windows maintenance](WINDOWS.md#stopped-only-software-maintenance).
 

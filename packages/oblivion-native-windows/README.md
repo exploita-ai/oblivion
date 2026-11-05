@@ -6,6 +6,11 @@ The installed Windows frontend and initial setup are connected in source.
 Ordinary-user broker and receipt-bound resource recovery are connected in source.
 Pending setup resume is connected to the original disk identity. SDK crash
 recovery and actual nested-Safe boot remain unqualified.
+The native setup handoff keeps the caller unelevated, authenticates its pipe
+token even with another administrator's UAC credentials, and reviews Hyper-V
+changes before creating runtime data. `install.cmd` invokes that same path;
+PowerShell 7 and Python remain builder dependencies only. Actual UAC, clean
+Windows startup and feature servicing still require Windows execution.
 The surrounding architecture is described in [Windows](../../docs/WINDOWS.md).
 
 The helper uses the Windows SDK through the pinned `windows-sys` bindings.
@@ -19,9 +24,10 @@ one statically addressed controller endpoint before creating the VM.
 support, which remains false until the complete integration is qualified.
 
 `supervisor.rs` owns one helper process and its lifetime pipe, while terminal
-clients hold authenticated leases. Its initial-install path creates a new VHDX;
-normal acquisition reuses existing storage. An SDK-verified creation capability
-authorizes the first guest bootstrap, never a general configuration flag. No
+clients hold authenticated leases. The installer creates and records the Pending
+VHDX; the supervisor consumes its SDK-verified capability for initialization.
+Normal acquisition reuses existing storage. That creation capability authorizes
+the first guest bootstrap, never a general configuration flag. No
 existing disk is overwritten or mounted on the Windows host. The current
 bootstrap sends the token plus Existing/NewDisk metadata; only matching fresh
 authority permits the guest to write its initial marker. Shutdown waits for the
@@ -36,7 +42,8 @@ boots and stops the new runtime, and commits Ready only after checking the VHDX.
 Pending setup can regain bootstrap authority only for its exact SDK-created
 disk identity, never from a matching filename/UUID or an unknown partial file.
 Metadata-only status/activity discovery does not hash boot assets or call HCS.
-Initial setup and maintenance require elevation. `broker.rs` connects ordinary
+Initial setup requests UAC for its one-shot helper; maintenance still requires
+an explicitly elevated process. `broker.rs` connects ordinary
 launch, metadata discovery and runtime controls to a per-user demand-start SCM
 service. The service authenticates the caller token and uses administrator-owned
 software and state; it never accepts executable/configuration paths from clients.
@@ -67,8 +74,9 @@ resource recovery still need Windows qualification. Safe routing remains the
 responsibility of the existing per-Safe Tor/SOCKS5 gateways inside the controller.
 
 The ordinary backend invocation is `oblivion-vm.exe run --config PATH`.
-The supervisor's distinct initial-install invocation creates the disk before
-boot; it cannot retry by overwriting an existing VHDX. Both backend paths require
+The supervisor's distinct initialization invocation resumes the exact disk
+recorded by setup; it cannot retry by overwriting an existing VHDX. Both backend
+paths require
 an inherited stdin pipe whose writer the supervisor keeps open;
 no application bytes belong on that pipe. EOF or any byte revokes the runtime.
 Configuration is a private, bounded regular file with no token or provider key.
@@ -87,13 +95,13 @@ on the assigned `sdX` name.
 Kernel, initrd, ISO, data and their parent directories are held open without
 delete sharing. Reparse points, hard-linked files, path aliases, unexpected
 owners and writable grants to other users are rejected. Configuration and data
-require private ACLs for the actual user and LocalSystem. VHDX inspection uses
+require private ACLs for the bound storage principal and LocalSystem. VHDX inspection uses
 the virtual-disk API for capacity, identifier, allocation subtype and loaded
 state, rather than treating physical file length as virtual capacity.
 Only these four pinned asset paths receive the scoped HCS VM-access grant.
 The helper revokes it after a confirmed stop. If stop cannot be confirmed, it
-reports failure and retains leases until process exit; grant reconciliation is
-still a requirement of the Windows recovery frontend. It must not silently
+reports failure and retains leases until process exit; grant reconciliation uses
+the original file identities recorded in its resource receipt. It must not silently
 reinitialize or relax the ACL on a subsequent launch.
 
 A private, local-only VirtioSerial pipe exists before VM creation. The guest
@@ -125,7 +133,8 @@ the connection. A privileged service would need its own qualified identity
 contract; the client never accepts LocalSystem as an implicit fallback.
 
 Cleanup stops admission and workers and requests termination of the owned VM.
-Only an HCS `Stopped` observation permits a successful stop report. The compute
+Only an HCS `Stopped` observation or positive ID-scoped absence permits a
+successful stop report. The compute
 system also uses `ShouldTerminateOnLastHandleClosed`; dropping a handle alone
 does not qualify graceful shutdown or disk persistence. The helper creates no
 saved-memory checkpoints and logs only static event identifiers. Windows paging,

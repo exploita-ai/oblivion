@@ -1,4 +1,4 @@
-# Windows native backend — feasibility and implementation proposal
+# Windows native backend
 
 Implementation checkpoint: 5 November 2026. **The Windows product is not complete
 or qualified.** An experimental HCS helper core and owned HCN ICS network are
@@ -6,12 +6,13 @@ implemented. A same-user authenticated named-pipe client and shared CLI adapter
 are now present. The installed command entrypoint, bundle verification and
 resumable protected per-user setup and local Files payload endpoints are connected in source;
 ordinary-user admission uses a demand-start SCM broker and owned-resource
-recovery uses private receipts. Pending disk recovery is connected in source; installed privilege and
+recovery uses private receipts. Native UAC setup and reviewed Hyper-V preparation
+are connected in source. Pending disk recovery is connected in source; installed privilege and
 forced-interruption qualification remain open.
 Stopped-only update, software collection and uninstall are now connected in source.
 The manager has a Windows x64 build target; its PE
-execution and complete installed path still need qualification. This is a proposal for phase 8 of the
-[roadmap](oblivion1.0-roadmap.md), rather than instructions for an available product.
+execution and complete installed path still need qualification. This is development
+work for phase 8 of the [roadmap](oblivion1.0-roadmap.md), rather than an available product.
 No Windows VM has been booted to qualify this source increment.
 
 The source supervisor now elects one private runtime generation and gives each
@@ -109,6 +110,31 @@ owner as the Unix launcher. Official agent arguments remain opaque. Invalid
 syntax and currently unavailable local endpoints fail before installation
 discovery, private prompts or VM startup.
 
+Produced Windows development bundles include `install.cmd`. Run it from a normal
+terminal in the bundle directory; it invokes the same `runtime install-bundle`
+operation. PowerShell 7, Python, Rust and the Windows SDK are builder dependencies,
+not installer prerequisites. The native setup requests UAC only for its helper;
+the terminal and any later manager remain unelevated. Starting setup as a normal
+user also preserves that user's identity when UAC asks for another administrator's
+credentials.
+
+Before UAC, the caller verifies the source bundle and copies only its software
+into a fresh pinned staging directory. Its owner and SYSTEM retain full access;
+administrators receive read/execute access. No Safe data or provider profiles
+enter this staging tree. The parent retains the exact process handle returned by
+`ShellExecuteExW` and verifies the connected pipe server before sending. After a
+bounded read, the helper authenticates the actual pipe caller's token against
+the staging owner and reverts before privileged work. No SID or installation
+target supplied in a message can select another user's installation.
+
+Setup checks the actual Windows build, supported edition, hardware observations,
+the Hyper-V feature state and HCS capabilities. If Hyper-V must be enabled, the
+ordinary terminal requests explicit confirmation before the helper runs the fixed
+System32 DISM operation. No PowerShell or ADK is required. A pending feature change
+or restart result stops setup before an Oblivion VM, service or data disk is
+created: restart Windows and rerun the same installer. Setup never restarts the
+computer automatically or changes firmware, Secure Boot, VBS or unrelated VMs.
+
 `runtime install-bundle DIRECTORY` verifies a current source-bound manifest,
 the exact inventory, hashes, file identities and ACLs. It creates a private
 `%PROGRAMDATA%\Oblivion\SID` root discovered with the Windows known-folder API,
@@ -142,13 +168,25 @@ are committed together before the guard is released. An interrupted maintenance
 operation can leave the broker disabled and requires retrying the matching
 verified bundle, rather than bypassing that fence.
 
-Setup requires an elevated token and available nested HCS capabilities before
-creating files, then registers the protected helper as the user's SCM service.
-Normal launch starts that service through limited SCM rights; no terminal or
-manager elevation is requested. Setup/update/removal do not elevate implicitly.
-The source bundle must
+The privileged installation phase requires an elevated token and available
+nested HCS capabilities before creating runtime data, then registers the protected
+helper as the authenticated user's SCM service. The parent watches cancellation;
+the helper observes caller EOF throughout feature servicing and installation and
+joins its owned worker. The parent removes staging only after actual helper exit. A
+cancelled DISM operation is not reported as a rollback; another attempt re-queries
+Windows. Normal launch starts the service through limited SCM rights. Update,
+collection and removal still require an explicitly elevated process; their UAC
+handoff is not implemented. The source bundle must
 also meet the private ACL contract; arbitrary extraction into a broadly writable
 directory is not accepted as a trusted installation source.
+
+This native setup is source implementation, not an installed-Windows result.
+Acceptance must include both same-account consent and a standard user entering a
+different administrator's credentials, refusal of UAC/feature changes, caller loss
+during servicing and resumption after reboot. Also test starting both PE files on
+a clean Windows 11 Pro installation with Hyper-V disabled: the Windows SDK imports
+ComputeCore/ComputeNetwork, and linking those APIs does not prove that the loader
+can reach setup on that baseline. No DLL download or alternate VM path is used.
 
 `oblivion` launches the real manager with its installed assets and launcher path,
 keeping the verified bundle and runtime lease alive until the child exits.
@@ -332,13 +370,10 @@ checks both resource identity and observed absence; failed cleanup requires
 reconciliation through the protected generation receipt; actual HCN behavior
 still requires Windows qualification.
 
-The installer should automate feature detection, explicit elevation, VM creation,
-image verification and any restart handoff. Everyday commands should run as the
-normal user. Prefer a narrowly scoped privileged backend controlling only its
-registered VM/disk identities over requiring every user to become a Hyper-V
-administrator. This permission model is a proposed implementation requirement,
-not a capability proved by the existing code. No installer should silently
-change host Secure Boot, VBS, unrelated VMs or their networks.
+The source installer connects feature detection, explicit elevation, image
+verification, VM preparation and a restart-required outcome. The ordinary-user
+broker controls only its registered VM/disk identities. Actual Windows execution
+must qualify that boundary; source and cross-compilation are insufficient.
 
 ## Why WSL2 is not an interchangeable fallback
 
