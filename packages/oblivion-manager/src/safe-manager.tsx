@@ -447,7 +447,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
         void execute(["settings", "idle", "--safe-minutes", String(safe), "--host-minutes", String(host)], "Automatic lock updated.", false)
       }} /></Show>
       <Show when={props.overlay && state() && !selectedOpen()}><text fg={theme.feedback.warning}>This Safe is no longer open. Return to the agent terminal to continue.</text></Show>
-      <Show when={page() === "network" && (!props.overlay || selectedOpen()) && safe()} keyed>{(id) => <NativeNetwork safe={id} name={safeTitle()} open={active().some((opened) => opened.id === id)} runtime={props.runtime} run={async (args) => await execute(args, undefined, false) === 0} observed={setObserved} back={() => props.overlay ? void leave() : section("settings")} />}</Show>
+      <Show when={page() === "network" && (!props.overlay || selectedOpen()) && safe()} keyed>{(id) => <NativeNetwork safe={id} name={safeTitle()} open={active().some((opened) => opened.id === id)} host={state()} runtime={props.runtime} run={async (args) => await execute(args, undefined, false) === 0} observed={setObserved} back={() => props.overlay ? void leave() : section("settings")} />}</Show>
       <Show when={page() === "files" && (!props.overlay || selectedOpen()) && safe()} keyed>{(id) => <NativeFiles safe={id} name={safeTitle()} transfers={fileTransfers} opening={state()?.idle_lock.safes.find((safe) => safe.opening.safe_id === id)?.opening.nonce}
         blocked={hostClosing() || safeClosing(id) ? "This Safe is closing and locking." : error() || undefined} runtime={props.runtime} run={async (args) => {
           const alreadyOpen = args[0] === "safe" && args[1] === "open" && (props.overlay || selectedOpen())

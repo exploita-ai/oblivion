@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { testRender } from "@opentui/solid"
 import { createSignal } from "solid-js"
 import { nativePreview } from "../src/native-control"
-import { NativeNetworkIndicator, scopedNetworkObservation, type NetworkObservation } from "../src/native-network"
+import { NativeNetwork, NativeNetworkIndicator, scopedNetworkObservation, type NetworkObservation } from "../src/native-network"
 import { SafeManager } from "../src/safe-manager"
 
 test.each(["TOR READY", "SOCKS5 READY"] as const)("%s belongs to the exact host and Safe opening", async (label) => {
@@ -55,6 +55,48 @@ test("Safe policy cannot come from a locked, stale or different opening observat
   expect(scopedNetworkObservation(observation, safe, { ...state, app_open: false }, now)).toBeUndefined()
   expect(scopedNetworkObservation({ ...observation, state: { ...state, app_open: false } }, safe, state, now)).toBeUndefined()
   expect(scopedNetworkObservation(observation, safe, { ...state, idle_lock: { ...state.idle_lock, safes: state.idle_lock.safes.map((entry) => ({ ...entry, opening: { ...entry.opening, nonce: "e".repeat(32) } })) } }, now)).toBeUndefined()
+})
+
+test.each([
+  ["agent", true, 0, "Close the Safe", 80],
+  ["agent", false, 0, "Start a new RAM Safe", 160],
+  ["documents", true, 0, undefined, 80],
+  ["share", true, 0, undefined, 80],
+  ["agent", true, 10_001, undefined, 80],
+] as const)("network policy availability for %s (persistent=%s, age=%i)", async (mode, persistent, age, reason, width) => {
+  const fixture = nativePreview(() => {})
+  await fixture.run(["unlock"])
+  const safe = (await fixture.status()).sessions[0]
+  await fixture.run(["safe", "open", safe])
+  const initial = await fixture.status()
+  const state = { ...initial, sessions: persistent ? initial.sessions : initial.sessions.filter((id) => id !== safe),
+    open_sessions: initial.open_sessions.map((entry) => ({ ...entry, mode })),
+    network_status: { label: "OFFLINE · NO NETWORK DEVICE" as const, direct_blocked: true, host_link: "CONNECTED" as const, age_ms: age } }
+  const commands: string[][] = []
+  const runtime = { ...fixture, query: async () => state }
+  const app = await testRender(() => <NativeNetwork safe={safe} name="Research" open host={state} runtime={runtime}
+    run={async (args) => { commands.push(args); return true }} observed={() => {}} back={() => {}} />, { width, height: width === 80 ? 24 : 50, kittyKeyboard: true })
+  try {
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain(age ? "STATUS UNKNOWN" : "OFFLINE · NO NETWORK DEVICE")
+    if (reason) {
+      expect(app.captureCharFrame()).toContain(`Unavailable: ${reason}`)
+      await app.mockInput.pressEnter()
+      expect(commands).toEqual([])
+    }
+    await app.mockInput.pressArrow("down")
+    await app.renderOnce()
+    expect(app.captureCharFrame().includes("Apply policy")).toBe(!reason)
+    await app.mockInput.pressEnter()
+    if (reason) {
+      expect(commands).toEqual([])
+      await app.mockInput.pressArrow("down")
+      await app.renderOnce()
+      expect(app.captureCharFrame()).toContain("Apply policy")
+      await app.mockInput.pressEnter()
+    }
+    expect(commands).toEqual([["network", "set", "--safe", safe, "--policy", reason ? "offline" : "strict"]])
+  } finally { await app.dispose() }
 })
 
 test.each([[80, 24], [160, 50]])("footer uses only the selected Safe's scoped policy at %ix%i", async (width, height) => {

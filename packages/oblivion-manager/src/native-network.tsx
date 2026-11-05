@@ -30,14 +30,13 @@ const policies = [
   { id: "offline", value: "offline", name: "Offline", description: "Block this Safe's network access, including provider requests. Local file operations remain available." },
 ] as const
 
-export function NativeNetwork(props: { safe: string; name: string; open: boolean; runtime: NativeRuntime; run: (args: string[]) => Promise<boolean>; observed: (value: NetworkObservation) => void; back: () => void }) {
-  const [snapshot, setSnapshot] = createSignal<NativeStatus>()
+export function NativeNetwork(props: { safe: string; name: string; open: boolean; host?: NativeStatus; runtime: NativeRuntime; run: (args: string[]) => Promise<boolean>; observed: (value: NetworkObservation) => void; back: () => void }) {
+  const [observation, setObservation] = createSignal<NetworkObservation>()
   const [selected, setSelected] = createSignal(0)
   const [error, setError] = createSignal("")
   const [working, setWorking] = createSignal(false)
   const [view, setView] = createSignal<"policy" | "transport" | "proxy">("policy")
   const [routeSelected, setRouteSelected] = createSignal(0)
-  const [received, setReceived] = createSignal(0)
   const [now, setNow] = createSignal(performance.now())
   let pending = false
   let stopped = false
@@ -50,22 +49,39 @@ export function NativeNetwork(props: { safe: string; name: string; open: boolean
     } finally { setWorking(false) }
   }
 
-  function apply(index: number) { if (policies[index]) void change(["--policy", policies[index].id]) }
+  function unavailable(policy: typeof policies[number]) {
+    if (policy.value === "offline") return
+    const current = scopedNetworkObservation(observation(), props.safe, props.host, now())
+    if (current?.network_status?.label !== "OFFLINE · NO NETWORK DEVICE"
+      || !current.open_sessions.some((entry) => entry.id === props.safe && entry.mode === "agent" && !entry.recovery_required)) return
+    return current.sessions.includes(props.safe)
+      ? "Close the Safe and set its policy before starting the agent again."
+      : "Start a new RAM Safe with network access. Closing this Safe discards its contents."
+  }
+
+  function apply(index: number) {
+    const policy = policies[index]
+    if (!policy || unavailable(policy)) return
+    void change(["--policy", policy.id])
+  }
   function route(index: number) { if (index === 0) { void change(["--tor"]); return }; setView("proxy") }
-  const transportLabel = () => now() - received() + (snapshot()?.network_status?.age_ms ?? 10_001) > 10_000 ? "STATUS UNKNOWN" : snapshot()?.network_status?.label ?? "STATUS UNKNOWN"
+  const snapshot = () => observation()?.state
+  const transportLabel = () => now() - (observation()?.received ?? 0) + (snapshot()?.network_status?.age_ms ?? 10_001) > 10_000 ? "STATUS UNKNOWN" : snapshot()?.network_status?.label ?? "STATUS UNKNOWN"
 
   async function refresh() {
     if (pending || !props.open) return
     pending = true
+    const safe = props.safe
     try {
-      const value = nativeStatus.parse(await props.runtime.query(["network", "status", "--safe", props.safe, "--json"]))
+      const value = nativeStatus.parse(await props.runtime.query(["network", "status", "--safe", safe, "--json"]))
       if (stopped) return
-      setSnapshot(value)
-      setReceived(performance.now())
+      const next = { safe, state: value, received: performance.now() }
+      setNow(next.received)
+      setObservation(next)
       setError("")
-      props.observed({ safe: props.safe, state: value, received: performance.now() })
+      props.observed(next)
     } catch {
-      if (!stopped) { setSnapshot(undefined); setError("Network status is unavailable. No protected route has been verified.") }
+      if (!stopped) { setObservation(undefined); setError("Network status is unavailable. No protected route has been verified.") }
     } finally { pending = false }
   }
 
@@ -104,7 +120,7 @@ export function NativeNetwork(props: { safe: string; name: string; open: boolean
       ]} selected={routeSelected()} change={setRouteSelected} focused disabled={working()} choose={route} back={() => setView("policy")} /></Show>
     <Show when={view() === "policy"}><Menu title="Network access" description={`${props.name} · ${transportLabel()} · Applies to every agent in this Safe.`}
       toolbar={[{ title: "Change route", key: "T", run: () => setView("transport") }, { title: "Refresh", key: "R", run: () => { void refresh() } }]}
-      items={policies.map((policy, index) => ({ name: policy.name, description: policy.description, badge: snapshot()?.safe_access.current === policy.value ? "Current" : undefined, action: "Apply policy", run: () => { void apply(index) } }))}
+      items={policies.map((policy, index) => ({ name: policy.name, description: policy.description, disabled: unavailable(policy), badge: snapshot()?.safe_access.current === policy.value ? "Current" : undefined, action: "Apply policy", run: () => apply(index) }))}
       selected={selected()} change={setSelected} focused disabled={working()}
       choose={apply} back={props.back} /></Show>
     <Show when={error()}><text fg={theme.feedback.warning}>{error()}</text></Show>
