@@ -22,6 +22,7 @@ MAX_PROFILE_BYTES = 1024
 MAX_DEVICES = 64
 MAX_SECTORS = (2**53 - 1) // 512
 # Linux uapi/linux/fs.h, with the native 64-bit ABI used on amd64 and arm64.
+BLKROGET = 0x125e
 BLKGETSIZE64 = 0x80081272
 BLKGETDISKSEQ = 0x80081280
 
@@ -236,16 +237,21 @@ def block_u64(fd, request):
     return struct.unpack('=Q', fcntl.ioctl(fd, request, bytes(8)))[0]
 
 
-def open_media(device_id, proc=Path('/proc'), sysfs=Path('/sys'), dev=Path('/dev'), stat_path=Path.stat):
-    """Return an owned read-only block FD and its public selection metadata."""
+def open_media(direction, device_id, proc=Path('/proc'), sysfs=Path('/sys'), dev=Path('/dev'), stat_path=Path.stat):
+    """Return an exclusively held block FD and its public selection metadata."""
+    access = {'import': os.O_RDONLY, 'export': os.O_RDWR}.get(direction)
+    if access is None:
+        raise ValueError('invalid_live_media_direction')
     if not isinstance(device_id, str) or not re.fullmatch(r'[0-9a-f]{64}', device_id):
         raise ValueError('invalid_live_media_id')
     observed = observe_media(proc, sysfs, dev, stat_path)
     selected = next((device for device in observed if device.id == device_id), None)
     if selected is None:
         raise ValueError('live_media_unavailable')
+    if direction == 'export' and selected.read_only:
+        raise ValueError('live_media_read_only')
 
-    fd = os.open(dev / selected.name, os.O_RDONLY | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC)
+    fd = os.open(dev / selected.name, access | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         info = os.fstat(fd)
         if not stat.S_ISBLK(info.st_mode) or device_number(info.st_rdev) != selected.major_minor:
@@ -256,6 +262,8 @@ def open_media(device_id, proc=Path('/proc'), sysfs=Path('/sys'), dev=Path('/dev
                 or block_u64(fd, BLKGETSIZE64) != selected.bytes
                 or block_u64(fd, BLKGETDISKSEQ) != selected.diskseq):
             raise ValueError('live_media_device_changed')
+        if direction == 'export' and fcntl.ioctl(fd, BLKROGET, bytes(4)) != bytes(4):
+            raise ValueError('live_media_read_only')
     except BaseException:
         os.close(fd)
         raise
@@ -282,7 +290,7 @@ def require_live_profile(path):
         raise ValueError('invalid_installation_profile')
 
 
-def lease_media(device_id, peer, profile=INSTALLATION, helper=NATIVE_HELPER):
+def lease_media(direction, device_id, peer, profile=INSTALLATION, helper=NATIVE_HELPER):
     if os.geteuid() != 0 or os.environ.get('SUDO_UID') != str(LIVE_UID):
         raise ValueError('live_media_lease_requires_live_sudo')
     require_live_profile(profile)
@@ -298,7 +306,7 @@ def lease_media(device_id, peer, profile=INSTALLATION, helper=NATIVE_HELPER):
             or not os.path.samestat(installed, Path(f'/proc/{pid}/exe').stat())):
         raise ValueError('invalid_live_media_lease_peer')
 
-    descriptor, _ = open_media(device_id)
+    descriptor, _ = open_media(direction, device_id)
     try:
         rights = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, struct.pack('=i', descriptor))]
         if peer.sendmsg([b'M'], rights, socket.MSG_DONTWAIT) != 1:
@@ -311,14 +319,16 @@ def main():
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('list')
-    commands.add_parser('lease').add_argument('id')
+    lease = commands.add_parser('lease')
+    lease.add_argument('direction', choices=('import', 'export'))
+    lease.add_argument('id')
     args = parser.parse_args()
     try:
         if args.command == 'list':
             print(json.dumps({'version': 1, 'devices': list_media()}, separators=(',', ':')))
             return
         with socket.socket(fileno=1) as peer:
-            lease_media(args.id, peer)
+            lease_media(args.direction, args.id, peer)
     except (OSError, UnicodeError):
         parser.exit(1, 'live_media_observation_failed\n')
     except ValueError as error:

@@ -3,7 +3,7 @@
 use crate::storage::{self, Error, Result, random_id, require};
 use oblivion_host::channel::Channel;
 use oblivion_host::{autolock::Opening, scope::Slot};
-use oblivion_wire::live_media::{DETACHED, REVOKED, Reserve, STOP, Source};
+use oblivion_wire::live_media::{DETACHED, Direction, REVOKED, Reserve, STOP, Source};
 use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -19,6 +19,7 @@ struct Reservation {
     host: String,
     opening: Opening,
     device_id: String,
+    direction: Direction,
     signal: UnixStream,
     owner: Arc<OwnedFd>,
     deadline: Instant,
@@ -92,6 +93,7 @@ impl Registry {
             host,
             opening: request.opening,
             device_id: request.device_id,
+            direction: request.direction,
             signal,
             owner: owner.clone(),
             deadline,
@@ -102,6 +104,7 @@ impl Registry {
             registry: self.clone(),
             id,
             slot,
+            direction: request.direction,
             controller,
             watch,
             owner,
@@ -134,7 +137,8 @@ impl Registry {
                 && Instant::now() < entry.deadline
                 && entry.host == host
                 && entry.opening == request.opening
-                && entry.device_id == request.device_id,
+                && entry.device_id == request.device_id
+                && entry.direction == request.direction,
             "live_media_reservation_changed",
         )?;
         let watch = entry
@@ -197,6 +201,7 @@ pub struct Lease {
     registry: Registry,
     id: String,
     slot: Slot,
+    direction: Direction,
     controller: UnixStream,
     watch: UnixStream,
     owner: Arc<OwnedFd>,
@@ -237,7 +242,7 @@ impl Lease {
             }
             oblivion_host::scope::within(self.slot, || {
                 let _lock = storage::recovery_lock()?;
-                crate::transfer_host::stop_live_media(&self.id)
+                crate::transfer_host::stop_live_media(&self.id, self.direction)
             })
         });
         if cleanup.is_err() {
@@ -352,7 +357,7 @@ mod tests {
     use super::{DETACHED, Lease, REVOKED, Registry, STOP, live_profile};
     use crate::storage::Result;
     use oblivion_host::autolock::Opening;
-    use oblivion_wire::live_media::{Reserve, Source};
+    use oblivion_wire::live_media::{Direction, Reserve, Source};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
@@ -372,6 +377,7 @@ mod tests {
             Reserve {
                 opening,
                 device_id: device.repeat(64),
+                direction: Direction::Import,
             },
             "b".repeat(32),
             owner.into(),
@@ -467,6 +473,7 @@ mod tests {
                 nonce: "a".repeat(32),
             },
             device_id: "1".repeat(64),
+            direction: Direction::Import,
         };
         assert!(registry.claim(&request, &host).is_err());
         request.opening.slot = 1.try_into().unwrap();
@@ -476,6 +483,9 @@ mod tests {
         request.device_id = "2".repeat(64);
         assert!(registry.claim(&request, &host).is_err());
         request.device_id = "1".repeat(64);
+        request.direction = Direction::Export;
+        assert!(registry.claim(&request, &host).is_err());
+        request.direction = Direction::Import;
         assert!(registry.claim(&request, &"c".repeat(32)).is_err());
         let source = registry
             .claim(&request, &host)

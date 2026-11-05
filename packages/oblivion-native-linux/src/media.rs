@@ -1,5 +1,6 @@
-//! One read-only removable device, owned by the controller's QMP connection.
+//! One removable device, owned by the controller's QMP connection.
 use crate::{Error, Result, qemu::Qmp};
+use oblivion_wire::live_media::Direction;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::OsString;
@@ -103,12 +104,28 @@ struct NodeId {
     node_name: &'static str,
 }
 
+pub(crate) fn block_access_matches(media: &File, direction: Direction) -> bool {
+    let access = match direction {
+        Direction::Import => libc::O_RDONLY,
+        Direction::Export => libc::O_RDWR,
+    };
+    let flags = unsafe { libc::fcntl(media.as_raw_fd(), libc::F_GETFL) };
+    let invalid_access = flags < 0 || flags & libc::O_ACCMODE != access;
+    #[cfg(target_os = "linux")]
+    let invalid_access = invalid_access || flags & libc::O_PATH != 0;
+    !invalid_access
+        && media
+            .metadata()
+            .is_ok_and(|info| info.file_type().is_block_device())
+}
+
 impl Qmp {
     /// The caller must supply an already authorized and exclusively opened
-    /// partition. This boundary independently rejects writable/non-block FDs.
-    pub fn attach_readonly_media(
+    /// partition. The descriptor access must match the reservation direction.
+    pub fn attach_media(
         &mut self,
         media: File,
+        direction: Direction,
         serial: &str,
         deadline: Instant,
     ) -> Result<()> {
@@ -120,23 +137,16 @@ impl Qmp {
         }) {
             return Err(Error("invalid_qmp_media_serial"));
         }
-        let flags = unsafe { libc::fcntl(media.as_raw_fd(), libc::F_GETFL) };
-        let invalid_access = flags < 0 || flags & libc::O_ACCMODE != libc::O_RDONLY;
-        #[cfg(target_os = "linux")]
-        let invalid_access = invalid_access || flags & libc::O_PATH != 0;
-        if invalid_access
-            || !media
-                .metadata()
-                .is_ok_and(|info| info.file_type().is_block_device())
-        {
-            return Err(Error("qmp_media_readonly_block_required"));
+        if !block_access_matches(&media, direction) {
+            return Err(Error("qmp_media_block_access_mismatch"));
         }
-        self.attach_media_descriptor(media, serial, deadline)
+        self.attach_media_descriptor(media, direction, serial, deadline)
     }
 
     fn attach_media_descriptor(
         &mut self,
         media: File,
+        direction: Direction,
         serial: &str,
         deadline: Instant,
     ) -> Result<()> {
@@ -145,6 +155,7 @@ impl Qmp {
             MediaStatus::Attached => return Err(Error("qmp_media_already_attached")),
             MediaStatus::Uncertain => return Err(Error("qmp_media_ownership_uncertain")),
         }
+        let read_only = direction == Direction::Import;
         let attached = (|| {
             let receipt: FdSet = serde_json::from_value(self.request(
                 "add-fd",
@@ -158,11 +169,11 @@ impl Qmp {
                 BlockNode {
                     driver: "raw",
                     node_name: NODE,
-                    read_only: true,
+                    read_only,
                     file: BlockFile {
                         driver: "host_device",
                         filename: format!("/dev/fdset/{}", receipt.fdset_id),
-                        read_only: true,
+                        read_only,
                         locking: "on",
                         aio: "threads",
                         cache: Cache {
@@ -271,8 +282,9 @@ impl Qmp {
 mod tests {
     use super::{BACKEND_PATH, DEVICE, DEVICE_PATH, MediaStatus, NODE, PORT};
     use crate::qemu::tests::socket_pair;
+    use oblivion_wire::live_media::Direction;
     use serde_json::{Value, json};
-    use std::fs::File;
+    use std::fs::{File, OpenOptions};
     use std::io::{BufRead, BufReader, Write};
     use std::os::fd::{AsRawFd, FromRawFd, RawFd};
     use std::os::unix::fs::MetadataExt;
@@ -297,7 +309,8 @@ mod tests {
         send(peer, json!({"id": request["id"], "return": result}));
     }
 
-    fn expect_attach(peer: &mut BufReader<UnixStream>) {
+    fn expect_attach(peer: &mut BufReader<UnixStream>, direction: Direction) {
+        let read_only = direction == Direction::Import;
         let mut control = [0usize; 8];
         let mut first = [0u8; 1];
         let mut data = libc::iovec {
@@ -328,7 +341,11 @@ mod tests {
             let fd = libc::CMSG_DATA(header).cast::<RawFd>().read_unaligned();
             assert_eq!(
                 libc::fcntl(fd, libc::F_GETFL) & libc::O_ACCMODE,
-                libc::O_RDONLY
+                if read_only {
+                    libc::O_RDONLY
+                } else {
+                    libc::O_RDWR
+                },
             );
             assert_eq!(libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC), 0);
             File::from_raw_fd(fd)
@@ -345,8 +362,8 @@ mod tests {
         assert_eq!(
             node["arguments"],
             json!({
-                "driver":"raw", "node-name":NODE, "read-only":true,
-                "file":{"driver":"host_device", "filename":"/dev/fdset/7", "read-only":true,
+                "driver":"raw", "node-name":NODE, "read-only":read_only,
+                "file":{"driver":"host_device", "filename":"/dev/fdset/7", "read-only":read_only,
                         "locking":"on","aio":"threads","cache":{"direct":false,"no-flush":false}}
             })
         );
@@ -366,11 +383,17 @@ mod tests {
 
     #[test]
     fn removable_media_uses_the_exact_fd_and_waits_for_owned_eject() {
+        for direction in [Direction::Import, Direction::Export] {
+            check_owned_eject(direction);
+        }
+    }
+
+    fn check_owned_eject(direction: Direction) {
         let (mut qmp, peer) = socket_pair();
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let worker = std::thread::spawn(move || {
             let mut peer = BufReader::new(peer);
-            expect_attach(&mut peer);
+            expect_attach(&mut peer, direction);
             let delete = request(&mut peer, "device_del", &[]);
             assert_eq!(delete["arguments"], json!({"id":DEVICE}));
             send(
@@ -403,14 +426,21 @@ mod tests {
         });
         let deadline = Instant::now() + Duration::from_secs(2);
         // The socket fixture verifies descriptor transport, while production
-        // admission only accepts a real read-only block descriptor.
+        // admission only accepts a real block descriptor with matching access.
+        let descriptor = || {
+            OpenOptions::new()
+                .read(true)
+                .write(direction == Direction::Export)
+                .open("/dev/null")
+                .unwrap()
+        };
         assert_eq!(
-            qmp.attach_readonly_media(File::open("/dev/null").unwrap(), SERIAL, deadline)
+            qmp.attach_media(descriptor(), direction, SERIAL, deadline)
                 .unwrap_err()
                 .0,
-            "qmp_media_readonly_block_required"
+            "qmp_media_block_access_mismatch"
         );
-        qmp.attach_media_descriptor(File::open("/dev/null").unwrap(), SERIAL, deadline)
+        qmp.attach_media_descriptor(descriptor(), direction, SERIAL, deadline)
             .unwrap();
         assert_eq!(qmp.media_status(), MediaStatus::Attached);
         qmp.detach_media(deadline).unwrap();
@@ -432,7 +462,7 @@ mod tests {
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let worker = std::thread::spawn(move || {
             let mut peer = BufReader::new(peer);
-            expect_attach(&mut peer);
+            expect_attach(&mut peer, Direction::Import);
             let delete = request(&mut peer, "device_del", &[]);
             // QEMU may deliver the event before its command response.
             send(
@@ -444,17 +474,27 @@ mod tests {
             assert_eq!(peer.read_line(&mut trailing).unwrap(), 0);
         });
         let deadline = Instant::now() + Duration::from_secs(2);
-        qmp.attach_media_descriptor(File::open("/dev/null").unwrap(), SERIAL, deadline)
-            .unwrap();
+        qmp.attach_media_descriptor(
+            File::open("/dev/null").unwrap(),
+            Direction::Import,
+            SERIAL,
+            deadline,
+        )
+        .unwrap();
         assert_eq!(
             qmp.detach_media(deadline).unwrap_err().0,
             "qmp_media_unplug_rejected"
         );
         assert_eq!(qmp.media_status(), MediaStatus::Uncertain);
         assert_eq!(
-            qmp.attach_media_descriptor(File::open("/dev/null").unwrap(), SERIAL, deadline)
-                .unwrap_err()
-                .0,
+            qmp.attach_media_descriptor(
+                File::open("/dev/null").unwrap(),
+                Direction::Import,
+                SERIAL,
+                deadline
+            )
+            .unwrap_err()
+            .0,
             "qmp_media_ownership_uncertain"
         );
         assert_eq!(

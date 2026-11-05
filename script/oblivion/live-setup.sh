@@ -18,7 +18,7 @@ printf 'oblivion-manager ALL=(root) NOPASSWD: /usr/lib/oblivion/live-storage.py 
 chmod 0440 /etc/sudoers.d/oblivion-live-storage
 visudo -c -f /etc/sudoers.d/oblivion-live-storage
 cat > /etc/sudoers.d/oblivion-live-media <<'EOF'
-Cmnd_Alias OBLIVION_USB = /usr/lib/oblivion/live-media.py ^lease [0-9a-f]{64}$
+Cmnd_Alias OBLIVION_USB = /usr/lib/oblivion/live-media.py ^lease (import|export) [0-9a-f]{64}$
 Defaults!OBLIVION_USB !use_pty, !log_input, !log_output, !log_allowed
 oblivion-manager ALL=(root) TIMEOUT=5s NOPASSWD: NOSETENV: OBLIVION_USB
 EOF

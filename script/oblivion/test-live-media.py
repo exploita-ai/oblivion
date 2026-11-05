@@ -162,13 +162,15 @@ class Discovery(unittest.TestCase):
         self.assertEqual([entry['name'] for entry in self.list()], [f'usb{index:02}' for index in range(1, 65)])
 
     @contextmanager
-    def block_descriptor(self, *, major_minor=17, bytes_count=4194304, diskseq=17, after_open=None):
+    def block_descriptor(self, *, major_minor=17, bytes_count=4194304, diskseq=17, after_open=None,
+                         writable=False, kernel_read_only=0):
         opened = []
         requests = []
-        with (self.proc / 'cmdline').open('rb') as source:
+        with (self.proc / 'cmdline').open('r+b' if writable else 'rb') as source:
             def open_block(path, flags):
                 self.assertEqual(path, self.dev / 'sdb1')
-                self.assertEqual(flags, os.O_RDONLY | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC)
+                access = os.O_RDWR if writable else os.O_RDONLY
+                self.assertEqual(flags, access | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC)
                 if after_open is not None:
                     after_open()
                 fd = os.dup(source.fileno())
@@ -177,8 +179,11 @@ class Discovery(unittest.TestCase):
 
             def ioctl(fd, request, buffer):
                 self.assertEqual(fd, opened[0])
-                self.assertEqual(len(buffer), 8)
                 requests.append(request)
+                if request == 0x125e:
+                    self.assertEqual(len(buffer), 4)
+                    return struct.pack('=i', kernel_read_only)
+                self.assertEqual(len(buffer), 8)
                 return struct.pack('=Q', {0x80081272: bytes_count, 0x80081280: diskseq}[request])
 
             block_info = SimpleNamespace(st_mode=stat.S_IFBLK, st_rdev=os.makedev(8, major_minor))
@@ -187,8 +192,8 @@ class Discovery(unittest.TestCase):
                   patch.object(media.fcntl, 'ioctl', side_effect=ioctl)):
                 yield opened, requests
 
-    def pin(self, device_id):
-        return media.open_media(device_id, self.proc, self.sys, self.dev, self.stat_path)
+    def pin(self, device_id, direction='import'):
+        return media.open_media(direction, device_id, self.proc, self.sys, self.dev, self.stat_path)
 
     def test_pins_the_exact_visible_partition_and_transfers_fd_ownership(self):
         disk = self.disk('sdb', 16)
@@ -202,8 +207,39 @@ class Discovery(unittest.TestCase):
             self.assertEqual(metadata, selected)
             self.assertFalse(os.get_inheritable(fd))
             self.assertEqual(os.read(fd, 5), b'quiet')
+            with self.assertRaises(OSError):
+                os.write(fd, b'x')
         finally:
             os.close(fd)
+
+    def test_export_pins_a_writable_leaf_and_rechecks_its_kernel_write_protection(self):
+        disk = self.disk('sdb', 16)
+        self.part(disk, 1, 17)
+        selected = self.list()[0]
+        with self.block_descriptor(writable=True) as (opened, requests):
+            fd, metadata = self.pin(selected['id'], 'export')
+        try:
+            self.assertEqual(opened, [fd])
+            self.assertEqual(requests, [0x80081272, 0x80081280, 0x125e])
+            self.assertEqual(metadata, selected)
+            self.assertEqual(os.write(fd, b'q'), 1)
+        finally:
+            os.close(fd)
+
+        with self.block_descriptor(writable=True, kernel_read_only=1) as (opened, requests):
+            with self.assertRaisesRegex(ValueError, 'live_media_read_only'):
+                self.pin(selected['id'], 'export')
+        self.assertEqual(requests, [0x80081272, 0x80081280, 0x125e])
+        with self.assertRaises(OSError):
+            os.fstat(opened[0])
+
+        self.put(disk / 'ro', 1)
+        selected = self.list()[0]
+        with self.block_descriptor() as (opened, requests):
+            with self.assertRaisesRegex(ValueError, 'live_media_read_only'):
+                self.pin(selected['id'], 'export')
+        self.assertEqual(opened, [])
+        self.assertEqual(requests, [])
 
     def test_refuses_a_stale_or_invalid_selection_before_opening(self):
         disk = self.disk('sdb', 16)
@@ -264,8 +300,8 @@ class Lease(unittest.TestCase):
         descriptor = os.open(self.profile, os.O_RDONLY | os.O_CLOEXEC)
         with sender, receiver, patch.dict(os.environ, {'SUDO_UID': '1000'}), patch.object(
                 media, 'open_media', return_value=(descriptor, {})) as pinned:
-            media.lease_media('a' * 64, sender, self.profile, self.helper)
-            pinned.assert_called_once_with('a' * 64)
+            media.lease_media('import', 'a' * 64, sender, self.profile, self.helper)
+            pinned.assert_called_once_with('import', 'a' * 64)
             with self.assertRaises(OSError):
                 os.fstat(descriptor)
             receiver.settimeout(1)
@@ -286,20 +322,20 @@ class Lease(unittest.TestCase):
         with sender, receiver, patch.object(media, 'open_media') as pinned:
             with patch.dict(os.environ, {'SUDO_UID': '01000'}):
                 with self.assertRaisesRegex(ValueError, 'live_media_lease_requires_live_sudo'):
-                    media.lease_media('a' * 64, sender, self.profile)
+                    media.lease_media('export', 'a' * 64, sender, self.profile)
             with patch.dict(os.environ, {'SUDO_UID': '1000'}):
                 with self.assertRaisesRegex(ValueError, 'invalid_live_media_lease_peer'):
-                    media.lease_media('a' * 64, sender, self.profile)
+                    media.lease_media('export', 'a' * 64, sender, self.profile)
                 with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as datagram:
                     with self.assertRaisesRegex(ValueError, 'invalid_live_media_lease_socket'):
-                        media.lease_media('a' * 64, datagram, self.profile)
+                        media.lease_media('export', 'a' * 64, datagram, self.profile)
             pinned.assert_not_called()
 
     def test_correct_uid_cannot_use_another_executable(self):
         sender, receiver = self.live_pair()
         with sender, receiver, patch.dict(os.environ, {'SUDO_UID': '1000'}), patch.object(media, 'open_media') as pinned:
             with self.assertRaisesRegex(ValueError, 'invalid_live_media_lease_peer'):
-                media.lease_media('a' * 64, sender, self.profile, self.profile)
+                media.lease_media('export', 'a' * 64, sender, self.profile, self.profile)
             pinned.assert_not_called()
 
     def test_refuses_unsafe_or_invalid_installation_profiles(self):
@@ -324,16 +360,17 @@ class Lease(unittest.TestCase):
 
     def test_closes_pinned_descriptor_when_receiver_exits_before_send(self):
         sender, receiver = self.live_pair()
-        descriptor = os.open(self.profile, os.O_RDONLY | os.O_CLOEXEC)
+        descriptor = os.open(self.profile, os.O_RDWR | os.O_CLOEXEC)
 
-        def pin_after_receiver_exits(_):
+        def pin_after_receiver_exits(direction, device_id):
+            self.assertEqual((direction, device_id), ('export', 'a' * 64))
             receiver.close()
             return descriptor, {}
 
         with sender, receiver, patch.dict(os.environ, {'SUDO_UID': '1000'}), patch.object(
                 media, 'open_media', side_effect=pin_after_receiver_exits):
             with self.assertRaises(BrokenPipeError):
-                media.lease_media('a' * 64, sender, self.profile, self.helper)
+                media.lease_media('export', 'a' * 64, sender, self.profile, self.helper)
         with self.assertRaises(OSError):
             os.fstat(descriptor)
 

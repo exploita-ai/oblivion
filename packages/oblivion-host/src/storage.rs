@@ -3011,7 +3011,7 @@ fn clear_key_file(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_key_file(name: &str, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_key_file(name: &str, bytes: &[u8]) -> Result<()> {
     let path = runtime_record(name);
     let pending = runtime_record(&format!("{name}.pending"));
     for existing in [&path, &pending] {

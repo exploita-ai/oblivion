@@ -1,11 +1,19 @@
 use crate::idle::Opening;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Direction {
+    Import,
+    Export,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reserve<S> {
     pub opening: Opening<S>,
     pub device_id: String,
+    pub direction: Direction,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -14,6 +22,7 @@ pub struct Source<S> {
     pub lease_id: String,
     pub opening: Opening<S>,
     pub device_id: String,
+    pub direction: Direction,
 }
 
 pub const STOP: u8 = b'X';

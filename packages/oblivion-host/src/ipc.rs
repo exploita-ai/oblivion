@@ -1092,7 +1092,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
             | Operation::OpenDocuments
             | Operation::FileAttach
             | Operation::LiveMediaReserve
-            | Operation::LiveMediaSource
+            | Operation::LiveMediaAttach
             | Operation::ChildTaskStart
             | Operation::ChildTaskRetry
             | Operation::ChildTaskCancel
@@ -1126,7 +1126,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
     channel
         .read_exact(&mut secret)
         .map_err(|_| Error("incomplete_secret"))?;
-    let _ordinary = if matches!(request.operation, Operation::Activity | Operation::LiveMediaSource) { None }
+    let _ordinary = if matches!(request.operation, Operation::Activity | Operation::LiveMediaAttach) { None }
         else { Some(ordinary.lock().map_err(|_| Error("controller_queue_failed"))?) };
     if matches!(request.operation, Operation::Activity | Operation::IdleSettings) {
         require(request.expected_session.is_none(), "invalid_idle_request")?;
@@ -1250,12 +1250,13 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         let (console, media) = crate::live_media::registry().reserve(selected, host, crate::vm::session_owner()?)?;
         // Idle lock writes its fence before waiting for storage.lock. Check
         // again after registration so it cannot miss this lease before the ACK.
-        crate::storage::require_current_idle_activity(&authority)?;
+        let opening = authority.safe.as_ref().ok_or(Error("idle_opening_changed"))?;
+        require(require_current_file_opening(&session, request.slot, opening)? == authority.host, "idle_opening_changed")?;
         return Ok(Response { ok: true, output: String::new(), error: None, console: Some(console),
             lease: Some(ClientLease { backup: None, slot: request.slot, id: media.id().to_owned(), safe_id: session,
                 operation: "live-media-release", secret, export: None, media: Some(MediaAttachment::Reservation(media)), _hold: None, timeout: None }) });
     }
-    if matches!(request.operation, Operation::LiveMediaSource) {
+    if matches!(request.operation, Operation::LiveMediaAttach) {
         let deadline = Instant::now() + Duration::from_secs(115);
         crate::live_media::require_live()?;
         let selected: oblivion_wire::live_media::Source<oblivion_host::scope::Slot> =
@@ -1271,20 +1272,19 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
             let source = crate::live_media::registry().claim(&selected, &host)?;
             (source, host)
         };
-        let authority = oblivion_host::autolock::Activity { host, safe: Some(selected.opening.clone()) };
-        let device = crate::transfer_host::wait_live_media(&selected.lease_id, || source.check(stream))?;
+        let device = crate::transfer_host::wait_live_media(&selected.lease_id, selected.direction, || source.check(stream))?;
         {
             let _lock = crate::storage::recovery_lock()?;
-            crate::storage::require_current_idle_activity(&authority)?;
+            require(require_current_file_opening(&selected.opening.safe_id, request.slot, &selected.opening)? == host, "idle_opening_changed")?;
             source.check(stream)?;
             crate::transfer_host::idle()?;
-            crate::transfer_host::start_live_media(&selected.lease_id, &device)?;
+            crate::transfer_host::start_live_media(&selected.lease_id, selected.direction, &device)?;
         }
         drop(device);
-        let (console, worker) = crate::transfer_host::attach_live_media(&selected.lease_id, deadline, || source.check(stream))?;
+        let (console, worker) = crate::transfer_host::attach_live_media(&selected.lease_id, selected.direction, deadline, || source.check(stream))?;
         {
             let _lock = crate::storage::recovery_lock()?;
-            crate::storage::require_current_idle_activity(&authority)?;
+            require(require_current_file_opening(&selected.opening.safe_id, request.slot, &selected.opening)? == host, "idle_opening_changed")?;
             source.check(stream)?;
         }
         return Ok(Response { ok: true, output: String::new(), error: None, console: Some(console),
@@ -1389,7 +1389,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         Operation::Transfers => "transfers",
         Operation::Onion => "onion",
         Operation::ChildTaskStatus | Operation::ChildTaskReview | Operation::ChildTaskStart | Operation::ChildTaskRetry | Operation::ChildTaskCancel
-            | Operation::AgentAttach | Operation::FileAttach | Operation::LiveMediaReserve | Operation::LiveMediaSource | Operation::ShareAttach | Operation::ShareImportAttach
+            | Operation::AgentAttach | Operation::FileAttach | Operation::LiveMediaReserve | Operation::LiveMediaAttach | Operation::ShareAttach | Operation::ShareImportAttach
             | Operation::ShareExportBegin | Operation::ShareExportLease | Operation::ShareExportEnd
             | Operation::BackupAttach | Operation::BackupStatus | Operation::BackupCancel
             | Operation::Activity | Operation::IdleSettings => unreachable!(),

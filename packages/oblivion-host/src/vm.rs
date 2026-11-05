@@ -146,7 +146,7 @@ impl Config {
 
     pub fn start_agent(&self, token: &str, web_access: &str, tools: Tools) -> Result<()> {
         require(matches!(web_access, "strict" | "open"), "invalid_web_access")?;
-        self.launch(Role::Session, true, false, false, true, false)?;
+        self.launch(Role::Session, true, false, false, true, false, false)?;
         let stream = UnixStream::connect(scope::path("/run/oblivion-session/token.sock"))
             .map_err(|_| Error("session_channel_unavailable"))?;
         crate::gateway::peer(&stream, scope::uid(VM_UID))?;
@@ -163,7 +163,11 @@ impl Config {
     }
 
     pub fn start_role(&self, role: Role) -> Result<()> {
-        self.launch(role, false, false, false, false, false)
+        self.launch(role, false, false, false, false, false, false)
+    }
+
+    pub fn start_live_export(&self) -> Result<()> {
+        self.launch(Role::Export, false, false, false, false, false, true)
     }
 
     pub fn start_documents(&self) -> Result<()> {
@@ -179,7 +183,7 @@ impl Config {
     }
 
     fn start_offline(&self, native: bool, share: bool) -> Result<()> {
-        self.launch(Role::Session, false, true, false, native, share)?;
+        self.launch(Role::Session, false, true, false, native, share, false)?;
         let stream = UnixStream::connect(&scope::path("/run/oblivion-session/ready.sock"))
             .map_err(|_| Error("session_channel_unavailable"))?;
         crate::gateway::peer(&stream, scope::uid(VM_UID))?;
@@ -195,7 +199,7 @@ impl Config {
     }
 
     pub fn resize_session(&self, target: u64) -> Result<()> {
-        self.launch(Role::Session, false, false, true, false, false)?;
+        self.launch(Role::Session, false, false, true, false, false, false)?;
         let stream = UnixStream::connect(&scope::path("/run/oblivion-session/ready.sock"))
             .map_err(|_| Error("session_channel_unavailable"))?;
         crate::gateway::peer(&stream, scope::uid(VM_UID))?;
@@ -213,7 +217,7 @@ impl Config {
         )
     }
 
-    fn launch(&self, role: Role, network: bool, documents: bool, resize: bool, native: bool, share: bool) -> Result<()> {
+    fn launch(&self, role: Role, network: bool, documents: bool, resize: bool, native: bool, share: bool, live_export: bool) -> Result<()> {
         require(!share || matches!(role, Role::Session) && documents && !network && !resize && !native, "invalid_share_launch")?;
         if matches!(role, Role::OnionUplink) {
             require(!network && !documents && !resize, "invalid_onion_launch")?;
@@ -423,7 +427,7 @@ impl Config {
             // has no guest_early_console field and rejects that configuration.
             "-serial".to_owned(), serial,
             "-kernel".to_owned(), "/kernel".to_owned(), "-initrd".to_owned(), "/initrd".to_owned(),
-            "-append".to_owned(), format!("root=/dev/vda ro rootfstype=squashfs {logging} panic=-1{}{}{}{}{}", if network { " oblivion.network=1" } else { "" }, if documents { " oblivion.documents=1" } else { "" }, if resize { " oblivion.resize=1" } else { "" }, if native { " oblivion.native=1" } else { "" }, if share { " oblivion.share=1" } else { "" }),
+            "-append".to_owned(), format!("root=/dev/vda ro rootfstype=squashfs {logging} panic=-1{}{}{}{}{}{}", if network { " oblivion.network=1" } else { "" }, if documents { " oblivion.documents=1" } else { "" }, if resize { " oblivion.resize=1" } else { "" }, if native { " oblivion.native=1" } else { "" }, if share { " oblivion.share=1" } else { "" }, if live_export { " oblivion.live-export=1" } else { "" }),
             "-drive".to_owned(), "file=/root.squashfs,format=raw,if=none,id=root,readonly=on".to_owned(),
             "-device".to_owned(), "virtio-blk-pci,drive=root,serial=oblivion-root".to_owned(),
         ]);
@@ -489,6 +493,14 @@ impl Config {
                 "-device".to_owned(),
                 "virtserialport,chardev=copy,name=oblivion.export".to_owned(),
             ]);
+            if live_export {
+                args.extend([
+                    "-chardev".to_owned(),
+                    "socket,id=export-proof,path=/run/oblivion-export-vm/proof.sock,server=on,wait=off".to_owned(),
+                    "-device".to_owned(),
+                    "virtserialport,chardev=export-proof,name=oblivion.export-proof".to_owned(),
+                ]);
+            }
         }
         if matches!(role, Role::Gateway) {
             // Connect the private control channel before the guest opens its

@@ -8,7 +8,9 @@ use oblivion_wire::{
     control::{HEADER_LIMIT, NATIVE_VERSION, Operation, Request, Response, valid_id},
     control_client::{self, Framing},
     frame,
-    live_media::{DETACHED, REVOKED, Reserve, STOP, Source, detach_proof, valid_device_id},
+    live_media::{
+        DETACHED, Direction, REVOKED, Reserve, STOP, Source, detach_proof, valid_device_id,
+    },
     runtime_auth::Token,
     slot::Slot,
 };
@@ -49,6 +51,7 @@ struct Job {
 enum QmpRequest {
     Attach {
         device: File,
+        direction: Direction,
         serial: String,
         local: UnixStream,
         reserve: UnixStream,
@@ -97,6 +100,7 @@ impl Sidecar {
                 match request {
                     QmpRequest::Attach {
                         device,
+                        direction,
                         serial,
                         local,
                         reserve,
@@ -107,8 +111,9 @@ impl Sidecar {
                             .and_then(|_| quiet(&local))
                             .and_then(|_| quiet(&reserve))
                             .and_then(|_| {
-                                qmp.attach_readonly_media(
+                                qmp.attach_media(
                                     device,
+                                    direction,
                                     &serial,
                                     deadline.min(Instant::now() + QMP_BUDGET),
                                 )
@@ -267,13 +272,22 @@ impl Worker {
         )?;
         let check = || check_local().and_then(|_| quiet(&reserve));
         let mut attached = false;
+        let mut flush = None;
         let source = (|| {
-            let device = broker(&selection.device_id, deadline, &check)?;
+            let device = broker(selection.direction, &selection.device_id, deadline, &check)?;
+            if selection.direction == Direction::Export {
+                flush = Some(
+                    device
+                        .try_clone()
+                        .map_err(|_| Error("live_media_descriptor_unavailable"))?,
+                );
+            }
             check()?;
             let (send, receipt) = std::sync::mpsc::channel();
             self.qmp
                 .send(QmpRequest::Attach {
                     device,
+                    direction: selection.direction,
                     serial: format!("obl-{}", &id[..16]),
                     local: local
                         .try_clone()
@@ -293,9 +307,10 @@ impl Worker {
                 lease_id: id.clone(),
                 opening: selection.opening,
                 device_id: selection.device_id,
+                direction: selection.direction,
             };
             let (connection, acknowledged) = self.controller(
-                Operation::LiveMediaSource,
+                Operation::LiveMediaAttach,
                 &source.opening.safe_id,
                 source.opening.slot,
                 &source,
@@ -328,6 +343,13 @@ impl Worker {
         let stopped = stop_controller(&reserve, &self.ending);
         let detached = if attached {
             stopped.and_then(|()| {
+                // The controller has stopped its writer and removed its map.
+                // Flush the same pinned block device on this worker, not QMP's
+                // event loop. Failure leaves the outer attachment fenced.
+                if let Some(file) = flush {
+                    file.sync_all()
+                        .map_err(|_| Error("live_media_flush_unconfirmed"))?;
+                }
                 let (send, receipt) = std::sync::mpsc::channel();
                 self.qmp
                     .send(QmpRequest::Detach(send))
@@ -507,12 +529,28 @@ fn quiet(peer: &UnixStream) -> Result<()> {
     }
 }
 
-fn broker(id: &str, deadline: Instant, check: &dyn Fn() -> Result<()>) -> Result<File> {
+fn broker(
+    direction: Direction,
+    id: &str,
+    deadline: Instant,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<File> {
     let (socket, child_socket) =
         UnixStream::pair().map_err(|_| Error("live_media_socket_failed"))?;
     let mut command = Command::new("/usr/bin/sudo");
+    let access = match direction {
+        Direction::Import => "import",
+        Direction::Export => "export",
+    };
     command
-        .args(["-n", "--", "/usr/lib/oblivion/live-media.py", "lease", id])
+        .args([
+            "-n",
+            "--",
+            "/usr/lib/oblivion/live-media.py",
+            "lease",
+            access,
+            id,
+        ])
         .env_clear()
         .current_dir("/")
         .stdin(Stdio::null())
@@ -541,7 +579,7 @@ fn broker(id: &str, deadline: Instant, check: &dyn Fn() -> Result<()>) -> Result
     channel
         .wait(libc::POLLIN)
         .map_err(|_| Error("live_media_broker_failed"))?;
-    let file = live_media::receive(&broker.socket, deadline)?;
+    let file = live_media::receive(&broker.socket, direction, deadline)?;
     loop {
         check()?;
         match broker
@@ -661,7 +699,7 @@ mod tests {
         control::{Operation, Request},
         control_client::{self, Framing},
         idle::Opening,
-        live_media::Reserve,
+        live_media::{Direction, Reserve},
         slot::Slot,
     };
     use std::io::{Read, Write};
@@ -680,6 +718,7 @@ mod tests {
                 nonce: "b".repeat(32),
             },
             device_id: "c".repeat(64),
+            direction: Direction::Import,
         };
         let body = serde_json::to_vec(&selection).unwrap();
         for (expected, slot, success) in [

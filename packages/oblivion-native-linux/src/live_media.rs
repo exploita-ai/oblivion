@@ -1,16 +1,16 @@
-//! Receive the exclusive, read-only block descriptor from the Live broker.
+//! Receive the exclusive block descriptor from the Live broker.
 use crate::{Error, Result};
+use oblivion_wire::live_media::Direction;
 use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
 use std::time::Instant;
 
 /// The caller owns the privileged broker process and its private socketpair.
 /// This function admits only the exact single-descriptor reply.
-pub fn receive(socket: &UnixStream, deadline: Instant) -> Result<File> {
+pub fn receive(socket: &UnixStream, direction: Direction, deadline: Instant) -> Result<File> {
     let file = receive_descriptor(socket, deadline)?;
-    verify_block(&file)?;
+    verify_block(&file, direction)?;
     Ok(file)
 }
 
@@ -64,15 +64,8 @@ fn receive_descriptor(socket: &UnixStream, deadline: Instant) -> Result<File> {
     Ok(File::from(descriptors.remove(0)))
 }
 
-fn verify_block(file: &File) -> Result<()> {
-    let info = file
-        .metadata()
-        .map_err(|_| Error("invalid_live_media_descriptor"))?;
-    let fd = file.as_raw_fd();
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if !info.file_type().is_block_device()
-        || flags < 0
-        || flags & (libc::O_ACCMODE | libc::O_PATH) != libc::O_RDONLY
+fn verify_block(file: &File, direction: Direction) -> Result<()> {
+    if !crate::media::block_access_matches(file, direction)
         || !crate::config::data_size(file).is_ok_and(|bytes| bytes > 0)
     {
         return Err(Error("invalid_live_media_descriptor"));
@@ -82,8 +75,13 @@ fn verify_block(file: &File) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{receive, receive_descriptor, verify_block};
+    use oblivion_wire::live_media::Direction;
+    use std::fs::File;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
     use std::time::Duration;
+    use std::time::Instant;
 
     fn send(socket: &UnixStream, marker: u8, fds: &[libc::c_int]) {
         let mut data = libc::iovec {
@@ -122,7 +120,7 @@ mod tests {
             libc::FD_CLOEXEC
         );
         assert_eq!(
-            verify_block(&file).unwrap_err().0,
+            verify_block(&file, Direction::Import).unwrap_err().0,
             "invalid_live_media_descriptor"
         );
     }
@@ -134,9 +132,13 @@ mod tests {
             let (receiver, sender) = UnixStream::pair().unwrap();
             send(&sender, marker, &vec![source.as_raw_fd(); count]);
             assert_eq!(
-                receive(&receiver, Instant::now() + Duration::from_secs(1))
-                    .unwrap_err()
-                    .0,
+                receive(
+                    &receiver,
+                    Direction::Import,
+                    Instant::now() + Duration::from_secs(1)
+                )
+                .unwrap_err()
+                .0,
                 "invalid_live_media_descriptor"
             );
         }
