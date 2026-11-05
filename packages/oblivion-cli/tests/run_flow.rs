@@ -249,6 +249,28 @@ fn protected_start_uses_the_monotonic_retry_window_without_waiting_in_the_test()
 }
 
 #[test]
+fn protected_start_retries_short_contention_on_the_same_safe() {
+    let mut runtime = Runtime::new(vec![
+        rejected(Operation::StartAgent, "gateway_not_ready"),
+        rejected(Operation::StartAgent, "controller_busy"),
+        response(Operation::StartAgent, ""),
+    ]);
+    run::start_agent(&mut runtime, 1, ID).unwrap();
+    runtime.finished();
+    assert_eq!(runtime.events, ["waiting", "wait:500", "wait:500"]);
+    assert!(runtime.sent.iter().all(|sent| sent.slot == Some(1) && sent.expected.as_deref() == Some(ID)));
+
+    let mut runtime = Runtime::new(vec![
+        rejected(Operation::StartAgent, "controller_busy"),
+        rejected(Operation::StartAgent, "controller_busy"),
+    ]);
+    runtime.advance = Some(Duration::from_secs(3));
+    assert_eq!(run::start_agent(&mut runtime, 1, ID).unwrap_err().to_string(), "controller_busy");
+    runtime.finished();
+    assert_eq!(runtime.events, ["wait:500"]);
+}
+
+#[test]
 fn occupied_slots_and_failed_ram_children_never_create_an_unrelated_safe() {
     let mut full = state("ram-only");
     full["open_sessions"] =

@@ -230,8 +230,12 @@ pub fn change_transport(transport: &Transport) -> Result<()> {
 }
 
 pub fn ready() -> Result<()> {
-    require(state()? == "active", "gateway_unavailable")?;
-    request(&Request::Check {}, false)
+    match state()?.as_str() {
+        "active" => request(&Request::Check {}, false),
+        // Only an explicit new run should restart a failed unit after cleanup.
+        "failed" => Err(Error("gateway_start_failed")),
+        _ => Err(Error("gateway_not_ready")),
+    }
 }
 
 fn request(request: &Request<'_>, active: bool) -> Result<()> {

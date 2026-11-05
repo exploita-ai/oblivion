@@ -1096,6 +1096,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
             | Operation::ChildTaskStart
             | Operation::ChildTaskRetry
             | Operation::ChildTaskCancel
+            | Operation::ShareRelease
             | Operation::ShareExportCancel
             | Operation::ShareExportBegin
             | Operation::ShareExportEnd
@@ -1293,7 +1294,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
                 _hold: Some(worker), timeout: None }) });
     }
     if matches!(request.operation, Operation::AgentAttach | Operation::FileAttach) {
-        let _lock = lock_named("storage.lock")?;
+        let _lock = crate::storage::admission_lock()?;
         require(!crate::storage::recovery_required()?, "recovery_required")?;
         let (session, mode) = crate::storage::session_info()?.ok_or(Error("session_not_open"))?;
         require((mode == "agent" || matches!(request.operation, Operation::FileAttach) && mode == "documents")
@@ -1587,6 +1588,33 @@ mod family_tests {
             assert!(families.lock().unwrap().is_empty());
         }
         assert!(serde_json::from_value::<FamilyRequest>(serde_json::json!({"operation":"child-lookup","child_id":SAFE,"parent_slot":0})).is_err());
+    }
+
+    #[test]
+    fn share_release_reads_the_scoped_opening_before_dispatch() {
+        let families = Arc::new(Mutex::new(BTreeMap::new()));
+        let tools = Arc::new(crate::safe_tools::Registry::default());
+        let idle = crate::idle_controller::Controller::new().unwrap_or_else(|error| panic!("{}", error.0));
+        let ordinary = Mutex::new(());
+        for (expected, secret_len, rejection) in [
+            (None, 100, "expected_session_required"),
+            (Some(SAFE), 0, "unexpected_secret"),
+            (Some(SAFE), 100, "incomplete_secret"),
+        ] {
+            let (mut client, mut server) = UnixStream::pair().unwrap();
+            let header = serde_json::to_vec(&serde_json::json!({
+                "operation": "share-release", "session": FAMILY, "slot": 1,
+                "expected_session": expected, "secret_len": secret_len,
+            })).unwrap();
+            client.write_all(&(header.len() as u32).to_be_bytes()).unwrap();
+            client.write_all(&header).unwrap();
+            client.shutdown(std::net::Shutdown::Write).unwrap();
+            match handle(&mut server, Path::new("/must-not-start/controller.json"),
+                unsafe { libc::geteuid() }, &families, &tools, &idle, &ordinary) {
+                Err(error) => assert_eq!(error.0, rejection),
+                Ok(_) => panic!("invalid Share release reached the worker"),
+            }
+        }
     }
 
     #[test]

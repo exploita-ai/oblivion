@@ -15,6 +15,8 @@ ExecStopPost=/usr/bin/python3 -I -B /usr/lib/oblivion/guest/safe-admin.py --clea
 UMask=0077
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+# Preserve SETUID through exec so the helper can drop all privileges after opening the port.
+AmbientCapabilities=CAP_SETUID
 PrivateNetwork=yes
 PrivateTmp=yes
 RestrictAddressFamilies=AF_UNIX AF_INET

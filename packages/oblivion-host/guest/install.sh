@@ -20,7 +20,7 @@ cp /usr/lib/oblivion/guest/tmux.conf /etc/oblivion/tmux.conf
 cp /usr/lib/oblivion/guest/oblivion-session-network.service /etc/systemd/system/
 cp /usr/lib/oblivion/guest/oblivion-import-receive@.service /etc/systemd/system/
 cp /usr/lib/oblivion/guest/oblivion-export-send@.service /etc/systemd/system/
-chmod 0755 /usr/lib/oblivion/guest/*.sh /usr/libexec/oblivion
+chmod 0755 /usr/lib/oblivion/guest/*.sh
 mkdir -p /etc/modules-load.d /etc/udev/rules.d
 printf 'virtio_net\nvirtio_console\n' > /etc/modules-load.d/oblivion-session.conf
 printf '%s\n' 'SUBSYSTEM=="virtio-ports", ATTR{name}=="oblivion.session", OWNER="root", GROUP="root", MODE="0600"' > /etc/udev/rules.d/70-oblivion-session.rules
@@ -46,10 +46,12 @@ printf 'overlay\n' >> /etc/initramfs-tools/modules
 # The root is already mounted with the correct options by initramfs. The
 # kernel command line still says ro for the squashfs lower and resize boots.
 ln -sf /dev/null /etc/systemd/system/systemd-remount-fs.service
+# Maintenance boots keep the squashfs root read-only. Logind needs its state directory to exist already.
+install -d -m 0755 /var/lib/systemd/linger
 cp /usr/lib/oblivion/guest/sudoers /etc/sudoers.d/oblivion-session
 chmod 0440 /etc/sudoers.d/oblivion-session
 visudo -cf /etc/sudoers
 cp /usr/lib/oblivion/guest/apt-session.conf /etc/apt/apt.conf.d/90oblivion-session
 sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources
 update-initramfs -u -k all
-systemctl enable oblivion-vault.service oblivion-documents-ready.service oblivion-resize.service
+systemctl enable oblivion-vault.service oblivion-documents-ready.service oblivion-resize.service oblivion-session-network.service

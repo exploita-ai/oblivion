@@ -118,22 +118,27 @@ pub fn open_existing<R: Runtime>(
 pub fn start_agent<R: Runtime>(runtime: &mut R, slot: R::Slot, id: &str) -> Result<()> {
     require_id(id)?;
     let started = runtime.now();
+    let mut busy_since = None;
     let mut waiting = false;
     loop {
         match safe_call(runtime, slot, id, Operation::StartAgent, &[]) {
             Ok(_) => return Ok(()),
-            Err(error)
-                if error.to_string() == "gateway_not_ready"
-                    && runtime.elapsed(&started) < Duration::from_secs(240) =>
-            {
-                if !waiting {
-                    runtime.notice(Notice::WaitingForConnection)?;
-                    waiting = true;
+            Err(error) => match error.to_string().as_str() {
+                "gateway_not_ready" if runtime.elapsed(&started) < Duration::from_secs(240) => {
+                    busy_since = None;
+                    if !waiting {
+                        runtime.notice(Notice::WaitingForConnection)?;
+                        waiting = true;
+                    }
                 }
-                runtime.wait(Duration::from_millis(500))?;
-            }
-            Err(error) => return Err(error),
+                "controller_busy"
+                    if runtime.elapsed(&started) < Duration::from_secs(240)
+                        && runtime.elapsed(busy_since.get_or_insert_with(|| runtime.now()))
+                            < Duration::from_secs(3) => {}
+                _ => return Err(error),
+            },
         }
+        runtime.wait(Duration::from_millis(500))?;
     }
 }
 

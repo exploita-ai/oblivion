@@ -156,7 +156,8 @@ fn serve(channel: &mut Channel, grant: &mut Option<Grant>) -> io::Result<()> {
                                 .ok_or_else(|| io::Error::other("tor_not_initialized"))?
                                 .bootstrapped()?,
                     })?,
-                        )?;
+                    grant,
+                )?;
                 continue;
             }
             Request::ConfigureTools { transport: selected } => {
@@ -292,7 +293,8 @@ fn serve(channel: &mut Channel, grant: &mut Option<Grant>) -> io::Result<()> {
                     &serde_json::to_vec(
                         &serde_json::json!({"ready": ready, "isolated": isolated, "tor_progress": progress}),
                     )?,
-                        )?;
+                    grant,
+                )?;
                 continue;
             }
         }
@@ -302,6 +304,7 @@ fn serve(channel: &mut Channel, grant: &mut Option<Grant>) -> io::Result<()> {
                 configured: transport.is_some(),
                 active: grant.is_some(),
             })?,
+            grant,
         )?;
         if shutdown {
             return Ok(());

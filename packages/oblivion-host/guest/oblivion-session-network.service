@@ -17,3 +17,6 @@ CapabilityBoundingSet=CAP_NET_ADMIN
 LimitCORE=0
 StandardOutput=null
 StandardError=null
+
+[Install]
+WantedBy=multi-user.target

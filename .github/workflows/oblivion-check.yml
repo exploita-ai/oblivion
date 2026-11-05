@@ -300,6 +300,7 @@ jobs:
             ipc::family_tests::backup_rpc_rejects_unscoped_sources_paths_and_attachment_secrets \
             ipc::family_tests::backup_metadata_failure_does_not_claim_a_live_volume_owner \
             backup_host::tests::lock_revokes_a_real_hashing_process_without_inheriting_controller_locks \
+            storage::status_tests::status_waits_for_short_storage_contention \
             idle_controller::tests::private_preferences_and_generation_fences; do
             docker run --rm --network none --tmpfs /run:rw,nosuid,nodev,noexec,size=16m \
               --mount "type=bind,src=$test_binary,dst=/storage-tests,readonly" \

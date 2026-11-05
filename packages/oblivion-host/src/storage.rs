@@ -9,6 +9,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 const GENERAL: &str = "/dev/mapper/oblivion-general";
@@ -816,6 +817,8 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
     }
     let _lock = if matches!(op, "lock" | "recover" | "child-start-close" | "share-release" | "share-export-cancel" | "share-export-cleanup" | "share-import-finish" | "share-import-abort" | "share-import-discard") || branch_latch.is_some() {
         recovery_lock()?
+    } else if matches!(op, "status" | "start-agent" | "close-idle" | "agent-release") {
+        admission_lock()?
     } else {
         lock()?
     };
@@ -1384,24 +1387,19 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             let vm = config.vm.as_ref().ok_or(Error("vm_not_configured"))?;
             vm.validate()?;
             require(crate::vm::stopped()?, "vm_already_running")?;
-            let id = if op == "enter-documents" {
-                args[3].clone()
-            } else {
-                random_id()?
-            };
-            if op == "enter-documents" {
-                config.open(&id, &password(false)?)?;
-            } else {
-                config.open_ephemeral()?;
+            if op == "enter-documents-ephemeral" {
+                return config.open_ephemeral_documents(&random_id()?, vm);
             }
-            write_session_info(&id, "starting")?;
+            let id = &args[3];
+            config.open(id, &password(false)?)?;
+            write_session_info(id, "starting")?;
             if let Err(error) = vm.start_documents() {
                 crate::vm::stop(true)?;
                 close_session()?;
                 clear_key_file("session-info")?;
                 return Err(error);
             }
-            write_session_info(&id, "documents")
+            write_session_info(id, "documents")
         }
         "shutdown-runtime" | "shutdown-idle" => {
             require(fs::read_to_string("/proc/cmdline").map_err(|_| Error("runtime_unavailable"))?
@@ -2870,14 +2868,20 @@ impl Config {
         result
     }
 
-    fn open_ephemeral(&self) -> Result<()> {
+    fn open_ephemeral_documents(&self, id: &str, vm: &crate::vm::Config) -> Result<()> {
         require(matches!(mount_mode()?, MountMode::ReadOnly | MountMode::RamOnly), "ephemeral_requires_ephemeral_mode")?;
-        self.admit_session(true)?;
-        require(
-            mount_mode()? != MountMode::Closed,
-            "general_not_open",
-        )?;
         require(!mapping_open("oblivion-session")?, "session_already_open")?;
+        let image = PathBuf::from(scope::path(EPHEMERAL));
+        match fs::symlink_metadata(&image) {
+            Ok(_) => {
+                write_key_file("session-recovery-required", b"1")?;
+                return Err(Error("ephemeral_cleanup_required"));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(Error("ephemeral_check_failed")),
+        }
+        require(ephemeral_child_id()?.is_none(), "recovery_required")?;
+        self.admit_session(true)?;
         // runtime() checks tmpfs; secure_process() rejects swap. Reuse the same
         // block mapping/interlock, with a new random secret that is never saved.
         runtime()?;
@@ -2885,12 +2889,33 @@ impl Config {
         File::open("/dev/urandom")
             .and_then(|mut random| random.read_exact(&mut secret))
             .map_err(|_| Error("random_failed"))?;
-        create_image(Path::new(&scope::path(EPHEMERAL)), self.ephemeral_mib)?;
-        self.format(Path::new(&scope::path(EPHEMERAL)), &secret)?;
-        crypt_open(Path::new(&scope::path(EPHEMERAL)), "oblivion-session", &secret, false)?;
-        drop(secret);
-        write_key_file("opening-nonce", random_id()?.as_bytes())?;
-        format_session()
+        let mut vm_start_attempted = false;
+        let result = (|| {
+            create_image(&image, self.ephemeral_mib)?;
+            self.format(&image, &secret)?;
+            crypt_open(&image, "oblivion-session", &secret, false)?;
+            drop(secret);
+            write_key_file("opening-nonce", random_id()?.as_bytes())?;
+            format_session()?;
+            write_session_info(id, "starting")?;
+            vm_start_attempted = true;
+            vm.start_documents()?;
+            write_session_info(id, "documents")
+        })();
+        if result.is_err() {
+            // Admission checked that this slot had no previous image or mapping.
+            // If boot started, stop the guest before releasing its block device.
+            let cleanup = (|| {
+                if vm_start_attempted { crate::vm::stop(true)?; }
+                close_session()?;
+                clear_key_file("session-info")
+            })();
+            if cleanup.is_err() {
+                write_key_file("session-recovery-required", b"1")?;
+                return Err(Error("ephemeral_cleanup_required"));
+            }
+        }
+        result
     }
 
     fn open(&self, id: &str, secret: &[u8]) -> Result<()> {
@@ -3658,8 +3683,65 @@ fn format_derived_volume(path: &Path, credential: &[u8]) -> Result<()> {
 }
 
 #[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires isolated root-owned tmpfs /run; no production state"]
+    fn status_waits_for_short_storage_contention() {
+        assert_eq!(std::env::var("OBLIVION_IDLE_CONTROLLER_TEST").as_deref(), Ok("1"));
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        assert!(!Path::new(RUN).exists());
+        fs::DirBuilder::new().mode(0o700).create(RUN).unwrap();
+        let config = "/run/status-fixture.json";
+        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(config).unwrap();
+        file.write_all(br#"{"general_image":"/run/absent.luks","general_mib":1024,"session_mib":128,"pbkdf_memory_kib":65536,"manager_uid":1000}"#).unwrap();
+        drop(file);
+
+        let status = || execute(vec!["--config".into(), config.into(), "status".into()], None);
+        let storage = lock().unwrap_or_else(|error| panic!("{}", error.0));
+        let (started, release) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            release.recv().unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+            drop(storage);
+        });
+        started.send(()).unwrap();
+        let result = status();
+        worker.join().unwrap();
+        result.unwrap_or_else(|error| panic!("{}", error.0));
+
+        let _storage = lock().unwrap_or_else(|error| panic!("{}", error.0));
+        assert!(matches!(status(), Err(Error("controller_busy"))));
+    }
+}
+
+#[cfg(test)]
 mod ram_only_tests {
     use super::*;
+
+    #[test]
+    fn gateway_namespace_accepts_only_the_readonly_ram_profile_self_bind() {
+        let mounts = concat!(
+            "15 1 0:20 / /run rw,nosuid,nodev - tmpfs tmpfs rw\n",
+            "16 15 0:20 /oblivion /run/oblivion rw,nosuid,nodev - tmpfs tmpfs rw\n",
+            "18 17 0:20 /oblivion/general/profile /run/oblivion/general/profile rw - tmpfs tmpfs rw\n",
+        );
+        let self_bind = "17 16 0:20 /oblivion/general /run/oblivion/general ro - tmpfs tmpfs rw\n";
+        let encrypted = "17 16 253:0 / /run/oblivion/general ro - ext4 /dev/mapper/oblivion-general rw\n";
+
+        assert!(general_mount_mode(&format!("{mounts}{self_bind}"), true).is_ok());
+        assert!(matches!(general_mount_mode(&format!("{mounts}{encrypted}"), false), Ok(MountMode::ReadOnly)));
+        assert!(matches!(general_mount_mode(&format!("{mounts}{self_bind}"), false), Err(Error("unexpected_general_mount"))));
+        for foreign in [
+            encrypted,
+            "17 16 0:21 / /run/oblivion/general ro - tmpfs tmpfs rw\n",
+            "17 16 0:20 /oblivion/other /run/oblivion/general ro - tmpfs tmpfs rw\n",
+            "17 16 0:20 /oblivion/general /run/oblivion/general rw - tmpfs tmpfs rw\n",
+        ] {
+            assert!(matches!(general_mount_mode(&format!("{mounts}{foreign}"), true), Err(Error("mixed_app_storage"))));
+        }
+    }
 
     #[test]
     #[ignore = "requires isolated root tmpfs /run and a read-only userdata fixture"]
@@ -3751,6 +3833,35 @@ mod family_storage_tests {
 #[cfg(test)]
 mod agent_safe_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires isolated root-owned tmpfs /run of at least 256 MiB and cryptsetup"]
+    fn ephemeral_open_rolls_back_format_failure_and_preserves_previous_image() {
+        assert_eq!(std::env::var("OBLIVION_EPHEMERAL_ROLLBACK_TEST").as_deref(), Ok("1"));
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        fs::DirBuilder::new().mode(0o700).create(RUN).unwrap();
+        create_ram_profile().unwrap_or_else(|error| panic!("{}", error.0));
+        let config = Config {
+            general_image: "/unused/general.luks".into(), general_mib: 512, session_mib: 128, ephemeral_mib: 128,
+            // Below Argon2's allowed minimum, so cryptsetup fails after file allocation.
+            pbkdf_memory_kib: 1, manager_uid: 1000, vm: None, gateway: None, import: None, export: None,
+            onion: None, gateway_network: false,
+        };
+        let vm = serde_json::from_str(r#"{
+            "root":"/unused", "kernel":"/unused/kernel", "initrd":"/unused/initrd",
+            "filesystem":"/unused/root.squashfs", "memory_mib":512, "cpus":1
+        }"#).unwrap();
+        let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert!(matches!(config.open_ephemeral_documents(id, &vm), Err(Error("operation_failed"))));
+        assert!(!Path::new(EPHEMERAL).exists());
+        assert!(!runtime_record("opening-nonce").exists());
+        assert!(!runtime_record("session-recovery-required").exists());
+
+        write_key_file("ephemeral.luks", b"existing allocation").unwrap_or_else(|error| panic!("{}", error.0));
+        assert!(matches!(config.open_ephemeral_documents(id, &vm), Err(Error("ephemeral_cleanup_required"))));
+        assert_eq!(fs::read(EPHEMERAL).unwrap(), b"existing allocation");
+        assert!(runtime_record("session-recovery-required").exists());
+    }
 
     fn record(id: u8, parent: u8) -> AgentSafeRecord {
         let id = format!("{id:032x}");
@@ -4013,15 +4124,25 @@ fn lock() -> Result<File> {
     lock_named("storage.lock")
 }
 
+pub(crate) fn admission_lock() -> Result<File> {
+    // Activity and idle snapshots can briefly own this lock. Wait before
+    // validating the opening or changing any state.
+    wait_for_storage_lock(Duration::from_secs(1))
+}
+
 pub(crate) fn recovery_lock() -> Result<File> {
     // A status poll may still own the operation lock when the display exits.
     // Recovery is latched already: wait for that worker, never skip teardown.
     // A stuck worker still leaves recovery required after this bounded wait.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    wait_for_storage_lock(Duration::from_secs(10))
+}
+
+fn wait_for_storage_lock(timeout: Duration) -> Result<File> {
+    let deadline = Instant::now() + timeout;
     loop {
         match lock() {
-            Err(Error("controller_busy")) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
+            Err(Error("controller_busy")) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
             }
             result => return result,
         }
@@ -4236,30 +4357,7 @@ fn mount_mode() -> Result<MountMode> {
     let ram = read_nonce(&Path::new(RUN).join("ram-only"))?;
     let mounts =
         fs::read_to_string("/proc/self/mountinfo").map_err(|_| Error("mount_check_failed"))?;
-    for line in mounts.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.get(4) == Some(&MOUNT) {
-            require(ram.is_none(), "mixed_app_storage")?;
-            let separator = fields
-                .iter()
-                .position(|field| *field == "-")
-                .ok_or(Error("mount_check_failed"))?;
-            require(
-                fields.get(separator + 2) == Some(&GENERAL),
-                "unexpected_general_mount",
-            )?;
-            let readonly = fields
-                .get(5)
-                .ok_or(Error("mount_check_failed"))?
-                .split(',')
-                .any(|option| option == "ro");
-            return Ok(if readonly {
-                MountMode::ReadOnly
-            } else {
-                MountMode::ReadWrite
-            });
-        }
-    }
+    let mode = general_mount_mode(&mounts, ram.is_some())?;
     if let Some(nonce) = ram {
         require(!mapping_open("oblivion-general")?
             && read_nonce(&Path::new(RUN).join("host-opening"))?.as_deref() == Some(&nonce), "invalid_ram_profile")?;
@@ -4269,6 +4367,45 @@ fn mount_mode() -> Result<MountMode> {
         require(unsafe { libc::fstatfs(directory.as_raw_fd(), stats.as_mut_ptr()) } == 0
             && unsafe { stats.assume_init().f_type } == libc::TMPFS_MAGIC, "ram_profile_must_be_tmpfs")?;
         return Ok(MountMode::RamOnly);
+    }
+    Ok(mode)
+}
+
+fn general_mount_mode(mounts: &str, ram: bool) -> Result<MountMode> {
+    for line in mounts.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.get(4) == Some(&MOUNT) {
+            let separator = fields
+                .iter()
+                .position(|field| *field == "-")
+                .ok_or(Error("mount_check_failed"))?;
+            let readonly = fields.get(5).ok_or(Error("mount_check_failed"))?
+                .split(',')
+                .any(|option| option == "ro");
+            if ram {
+                // systemd ReadOnlyPaths self-binds this directory in the
+                // worker namespace. It must be the same subtree of the
+                // enclosing tmpfs, not a separate filesystem or directory.
+                let self_bind = readonly && fields.get(separator + 1) == Some(&"tmpfs")
+                    && mounts.lines().any(|line| {
+                        let parent: Vec<&str> = line.split_whitespace().take(5).collect();
+                        let [id, _, device, root, path] = parent.as_slice() else { return false };
+                        *id == fields[1] && *device == fields[2]
+                            && Path::new(MOUNT).strip_prefix(path).is_ok_and(|relative| {
+                                !relative.as_os_str().is_empty()
+                                    && Path::new(root).join(relative) == Path::new(fields[3])
+                            })
+                    });
+                require(self_bind, "mixed_app_storage")?;
+                continue;
+            }
+            require(fields.get(separator + 2) == Some(&GENERAL), "unexpected_general_mount")?;
+            return Ok(if readonly {
+                MountMode::ReadOnly
+            } else {
+                MountMode::ReadWrite
+            });
+        }
     }
     Ok(MountMode::Closed)
 }
@@ -4773,10 +4910,9 @@ impl Config {
         // ready. A failed preflight must release any partly started gateway.
         let result = (|| {
             self.admit_agent(true)?;
-            if matches!(crate::gateway::state()?.as_str(), "inactive" | "failed") {
+            if crate::gateway::state()? == "inactive" {
                 crate::gateway::start(false)?;
             }
-            require(crate::gateway::state()? == "active", "gateway_not_ready")?;
             crate::gateway::ready()?;
             write_session_info(id, "starting")
         })();
