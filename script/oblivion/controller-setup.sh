@@ -36,7 +36,9 @@ systemctl enable oblivion-controller.service oblivion-host-firewall.service Netw
 printf '[Unit]\nRequires=oblivion-runtime-network.service\nAfter=oblivion-runtime-network.service\n' > /etc/systemd/system/NetworkManager.service.d/runtime-network.conf
 systemctl mask NetworkManager-wait-online.service e2scrub_reap.service e2scrub_all.timer dpkg-db-backup.timer dpkg-db-backup.service
 printf 'loop\ndm_crypt\nkvm\nvsock\nvmw_vsock_virtio_transport\n' > /etc/modules-load.d/oblivion-runtime.conf
-printf 'MODULES=most\nCOMPRESS=gzip\nRESUME=none\n' > /etc/initramfs-tools/conf.d/oblivion
+# Ephemeral Safe volumes reserve space in /run. Raise its tmpfs ceiling while
+# leaving actual allocations subject to the controller's memory admission.
+printf 'MODULES=most\nCOMPRESS=gzip\nRESUME=none\nRUNSIZE=40%%\n' > /etc/initramfs-tools/conf.d/oblivion
 # Preserve VirtIO and explicitly include the same amd64 controller's Hyper-V
 # storage/network/vsock modules. Built-in drivers need no archive entry.
 python3 -B /tmp/hypervisor-kernel.py initramfs-modules / >> /etc/initramfs-tools/modules

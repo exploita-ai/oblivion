@@ -38,6 +38,8 @@ for binary in "$host"/usr/bin/qemu-system-* "$host"/usr/lib/*/qemu/*.so; do
         chroot "$host" dpkg-query -S "$canonical" | sed 's/: .*//' >> "$packages"
     done
 done
+# dpkg-query can list several owners of a shared directory on one line.
+sed -i 's/, */\n/g' "$packages"
 sort -u "$packages" -o "$packages"
 mkdir -p "$assets/qemu-root/usr/share/doc"
 while read -r package; do

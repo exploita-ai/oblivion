@@ -229,3 +229,4 @@ packages/oblivion-native-linux/*
 !script/oblivion/live-os/**
 
 !script/oblivion/hypervisor-kernel.py
+!script/oblivion/hypervisor-qemu.py

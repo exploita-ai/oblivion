@@ -138,11 +138,12 @@ def install(architecture, requested):
         raise ValueError('one_hypervisor_kernel_dependency_required')
     image = images[0]
     version = package(image)
-    files = run('dpkg-query', '-L', image).splitlines()
-    boot = [Path(path) for path in files if path.startswith('/boot/vmlinuz-')]
-    if len(boot) != 1 or not boot[0].is_file():
+    # Split Debian kernel packages install the boot file through a hook, so
+    # the versioned linux-image package may not list it in its payload.
+    abi = image.removeprefix('linux-image-')
+    boot = Path('/boot') / ('vmlinuz-' + abi)
+    if boot.is_symlink() or not boot.is_file():
         raise ValueError('one_hypervisor_boot_kernel_required')
-    abi = boot[0].name.removeprefix('vmlinuz-')
     numerical = re.match(r'^(\d+)\.(\d+)', abi)
     if architecture == 'arm64' and (not numerical or tuple(map(int, numerical.groups())) < (6, 16)):
         raise ValueError('arm64_nested_kernel_requires_linux_6_16')
@@ -156,7 +157,7 @@ def install(architecture, requested):
                                      'repository': SOURCE, 'development_override': requested or None,
                                      'meta_package': meta, 'meta_version': meta_version,
                                      'kernel_package': image, 'kernel_version': version,
-                                     'abi': abi, 'kernel_sha256': digest(boot[0]),
+                                     'abi': abi, 'kernel_sha256': digest(boot),
                                      'arm64_minimum_kernel': '6.16',
                                      'hyperv_guest_drivers': guest_drivers(Path('/'), architecture, abi),
                                      'boot_arguments': {'outer-live': ['kvm-arm.mode=nested'] if architecture == 'arm64' else [], 'controller': []}}, sort_keys=True, indent=2) + '\n')
