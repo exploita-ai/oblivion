@@ -113,7 +113,8 @@ fn data_stage(value: &str) -> bool {
         .is_some_and(valid_id)
 }
 
-#[derive(Default, Serialize)]
+#[derive(Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Cleanup {
     pub releases_removed: usize,
     pub boot_files_removed: usize,
@@ -397,6 +398,11 @@ mod native {
         let requested = incoming.binding()?;
         let mut record = if exists(&root.file("installation.json")?)? {
             let record = read_record(root, &identity)?;
+            if matches!(&record.phase, Phase::Uninstalled { .. }) {
+                // Reinstall only restores software around the recorded disk.
+                // It must never regain Pending's initialization authority.
+                return update_bundle(root, incoming, stop, deadline);
+            }
             if !same_binding(&record.bundle, &requested)? || record.data_bytes != bytes {
                 return Err(Error("installation_resume_requires_matching_bundle"));
             }
@@ -1790,6 +1796,19 @@ mod native {
             assert_eq!(std::fs::read(root.path().join("vm.json")).unwrap(), config);
             assert_eq!(std::fs::read(root.path().join("data.vhdx")).unwrap(), data);
             assert!(root.path().join("vm.json.supervision.json").exists());
+
+            let restored = update_bundle(
+                root,
+                base.open().unwrap(),
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap();
+            assert_eq!(restored.runtime_id(), record.runtime_id);
+            assert!(matches!(restored.record.phase, Phase::Ready { .. }));
+            assert!(restored.record.data() == preserved.data());
+            assert_eq!(std::fs::read(root.path().join("vm.json")).unwrap(), config);
+            assert_eq!(std::fs::read(root.path().join("data.vhdx")).unwrap(), data);
         }
 
         #[test]

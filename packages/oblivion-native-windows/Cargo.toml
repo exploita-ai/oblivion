@@ -27,6 +27,7 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_System_HostComputeSystem",
   "Win32_System_Console",
   "Win32_System_Diagnostics_Debug",
+  "Win32_System_Environment",
   "Win32_System_IO",
   "Win32_System_Pipes",
   "Win32_System_Services",
@@ -40,6 +41,7 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_System_HostComputeNetwork",
   "Win32_System_Com",
   "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 
 [[bin]]

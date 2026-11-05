@@ -429,6 +429,35 @@ pub(crate) struct Asset {
 }
 
 impl Directory {
+    /// Published software, unlike the private catalog, is readable by its user.
+    /// Ancestors need only metadata handles to prevent deletion/renaming; their
+    /// private ACLs are not software authority. Root and every leaf still pass
+    /// the ordinary immutable owner/DACL and file-identity boundary below.
+    pub(crate) fn open_published(path: &str, caller: &Identity) -> Result<(Self, Identity)> {
+        let ancestors = pin_parents_access(path, 0)?;
+        let file = open_raw(path, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?;
+        let (id, _) = inspect(&file, path, true)?;
+        let owner = crate::security::file_owner(&file)?;
+        let expected = if matches!(owner.sid(), "S-1-5-18" | "S-1-5-32-544") {
+            Identity::administrators()?
+        } else if owner.sid() == caller.sid() {
+            caller.clone()
+        } else {
+            return Err(Error("untrusted_published_software_owner"));
+        };
+        permissions(&file, expected.sid(), false)?;
+        Ok((
+            Self(Arc::new(DirectoryPin {
+                path: path.into(),
+                file,
+                id,
+                ancestors,
+                parent: None,
+            })),
+            expected,
+        ))
+    }
+
     /// Setup may create a fresh private software staging tree under the
     /// standard shared ProgramData parent. No existing leaf is adopted.
     pub(crate) fn create_setup(path: &str, identity: &Identity) -> Result<Self> {
@@ -935,6 +964,10 @@ fn create_directory(path: &str, identity: &Identity) -> Result<()> {
 }
 
 fn pin_parents(path: &str) -> Result<Vec<(String, File, FileId)>> {
+    pin_parents_access(path, READ_CONTROL | FILE_READ_ATTRIBUTES)
+}
+
+fn pin_parents_access(path: &str, access: u32) -> Result<Vec<(String, File, FileId)>> {
     if !crate::config::drive_file(path) {
         return Err(Error("invalid_runtime_asset_path"));
     }
@@ -944,11 +977,17 @@ fn pin_parents(path: &str) -> Result<Vec<(String, File, FileId)>> {
         paths.push(path[..index + 3].to_owned());
     }
     for parent in paths {
-        let file = open_raw(&parent, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?;
+        let file = open_raw(&parent, access, true, true)?;
         let (id, _) = inspect(&file, &parent, true)?;
         parents.push((parent, file, id));
     }
     Ok(parents)
+}
+
+pub(crate) fn published_file_identity(path: &str) -> Result<(u64, [u8; 16])> {
+    let file = open_raw(path, READ_CONTROL | FILE_READ_ATTRIBUTES, false, false)?;
+    let (id, _) = inspect(&file, path, false)?;
+    Ok((id.volume, id.file))
 }
 
 fn verify_parents(parents: &[(String, File, FileId)]) -> Result<()> {

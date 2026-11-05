@@ -39,6 +39,8 @@ pub mod network_model;
 pub mod prerequisites;
 #[cfg(windows)]
 pub mod private;
+#[cfg(all(windows, test))]
+mod published_source_tests;
 pub mod resources;
 #[cfg(windows)]
 pub mod runtime;
@@ -49,3 +51,5 @@ pub mod security;
 pub mod setup;
 #[cfg(windows)]
 pub mod supervisor;
+#[cfg(any(windows, test))]
+pub mod user_command;

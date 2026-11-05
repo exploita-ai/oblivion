@@ -92,7 +92,12 @@ jobs:
           rustup toolchain install 1.88.0 --profile minimal
           rustup default 1.88.0
       - name: Exercise native ACLs, private pipe peers, cancellation and lifetime
-        run: cargo test --locked --all-targets
+        run: |
+          $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'The isolated restricted-token ACL fixture requires an elevated Windows test process.'
+          }
+          cargo test --locked --all-targets
       - name: Link the actual HCS helper
         run: cargo build --locked --bin oblivion-vm
       - name: Record acceptance scope

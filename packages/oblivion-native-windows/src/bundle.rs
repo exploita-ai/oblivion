@@ -49,6 +49,50 @@ pub struct VerifiedBundle {
 impl VerifiedBundle {
     pub fn open(root: &str, expected_source: Option<&str>, identity: &Identity) -> Result<Self> {
         let root = Directory::open(root, identity, false)?;
+        Self::read(root, expected_source, identity)
+    }
+
+    /// Explicit update input uses the current manifest, but its own source
+    /// identity: the installed old CLI must not impose the old compiler hash.
+    pub fn update_input(root: &str) -> Result<Self> {
+        let (root, owner) = Directory::open_published(root, &Identity::current()?)?;
+        Self::read(root, None, &owner)
+    }
+
+    pub fn current_launcher(expected_source: &str) -> Result<Self> {
+        let executable =
+            std::env::current_exe().map_err(|_| Error("current_executable_unavailable"))?;
+        let path = executable
+            .to_str()
+            .ok_or(Error("invalid_runtime_asset_path"))?;
+        Self::launcher(
+            path.strip_prefix(r"\\?\").unwrap_or(path),
+            expected_source,
+            &Identity::current()?,
+        )
+    }
+
+    pub(crate) fn launcher(path: &str, expected_source: &str, caller: &Identity) -> Result<Self> {
+        let directory = std::path::Path::new(path)
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::to_str)
+            .ok_or(Error("invalid_runtime_asset_path"))?;
+        let (root, owner) = Directory::open_published(directory, caller)?;
+        let bundle = Self::read(root, Some(expected_source), &owner)?;
+        let role = bundle
+            .files
+            .get("bin/oblivion.exe")
+            .ok_or(Error("desktop_bundle_file_missing"))?;
+        if !bundle.cli().eq_ignore_ascii_case(path)
+            || crate::files::published_file_identity(path)? != role.identity()
+        {
+            return Err(Error("current_launcher_identity_changed"));
+        }
+        Ok(bundle)
+    }
+
+    fn read(root: Directory, expected_source: Option<&str>, identity: &Identity) -> Result<Self> {
         let manifest_file = root.asset("bundle.json", identity, false)?;
         if manifest_file.bytes() > MAX_MANIFEST as u64 {
             return Err(Error("desktop_bundle_manifest_limit"));
@@ -173,7 +217,9 @@ impl VerifiedBundle {
 
     /// Only immutable product bytes enter UAC staging. A distinct administrator
     /// may read/execute them but never modify them or gain access to Safe data.
-    pub(crate) fn stage(self, destination: &str, owner: &Identity) -> Result<Self> {
+    /// Borrowing retains every original source read/no-delete pin in the
+    /// parent while an elevated maintenance helper can attempt collection.
+    pub(crate) fn stage(&self, destination: &str, owner: &Identity) -> Result<Self> {
         let copied = self.copy_into(
             Directory::create_setup(destination, owner)?,
             owner,
@@ -198,7 +244,7 @@ impl VerifiedBundle {
         &self.manifest_sha256
     }
 
-    fn copy_into(self, root: Directory, identity: &Identity, client: &Identity) -> Result<Self> {
+    fn copy_into(&self, root: Directory, identity: &Identity, client: &Identity) -> Result<Self> {
         self.root.verify()?;
         self.manifest_file.verify()?;
         for asset in self.files.values() {
@@ -262,10 +308,10 @@ impl VerifiedBundle {
         Ok(Self {
             paths: Paths::new(root.path(), &self.manifest),
             root,
-            manifest: self.manifest,
-            binding: self.binding,
+            manifest: self.manifest.clone(),
+            binding: self.binding.clone(),
             manifest_file,
-            manifest_sha256: self.manifest_sha256,
+            manifest_sha256: self.manifest_sha256.clone(),
             files,
         })
     }
@@ -804,11 +850,16 @@ pub(crate) mod tests {
     fn setup_stage_keeps_the_exact_inventory_pinned_and_administrator_access_read_only() {
         let fixture = Fixture::new();
         let stage_path = fixture.area.join("setup").to_str().unwrap().to_owned();
-        let stage = fixture
-            .open()
-            .unwrap()
-            .stage(&stage_path, &fixture.identity)
-            .unwrap();
+        let source = fixture.open().unwrap();
+        let stage = source.stage(&stage_path, &fixture.identity).unwrap();
+        // The installed caller's PE mapping is not our deletion fence: retain
+        // actual source handles so all DELETE admission fails before any file
+        // in the release can be removed, even by the staged helper.
+        assert!(fixture.open().unwrap().remove(&fixture.identity).is_err());
+        let complete = fixture.open().unwrap();
+        assert_eq!(complete.files.len(), fixture.manifest.files.len());
+        assert_eq!(complete.manifest_sha256(), source.manifest_sha256());
+        drop(complete);
         let (pin, owner) = Directory::setup_owner(&stage_path).unwrap();
         assert_eq!(owner.sid(), fixture.identity.sid());
         assert_eq!(stage.source(), fixture.manifest.source_sha256);
@@ -835,5 +886,25 @@ pub(crate) mod tests {
         stage.remove(&fixture.identity).unwrap();
         assert!(!std::path::Path::new(&stage_path).exists());
         fixture.open().unwrap();
+    }
+
+    #[test]
+    fn published_launcher_admission_binds_the_actual_role_source_and_open_file() {
+        let fixture = Fixture::new();
+        let original = fixture.open().unwrap();
+        let launcher = original.cli().to_owned();
+        let helper = original.helper().to_owned();
+        let source = original.source().to_owned();
+        drop(original);
+        let admitted = VerifiedBundle::launcher(&launcher, &source, &fixture.identity).unwrap();
+        assert_eq!(admitted.id(), fixture.manifest.bundle_id);
+        assert!(VerifiedBundle::launcher(&helper, &source, &fixture.identity).is_err());
+        assert!(VerifiedBundle::launcher(&launcher, &"f".repeat(64), &fixture.identity).is_err());
+        assert!(OpenOptions::new().write(true).open(&launcher).is_err());
+        drop(admitted);
+        // Explicit update input accepts a different current-format source; it
+        // does not translate any old schema or rewrite its target identity.
+        let incoming = VerifiedBundle::update_input(fixture.source().path()).unwrap();
+        assert_eq!(incoming.source(), source);
     }
 }

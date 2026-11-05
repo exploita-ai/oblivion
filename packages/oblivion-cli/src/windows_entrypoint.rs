@@ -9,8 +9,9 @@ use crate::{
 };
 use oblivion_native_windows::broker::{self, Action, Layout};
 use oblivion_native_windows::bundle::VerifiedBundle;
-use oblivion_native_windows::installation::{self, Root};
+use oblivion_native_windows::installation::Root;
 use oblivion_native_windows::security::Identity;
+use oblivion_native_windows::user_command::{self, Change};
 use oblivion_wire::idle::Activity;
 use oblivion_wire::slot::Slot;
 use std::io::{IsTerminal, Read};
@@ -68,7 +69,7 @@ pub fn run() -> Result<i32> {
     }
     match command {
         Command::Activity => forward_activity(),
-        Command::Runtime(command) => runtime_command(&Root::current()?, command),
+        Command::Runtime(command) => runtime_command(command),
         // A polling manager already owns a supervisor lease. Reading status
         // must not hash a whole controller image or start a VM at every poll.
         Command::Controller(controller::Command::StatusJson) => controller::execute(
@@ -172,14 +173,13 @@ fn manager(layout: &Layout) -> Result<i32> {
         .ok_or_else(|| "manager_exit_unconfirmed".into())
 }
 
-fn runtime_command(root: &Root, command: RuntimeCommand) -> Result<i32> {
+fn runtime_command(command: RuntimeCommand) -> Result<i32> {
     let stop = Arc::new(AtomicBool::new(false));
     match command {
         RuntimeCommand::InstallBundle(path) => {
-            let bundle = bundle_input(&path)?;
-            let outcome = oblivion_native_windows::setup::install(
-                bundle,
-                DATA_BYTES,
+            maintenance_outcome(oblivion_native_windows::setup::execute(
+                bundle_input(&path, Some(source_id()?))?,
+                oblivion_native_windows::setup::Operation::Install { bytes: DATA_BYTES },
                 stop,
                 Instant::now() + STARTUP,
                 &mut || {
@@ -189,65 +189,30 @@ fn runtime_command(root: &Root, command: RuntimeCommand) -> Result<i32> {
                     crate::windows_terminal::confirm("ENABLE", |_| {})
                         .map_err(|_| oblivion_native_windows::Error("setup_review_interrupted"))
                 },
-            )?;
-            match outcome {
-                oblivion_native_windows::setup::Outcome::Installed {
-                    runtime_id,
-                    launcher,
-                } => {
-                    println!(
-                        "Oblivion installed. Open the installed launcher to create encrypted storage:"
-                    );
-                    println!("\"{launcher}\"");
-                    println!("Runtime {runtime_id}");
-                    Ok(0)
-                }
-                oblivion_native_windows::setup::Outcome::RebootRequired => {
-                    println!(
-                        "Windows needs a restart before setup can continue. Restart Windows, then run this installer again."
-                    );
-                    Ok(2)
-                }
-                oblivion_native_windows::setup::Outcome::Declined => {
-                    println!("Setup cancelled.");
-                    Ok(0)
-                }
-                oblivion_native_windows::setup::Outcome::Blocked { reason } => {
-                    Err(format!("Windows setup prerequisites are unavailable: {reason}").into())
-                }
-            }
+            )?)
         }
         RuntimeCommand::Update(path) => {
-            let installed = installation::update_bundle(
-                root,
-                bundle_input(&path)?,
+            maintenance_outcome(oblivion_native_windows::setup::execute(
+                bundle_input(&path, None)?,
+                oblivion_native_windows::setup::Operation::Update {},
                 stop,
                 Instant::now() + STARTUP,
-            )?;
-            println!("Oblivion updated. Encrypted data and runtime identity were preserved.");
-            println!("{}", installed.launcher());
-            println!("Runtime {}", installed.runtime_id());
-            Ok(0)
+                &mut || Err(oblivion_native_windows::Error("unexpected_setup_review")),
+            )?)
         }
-        RuntimeCommand::Gc => {
-            let cleanup = installation::collect(root, stop, Instant::now() + STARTUP)?;
-            println!("{}", serde_json::to_string(&cleanup)?);
-            Ok(0)
-        }
-        RuntimeCommand::Uninstall => {
-            let cleanup = installation::uninstall(root, stop, Instant::now() + STARTUP)?;
-            println!("{}", serde_json::to_string(&cleanup)?);
-            println!(
-                "Encrypted data and runtime identity are retained at {:?}.",
-                root.path()
-            );
-            if !cleanup.software_removed {
-                eprintln!(
-                    "Software removal is incomplete. Close installed programs and retry from a verified external bundle. Unknown files were preserved."
-                );
-                return Ok(2);
-            }
-            Ok(0)
+        RuntimeCommand::Gc | RuntimeCommand::Uninstall => {
+            let operation = if command == RuntimeCommand::Gc {
+                oblivion_native_windows::setup::Operation::Gc {}
+            } else {
+                oblivion_native_windows::setup::Operation::Uninstall {}
+            };
+            maintenance_outcome(oblivion_native_windows::setup::execute(
+                VerifiedBundle::current_launcher(source_id()?)?,
+                operation,
+                stop,
+                Instant::now() + STARTUP,
+                &mut || Err(oblivion_native_windows::Error("unexpected_setup_review")),
+            )?)
         }
         RuntimeCommand::Start => {
             broker::command(Action::Start, source_id()?, stop, Instant::now() + STARTUP)?;
@@ -280,7 +245,85 @@ fn runtime_command(root: &Root, command: RuntimeCommand) -> Result<i32> {
     }
 }
 
-fn bundle_input(path: &str) -> Result<VerifiedBundle> {
+fn maintenance_outcome(outcome: oblivion_native_windows::setup::Outcome) -> Result<i32> {
+    use oblivion_native_windows::setup::Outcome;
+    match outcome {
+        Outcome::Installed { registration } => {
+            println!("Oblivion installed.");
+            println!("\"{}\"", registration.launcher);
+            println!("Runtime {}", registration.runtime_id);
+            Ok(command_registration(
+                user_command::register(&registration.runtime_id, &registration.bundle_id),
+                "Open a new terminal and run oblivion to continue.",
+            ))
+        }
+        Outcome::Updated { registration } => {
+            println!("Oblivion updated. Encrypted data and runtime identity were preserved.");
+            println!("\"{}\"", registration.launcher);
+            println!("Runtime {}", registration.runtime_id);
+            Ok(command_registration(
+                user_command::register(&registration.runtime_id, &registration.bundle_id),
+                "Open a new terminal to use the updated oblivion command.",
+            ))
+        }
+        Outcome::Collected { cleanup, .. } => {
+            println!("{}", serde_json::to_string(&cleanup)?);
+            Ok(0)
+        }
+        Outcome::Uninstalled {
+            runtime_id,
+            cleanup,
+        } => {
+            println!("{}", serde_json::to_string(&cleanup)?);
+            println!(
+                "Encrypted data and runtime identity are retained at \"{}\".",
+                Root::current()?.path().display()
+            );
+            let command = command_registration(
+                user_command::unregister(&runtime_id),
+                "Reopen your terminal to refresh its PATH.",
+            );
+            if !cleanup.software_removed {
+                eprintln!(
+                    "Software removal is incomplete. Close installed programs and retry from a verified external bundle. Unknown files were preserved."
+                );
+                return Ok(2);
+            }
+            Ok(command)
+        }
+        Outcome::RebootRequired => {
+            println!(
+                "Windows needs a restart before setup can continue. Restart Windows, then run this installer again."
+            );
+            Ok(2)
+        }
+        Outcome::Declined => {
+            println!("Operation cancelled.");
+            Ok(0)
+        }
+        Outcome::Blocked { reason } => {
+            Err(format!("Windows setup prerequisites are unavailable: {reason}").into())
+        }
+    }
+}
+
+fn command_registration(result: oblivion_native_windows::Result<Change>, success: &str) -> i32 {
+    let change = match result {
+        Ok(change) => change,
+        Err(error) => {
+            eprintln!(
+                "The user command could not be updated ({error}). Rerun this operation to retry."
+            );
+            return 2;
+        }
+    };
+    if change.reopen_terminal {
+        println!("{success}");
+    }
+    0
+}
+
+fn bundle_input(path: &str, expected_source: Option<&str>) -> Result<VerifiedBundle> {
     // Resolve lexically. Canonicalizing a user-supplied UNC/junction path would
     // access it before the native bundle boundary can reject it.
     let path = std::path::absolute(path)?;
@@ -291,11 +334,14 @@ fn bundle_input(path: &str) -> Result<VerifiedBundle> {
     if path.as_bytes().first().is_some_and(u8::is_ascii_lowercase) {
         path.replace_range(..1, &path[..1].to_ascii_uppercase());
     }
-    Ok(VerifiedBundle::open(
-        &path,
-        Some(source_id()?),
-        &Identity::current()?,
-    )?)
+    match expected_source {
+        Some(source) => Ok(VerifiedBundle::open(
+            &path,
+            Some(source),
+            &Identity::current()?,
+        )?),
+        None => Ok(VerifiedBundle::update_input(&path)?),
+    }
 }
 
 fn forward_activity() -> Result<i32> {

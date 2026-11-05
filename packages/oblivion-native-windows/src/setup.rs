@@ -7,13 +7,36 @@ use serde::{Deserialize, Serialize};
 
 const LIMIT: usize = 4096;
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum Operation {
+    Install { bytes: u64 },
+    Update {},
+    Gc {},
+    Uninstall {},
+}
+
+impl Operation {
+    fn validate(self) -> Result<()> {
+        if let Self::Install { bytes } = self {
+            oblivion_wire::runtime_auth::Data::NewDisk {
+                runtime_id: "1".repeat(32),
+                bytes,
+            }
+            .validate()
+            .map_err(|_| Error("invalid_setup_request"))?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
     version: u8,
     source_sha256: String,
     manifest_sha256: String,
-    bytes: u64,
+    operation: Operation,
 }
 
 impl Request {
@@ -22,12 +45,7 @@ impl Request {
         if request.version != 1
             || !oblivion_bundle::hash(&request.source_sha256)
             || !oblivion_bundle::hash(&request.manifest_sha256)
-            || (oblivion_wire::runtime_auth::Data::NewDisk {
-                runtime_id: "1".repeat(32),
-                bytes: request.bytes,
-            })
-            .validate()
-            .is_err()
+            || request.operation.validate().is_err()
         {
             return Err(Error("invalid_setup_request"));
         }
@@ -46,23 +64,39 @@ struct Approval {
 struct Response {
     version: u8,
     manifest_sha256: String,
+    operation: Operation,
     event: Event,
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum Event {
-    Requirements { outcome: prerequisites::Outcome },
-    Installed { runtime_id: String },
+    Requirements {
+        outcome: prerequisites::Outcome,
+    },
+    Installed {
+        runtime_id: String,
+    },
+    Updated {
+        runtime_id: String,
+    },
+    Cleaned {
+        runtime_id: String,
+        cleanup: crate::installation::Cleanup,
+    },
     Declined,
-    Failed { code: String },
+    Failed {
+        code: String,
+    },
 }
 
 impl Response {
-    fn decode(bytes: &[u8], manifest: &str) -> Result<Self> {
+    fn decode(bytes: &[u8], manifest: &str, operation: Operation) -> Result<Self> {
         let response: Self = decode(bytes)?;
         let valid = match &response.event {
-            Event::Installed { runtime_id } => {
+            Event::Installed { runtime_id }
+            | Event::Updated { runtime_id }
+            | Event::Cleaned { runtime_id, .. } => {
                 oblivion_wire::control::valid_id(runtime_id)
                     && runtime_id.bytes().any(|byte| byte != b'0')
             }
@@ -78,7 +112,24 @@ impl Response {
             } => false,
             _ => true,
         };
-        if response.version != 1 || response.manifest_sha256 != manifest || !valid {
+        let matching = matches!(
+            (operation, &response.event),
+            (
+                Operation::Install { .. },
+                Event::Installed { .. } | Event::Requirements { .. } | Event::Declined
+            ) | (Operation::Update {}, Event::Updated { .. })
+                | (
+                    Operation::Gc {} | Operation::Uninstall {},
+                    Event::Cleaned { .. }
+                )
+                | (_, Event::Failed { .. })
+        );
+        if response.version != 1
+            || response.manifest_sha256 != manifest
+            || response.operation != operation
+            || !valid
+            || !matching
+        {
             return Err(Error("invalid_setup_response"));
         }
         Ok(response)
@@ -92,10 +143,27 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|_| Error("invalid_setup_message"))
 }
 
+pub struct Registration {
+    pub runtime_id: String,
+    pub bundle_id: String,
+    pub source_sha256: String,
+    pub launcher: String,
+}
+
 pub enum Outcome {
     Installed {
+        registration: Registration,
+    },
+    Updated {
+        registration: Registration,
+    },
+    Collected {
         runtime_id: String,
-        launcher: String,
+        cleanup: crate::installation::Cleanup,
+    },
+    Uninstalled {
+        runtime_id: String,
+        cleanup: crate::installation::Cleanup,
     },
     RebootRequired,
     Declined,
@@ -106,7 +174,9 @@ pub enum Outcome {
 
 #[cfg(windows)]
 mod native {
-    use super::{Approval, Event, LIMIT, Outcome, Request, Response, decode};
+    use super::{
+        Approval, Event, LIMIT, Operation, Outcome, Registration, Request, Response, decode,
+    };
     use crate::bundle::VerifiedBundle;
     use crate::client::Channel;
     use crate::files::Directory;
@@ -141,9 +211,9 @@ mod native {
 
     /// The original process remains unelevated. The callback is only the
     /// explicit review for enabling Hyper-V, before any VM or data creation.
-    pub fn install(
+    pub fn execute(
         bundle: VerifiedBundle,
-        bytes: u64,
+        operation: Operation,
         stop: Arc<AtomicBool>,
         deadline: Instant,
         review: &mut dyn FnMut() -> Result<bool>,
@@ -160,7 +230,7 @@ mod native {
                     std::thread::sleep(Duration::from_millis(25));
                 }
             });
-            let result = install_owned(bundle, bytes, Arc::clone(&stop), deadline, review);
+            let result = execute_owned(bundle, operation, Arc::clone(&stop), deadline, review);
             drop(completed);
             signal_owner
                 .join()
@@ -169,16 +239,17 @@ mod native {
         })
     }
 
-    fn install_owned(
+    fn execute_owned(
         bundle: VerifiedBundle,
-        bytes: u64,
+        operation: Operation,
         stop: Arc<AtomicBool>,
         deadline: Instant,
         review: &mut dyn FnMut() -> Result<bool>,
     ) -> Result<Outcome> {
+        operation.validate()?;
         let owner = Identity::current()?;
         if security::elevated()? {
-            return install_here(bundle, &owner, bytes, stop, deadline, review);
+            return execute_here(bundle, &owner, operation, stop, deadline, review);
         }
         check(&stop, deadline)?;
         let current = Root::current()?;
@@ -238,7 +309,7 @@ mod native {
                     version: 1,
                     source_sha256: source.clone(),
                     manifest_sha256: manifest.clone(),
-                    bytes,
+                    operation,
                 },
             )?;
             let outcome = (|| {
@@ -247,7 +318,7 @@ mod native {
                     check(&stop, deadline)?;
                     let raw = frame::read(&mut channel, 1..=LIMIT)
                         .map_err(|_| Error("setup_exchange_failed"))?;
-                    let response = Response::decode(&raw, &manifest)?;
+                    let response = Response::decode(&raw, &manifest, operation)?;
                     match response.event {
                         Event::Requirements {
                             outcome: prerequisites::Outcome::EnableRequired,
@@ -261,21 +332,12 @@ mod native {
                                 },
                             )?;
                         }
-                        Event::Requirements {
-                            outcome: prerequisites::Outcome::RebootRequired,
-                        } => return Ok(Outcome::RebootRequired),
-                        Event::Requirements {
-                            outcome: prerequisites::Outcome::Blocked { reason },
-                        } => return Ok(Outcome::Blocked { reason }),
-                        Event::Installed { runtime_id } => {
-                            return Ok(Outcome::Installed {
-                                runtime_id,
-                                launcher: String::new(),
-                            });
-                        }
-                        Event::Declined => return Ok(Outcome::Declined),
+                        event @ (Event::Requirements { .. }
+                        | Event::Installed { .. }
+                        | Event::Updated { .. }
+                        | Event::Cleaned { .. }
+                        | Event::Declined) => return Ok(event),
                         Event::Failed { .. } => return Err(Error("setup_installation_failed")),
-                        _ => return Err(Error("invalid_setup_response")),
                     }
                 }
             })();
@@ -290,68 +352,153 @@ mod native {
         if observed.is_err() {
             return Err(Error("setup_cleanup_incomplete"));
         }
+        // Source pins outlive the exact privileged helper, not just staging.
+        // In particular, uninstall cannot partly remove its invoking release.
+        drop(bundle);
         let cleanup = stage.remove(&owner);
         let outcome = result?;
         cleanup?;
-        match outcome {
-            Outcome::Installed { runtime_id, .. } => {
-                let verified = broker::control_id(
-                    &source,
-                    Arc::clone(&stop),
-                    Instant::now() + Duration::from_secs(30),
-                )?;
+        finish(outcome, operation, &current, source, bundle_id, stop)
+    }
+
+    fn execute_here(
+        bundle: VerifiedBundle,
+        owner: &Identity,
+        operation: Operation,
+        stop: Arc<AtomicBool>,
+        deadline: Instant,
+        review: &mut dyn FnMut() -> Result<bool>,
+    ) -> Result<Outcome> {
+        let source = bundle.source().to_owned();
+        let bundle_id = bundle.id().to_owned();
+        let event = perform(
+            bundle,
+            owner,
+            operation,
+            Arc::clone(&stop),
+            deadline,
+            review,
+        )?;
+        finish(
+            event,
+            operation,
+            &Root::for_user(owner)?,
+            source,
+            bundle_id,
+            stop,
+        )
+    }
+
+    fn perform(
+        bundle: VerifiedBundle,
+        owner: &Identity,
+        operation: Operation,
+        stop: Arc<AtomicBool>,
+        deadline: Instant,
+        review: &mut dyn FnMut() -> Result<bool>,
+    ) -> Result<Event> {
+        operation.validate()?;
+        if matches!(operation, Operation::Install { .. }) {
+            match requirements(&stop, deadline, review)? {
+                prerequisites::Outcome::Ready => {}
+                prerequisites::Outcome::EnableRequired => return Ok(Event::Declined),
+                outcome => return Ok(Event::Requirements { outcome }),
+            }
+        }
+        let root = Root::for_user(owner)?;
+        match operation {
+            Operation::Install { bytes } => {
+                let installed = installation::install_bundle(&root, bundle, bytes, stop, deadline)?;
+                Ok(Event::Installed {
+                    runtime_id: installed.runtime_id().into(),
+                })
+            }
+            Operation::Update {} => {
+                let installed = installation::update_bundle(&root, bundle, stop, deadline)?;
+                Ok(Event::Updated {
+                    runtime_id: installed.runtime_id().into(),
+                })
+            }
+            Operation::Gc {} | Operation::Uninstall {} => {
+                let (runtime_id, source) = installation::control_binding(&root)?;
+                if source != bundle.source() {
+                    return Err(Error("installed_runtime_source_mismatch"));
+                }
+                // Release this source view before collection; the independent
+                // staging image keeps this helper outside installed releases.
+                drop(bundle);
+                let cleanup = if matches!(operation, Operation::Gc {}) {
+                    installation::collect(&root, stop, deadline)?
+                } else {
+                    installation::uninstall(&root, stop, deadline)?
+                };
+                Ok(Event::Cleaned {
+                    runtime_id,
+                    cleanup,
+                })
+            }
+        }
+    }
+
+    fn finish(
+        event: Event,
+        operation: Operation,
+        current: &Root,
+        source: String,
+        bundle_id: String,
+        stop: Arc<AtomicBool>,
+    ) -> Result<Outcome> {
+        match event {
+            Event::Installed { runtime_id } | Event::Updated { runtime_id } => {
+                let verified =
+                    broker::control_id(&source, stop, Instant::now() + Duration::from_secs(30))?;
                 if verified != runtime_id {
                     return Err(Error("setup_installed_identity_changed"));
                 }
                 let launcher = current
                     .path()
                     .join("releases")
-                    .join(bundle_id)
+                    .join(&bundle_id)
                     .join("bin")
                     .join("oblivion.exe")
                     .to_str()
                     .ok_or(Error("unsupported_installation_path"))?
                     .to_owned();
-                Ok(Outcome::Installed {
+                let registration = Registration {
                     runtime_id,
+                    bundle_id,
+                    source_sha256: source,
                     launcher,
-                })
+                };
+                match operation {
+                    Operation::Install { .. } => Ok(Outcome::Installed { registration }),
+                    Operation::Update {} => Ok(Outcome::Updated { registration }),
+                    _ => Err(Error("invalid_setup_response")),
+                }
             }
-            outcome => Ok(outcome),
+            Event::Cleaned {
+                runtime_id,
+                cleanup,
+            } => match operation {
+                Operation::Gc {} => Ok(Outcome::Collected {
+                    runtime_id,
+                    cleanup,
+                }),
+                Operation::Uninstall {} => Ok(Outcome::Uninstalled {
+                    runtime_id,
+                    cleanup,
+                }),
+                _ => Err(Error("invalid_setup_response")),
+            },
+            Event::Requirements {
+                outcome: prerequisites::Outcome::RebootRequired,
+            } => Ok(Outcome::RebootRequired),
+            Event::Requirements {
+                outcome: prerequisites::Outcome::Blocked { reason },
+            } => Ok(Outcome::Blocked { reason }),
+            Event::Declined => Ok(Outcome::Declined),
+            _ => Err(Error("invalid_setup_response")),
         }
-    }
-
-    fn install_here(
-        bundle: VerifiedBundle,
-        owner: &Identity,
-        bytes: u64,
-        stop: Arc<AtomicBool>,
-        deadline: Instant,
-        review: &mut dyn FnMut() -> Result<bool>,
-    ) -> Result<Outcome> {
-        let source = bundle.source().to_owned();
-        match requirements(&stop, deadline, review)? {
-            prerequisites::Outcome::Ready => {}
-            prerequisites::Outcome::RebootRequired => return Ok(Outcome::RebootRequired),
-            prerequisites::Outcome::Blocked { reason } => return Ok(Outcome::Blocked { reason }),
-            prerequisites::Outcome::EnableRequired => return Ok(Outcome::Declined),
-        }
-        let installed = installation::install_bundle(
-            &Root::for_user(owner)?,
-            bundle,
-            bytes,
-            Arc::clone(&stop),
-            deadline,
-        )?;
-        if broker::control_id(&source, stop, Instant::now() + Duration::from_secs(30))?
-            != installed.runtime_id()
-        {
-            return Err(Error("setup_installed_identity_changed"));
-        }
-        Ok(Outcome::Installed {
-            runtime_id: installed.runtime_id().into(),
-            launcher: installed.launcher().into(),
-        })
     }
 
     fn requirements(
@@ -398,6 +545,7 @@ mod native {
             return Err(Error("setup_bundle_binding_changed"));
         }
         let manifest = request.manifest_sha256.clone();
+        let operation = request.operation;
         let result = std::thread::scope(|scope| {
             let (review_request, reviews) = std::sync::mpsc::sync_channel(0);
             let (approve, approvals) = std::sync::mpsc::sync_channel(0);
@@ -417,21 +565,14 @@ mod native {
                         }
                     }
                 };
-                match requirements(&worker_stop, deadline, &mut review)? {
-                    prerequisites::Outcome::Ready => {}
-                    prerequisites::Outcome::EnableRequired => return Ok(Event::Declined),
-                    outcome => return Ok(Event::Requirements { outcome }),
-                }
-                let installed = installation::install_bundle(
-                    &Root::for_user(&worker_owner)?,
+                perform(
                     bundle,
-                    request.bytes,
+                    &worker_owner,
+                    request.operation,
                     Arc::clone(&worker_stop),
                     deadline,
-                )?;
-                Ok(Event::Installed {
-                    runtime_id: installed.runtime_id().into(),
-                })
+                    &mut review,
+                )
             });
             let mut connected = true;
             let observed = (|| {
@@ -443,6 +584,7 @@ mod native {
                         response(
                             &mut channel,
                             &manifest,
+                            operation,
                             Event::Requirements {
                                 outcome: prerequisites::Outcome::EnableRequired,
                             },
@@ -481,11 +623,12 @@ mod native {
             result
         });
         match result {
-            Ok(event) => response(&mut channel, &manifest, event),
+            Ok(event) => response(&mut channel, &manifest, operation, event),
             Err(error) => {
                 response(
                     &mut channel,
                     &manifest,
+                    operation,
                     Event::Failed {
                         code: error.0.into(),
                     },
@@ -495,12 +638,18 @@ mod native {
         }
     }
 
-    fn response(channel: &mut Channel, manifest: &str, event: Event) -> Result<()> {
+    fn response(
+        channel: &mut Channel,
+        manifest: &str,
+        operation: Operation,
+        event: Event,
+    ) -> Result<()> {
         send(
             channel,
             &Response {
                 version: 1,
                 manifest_sha256: manifest.into(),
+                operation,
                 event,
             },
         )
@@ -610,7 +759,7 @@ mod native {
 
     #[cfg(test)]
     mod tests {
-        use super::{LIMIT, Request, send};
+        use super::{LIMIT, Operation, Request, send};
         use crate::client::Channel;
         use crate::private::{Purpose, tests::connected_pair};
         use crate::security::Identity;
@@ -631,7 +780,7 @@ mod native {
                     version: 1,
                     source_sha256: "a".repeat(64),
                     manifest_sha256: "b".repeat(64),
-                    bytes: 17179869184,
+                    operation: Operation::Install { bytes: 17179869184 },
                 },
             )
             .unwrap();
@@ -656,21 +805,21 @@ mod native {
 }
 
 #[cfg(windows)]
-pub use native::{install, service};
+pub use native::{execute, service};
 
 #[cfg(test)]
 mod tests {
-    use super::{Approval, Event, LIMIT, Request, Response, decode};
+    use super::{Approval, Event, LIMIT, Operation, Request, Response, decode};
     use serde_json::json;
 
     #[test]
     fn setup_request_cannot_supply_an_owner_or_a_privileged_path() {
-        let value = json!({"version":1,"source_sha256":"a".repeat(64),"manifest_sha256":"b".repeat(64),"bytes":17179869184_u64});
+        let value = json!({"version":1,"source_sha256":"a".repeat(64),"manifest_sha256":"b".repeat(64),"operation":{"kind":"install","bytes":17179869184_u64}});
         Request::decode(&serde_json::to_vec(&value).unwrap()).unwrap();
         for (field, invalid) in [
             ("owner", json!("S-1-5-21-1-2-3-1001")),
             ("root", json!(r"C:\Foreign")),
-            ("bytes", json!(1)),
+            ("operation", json!({"kind":"install","bytes":1})),
             ("version", json!(2)),
             ("source_sha256", json!("PRIVATE_CANARY")),
         ] {
@@ -688,18 +837,71 @@ mod tests {
     #[test]
     fn completion_is_bound_to_the_reviewed_bundle_and_exact_runtime_shape() {
         let manifest = "b".repeat(64);
-        let installed = json!({"version":1,"manifest_sha256":manifest,"event":{"kind":"installed","runtime_id":"1".repeat(32)}});
-        let response =
-            Response::decode(&serde_json::to_vec(&installed).unwrap(), &manifest).unwrap();
+        let installed = json!({"version":1,"manifest_sha256":manifest,"operation":{"kind":"install","bytes":17179869184_u64},"event":{"kind":"installed","runtime_id":"1".repeat(32)}});
+        let response = Response::decode(
+            &serde_json::to_vec(&installed).unwrap(),
+            &manifest,
+            Operation::Install { bytes: 17179869184 },
+        )
+        .unwrap();
         assert!(matches!(response.event, Event::Installed { .. }));
         for invalid in [
-            json!({"version":1,"manifest_sha256":"c".repeat(64),"event":{"kind":"installed","runtime_id":"1".repeat(32)}}),
-            json!({"version":1,"manifest_sha256":manifest,"event":{"kind":"installed","runtime_id":"0".repeat(32)}}),
-            json!({"version":1,"manifest_sha256":manifest,"event":{"kind":"requirements","outcome":{"kind":"ready"}}}),
-            json!({"version":1,"manifest_sha256":manifest,"event":{"kind":"failed","code":"PRIVATE\nCANARY"}}),
-            json!({"version":1,"manifest_sha256":manifest,"event":{"kind":"installed","runtime_id":"1".repeat(32),"launcher":r"C:\Foreign\program.exe"}}),
+            json!({"version":1,"manifest_sha256":"c".repeat(64),"operation":{"kind":"install","bytes":17179869184_u64},"event":{"kind":"installed","runtime_id":"1".repeat(32)}}),
+            json!({"version":1,"manifest_sha256":manifest,"operation":{"kind":"install","bytes":17179869184_u64},"event":{"kind":"installed","runtime_id":"0".repeat(32)}}),
+            json!({"version":1,"manifest_sha256":manifest,"operation":{"kind":"install","bytes":17179869184_u64},"event":{"kind":"requirements","outcome":{"kind":"ready"}}}),
+            json!({"version":1,"manifest_sha256":manifest,"operation":{"kind":"install","bytes":17179869184_u64},"event":{"kind":"failed","code":"PRIVATE\nCANARY"}}),
+            json!({"version":1,"manifest_sha256":manifest,"operation":{"kind":"install","bytes":17179869184_u64},"event":{"kind":"installed","runtime_id":"1".repeat(32),"launcher":r"C:\Foreign\program.exe"}}),
         ] {
-            assert!(Response::decode(&serde_json::to_vec(&invalid).unwrap(), &manifest).is_err());
+            assert!(
+                Response::decode(
+                    &serde_json::to_vec(&invalid).unwrap(),
+                    &manifest,
+                    Operation::Install { bytes: 17179869184 }
+                )
+                .is_err()
+            );
         }
+    }
+
+    #[test]
+    fn maintenance_admission_and_outcomes_cannot_change_the_reviewed_operation() {
+        let manifest = "b".repeat(64);
+        for operation in [
+            Operation::Update {},
+            Operation::Gc {},
+            Operation::Uninstall {},
+        ] {
+            let request = Request {
+                version: 1,
+                source_sha256: "a".repeat(64),
+                manifest_sha256: manifest.clone(),
+                operation,
+            };
+            assert_eq!(
+                Request::decode(&serde_json::to_vec(&request).unwrap())
+                    .unwrap()
+                    .operation,
+                operation
+            );
+        }
+        let cleaned = json!({"version":1,"manifest_sha256":manifest,"operation":{"kind":"uninstall"},"event":{"kind":"cleaned","runtime_id":"1".repeat(32),"cleanup":{"releases_removed":1,"boot_files_removed":3,"retained":0,"in_use":1,"software_removed":false}}});
+        let bytes = serde_json::to_vec(&cleaned).unwrap();
+        let response = Response::decode(&bytes, &manifest, Operation::Uninstall {}).unwrap();
+        assert!(
+            matches!(response.event, Event::Cleaned { cleanup, .. } if cleanup.in_use==1 && !cleanup.software_removed)
+        );
+        assert!(Response::decode(&bytes, &manifest, Operation::Gc {}).is_err());
+        assert!(Response::decode(&bytes, &manifest, Operation::Update {}).is_err());
+        let mut changed = cleaned;
+        changed["event"]["cleanup"]["destination"] = json!(r"C:\Foreign");
+        assert!(
+            Response::decode(
+                &serde_json::to_vec(&changed).unwrap(),
+                &manifest,
+                Operation::Uninstall {}
+            )
+            .is_err()
+        );
+        assert!(Request::decode(br#"{"version":1,"source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","operation":{"kind":"gc","bytes":17179869184}}"#).is_err());
     }
 }
