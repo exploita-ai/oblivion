@@ -27,6 +27,7 @@ export function NativeShare(props: { selection: ShareSelection; run: (args: stri
   const [working, setWorking] = createSignal(false)
   const [exitCode, setExitCode] = createSignal<number>()
   const [applySettings, setApplySettings] = createSignal(false)
+  const [includeSettings, setIncludeSettings] = createSignal(false)
   const [filters, setFilters] = createSignal<ContentFilter[]>([])
   const [includeChats, setIncludeChats] = createSignal(true)
   const [filterKind, setFilterKind] = createSignal<ContentFilter["kind"]>("path")
@@ -45,6 +46,8 @@ export function NativeShare(props: { selection: ShareSelection; run: (args: stri
     { name: "Safe and descendants", description: `Export this branch of ${props.selection.branch?.count} persistent Safes. Every included Safe must be closed.`, disabled: !props.selection.branch?.closed ? "Close the included descendant Safes first." : undefined, action: "Choose destination", run: () => { if (props.selection.operation === "export" && props.selection.scope === "safe" && props.selection.branch?.closed) { setScope("branch"); setPage("choose") } } },
   ] : []
   const output = () => path.join(directory(), filename())
+  const shareAll = () => props.selection.operation === "export" && props.selection.scope === "all"
+  const exportCancelled = () => props.selection.operation === "export" && exitCode() === 130
   const selectorArgs = () => props.selection.operation !== "export" ? [] : props.selection.scope === "all" ? ["--all"] : [scope() === "branch" ? "--branch" : "--safe", props.selection.safe]
   const filterText = () => [
     `Include conversations: ${includeChats() ? "Yes" : "No (--no-chats)"}`,
@@ -73,7 +76,7 @@ export function NativeShare(props: { selection: ShareSelection; run: (args: stri
     setWorking(true)
     try {
       const code = await props.run(props.selection.operation === "export"
-        ? ["share", "export", ...selectorArgs(), output(), ...filters().flatMap((entry) => [`--${entry.kind}`, entry.value]), ...(!includeChats() ? ["--no-chats"] : [])]
+        ? ["share", "export", ...selectorArgs(), output(), ...filters().flatMap((entry) => [`--${entry.kind}`, entry.value]), ...(!includeChats() ? ["--no-chats"] : []), ...(shareAll() && includeSettings() ? ["--include-settings"] : [])]
         : ["share", "import", source(), ...(applySettings() ? ["--apply-settings"] : [])])
       if (generation !== `${context()}/${scope()}/${source()}`) return
       setExitCode(code)
@@ -84,7 +87,7 @@ export function NativeShare(props: { selection: ShareSelection; run: (args: stri
   createEffect(() => {
     context()
     untrack(() => {
-      setFilters([]); setIncludeChats(true); setApplySettings(false); setSelectedFilter(0); setSelectedScope(0); setScope("safe"); setArea("actions")
+      setFilters([]); setIncludeChats(true); setApplySettings(false); setIncludeSettings(false); setSelectedFilter(0); setSelectedScope(0); setScope("safe"); setArea("actions")
       setSource(""); setExitCode(undefined); setFilterError("")
       setFilename(props.selection.operation === "export" ? props.selection.scope === "all" ? "oblivion-all.oblivion-share" : `oblivion-${props.selection.safe.slice(0, 8)}.oblivion-share` : "")
       setPage(props.selection.operation === "export" && props.selection.scope === "safe" && props.selection.branch ? "scope" : "choose")
@@ -102,6 +105,7 @@ export function NativeShare(props: { selection: ShareSelection; run: (args: stri
     if (page() === "review") {
       if (key.name === "escape") { key.preventDefault(); setPage("name"); return }
       if (key.name === "f") { key.preventDefault(); contentFilters(); return }
+      if (key.name === "i" && shareAll()) { key.preventDefault(); setIncludeSettings((value) => !value); return }
       if (key.name === "tab") { key.preventDefault(); setArea((value) => value === "list" ? "actions" : "list"); return }
       if (area() !== "list") return
       if (["up", "down", "pageup", "pagedown", "home", "end"].includes(key.name)) {
@@ -150,10 +154,15 @@ export function NativeShare(props: { selection: ShareSelection; run: (args: stri
       <Show when={page() === "review" && props.selection.operation === "export"}>
         <PageHeader title="Review Share export" description={sourceLabel()} />
         <scrollbox ref={(value) => { scroll = value }} flexGrow={1} minHeight={0} border borderColor={area() === "list" ? theme.border.focused : theme.border.base} padding={1} contentOptions={{ minHeight: 0 }}>
-          <text fg={theme.text.base} wrapMode="word">{`Scope · ${selectorArgs().join(" ")}\nDestination · ${output()}\nProvider login stores are excluded. Conversations reopen in their original agent. Content scan is best effort; it does not guarantee removal of secrets.\n\n${filterText()}\n\nFilters apply identically to every selected Safe. No contents have been read by this screen. Next: inspect the detailed CLI review and choose a separate Share password.`}</text>
+          <text fg={theme.text.base} wrapMode="word">{`Scope · ${selectorArgs().join(" ")}\nDestination · ${output()}${shareAll() ? `\nAutomatic-lock timers · ${includeSettings() ? "Included" : "Excluded"}` : ""}\nProvider login stores are excluded. Conversations reopen in their original agent. Content scan is best effort; it does not guarantee removal of secrets.\n\n${filterText()}\n\nFilters apply identically to every selected Safe. The detailed terminal review shows the selected contents and lets you exclude files or conversations before approval.`}</text>
         </scrollbox>
         <text fg={theme.text.muted}>{area() === "list" ? "↑ ↓ / PgUp PgDn scroll · Tab actions" : "Tab review text · ← → select action"}</text>
-        <ActionBar focused={area() === "actions"} disabled={working()} actions={[{ title: "Continue to export", key: "Enter", run: () => { void confirm() } }, { title: "Content filters", key: "F", run: contentFilters }, { title: "Cancel", key: "Esc", run: () => setPage("name") }]} />
+        <ActionBar focused={area() === "actions"} disabled={working()} actions={[
+          { title: "Review contents", key: "Enter", run: () => { void confirm() } },
+          { title: "Content filters", key: "F", run: contentFilters },
+          ...(shareAll() ? [{ title: includeSettings() ? "Exclude lock timers" : "Include lock timers", key: "I", run: () => setIncludeSettings((value) => !value) }] : []),
+          { title: "Cancel", key: "Esc", run: () => setPage("name") },
+        ]} />
       </Show>
       <Show when={page() === "review" && props.selection.operation === "import"}><box flexGrow={1} minHeight={0} alignItems="center" justifyContent="center"><box width="100%" maxWidth={104} height={Math.min(22, dimensions().height - 7)} maxHeight="100%" minHeight={0} padding={1} border borderColor={theme.border.base} backgroundColor={theme.background.panel}><FormView form={{
         title: "Review Share import",
@@ -162,7 +171,7 @@ export function NativeShare(props: { selection: ShareSelection; run: (args: stri
       }} cancel={() => setPage("choose")} submit={(values) => { setApplySettings(values.settings === "true"); void confirm() }} /></box></box></Show>
       <Show when={page() === "result"}><PageHeader title={exitCode() === 0 ? props.selection.operation === "export" ? "Share exported" : "Share imported" : exitCode() === 130 ? "Share cancelled" : props.selection.operation === "import" && exitCode() === 2 ? "Safes imported · settings not applied" : "Share did not complete"}
         description={exitCode() === 0 ? props.selection.operation === "export" ? "The encrypted Share was verified and saved. Send its password through a separate channel." : "New encrypted Safes were published offline. Open them to review their contents and authenticate agents separately." : exitCode() === 130 ? props.selection.operation === "import" ? "Operation cancelled. Check Share imports and your Safes before retrying an import." : "Operation cancelled. Check the destination before retrying an export." : props.selection.operation === "import" && exitCode() === 2 ? "The Safes were already imported. Do not import the Share again. Review your Safes and configure Automatic lock in Settings." : "Review the terminal output and check your Safes before retrying an import."} />
-        <FormView form={{ title: props.selection.operation === "export" ? "Share export" : "Share import", description: props.selection.operation === "export" ? `Destination · ${output()}` : `Source · ${source()}`, fields: [], submit: "Back to Safes", run: async () => {} }} cancel={props.back} submit={props.back} />
+        <FormView form={{ title: props.selection.operation === "export" ? "Share export" : "Share import", description: props.selection.operation === "export" ? `Destination · ${output()}` : `Source · ${source()}`, fields: [], submit: exportCancelled() ? "Back to review" : "Back to Safes", run: async () => {} }} cancel={props.back} submit={() => exportCancelled() ? review() : props.back()} />
       </Show>
     </Show>
     <Show when={working()}><BusyModal text="Preparing Share" /></Show>

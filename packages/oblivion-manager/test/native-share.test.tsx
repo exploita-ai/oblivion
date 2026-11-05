@@ -125,6 +125,30 @@ test.each(["safe", "branch", "all"] as const)("Share %s scope becomes exactly on
   } finally { await app.dispose(); await rm(directory, { recursive: true }) }
 })
 
+test("Share all explicitly includes lock timers and retains its choices after a cancelled terminal review", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "oblivion-share-ui-"))
+  const calls: string[][] = []
+  const app = await testRender(() => <NativeShare selection={{ operation: "export", scope: "all", count: 3, closed: true }} initialDirectory={directory}
+    run={async (args) => { calls.push(args); return calls.length === 1 ? 130 : 0 }} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await reviewExport(app)
+    await visible(app, "Automatic-lock timers · Excluded")
+    await app.mockInput.pressKey("i")
+    await visible(app, "Automatic-lock timers · Included")
+    expect(calls).toHaveLength(0)
+    await app.mockInput.pressEnter()
+    await visible(app, "Back to review")
+    expect(calls[0]).toEqual(["share", "export", "--all", path.join(directory, "oblivion-all.oblivion-share"), "--include-settings"])
+    await app.mockInput.pressEnter()
+    await visible(app, "Automatic-lock timers · Included")
+    await app.mockInput.pressKey("i")
+    await visible(app, "Automatic-lock timers · Excluded")
+    await app.mockInput.pressEnter()
+    await visible(app, "Share exported")
+    expect(calls[1]).toEqual(calls[0].slice(0, -1))
+  } finally { await app.dispose(); await rm(directory, { recursive: true }) }
+})
+
 test("cancelled review and a source reopened elsewhere never start export", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "oblivion-share-ui-"))
   const [closed, setClosed] = createSignal(true)

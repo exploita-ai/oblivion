@@ -14,6 +14,15 @@ export, guest review, encrypted streams, fresh-volume import, atomic collection
 publication and explicit import recovery. These source statements do not imply
 that all end-to-end paths have passed in an installed candidate.
 
+Share export now lists included native chats by agent and opaque reference,
+with a native title when it can be displayed. The detailed terminal review
+accepts exclusions for the current Safe and regenerates the plan on its same
+offline attachment. The final export reopens the exact approved selection and
+checks its digest again. If a conversation needs an excluded file or an
+excluded Codex conversation's saved prefix, the edit is rejected and the prior
+selection can be reviewed again. Share all includes automatic-lock settings
+only when approved separately, and applying them on import remains opt-in.
+
 The import picker handles bracketed pastes directly and reviews one or more
 resolved paths before adding them to the selection. Enter path still accepts
 one literal path, a terminal-escaped path or a local file URL. The Windows

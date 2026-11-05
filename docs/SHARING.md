@@ -22,8 +22,11 @@ oblivion share export --all collection.oblivion-share
 ```
 
 `--branch` includes the selected Safe and its descendants. `--all` includes all
-persistent Safes and the application automatic-lock timers. No proxy passwords
-or provider profiles enter the package. Export refuses an existing output file.
+persistent Safes. To share the application automatic-lock timers, use
+`--all FILE --include-settings` or select **Include lock timers** in the manager.
+Their values appear in the final review. The receiver chooses separately
+whether to apply them. Proxy passwords and provider profiles are excluded.
+Export refuses an existing output file.
 
 By default Share includes `workspace`, `imports` and supported native
 conversations. Each conversation reopens in the agent that created it. Source
@@ -38,7 +41,16 @@ selected for export; missing attachments or unsupported records stop the
 operation instead of producing an incomplete conversation. Credential files
 remain excluded; messages and documents themselves can still contain secrets.
 
-Narrow the selection or exclude items shown during review:
+The detailed terminal review lists included paths and conversations for each
+Safe. Conversations show their agent, Share reference and native title when it
+can be displayed. Use **F** and the numbers next to paths or **C** and the
+numbers next to chats to stage exclusions. Use **Enter** to regenerate the
+review with your edits, then **Enter** again to keep that selection. **U**
+clears pending edits and **Q** cancels the export. Exclusions apply to the
+Safe being reviewed. If an included conversation needs an excluded file or
+saved Codex context, stage both exclusions together and review again.
+
+You can also narrow the starting selection from the command line:
 
 ```sh
 oblivion share export --safe research project.oblivion-share \
