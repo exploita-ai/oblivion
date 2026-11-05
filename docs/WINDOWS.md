@@ -103,8 +103,9 @@ reports read only bounded private metadata and address existing control pipes;
 they do not hash the ISO or boot a stopped runtime. Files browsing and guest
 transfer status/recovery use private, opening-scoped messages. Local Files import
 and export now use the same manifest, reviewed approval, payload protocol and
-receiver journal as Unix. Share, backup file streams, software update/removal and
-the Live storage selector remain explicitly unavailable on Windows.
+receiver journal as Unix. Personal-backup streams also use native file endpoints
+and the shared restore workflow. Share, software update/removal and the Live
+storage selector remain explicitly unavailable on Windows.
 
 ## Local Files copies
 
@@ -137,6 +138,19 @@ Native filesystem, named-pipe, consent and actual copy-orchestration fixtures
 are registered in Windows CI. Local MSVC compilation on the Mac is not evidence
 that they passed on Windows, that directory synchronization works on every
 filesystem, or that an installed Hyper-V transfer has been qualified.
+
+## Personal backup streams
+
+Personal backups now connect `backup export/import` to the installed Windows
+entrypoint. The common workflow checks writable storage, a closed persistent
+Safe, the fixed maintenance slot, preparation metadata and exact copy receipts.
+Only the selected ciphertext file is streamed; password validation and restore
+remain inside the controller. Backup data-channel EOF ends its authority, then
+controller status must confirm Copied before output publication or restore.
+This is distinct from the explicit AgentRelease used by Files. Native file
+authority stays pinned through review/copy/publication, without adding a new
+UUID requirement to Unix raw-backup destinations. The Windows execution and
+installed backup/restore acceptance gates remain open.
 
 The executable smoke tests exercise help, version and pre-startup rejection on
 Windows without starting a VM. The actual installed lifecycle and HCS permissions
@@ -365,7 +379,7 @@ retain POSIX paths. The source-bound bundle validator supports Windows assets
 without depending on Unix ownership APIs. Compilation and fixture definitions
 do not qualify the installed manager or Hyper-V path.
 
-Remaining work is the Windows Share/backup streaming endpoints, a normal-user
+Remaining work is the Windows Share streaming endpoints, a normal-user
 privilege broker, update/removal and explicit reconciliation of owned HCS,
 network and ACL grants after uncertain shutdown or interrupted setup. The full
 installed path must then pass the acceptance gates below. There is no second

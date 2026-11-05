@@ -320,7 +320,7 @@ jobs:
           for package in oblivion-gateway oblivion-transfer oblivion-transport oblivion-tor-state; do
             (cd "packages/$package" && cargo check --locked --lib --bins && cargo test --locked --lib)
           done
-          (cd packages/oblivion-transfer && cargo test --locked --offline --test approved --test share --test personal_copy --test native_files --test prepared_files --test multi_files --test transfer_inventory --test endpoint --test relay --test stream && cargo build --locked --offline --bin oblivion-copy)
+          (cd packages/oblivion-transfer && cargo test --locked --offline --test approved --test share --test personal_copy --test native_backup --test native_files --test prepared_files --test multi_files --test transfer_inventory --test endpoint --test relay --test stream && cargo build --locked --offline --bin oblivion-copy)
       - name: Recover receiver records after a real filesystem remount
         working-directory: packages/oblivion-transfer
         run: |
@@ -402,7 +402,7 @@ jobs:
         run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
       - name: Verify native file reconciliation and ciphertext-only personal copies
         working-directory: packages/oblivion-transfer
-        run: cargo test --locked --test personal_copy --test native_files --test prepared_files --test multi_files --test transfer_inventory --test endpoint --test relay --test stream
+        run: cargo test --locked --test personal_copy --test native_backup --test native_files --test prepared_files --test multi_files --test transfer_inventory --test endpoint --test relay --test stream
       - name: Check native per-agent Share without source credentials
         working-directory: packages/oblivion-history
         run: |

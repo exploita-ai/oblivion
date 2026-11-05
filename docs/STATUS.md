@@ -330,7 +330,7 @@ read bounded private metadata and use the existing pipe without hashing the ISO
 or implicitly starting a stopped runtime. Windows Files reads guest pages and
 receiver outcomes through opening-bound attachments, releasing before pipe close.
 Local Files payload copies are now connected to the shared protocol and consent
-flow. Share, backup file streams and software update/removal remain explicitly
+flow. Share and software update/removal remain explicitly
 unavailable there and fail before installation discovery/boot.
 
 Windows setup now records Pending before bundle publication, configuration or
@@ -396,7 +396,7 @@ boundaries now flush before awaiting the peer, with actual buffered Unix
 socket regressions. Windows filesystem, event-pipe and copy-orchestration fixtures
 are compiled for MSVC and registered in Windows CI; they have not been executed
 on this Mac. This does not qualify HCS boot, installed transfer persistence,
-Windows durability or the unfinished Share/backup/software-lifecycle endpoints.
+Windows durability or the unfinished Share/software-lifecycle endpoints.
 
 Focused Unix verification passed 25 transfer cases, six copy-parser cases and
 ten real launcher/event cases. They include buffered import/export, interrupted
@@ -404,3 +404,20 @@ publication, receiver inventory and preservation of user edits during recovery.
 The canonical root `bun run check` passed. MSVC checks include the actual
 Windows entrypoint, native backend fixtures and Files command fixtures; those
 cross-compiles are kept separate from Windows execution and VM acceptance.
+
+Personal-backup copies now consume one portable workflow on Unix and Windows.
+The shared core owns writable-state and closed-Safe preflight, slot selection,
+private password entry, preparation/receipt validation, Copied reconciliation
+and restore completion after a lost reply. Native endpoints pin the selected
+LUKS2 source and private output; the payload protocol and volume checks are
+shared with the existing media path. Export publishes exclusively only after
+controller confirmation. Backup attachment EOF ends authority without the Files
+AgentRelease protocol; EOF alone never proves copying or restoration. This
+source increment does not qualify Windows execution or an installed-VM round trip.
+
+Verification passed 15 shared CLI backup cases, nine focused Mac transfer cases,
+three Linux native-backup cases (including tmpfs publication without a UUID),
+and four actual Unix frontend/attachment cases. The canonical root check and
+MSVC checks for the complete CLI/entrypoint/tests and Transfer library passed.
+Windows named-pipe and synthetic 32 MiB ciphertext adapter fixtures were compiled,
+not executed; CI definitions do not replace that missing runtime evidence.

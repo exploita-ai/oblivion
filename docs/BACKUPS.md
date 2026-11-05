@@ -59,3 +59,16 @@ interrupted output can leave an encrypted partial file in the chosen external
 directory. It is not a confirmed backup. This path has local stream, filesystem
 and process-revocation fixtures; a complete installed-VM backup/restore round
 trip is still a release gate.
+
+The current Unix and Windows command adapters use one backup workflow for
+preflight, password entry, copy receipts, controller reconciliation and restore.
+Native filesystem endpoints pin only the chosen ciphertext file and output
+directory. The output is private and published without replacing an existing
+file, only after the controller confirms its copy. No source path crosses the
+attachment: the manifest always names the one fixed encrypted-volume payload.
+
+A backup attachment ends through data-channel EOF, unlike a Files/agent
+attachment with an explicit client release. Closing that channel is not proof
+of a successful backup; the workflow checks the controller's outcome separately.
+Windows source, output and transport compilation is distinct from execution on
+Windows and an installed Hyper-V backup/restore round trip, which remain open.
