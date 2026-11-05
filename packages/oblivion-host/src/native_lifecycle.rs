@@ -1050,6 +1050,7 @@ mod tests {
             })
         }
         fn phase(&self) -> Phase {
+            let _lock = self.registry.lock().unwrap();
             self.registry.generation().unwrap().unwrap().phase
         }
         fn wait_for(&self, condition: impl Fn() -> bool) {
