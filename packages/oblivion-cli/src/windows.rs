@@ -95,6 +95,26 @@ pub struct FileAttachment {
 }
 
 pub struct FileStream(client::Channel);
+
+/// Backup authority ends with this pipe, unlike an agent/FileAttachment. The
+/// controller reconciles its own worker receipt after EOF; closing is no proof
+/// that the encrypted volume was copied or that restoration committed.
+pub struct BackupAttachment {
+    stream: FileStream,
+    stop: Arc<AtomicBool>,
+}
+
+impl BackupAttachment {
+    pub fn stream(&mut self) -> &mut FileStream {
+        &mut self.stream
+    }
+    pub fn cancellation(&self) -> Cancellation {
+        Cancellation(Arc::clone(&self.stop))
+    }
+    pub fn close(&mut self) -> io::Result<()> {
+        self.stream.0.close()
+    }
+}
 impl FileAttachment {
     pub fn stream(&mut self) -> &mut FileStream {
         &mut self.stream
@@ -184,6 +204,41 @@ impl Runtime {
 
     pub fn cancellation(&self) -> Cancellation {
         self.client.cancellation()
+    }
+
+    pub fn attach_backup(
+        &mut self,
+        transaction: &str,
+        slot: Slot,
+        stop: Arc<AtomicBool>,
+    ) -> Result<BackupAttachment> {
+        if self.client.cancelled.load(Ordering::Acquire) {
+            return Err("controller_cancelled".into());
+        }
+        if !oblivion_wire::control::valid_id(transaction) {
+            return Err("invalid_backup_transaction".into());
+        }
+        let (mut channel, attached) = self.client.transport.attach(
+            header(&Call {
+                operation: Operation::BackupAttach,
+                slot: Some(slot),
+                session: Some(transaction),
+                expected_session: None,
+                secret: &[],
+            })?,
+            &[],
+            Arc::clone(&stop),
+            Instant::now() + Operation::BackupAttach.response_budget(),
+        )?;
+        if attached != transaction {
+            channel.close()?;
+            return Err("invalid_backup_attachment".into());
+        }
+        channel.set_deadline(Instant::now() + Duration::from_secs(3600))?;
+        Ok(BackupAttachment {
+            stream: FileStream(channel),
+            stop,
+        })
     }
 
     pub fn attach_file(

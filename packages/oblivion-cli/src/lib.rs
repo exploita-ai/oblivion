@@ -23,6 +23,8 @@ pub mod settings;
 #[cfg(windows)]
 pub mod windows;
 #[cfg(windows)]
+pub mod windows_backup;
+#[cfg(windows)]
 pub mod windows_entrypoint;
 #[cfg(windows)]
 pub mod windows_file_copy;

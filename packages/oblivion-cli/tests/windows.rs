@@ -905,3 +905,361 @@ fn complete_windows_export_command_publishes_recovers_and_never_reports_denied_r
         );
     }
 }
+
+#[test]
+fn backup_attachment_ends_at_pipe_eof_then_waits_for_controller_copied_proof() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    let (id, mut data) = listener();
+    let mut status = instance(&id, false);
+    let server = std::thread::spawn(move || {
+        let request = connect(&mut data);
+        assert_eq!(request["operation"], json!(Operation::BackupAttach));
+        assert_eq!(request["slot"], 7);
+        assert_eq!(request["session"], COPY_OPERATION);
+        assert!(request["expected_session"].is_null());
+        assert_eq!(request["secret_len"], 0);
+        frame::write(
+            &mut data,
+            &serde_json::to_vec(&json!({"ok":true,"output":COPY_OPERATION})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        data.write_all(b"ciphertext").unwrap();
+        // A quiet Agent/File lease here would prevent this EOF and deadlock the
+        // controller's transaction cleanup/status reconciliation.
+        disconnect(&mut data);
+        for (outcome, active) in [("copying", true), ("copied", false)] {
+            let request = connect(&mut status);
+            assert_eq!(
+                request["operation"],
+                json!(Operation::BackupStatus),
+                "backup streams never send AgentRelease"
+            );
+            assert_eq!(
+                request["slot"], 0,
+                "catalog status uses the maintenance slot"
+            );
+            assert!(request["session"].is_null() && request["expected_session"].is_null());
+            assert_eq!(request["secret_len"], 0);
+            let catalog = json!({"transactions":[{"transaction":COPY_OPERATION,"slot":7,"kind":"export",
+                "safe_id":SAFE,"bytes":33_554_432u64,"outcome":outcome,"active":active}]});
+            frame::write(
+                &mut status,
+                &serde_json::to_vec(&json!({"ok":true,"output":catalog.to_string()})).unwrap(),
+                1..=RESPONSE_LIMIT,
+            )
+            .unwrap();
+            disconnect(&mut status);
+        }
+    });
+    let mut runtime = oblivion_cli::windows::Runtime::new(&id).unwrap();
+    let slot = 7.try_into().unwrap();
+    let mut attachment = runtime
+        .attach_backup(COPY_OPERATION, slot, Arc::new(AtomicBool::new(false)))
+        .unwrap();
+    let mut bytes = [0; 10];
+    attachment.stream().read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"ciphertext");
+    attachment.close().unwrap();
+    oblivion_cli::backup::copied(&mut runtime, COPY_OPERATION, slot).unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn cancelled_backup_pending_read_closes_pipe_and_requires_status_recovery_not_agent_release() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+    let (id, mut data) = listener();
+    let mut control = instance(&id, false);
+    let server = std::thread::spawn(move || {
+        let request = connect(&mut data);
+        assert_eq!(request["operation"], json!(Operation::BackupAttach));
+        assert_eq!(request["slot"], 7);
+        assert_eq!(request["session"], COPY_OPERATION);
+        assert!(request["expected_session"].is_null());
+        assert_eq!(request["secret_len"], 0);
+        frame::write(
+            &mut data,
+            &serde_json::to_vec(&json!({"ok":true,"output":COPY_OPERATION})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        disconnect(&mut data);
+        let request = connect(&mut control);
+        assert_eq!(request["operation"], json!(Operation::BackupStatus));
+        assert_eq!(request["slot"], 0);
+        let catalog = json!({"transactions":[{"transaction":COPY_OPERATION,"slot":7,"kind":"import",
+            "safe_id":null,"bytes":null,"outcome":"recovery-required","active":false}]});
+        frame::write(
+            &mut control,
+            &serde_json::to_vec(&json!({"ok":true,"output":catalog.to_string()})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        disconnect(&mut control);
+        let request = connect(&mut control);
+        assert_eq!(request["operation"], json!(Operation::BackupCancel));
+        assert_eq!(request["slot"], 7);
+        assert_eq!(request["session"], COPY_OPERATION);
+        assert!(request["expected_session"].is_null());
+        assert_eq!(request["secret_len"], 0);
+        frame::write(
+            &mut control,
+            &serde_json::to_vec(&json!({"ok":true,"output":""})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        disconnect(&mut control);
+    });
+    let mut runtime = oblivion_cli::windows::Runtime::new(&id).unwrap();
+    let slot = 7.try_into().unwrap();
+    let mut attachment = runtime
+        .attach_backup(COPY_OPERATION, slot, Arc::new(AtomicBool::new(false)))
+        .unwrap();
+    let cancellation = attachment.cancellation();
+    let cancel = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        cancellation.cancel();
+    });
+    assert!(attachment.stream().read(&mut [0]).is_err());
+    cancel.join().unwrap();
+    attachment.close().unwrap();
+    let copied = oblivion_cli::backup::copied(&mut runtime, COPY_OPERATION, slot).unwrap_err();
+    assert_eq!(copied.to_string(), "backup_copy_requires_recovery");
+    let mut diagnostics = Vec::new();
+    assert!(
+        oblivion_cli::backup::finish_attempt(
+            &mut runtime,
+            COPY_OPERATION,
+            slot,
+            Err(copied),
+            &mut diagnostics
+        )
+        .is_err()
+    );
+    assert!(
+        String::from_utf8(diagnostics)
+            .unwrap()
+            .contains(COPY_OPERATION)
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn backup_attachment_refuses_a_different_acknowledged_transaction_and_closes_without_agent_release()
+{
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    let (id, mut data) = listener();
+    let server = std::thread::spawn(move || {
+        let request = connect(&mut data);
+        assert_eq!(request["operation"], json!(Operation::BackupAttach));
+        assert_eq!(request["session"], COPY_OPERATION);
+        frame::write(
+            &mut data,
+            &serde_json::to_vec(&json!({"ok":true,"output":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}))
+                .unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        disconnect(&mut data);
+    });
+    let mut runtime = oblivion_cli::windows::Runtime::new(&id).unwrap();
+    let error = runtime
+        .attach_backup(
+            COPY_OPERATION,
+            7.try_into().unwrap(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .err()
+        .unwrap();
+    assert_eq!(error.to_string(), "invalid_backup_attachment");
+    server.join().unwrap();
+}
+
+#[test]
+fn native_backup_adapter_copies_a_real_synthetic_luks_volume_and_publishes_only_after_status() {
+    use oblivion_cli::backup::Native;
+    use oblivion_transfer::backup::Source;
+    use oblivion_transfer::copy_protocol;
+    use oblivion_transfer::endpoint::{
+        Approval, OfferRequest, ReceiveRequest, read_message, write_message,
+    };
+    use oblivion_transfer::{ENCRYPTED_VOLUME_NAME, Manifest, Receipt, relay_payload};
+    use oblivion_wire::backup::{Exported, Imported};
+    const BYTES: u64 = 32 * 1024 * 1024;
+    const EXPORT: &str = "ffffffffffffffffffffffffffffffff";
+    struct Witness {
+        prefix: Vec<u8>,
+        count: u64,
+    }
+    impl Write for Witness {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.prefix
+                .extend_from_slice(&bytes[..bytes.len().min(8 - self.prefix.len())]);
+            self.count += bytes.len() as u64;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    fn copied_status(pipe: &mut File, transaction: &str, slot: u8, kind: &str) {
+        let request = connect(pipe);
+        assert_eq!(request["operation"], json!(Operation::BackupStatus));
+        assert_eq!(request["slot"], 0);
+        assert!(request["session"].is_null() && request["expected_session"].is_null());
+        let catalog = json!({"transactions":[{"transaction":transaction,"slot":slot,"kind":kind,
+            "safe_id":if kind=="export" {json!(SAFE)} else {Value::Null},"bytes":BYTES,"outcome":"copied","active":false}]});
+        frame::write(
+            pipe,
+            &serde_json::to_vec(&json!({"ok":true,"output":catalog.to_string()})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        disconnect(pipe);
+    }
+    fn backup_attach(pipe: &mut File, transaction: &str, slot: u8) {
+        let request = connect(pipe);
+        assert_eq!(request["operation"], json!(Operation::BackupAttach));
+        assert_eq!(request["slot"], slot);
+        assert_eq!(request["session"], transaction);
+        assert!(request["expected_session"].is_null());
+        assert_eq!(request["secret_len"], 0);
+        frame::write(
+            pipe,
+            &serde_json::to_vec(&json!({"ok":true,"output":transaction})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+    }
+    let area = CopyArea::new();
+    let source_path = area.0.join("opaque-backup.oblivion");
+    let target_path = area.0.join("saved.oblivion");
+    let mut file = File::create(&source_path).unwrap();
+    file.write_all(b"LUKS\xba\xbe\x00\x02").unwrap();
+    file.set_len(BYTES).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let (id, mut data) = listener();
+    let mut status = instance(&id, false);
+    let peer_source_path = source_path.clone();
+    let server = std::thread::spawn(move || {
+        backup_attach(&mut data, COPY_OPERATION, 7);
+        let receive: ReceiveRequest = read_message(&mut data, 4096).unwrap();
+        assert_eq!(receive.approval.id, COPY_OPERATION);
+        let manifest = Manifest::read(&mut data, receive.limits).unwrap();
+        assert_eq!(manifest.sha256(), receive.approval.manifest_sha256);
+        assert_eq!(manifest.entries().len(), 1);
+        assert_eq!(manifest.entries()[0].path(), ENCRYPTED_VOLUME_NAME);
+        assert_eq!(manifest.bytes(), BYTES);
+        let mut encoded = Vec::new();
+        manifest.write(&mut encoded).unwrap();
+        assert!(!String::from_utf8_lossy(&encoded).contains("PRIVATE_HOST_COPY_"));
+        data.write_all(b"receive\n").unwrap();
+        let mut witness = Witness {
+            prefix: Vec::new(),
+            count: 0,
+        };
+        relay_payload(&mut data, &mut witness, &manifest).unwrap();
+        assert_eq!(witness.prefix, b"LUKS\xba\xbe\x00\x02");
+        assert_eq!(witness.count, BYTES + 8);
+        write_message(
+            &mut data,
+            &Receipt {
+                id: COPY_OPERATION.into(),
+                manifest_sha256: manifest.sha256(),
+                entries: 1,
+                bytes: BYTES,
+            },
+        )
+        .unwrap();
+        disconnect(&mut data);
+        copied_status(&mut status, COPY_OPERATION, 7, "import");
+
+        backup_attach(&mut data, EXPORT, 8);
+        let offer: OfferRequest = read_message(&mut data, 4096).unwrap();
+        assert_eq!(offer.id, EXPORT);
+        assert_eq!(offer.paths, [ENCRYPTED_VOLUME_NAME]);
+        assert_eq!(offer.limits.entries, 1);
+        assert_eq!(offer.limits.bytes, BYTES);
+        assert!(
+            !serde_json::to_string(&offer)
+                .unwrap()
+                .contains("PRIVATE_HOST_COPY_")
+        );
+        let mut source = Source::open(&peer_source_path, BYTES).unwrap();
+        source.manifest().write(&mut data).unwrap();
+        let approval: Approval = read_message(&mut data, 4096).unwrap();
+        assert_eq!(approval.id, EXPORT);
+        assert_eq!(approval.manifest_sha256, source.manifest().sha256());
+        copy_protocol::Source::write_payload(&mut source, &mut data).unwrap();
+        let receipt: Receipt = read_message(&mut data, 4096).unwrap();
+        assert_eq!(receipt.id, EXPORT);
+        assert_eq!(receipt.manifest_sha256, source.manifest().sha256());
+        assert_eq!((receipt.entries, receipt.bytes), (1, BYTES));
+        data.write_all(b"copied\n").unwrap();
+        disconnect(&mut data);
+        copied_status(&mut status, EXPORT, 8, "export");
+    });
+    let mut runtime = oblivion_cli::windows::Runtime::new(&id).unwrap();
+    let mut source = runtime
+        .prepare_import(source_path.to_str().unwrap())
+        .unwrap();
+    assert_eq!(
+        <oblivion_cli::windows::Runtime as Native>::source_bytes(&source),
+        BYTES
+    );
+    let receipt = runtime
+        .send_import(
+            &mut source,
+            &Imported {
+                transaction: COPY_OPERATION.into(),
+                maximum: BYTES,
+            },
+            7.try_into().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        (receipt.id.as_str(), receipt.entries, receipt.bytes),
+        (COPY_OPERATION, 1, BYTES)
+    );
+    oblivion_cli::backup::copied(&mut runtime, COPY_OPERATION, 7.try_into().unwrap()).unwrap();
+    let destination = runtime
+        .prepare_export(target_path.to_str().unwrap())
+        .unwrap();
+    let (output, receipt) = runtime
+        .receive_export(
+            destination,
+            &Exported {
+                transaction: EXPORT.into(),
+                safe_id: SAFE.into(),
+                bytes: BYTES,
+            },
+            8.try_into().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        (receipt.id.as_str(), receipt.entries, receipt.bytes),
+        (EXPORT, 1, BYTES)
+    );
+    assert!(
+        !target_path.exists(),
+        "a verified receipt alone must not publish the personal backup"
+    );
+    oblivion_cli::backup::copied(&mut runtime, EXPORT, 8.try_into().unwrap()).unwrap();
+    assert_eq!(
+        runtime.publish_export(output).unwrap(),
+        target_path.to_string_lossy()
+    );
+    assert_eq!(std::fs::metadata(&target_path).unwrap().len(), BYTES);
+    let mut prefix = [0; 8];
+    File::open(target_path)
+        .unwrap()
+        .read_exact(&mut prefix)
+        .unwrap();
+    assert_eq!(&prefix, b"LUKS\xba\xbe\x00\x02");
+    server.join().unwrap();
+}

@@ -88,8 +88,8 @@ fn syntax_and_unimplemented_endpoints_fail_before_hyperv_or_installation_discove
             "Event copies require their reviewed approval; --yes cannot be combined with --events",
         ),
         (
-            vec!["backup", "import", "unopened.oblivion"],
-            "windows_backup_endpoint_not_implemented",
+            vec!["backup", "import"],
+            "Use backup export --safe SAFE FILE, backup import FILE, backup finish TRANSACTION, backup status [--json] or backup discard TRANSACTION",
         ),
         (
             vec!["share", "import", "unopened.oblivion-share"],

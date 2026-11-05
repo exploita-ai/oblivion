@@ -1,5 +1,6 @@
 //! Personal full-volume backups, separate from credential-free Share. Parsing
-//! is shared for every command; ciphertext copying stays in the native adapter.
+//! and transaction orchestration are shared; native adapters own file handles,
+//! ciphertext copying, attachment cleanup and atomic output publication.
 use crate::controller::{self, Call, Controller, Result, State};
 use crate::run::Runtime;
 use oblivion_wire::backup::{self, Finished, Kind, Outcome, Status};
@@ -24,6 +25,151 @@ enum Action {
     Finish(String),
     Status { json: bool },
     Discard(String),
+}
+
+/// A copy endpoint retains the reviewed native file objects. Copy methods must
+/// close their data channel and attachment before returning, including errors.
+/// An unpublished Output owns cleanup of its private temporary file.
+pub trait Native: Runtime {
+    type Source;
+    type Destination;
+    type Output;
+
+    fn prepare_import(&mut self, path: &str) -> Result<Self::Source>;
+    fn source_bytes(source: &Self::Source) -> u64;
+    fn prepare_export(&mut self, path: &str) -> Result<Self::Destination>;
+    fn send_import(
+        &mut self,
+        source: &mut Self::Source,
+        prepared: &backup::Imported,
+        slot: Self::Slot,
+    ) -> Result<oblivion_transfer::Receipt>;
+    fn receive_export(
+        &mut self,
+        destination: Self::Destination,
+        prepared: &backup::Exported,
+        slot: Self::Slot,
+    ) -> Result<(Self::Output, oblivion_transfer::Receipt)>;
+    fn publish_export(&mut self, output: Self::Output) -> Result<String>;
+}
+
+pub fn run<R: Native>(
+    runtime: &mut R,
+    command: Command,
+    output: &mut impl Write,
+    diagnostics: &mut impl Write,
+) -> Result<i32>
+where
+    R::Slot: Default + Serialize,
+{
+    if let Command::Control(command) = command {
+        return execute(runtime, command, output, diagnostics);
+    }
+    let state = writable_state(runtime)?;
+    if state.recovery_required {
+        return Err("Complete recovery before copying a personal backup".into());
+    }
+    match command {
+        Command::Export { safe, path } => {
+            let id = state.find_safe(&safe)?.ok_or("Safe not found")?;
+            if !state.sessions.contains(&id) {
+                return Err("Personal backups require a persistent Safe".into());
+            }
+            if state
+                .open_sessions
+                .iter()
+                .any(|safe| safe.id.as_ref() == Some(&id))
+            {
+                return Err("Close the Safe before exporting its personal backup".into());
+            }
+            let destination = runtime.prepare_export(&path)?;
+            let slot = crate::run::free_slot(runtime, &state)?;
+            writeln!(
+                diagnostics,
+                "A personal backup contains the complete encrypted Safe, including saved logins and installed software. Keep its original Safe password."
+            )?;
+            let secret = runtime.password("Safe password")?;
+            let response = runtime.request(Call {
+                operation: Operation::BackupExportBegin,
+                slot: Some(slot),
+                session: Some(&id),
+                expected_session: Some(&id),
+                secret: &secret,
+            })?;
+            drop(secret);
+            let prepared: backup::Exported =
+                serde_json::from_str(&response).map_err(|_| "invalid_backup_preparation")?;
+            if !valid_id(&prepared.transaction) {
+                return Err("invalid_backup_preparation".into());
+            }
+            let result = (|| {
+                if prepared.safe_id != id || !backup::volume_size(prepared.bytes) {
+                    return Err("invalid_backup_preparation".into());
+                }
+                let (publication, receipt) =
+                    runtime.receive_export(destination, &prepared, slot)?;
+                verify_receipt(&receipt, &prepared.transaction, prepared.bytes)?;
+                copied(runtime, &prepared.transaction, slot)?;
+                let path = runtime.publish_export(publication)?;
+                writeln!(output, "{}", serde_json::to_string(&receipt)?)?;
+                writeln!(diagnostics, "Personal backup saved to {path:?}")?;
+                Ok(0)
+            })();
+            finish_attempt(runtime, &prepared.transaction, slot, result, diagnostics)
+        }
+        Command::Import { path } => {
+            let mut source = runtime.prepare_import(&path)?;
+            let bytes = R::source_bytes(&source);
+            if !backup::volume_size(bytes) {
+                return Err("invalid_backup_source".into());
+            }
+            let slot = crate::run::free_slot(runtime, &state)?;
+            writeln!(
+                diagnostics,
+                "Restore the complete Safe with its original identity and saved logins. It will remain offline after restoration."
+            )?;
+            let response = runtime.request(Call {
+                operation: Operation::BackupImportBegin,
+                slot: Some(slot),
+                session: None,
+                expected_session: None,
+                secret: &[],
+            })?;
+            let prepared: backup::Imported =
+                serde_json::from_str(&response).map_err(|_| "invalid_backup_preparation")?;
+            if !valid_id(&prepared.transaction) {
+                return Err("invalid_backup_preparation".into());
+            }
+            let result = (|| {
+                if !backup::volume_size(prepared.maximum) {
+                    return Err("invalid_backup_preparation".into());
+                }
+                if bytes > prepared.maximum {
+                    return Err("insufficient_restore_space".into());
+                }
+                let receipt = runtime.send_import(&mut source, &prepared, slot)?;
+                verify_receipt(&receipt, &prepared.transaction, bytes)?;
+                copied(runtime, &prepared.transaction, slot)?;
+                let finished = finish_import(runtime, &prepared.transaction, slot, diagnostics)?;
+                writeln!(output, "{}", serde_json::to_string(&finished)?)?;
+                writeln!(diagnostics, "Safe {} restored offline.", finished.safe_id)?;
+                Ok(0)
+            })();
+            finish_attempt(runtime, &prepared.transaction, slot, result, diagnostics)
+        }
+        Command::Control(_) => unreachable!("management commands return before copy preparation"),
+    }
+}
+
+fn verify_receipt(
+    receipt: &oblivion_transfer::Receipt,
+    transaction: &str,
+    bytes: u64,
+) -> Result<()> {
+    if receipt.id != transaction || receipt.entries != 1 || receipt.bytes != bytes {
+        return Err("invalid_backup_receipt".into());
+    }
+    Ok(())
 }
 
 pub fn parse(args: &[String]) -> Result<Command> {

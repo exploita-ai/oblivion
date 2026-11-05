@@ -44,9 +44,6 @@ pub fn run() -> Result<i32> {
             println!("oblivion {}", env!("CARGO_PKG_VERSION"));
             return Ok(0);
         }
-        Command::Backup(backup::Command::Export { .. } | backup::Command::Import { .. }) => {
-            return Err("windows_backup_endpoint_not_implemented".into());
-        }
         Command::Files(Files::Copy(command))
             if !command.events_output && !command.confirmed && !std::io::stdin().is_terminal() =>
         {
@@ -141,7 +138,7 @@ fn execute(
         Command::ChildTask(command) => {
             child_task::execute(runtime, command, &mut std::io::stdout().lock())
         }
-        Command::Backup(backup::Command::Control(command)) => backup::execute(
+        Command::Backup(command) => backup::run(
             runtime,
             command,
             &mut std::io::stdout().lock(),
