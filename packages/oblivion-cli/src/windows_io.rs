@@ -43,9 +43,7 @@ pub(crate) fn cancel_and_join(worker: JoinHandle<()>, stopped: &AtomicBool) -> i
     // ERROR_NOT_FOUND can race the worker entering its next synchronous call.
     // Repeat until the worker has really exited; never detach its I/O buffers.
     while !worker.is_finished() {
-        if unsafe { CancelSynchronousIo(worker.as_raw_handle()) } == 0
-            && unsafe { GetLastError() } != ERROR_NOT_FOUND
-        {
+        if cancel_read(&worker).is_err() {
             failed = true;
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -54,6 +52,15 @@ pub(crate) fn cancel_and_join(worker: JoinHandle<()>, stopped: &AtomicBool) -> i
         .join()
         .map_err(|_| io::Error::other("windows_io_worker_failed"))?;
     if failed {
+        return Err(io::Error::other("windows_io_cancellation_failed"));
+    }
+    Ok(())
+}
+
+pub(crate) fn cancel_read(worker: &JoinHandle<()>) -> io::Result<()> {
+    if unsafe { CancelSynchronousIo(worker.as_raw_handle()) } == 0
+        && unsafe { GetLastError() } != ERROR_NOT_FOUND
+    {
         return Err(io::Error::other("windows_io_cancellation_failed"));
     }
     Ok(())

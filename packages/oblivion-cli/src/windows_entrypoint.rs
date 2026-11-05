@@ -158,14 +158,7 @@ fn execute(
 }
 
 fn manager(layout: &Layout) -> Result<i32> {
-    // The authenticated broker supplies administrator-owned software paths.
-    // This child and every explicit host-side file copy remain unelevated.
-    let status = std::process::Command::new(&layout.manager)
-        .env("OBLIVION_LAUNCHER", &layout.launcher)
-        .env("OTUI_ASSET_ROOT", &layout.assets)
-        .env("OBLIVION_RUNTIME_MODE", "desktop")
-        .env_remove("OBLIVION_LIVE_STORAGE")
-        .env_remove("OBLIVION_SHOW_INTRO")
+    let status = crate::windows_overlay::manager_command(layout)
         .status()
         .map_err(|_| "manager_process_failed")?;
     status

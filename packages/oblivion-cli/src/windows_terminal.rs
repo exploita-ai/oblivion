@@ -2,7 +2,10 @@
 //! Console secrets never consume redirected stdin. One owned reader retains VT
 //! input bytes; its synchronous I/O is cancelled and joined before mode restore.
 use crate::controller::Result;
-use crate::windows_io::{cancel_and_join, duplicate};
+use crate::terminal_overlay::{self, Keys, Page, Screen};
+use crate::windows_io::{cancel_and_join, cancel_read, duplicate};
+use crate::windows_overlay::Overlay;
+use oblivion_native_windows::broker::Layout;
 use oblivion_native_windows::client::Channel;
 use oblivion_wire::agent::{self, Command, Size};
 use oblivion_wire::terminal_guard::Guard;
@@ -26,16 +29,96 @@ use windows_sys::Win32::System::Console::{
     STD_OUTPUT_HANDLE, SetConsoleCP, SetConsoleCtrlHandler, SetConsoleMode, SetConsoleOutputCP,
 };
 use windows_sys::Win32::System::Threading::Sleep;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 static IN_USE: AtomicBool = AtomicBool::new(false);
 static SIGNAL: AtomicU32 = AtomicU32::new(0);
 static HANDLER_ACTIVE: AtomicBool = AtomicBool::new(false);
+// Agent signal frames carry Linux guest numbers.
+const GUEST_SIGWINCH: i32 = 28;
 
 pub struct Terminal {
     input: File,
     output: File,
     error: File,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Panels<'a> {
+    pub layout: &'a Layout,
+    pub safe: &'a str,
+}
+
+struct Attachment {
+    input: Option<Input>,
+    opening: Option<Page>,
+    overlay: Option<Overlay>,
+    screen: Option<Screen>,
+}
+
+impl Attachment {
+    fn enqueue_input(
+        &mut self,
+        pending: &mut Vec<u8>,
+        keys: &mut Keys,
+        human: &mut crate::activity::HumanInput,
+        interactive: bool,
+        on_activity: &mut impl FnMut(Instant),
+    ) -> Result<bool> {
+        if self.opening.is_some() {
+            return Ok(false);
+        }
+        let Some(input) = self.input.as_ref() else {
+            return Ok(false);
+        };
+        let now = Instant::now();
+        let mut forwarded = Zeroizing::new(Vec::new());
+        keys.expire(&mut forwarded, now);
+        let eof = match input.events.try_recv() {
+            Ok(InputEvent::Bytes(bytes)) if self.screen.is_some() => {
+                let mut touched = false;
+                for &byte in bytes.iter() {
+                    touched |= human.feed(byte, now);
+                    if let Some(page) = keys.feed(byte, &mut forwarded, now) {
+                        // Coalesced input after a panel key must not cross
+                        // either boundary without a complete paste frame.
+                        self.opening = Some(page);
+                        input.stopped.store(true, Ordering::Release);
+                        break;
+                    }
+                }
+                if touched {
+                    on_activity(now);
+                }
+                false
+            }
+            Ok(InputEvent::Bytes(bytes)) => {
+                if interactive
+                    && bytes
+                        .iter()
+                        .fold(false, |touched, byte| human.feed(*byte, now) || touched)
+                {
+                    on_activity(now);
+                }
+                agent::write_frame(pending, 0, &bytes)?;
+                false
+            }
+            Ok(InputEvent::Eof) => {
+                keys.finish(&mut forwarded);
+                true
+            }
+            Ok(InputEvent::Failed(error)) => return Err(error.into()),
+            Err(mpsc::TryRecvError::Empty) => false,
+            Err(mpsc::TryRecvError::Disconnected) => return Err("terminal_input_lost".into()),
+        };
+        if !forwarded.is_empty() {
+            agent::write_frame(pending, 0, &forwarded)?;
+        }
+        if eof {
+            agent::write_frame(pending, 5, &[])?;
+        }
+        Ok(eof)
+    }
 }
 
 impl Terminal {
@@ -75,10 +158,11 @@ impl Terminal {
 
     /// The caller owns the authenticated AgentAttach channel and keeps its lease
     /// until explicit AgentRelease finishes, including after the guest exits.
-    pub fn attach(
+    pub(crate) fn attach(
         &self,
         channel: &mut Channel,
         command: &Command<'_>,
+        panels: Option<Panels<'_>>,
         mut on_activity: impl FnMut(Instant),
     ) -> Result<i32> {
         let _exclusive = Exclusive::claim()?;
@@ -100,13 +184,38 @@ impl Terminal {
         )?;
         command.write(channel)?;
         channel.flush()?;
-        let mut input = Input::start(self.input.try_clone()?)?;
-        let result = self.bridge(channel, &input, initial, &mut on_activity);
+        let panels = panels.filter(|_| initial.is_some());
+        let mut attachment = Attachment {
+            input: Some(Input::start(self.input.try_clone()?)?),
+            opening: None,
+            overlay: None,
+            screen: initial.filter(|_| panels.is_some()).map(|size| {
+                let mut screen = terminal_overlay::parser(size.rows, size.cols);
+                screen.enable_synchronized_output();
+                screen
+            }),
+        };
+        let result = self.bridge(
+            channel,
+            &mut attachment,
+            &modes,
+            initial,
+            panels,
+            &mut on_activity,
+        );
         // Completion is not inferred from CancelSynchronousIo accepting a
         // request. Keep the reader and its buffers until its thread exits.
-        let stopped = input.stop();
+        let stopped = attachment.input.as_mut().map(Input::stop).transpose();
+        let panel_closed = if let Some(overlay) = attachment.overlay.take() {
+            overlay
+                .close()
+                .and_then(|()| self.restore_panel(&modes, attachment.screen.as_ref()))
+        } else {
+            Ok(())
+        };
         let restored = modes.restore();
         stopped?;
+        panel_closed?;
         restored?;
         result
     }
@@ -114,20 +223,73 @@ impl Terminal {
     fn bridge(
         &self,
         channel: &mut Channel,
-        input: &Input,
+        attachment: &mut Attachment,
+        modes: &Modes,
         mut viewport: Option<Size>,
+        panels: Option<Panels<'_>>,
         on_activity: &mut impl FnMut(Instant),
     ) -> Result<i32> {
         let mut human = crate::activity::HumanInput::default();
         let interactive = viewport.is_some();
         let mut decoder = agent::Decoder::default();
-        let mut pending = Vec::new();
+        let mut pending = Zeroizing::new(Vec::new());
         let mut written = 0;
         let mut ended = false;
         let mut resized = Instant::now();
         let mut output_guard = Guard::default();
         let mut error_guard = Guard::default();
+        let mut keys = Keys::default();
+        let mut replies = Vec::new();
+        let mut redraw = false;
         loop {
+            if let Some(page) = attachment.opening {
+                let reader = attachment.input.as_mut().ok_or("terminal_input_lost")?;
+                if reader.poll_stop()? {
+                    attachment.input.take();
+                    attachment.opening = None;
+                    let panels = panels.ok_or("terminal_panel_unavailable")?;
+                    let mut output = &self.output;
+                    // The old reader may have consumed a prefix of a paste.
+                    // Discard the old receiver and console queue as one handoff.
+                    self.flush_input()?;
+                    terminal_overlay::begin(&mut output)?;
+                    output.flush()?;
+                    match Overlay::start(
+                        panels.layout,
+                        page,
+                        panels.safe,
+                        &self.input,
+                        &self.output,
+                        &self.error,
+                    ) {
+                        Ok(overlay) => attachment.overlay = Some(overlay),
+                        Err(error) => {
+                            self.restore_panel(modes, attachment.screen.as_ref())?;
+                            attachment.input = Some(Input::start(self.input.try_clone()?)?);
+                            writeln!(&self.error, "\r\nOblivion panel could not open: {error}")?;
+                            redraw = true;
+                        }
+                    }
+                }
+            }
+            if let Some(overlay) = attachment.overlay.as_mut() {
+                if let Some(status) = overlay.poll()? {
+                    attachment
+                        .overlay
+                        .take()
+                        .ok_or("terminal_panel_unavailable")?
+                        .close()?;
+                    if let Some(screen) = attachment.screen.as_mut() {
+                        screen.write_replies(&mut replies)?;
+                    }
+                    self.restore_panel(modes, attachment.screen.as_ref())?;
+                    if !status.success() {
+                        writeln!(&self.error, "\r\nOblivion panel closed unexpectedly.")?;
+                    }
+                    attachment.input = Some(Input::start(self.input.try_clone()?)?);
+                    redraw = true;
+                }
+            }
             let now = Instant::now();
             if interactive && human.expire(now) {
                 on_activity(now);
@@ -145,14 +307,22 @@ impl Terminal {
                         } else {
                             (&self.error, &mut error_guard)
                         };
-                        let bytes = if mode(file).is_some() {
-                            guard.filter(&bytes)
-                        } else {
-                            bytes
-                        };
-                        let mut file = file;
-                        file.write_all(&bytes)?;
-                        file.flush()?;
+                        let console = mode(file).is_some();
+                        let bytes = if console { guard.filter(&bytes) } else { bytes };
+                        if console {
+                            if let Some(screen) = attachment.screen.as_mut() {
+                                screen.process(&bytes);
+                                if attachment.overlay.is_none() {
+                                    screen.write_replies(&mut io::sink())?;
+                                }
+                            }
+                            if attachment.overlay.is_some() {
+                                continue;
+                            }
+                        }
+                        let mut destination = file;
+                        destination.write_all(&bytes)?;
+                        destination.flush()?;
                     }
                     4 if bytes.len() == 4 => {
                         let code = i32::from_be_bytes(bytes.try_into().unwrap());
@@ -175,10 +345,10 @@ impl Terminal {
                     Err(error) => return Err(error.into()),
                 }
             }
-            if written == pending.len() {
+            if !pending.is_empty() && written == pending.len() {
                 match channel.try_flush() {
                     Ok(()) => {
-                        pending.clear();
+                        pending.zeroize();
                         written = 0;
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
@@ -187,47 +357,68 @@ impl Terminal {
             }
             if pending.is_empty() {
                 let signal = SIGNAL.swap(0, Ordering::AcqRel);
-                if signal != 0 {
-                    agent::write_frame(&mut pending, 6, &(signal as i32).to_be_bytes())?;
+                if signal != 0
+                    && (signal == 1 || attachment.overlay.is_none() && attachment.opening.is_none())
+                {
+                    agent::write_frame(&mut *pending, 6, &(signal as i32).to_be_bytes())?;
+                } else if redraw {
+                    redraw = false;
+                    agent::write_frame(&mut *pending, 6, &GUEST_SIGWINCH.to_be_bytes())?;
                 } else if viewport.is_some() && resized.elapsed() >= Duration::from_millis(50) {
                     resized = Instant::now();
                     let current = self.size()?;
                     if current != viewport {
                         let size = current.ok_or("terminal_console_lost")?;
                         viewport = Some(size);
+                        if let Some(screen) = attachment.screen.as_mut() {
+                            screen.resize(size.rows, size.cols);
+                        }
                         agent::write_frame(
-                            &mut pending,
+                            &mut *pending,
                             3,
                             &[size.rows.to_be_bytes(), size.cols.to_be_bytes()].concat(),
                         )?;
                     }
-                } else if !ended {
-                    match input.events.try_recv() {
-                        Ok(InputEvent::Bytes(bytes)) => {
-                            let now = Instant::now();
-                            if interactive
-                                && bytes
-                                    .iter()
-                                    .fold(false, |touched, byte| human.feed(*byte, now) || touched)
-                            {
-                                on_activity(now);
-                            }
-                            agent::write_frame(&mut pending, 0, &bytes)?;
+                } else {
+                    if attachment.overlay.is_some() {
+                        if let Some(screen) = attachment.screen.as_mut() {
+                            screen.write_replies(&mut replies)?;
                         }
-                        Ok(InputEvent::Eof) => {
-                            ended = true;
-                            agent::write_frame(&mut pending, 5, &[])?;
-                        }
-                        Ok(InputEvent::Failed(error)) => return Err(error.into()),
-                        Err(mpsc::TryRecvError::Empty) => {}
-                        Err(mpsc::TryRecvError::Disconnected) => {
-                            return Err("terminal_input_lost".into());
-                        }
+                    }
+                    if !replies.is_empty() {
+                        agent::write_frame(&mut *pending, 0, &replies)?;
+                        replies.clear();
+                    } else if !ended {
+                        ended = attachment.enqueue_input(
+                            &mut pending,
+                            &mut keys,
+                            &mut human,
+                            interactive,
+                            on_activity,
+                        )?;
                     }
                 }
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    fn flush_input(&self) -> Result<()> {
+        if unsafe { FlushConsoleInputBuffer(self.input.as_raw_handle()) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
+    fn restore_panel(&self, modes: &Modes, screen: Option<&Screen>) -> Result<()> {
+        modes.resume()?;
+        let mut output = &self.output;
+        terminal_overlay::reset(&mut output)?;
+        if let Some(screen) = screen {
+            terminal_overlay::repaint(screen, &mut output)?;
+        }
+        output.flush()?;
+        self.flush_input()
     }
 }
 
@@ -243,8 +434,12 @@ fn mode(file: &File) -> Option<u32> {
     (unsafe { GetConsoleMode(file.as_raw_handle(), &mut value) } != 0).then_some(value)
 }
 
+#[cfg(test)]
+#[path = "windows_terminal/overlay_tests.rs"]
+mod overlay_tests;
+
 struct Modes {
-    saved: Vec<(HANDLE, u32)>,
+    saved: Vec<(HANDLE, u32, u32)>,
     input_cp: Option<u32>,
     output_cp: Option<u32>,
     restored: bool,
@@ -260,7 +455,7 @@ impl Modes {
     }
     fn set(&mut self, file: &File, value: u32) -> Result<()> {
         let old = mode(file).ok_or("Console handle required")?;
-        self.saved.push((file.as_raw_handle(), old));
+        self.saved.push((file.as_raw_handle(), old, value));
         if unsafe { SetConsoleMode(file.as_raw_handle(), value) } == 0 {
             return Err(io::Error::last_os_error().into());
         }
@@ -300,6 +495,19 @@ impl Modes {
         }
         Ok(guard)
     }
+    fn resume(&self) -> Result<()> {
+        for &(handle, _, value) in &self.saved {
+            if unsafe { SetConsoleMode(handle, value) } == 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+        }
+        if self.input_cp.is_some() && unsafe { SetConsoleCP(65001) } == 0
+            || self.output_cp.is_some() && unsafe { SetConsoleOutputCP(65001) } == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
     fn restore(mut self) -> Result<()> {
         self.restore_inner()
     }
@@ -308,7 +516,7 @@ impl Modes {
             return Ok(());
         }
         let mut failed = false;
-        for &(handle, mode) in self.saved.iter().rev() {
+        for &(handle, mode, _) in self.saved.iter().rev() {
             failed |= unsafe { SetConsoleMode(handle, mode) } == 0;
         }
         if let Some(cp) = self.input_cp {
@@ -446,6 +654,17 @@ impl Input {
             return Ok(());
         };
         cancel_and_join(worker, &self.stopped).map_err(Into::into)
+    }
+    fn poll_stop(&mut self) -> Result<bool> {
+        let Some(worker) = self.worker.as_ref() else {
+            return Ok(true);
+        };
+        if !worker.is_finished() {
+            cancel_read(worker)?;
+            return Ok(false);
+        }
+        self.stop()?;
+        Ok(true)
     }
 }
 impl Drop for Input {

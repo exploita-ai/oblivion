@@ -2,7 +2,7 @@
 //! supervisor supplies the elected runtime ID; discovery/startup live above it.
 use crate::controller::{Call, Controller, Result};
 use crate::run;
-use crate::windows_terminal::{self, Terminal};
+use crate::windows_terminal::{self, Panels, Terminal};
 use oblivion_native_windows::{broker, client};
 use oblivion_wire::agent::{Command, Launch, Size};
 use oblivion_wire::control::{Operation, Request};
@@ -319,7 +319,7 @@ pub struct Runtime {
     terminal: Option<Terminal>,
     // Kept until terminal/controller handles have been released. Another
     // terminal owns its own lease on the same supervisor and controller VM.
-    _supervision: Option<broker::Lease>,
+    supervision: Option<broker::Lease>,
 }
 
 impl Runtime {
@@ -328,14 +328,14 @@ impl Runtime {
             runtime_id: runtime_id.to_owned(),
             client: Client::new(runtime_id)?,
             terminal: None,
-            _supervision: None,
+            supervision: None,
         })
     }
 
     pub fn brokered(lease: broker::Lease, stop: Arc<AtomicBool>) -> Result<Self> {
         let mut runtime = Self::new(&lease.layout().runtime_id)?;
         runtime.client.cancelled = stop;
-        runtime._supervision = Some(lease);
+        runtime.supervision = Some(lease);
         Ok(runtime)
     }
 
@@ -562,11 +562,15 @@ impl Runtime {
             expected_session: Some(id),
             secret: &[],
         })?;
+        let panels = self.supervision.as_ref().map(|lease| Panels {
+            layout: lease.layout(),
+            safe: id,
+        });
         let result = self
             .terminal
             .as_ref()
             .ok_or("terminal_unavailable")?
-            .attach(&mut channel, command, |at| {
+            .attach(&mut channel, command, panels, |at| {
                 if let Some(activity) = activity.as_mut() {
                     activity.touch(at);
                 }

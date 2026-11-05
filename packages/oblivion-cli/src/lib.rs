@@ -37,4 +37,6 @@ pub mod windows_files;
 #[cfg(windows)]
 mod windows_io;
 #[cfg(windows)]
+mod windows_overlay;
+#[cfg(windows)]
 pub mod windows_terminal;
