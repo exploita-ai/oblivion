@@ -33,10 +33,14 @@ integration conditions require an unmodified client, users authenticating with
 their own accounts, and direct provider billing. Oblivion does not resell API
 usage or authenticate users through an intermediary provider account.
 
-Agent package versions, download URLs and integrity values are recorded in
-script/oblivion/install-agents.json. Debian packages, Python tool bundles and
-other dependencies retain their own licenses; image inventories and bundled
-notices identify their contents.
+Agent package versions, download URLs, integrity values and separate distribution
+conditions are recorded in script/oblivion/install-agents.json. Pinned upstream
+license and notice files are retained in script/oblivion/agent-notices and
+installed under /usr/share/doc/oblivion-agents in the Safe image. The client
+inventory identifies the actual installed architecture, executables and notices.
+These records do not constitute acceptance of commercial terms or relicense
+the clients. Debian packages, Python tool bundles and other dependencies retain
+their own licenses; image inventories and bundled notices identify their contents.
 
 ICU4X Unicode selection aliases
 ------------------------------

@@ -87,6 +87,8 @@ script/oblivion/*
 !script/oblivion/install-session-node.py
 !script/oblivion/install-agents.py
 !script/oblivion/install-agents.json
+!script/oblivion/agent-notices/
+!script/oblivion/agent-notices/**
 !script/oblivion/test-host-firewall.py
 !script/oblivion/vm-*.sh
 !script/oblivion/vm-*.py

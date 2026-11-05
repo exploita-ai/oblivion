@@ -80,10 +80,35 @@ dedicated collector domains are denied ahead of user rules. This is not a claim
 that all telemetry can be identified: traffic to a collector sharing the model
 API's encrypted destination cannot be distinguished by a hostname-only gateway.
 
-Agent versions and package integrity values are recorded in
-[install-agents.json](../script/oblivion/install-agents.json). Provider terms,
-account restrictions and billing remain those of the native clients. See
-[NOTICE](../NOTICE) for licensing boundaries.
+## Official client distribution
+
+Images preinstall the pinned official Linux clients so a prepared Safe does not
+need a package download to open its terminal interface. Authentication and remote
+inference still require the provider's supported network access and account.
+
+[install-agents.json](../script/oblivion/install-agents.json) records package
+identity, official download URL, SHA-512 integrity and a separate distribution
+policy for each client. The image installer verifies the required upstream
+license and notice files against committed SHA-256 hashes before downloading a
+client. It preserves the upstream package and installs the verified notices
+under `/usr/share/doc/oblivion-agents/`. The installed `build-evidence.json`,
+also exported as the image's `client-evidence.json`, records only the clients and
+architecture actually installed, their executable hashes and their notices.
+Package integrity identifies bytes; it does not grant distribution rights.
+
+Codex retains its [Apache-2.0 license](https://github.com/openai/codex/blob/rust-v0.159.2/LICENSE)
+and [upstream notices](https://github.com/openai/codex/blob/rust-v0.159.2/NOTICE).
+OpenCode 2 retains its [MIT license](https://github.com/anomalyco/opencode/blob/v2.0.1/LICENSE),
+including when its platform package has no separate license file.
+Claude Code has [separate terms](https://github.com/anthropics/claude-code/blob/v2.1.302/LICENSE.md)
+and [commercial integration conditions](https://code.claude.com/docs/en/legal-and-compliance#can-customers-offer-claude-code-in-their-products).
+Its client remains unmodified, its native authentication choices remain available,
+and users supply their own accounts with direct provider billing. It is not
+relicensed under Oblivion's MIT license. The recorded policy and notices do not
+replace review of the applicable terms before publishing a candidate.
+
+Provider terms, account restrictions and billing remain those of the native
+clients. See [NOTICE](../NOTICE) for the framework's licensing boundaries.
 
 Local inference, Ollama endpoint integration and managed model downloads are
 explicitly deferred until after Oblivion 1.0. See the

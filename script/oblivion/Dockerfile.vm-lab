@@ -113,6 +113,7 @@ COPY packages/tui-kit/src/ /tui-kit/src/
 COPY package.json bun.lock LICENSE NOTICE /workspace-inputs/
 COPY script/oblivion/Dockerfile.vm-lab script/oblivion/hypervisor-kernel.py script/oblivion/hypervisor-qemu.py script/oblivion/controller-setup.sh script/oblivion/controller-pack.sh script/oblivion/live-setup.sh script/oblivion/live-pack.sh script/oblivion/live-storage.py script/oblivion/live-grub.cfg script/oblivion/live-controller.json script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/session-identities.sh script/oblivion/pack-vm-assets.sh script/oblivion/host-firewall.nft script/oblivion/install-agents.py script/oblivion/install-agents.json script/oblivion/session-node.json script/oblivion/install-session-node.py script/oblivion/session-packages.txt script/oblivion/session-analysis.lock script/oblivion/session-analysis-licenses.json script/oblivion/install-session-analysis.py script/oblivion/onionshare-source.json script/oblivion/onionshare-requirements.lock script/oblivion/onionshare-licenses.json script/oblivion/install-onionshare.py script/oblivion/install-vbox-clipboard.py script/oblivion/vbox-clipboard.json /runtime-inputs/
 COPY script/oblivion/display/ /runtime-inputs/display/
+COPY script/oblivion/agent-notices/ /runtime-inputs/agent-notices/
 COPY script/oblivion/live-os/ /runtime-inputs/live-os/
 COPY script/oblivion/native-bundle/host-sources.py /runtime-inputs/native-bundle/host-sources.py
 COPY script/oblivion/native-bundle/host-sources.py /host-sources.py
@@ -496,8 +497,8 @@ COPY packages/oblivion-history/oblivion_history/ /usr/lib/oblivion/history/obliv
 COPY packages/oblivion-tools/dist/server.mjs /usr/lib/oblivion/tools/server.mjs
 COPY packages/oblivion-host/guest/native-tools/codex.toml /etc/codex/config.toml
 COPY script/oblivion/install-agents.py script/oblivion/install-agents.json /build/agents/
+COPY script/oblivion/agent-notices/ /build/agents/agent-notices/
 RUN python3 /build/agents/install-agents.py "$TARGETARCH" / $OBLIVION_AGENTS --verify \
-    && cp /build/agents/install-agents.json /usr/lib/oblivion/build-evidence.json \
     && rm -rf /build/agents
 
 # Direct-controller Debian packaging deliberately excludes Live OS configuration.
@@ -543,6 +544,7 @@ COPY packages/theme/src/ /packaging-runtime-inputs/theme/
 COPY packages/tui-kit/src/ /packaging-runtime-inputs/tui-kit/
 COPY package.json bun.lock /packaging-runtime-inputs/workspace/
 COPY script/oblivion/install-agents.py script/oblivion/install-agents.json script/oblivion/session-node.json script/oblivion/install-session-node.py script/oblivion/session-packages.txt script/oblivion/session-analysis.lock script/oblivion/session-analysis-licenses.json script/oblivion/install-session-analysis.py script/oblivion/onionshare-source.json script/oblivion/onionshare-requirements.lock script/oblivion/install-onionshare.py /packaging-runtime-inputs/locks/
+COPY script/oblivion/agent-notices/ /packaging-runtime-inputs/locks/agent-notices/
 RUN sh /pack-vm-assets.sh / /roles /usr/share/doc/oblivion-stack/build \
     && cp /roles/session/usr/lib/oblivion/build-evidence.json /usr/share/doc/oblivion-stack/build/client-evidence.json \
     && python3 -c 'import json,os,pathlib; pathlib.Path("/usr/share/doc/oblivion-stack/build/inputs.json").write_text(json.dumps({"format":"oblivion-debian-build","version":1,"revision":os.environ["OBLIVION_SOURCE_REVISION"],"dirty":os.environ["OBLIVION_SOURCE_DIRTY"]=="true","architecture":os.environ["TARGETARCH"],"development_only":True})+"\n")' \
