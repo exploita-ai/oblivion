@@ -26,7 +26,16 @@ const renderer = await createCliRenderer({
 const clipboard = createManagerClipboard(renderer)
 const exit = () => { clipboard.dispose(); renderer.destroy(); process.exit(0) }
 
+function runsWithoutTerminal(args: string[]) {
+  return (args[0] === "settings" && args[1] === "idle")
+    || (args[0] === "network" && args[1] === "set" && args[2] === "--safe"
+      && (args[4] === "--policy" || args[4] === "--tor"))
+}
+
 async function launch(args: string[]) {
+  if (runsWithoutTerminal(args)) {
+    return Bun.spawn([nativeLauncher(), ...args], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exited
+  }
   await renderer.suspend()
   try {
     const child = Bun.spawn([nativeLauncher(), ...args], {
