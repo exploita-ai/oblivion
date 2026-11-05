@@ -98,6 +98,34 @@ jobs:
             throw 'The isolated restricted-token ACL fixture requires an elevated Windows test process.'
           }
           cargo test --locked --all-targets
+      - name: Verify the ordinary-user build process on the hosted runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $env:OBLIVION_BUILD_CALLER = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          $command = @'
+          $ErrorActionPreference = 'Stop'
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+          if ($identity.User.Value -cne $env:OBLIVION_BUILD_CALLER -or
+              $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'Expected the original caller with Administrators disabled.'
+          }
+          $file = Join-Path $env:RUNNER_TEMP ("oblivion-token-" + [Guid]::NewGuid().ToString('N'))
+          try {
+            [IO.File]::WriteAllText($file, 'fixture')
+            $owner = (Get-Acl -LiteralPath $file).GetOwner([Security.Principal.SecurityIdentifier])
+            if ($owner.Value -cne $identity.User.Value) { throw 'New files must belong to the caller.' }
+          } finally {
+            Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue
+          }
+          exit 23
+          '@
+          $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+          cargo run --locked --offline --example build-as-user -- (Join-Path $PSHOME 'pwsh.exe') $encoded
+          if ($LASTEXITCODE -ne 23) { throw "Unexpected build process exit code $LASTEXITCODE." }
+          exit 0
       - name: Link the actual HCS helper
         run: cargo build --locked --bin oblivion-vm
       - name: Record acceptance scope

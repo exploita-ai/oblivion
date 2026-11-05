@@ -7,7 +7,8 @@ Run in a non-elevated x64 MSVC Developer PowerShell with Rust 1.88.0,
 repository-pinned Bun, Python 3 and cached Cargo/workspace dependencies.
 Use an LF checkout: a runtime candidate must match the exact current source bytes.
 -Runtime is an existing amd64 runtime directory with SHA256SUMS and all sidecars.
-Without it, output is build inputs only, with no bundle.json, ISO or install flow.
+Without -Runtime, output is build inputs only, with no bundle.json, ISO or install flow.
+-ToolsBundle supplies the controller build's server.mjs for source pairing with -Runtime.
 No tools are installed and no VM, HCS service or image build is started.
 #>
 [CmdletBinding()]
@@ -15,12 +16,14 @@ param(
     [string]$Version = $env:OBLIVION_DESKTOP_VERSION,
     [string]$Runtime = $env:OBLIVION_DESKTOP_RUNTIME,
     [string]$Output = $env:OBLIVION_DESKTOP_OUTPUT,
-    [string]$Python = 'python'
+    [string]$Python = 'python',
+    [ValidateNotNullOrEmpty()][string]$ToolsBundle
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandArgumentPassing = 'Standard'
 $PSNativeCommandUseErrorActionPreference = $false
+if ($ToolsBundle -and -not $Runtime) { throw 'Use -ToolsBundle only with -Runtime.' }
 if (-not $IsWindows -or [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64' -or
     [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -ne 'X64') {
     throw 'Build on native Windows x64 using PowerShell 7.4 or later.'
@@ -56,6 +59,45 @@ function New-PrivateDirectory {
             [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow))
     }
     [void][IO.FileSystemAclExtensions]::CreateDirectory($Security, $Path)
+}
+function Get-EntryAttributes {
+    param([string]$Path)
+    try { return [IO.File]::GetAttributes($Path) }
+    catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] { return $null }
+}
+function Install-ToolsBundle {
+    param([string]$Path)
+    $SourceFile = [IO.Path]::GetFullPath($Path, $Repository)
+    $Directory = Join-Path $Repository 'packages/oblivion-tools/dist'
+    $Destination = [IO.Path]::GetFullPath((Join-Path $Directory 'server.mjs'))
+    $DirectoryFlag = [IO.FileAttributes]::Directory
+    $ReparseFlag = [IO.FileAttributes]::ReparsePoint
+    $FileMask = $DirectoryFlag -bor $ReparseFlag
+    $Attributes = Get-EntryAttributes $SourceFile
+    if ($null -eq $Attributes -or ($Attributes -band $FileMask) -or $SourceFile -ieq $Destination) {
+        throw '-ToolsBundle must name a separate regular file.'
+    }
+    foreach ($Component in @($Repository, (Join-Path $Repository 'packages'), (Join-Path $Repository 'packages/oblivion-tools'), $Directory)) {
+        $Attributes = Get-EntryAttributes $Component
+        if ($null -eq $Attributes -and $Component -eq $Directory) {
+            [void][IO.Directory]::CreateDirectory($Directory)
+            continue
+        }
+        if ($null -eq $Attributes -or ($Attributes -band $FileMask) -ne $DirectoryFlag) {
+            throw 'The tools output path must contain only ordinary directories.'
+        }
+    }
+    $Attributes = Get-EntryAttributes $Destination
+    if ($null -ne $Attributes -and ($Attributes -band $FileMask)) {
+        throw 'The tools output must be a regular file.'
+    }
+    $Temporary = Join-Path $Directory ('.server-' + [guid]::NewGuid().ToString('N') + '.mjs')
+    try {
+        [IO.File]::Copy($SourceFile, $Temporary, $false)
+        [IO.File]::Move($Temporary, $Destination, $true)
+    } finally {
+        [IO.File]::Delete($Temporary)
+    }
 }
 foreach ($Tool in @($Python, 'cargo', 'rustc', 'bun')) {
     if (-not (Get-Command $Tool -CommandType Application -ErrorAction SilentlyContinue)) { throw "Required tool is missing: $Tool." }
@@ -94,7 +136,8 @@ $Saved = @{}
 foreach ($Name in $Variables) { $Saved[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process') }
 Push-Location -LiteralPath $Repository
 try {
-    Invoke-Native -Executable 'bun' -Arguments @('run', '--cwd', 'packages/oblivion-tools', 'build')
+    if ($ToolsBundle) { Install-ToolsBundle $ToolsBundle }
+    else { Invoke-Native -Executable 'bun' -Arguments @('run', '--cwd', 'packages/oblivion-tools', 'build') }
     $Inventory = Join-Path $Work 'host-sources.sha256'
     $Source = (Invoke-Native -Executable $Python -Arguments @('-B', $Builder, 'sources', '--output', $Inventory) -Capture) -join ''
     if ($Source -notmatch '^[0-9a-f]{64}$') { throw 'The canonical source inventory returned an invalid identity.' }
