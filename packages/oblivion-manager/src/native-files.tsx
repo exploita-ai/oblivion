@@ -17,7 +17,7 @@ import { NativeUsbTransfers } from "./native-usb-transfers"
 import { createFileTransfers, fileInventory, fileOutcome, type FileInventory, type FileOutcome, type FileReference, type FileTransfer } from "./native-file-transfers"
 import type { FileMappingEntry, FileReview, RunningFileCopy } from "./native-file-events"
 import { SelectionBasket, selectionError, type FileSelection } from "./file-selection"
-import { inspectLocalPaths, maximumPathBytes, unsafePathText } from "./local-path"
+import { inspectLocalPaths, inspectSelectedLocalPaths, maximumPathBytes, unsafePathText } from "./local-path"
 
 const directory = z.object({
   path: z.string(), entries: z.array(z.object({ name: z.string(), path: z.string(), kind: z.enum(["directory", "file"]), bytes: z.number().nonnegative() })),
@@ -513,6 +513,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       fields: [], submit: page() === "recover" ? "Publish verified copy" : "Discard private staging", run: async () => {},
     }} cancel={back} submit={() => { void execute() }} /></Show>
     <Show when={page() === "source" || page() === "destination"}><LocalChooser directoryOnly={page() === "destination"} back={back}
+      pickFiles={props.runtime.pickFiles} pickerScope={page() === "source" && !props.blocked ? generation() : undefined}
       selection={page() === "source" ? { paths: sources(), change: setSources, continue: continueSelection } : undefined} choose={(value) => {
       setDestination(value); void beginCopy()
     }} /></Show>
@@ -547,7 +548,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
   </box>
 }
 
-export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolean; title?: string; initialDirectory?: string; selection?: FileSelection; choose: (value: string) => void; back: () => void }) {
+export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolean; title?: string; initialDirectory?: string; selection?: FileSelection; pickFiles?: NativeRuntime["pickFiles"]; pickerScope?: string; choose: (value: string) => void; back: () => void }) {
   const [current, setCurrent] = createSignal(props.initialDirectory ?? process.cwd())
   const [entries, setEntries] = createSignal<{ name: string; directory: boolean; bytes: number }[]>([])
   const [selected, setSelected] = createSignal(0)
@@ -558,6 +559,7 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
   const [view, setView] = createSignal<"browse" | "path" | "review" | "basket">("browse")
   const [entered, setEntered] = createSignal("")
   const [candidates, setCandidates] = createSignal<{ path: string; directory: boolean; bytes: number }[]>([])
+  const [picker, setPicker] = createSignal<AbortController>()
   const candidate = () => candidates().length === 1 ? candidates()[0] : undefined
   let stopped = false
 
@@ -582,25 +584,45 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
     if (updateSelection([...new Set([...selection.paths, ...candidates().map((value) => value.path)])])) cancelPath()
   }
 
-  async function inspect(value: string, drop = false) {
+  async function reviewPaths(read: () => ReturnType<typeof inspectLocalPaths>, message: string, valid = () => true) {
     if (working()) return
     const from = view()
-    if (!drop) setEntered(value)
     setWorking(true)
     setError("")
     try {
-      const selected = await inspectLocalPaths(value, current(), drop)
-      if (stopped || view() !== from) return
+      const selected = await read()
+      if (stopped || view() !== from || !valid() || !selected.length) return
       if (selected.some(({ info }) => info.isSymbolicLink() || !info.isDirectory() && !info.isFile())) { setError("Choose a regular local file or directory. Symbolic links are not selectable."); return }
       if (props.directoryOnly && selected.some(({ info }) => !info.isDirectory())) { setError("This operation requires a directory. Choose a local folder."); return }
       setCandidates(selected.map(({ path, info }) => ({ path, directory: info.isDirectory(), bytes: info.size })))
       setView("review")
     } catch {
-      if (!stopped && view() === from) setError(drop
-        ? "Could not read the dropped paths. Drop existing local files or use Enter path to inspect one path at a time."
-        : "Enter one existing local path or local file:// URL. Controls, remote authorities and multiple paths are not accepted.")
+      if (!stopped && view() === from && valid()) setError(message)
     }
     finally { if (!stopped) setWorking(false) }
+  }
+
+  function inspect(value: string, drop = false) {
+    if (working()) return
+    if (!drop) setEntered(value)
+    return reviewPaths(() => inspectLocalPaths(value, current(), drop), drop
+      ? "Could not read the dropped paths. Drop existing local files or use Enter path to inspect one path at a time."
+      : "Enter one existing local path or local file:// URL. Controls, remote authorities and multiple paths are not accepted.")
+  }
+
+  async function openDesktopPicker() {
+    const scope = props.pickerScope
+    const choose = props.pickFiles
+    if (!scope || !choose || !props.selection || working() || view() !== "browse") return
+    const request = new AbortController()
+    setPicker(request)
+    const valid = () => !request.signal.aborted && scope === props.pickerScope
+    try {
+      await reviewPaths(async () => {
+        const paths = await choose(request.signal)
+        return valid() ? inspectSelectedLocalPaths(paths) : []
+      }, "The desktop selection is unavailable. Use the file list or Enter path.", valid)
+    } finally { if (!stopped) setPicker(undefined) }
   }
 
   function choose(index: number) {
@@ -623,7 +645,11 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
     finally { if (!stopped) setWorking(false) }
   }
   onMount(() => { void load(current()) })
-  onCleanup(() => { stopped = true })
+  onCleanup(() => { stopped = true; picker()?.abort() })
+  createEffect(on(() => props.pickerScope, () => {
+    picker()?.abort()
+    if (view() === "review") cancelPath()
+  }, { defer: true }))
   usePaste((event) => {
     if (event.defaultPrevented) return
     const drop = view() === "browse" && !!props.selection
@@ -641,7 +667,9 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
     setError(drop ? "Drop paths without control characters or line breaks." : "Paste one path without control characters or line breaks.")
   })
   useKeyboard((key) => {
-    if (key.defaultPrevented || working()) return
+    if (key.defaultPrevented) return
+    if (picker() && key.name === "escape") { key.preventDefault(); picker()?.abort(); return }
+    if (working()) return
     if (view() === "path") return
     if (view() === "basket") return
     if (view() === "review") {
@@ -654,6 +682,7 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
       return
     }
     if (key.name === "escape") { key.preventDefault(); props.back(); return }
+    if (key.name === "d" && props.pickFiles && props.pickerScope && props.selection) { key.preventDefault(); void openDesktopPicker(); return }
     if (key.name === "p") { key.preventDefault(); enterPath(); return }
     if (key.name === "b" && props.selection) { key.preventDefault(); setView("basket"); return }
     if (key.name === "c" && props.selection?.paths.length) { key.preventDefault(); props.selection.continue(); return }
@@ -673,7 +702,7 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
       fields: [], submit: props.filesOnly && candidate()?.directory ? "Browse folder" : props.selection ? "Add to selection" : candidate()?.directory ? "Choose folder" : "Choose file", run: async () => {} }} cancel={cancelPath} submit={() => { if (props.filesOnly && candidate()?.directory) { browseCandidate(); return }; useCandidates() }} /></Show>
     <Show when={view() === "review" && candidate()?.directory && !props.filesOnly}><ActionBar actions={[{ title: "Browse folder", key: "B", disabled: working(), run: browseCandidate }]} /></Show>
     <Show when={view() === "review" && candidates().length > 1}>
-      <PageHeader title="Review dropped paths" description={`${candidates().length} local files and folders to add to the import selection.`} />
+      <PageHeader title="Review selected paths" description={`${candidates().length} local files and folders to add to the import selection.`} />
       <scrollbox flexGrow={1} minHeight={1} focused>
         <For each={candidates()}>{(value) => <box flexDirection="column" paddingBottom={1}>
           <text fg={theme.text.base}>{value.path}</text>
@@ -685,11 +714,12 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
         { title: "Cancel", key: "Esc", run: cancelPath },
       ]} />
     </Show>
-    <Show when={view() === "browse" && props.selection}><PageHeader title="Choose local files" description="Drop or paste paths in a supported terminal. Enter opens folders. Space selects." />
+    <Show when={view() === "browse" && props.selection}><PageHeader title="Choose local files" description={props.pickFiles ? "Use Desktop picker to drop files or choose them in a window. Enter opens folders. Space selects." : "Drop or paste paths in a supported terminal. Enter opens folders. Space selects."} />
       <FilePicker currentDir={current()} parentDir={parentDir()} entries={entries().map((entry) => ({ ...entry, path: path.join(current(), entry.name) }))} selected={props.selection!.paths} focused busy={working()}
         next={offset() + 100 < total()} previous={offset() > 0} onNavigate={(next) => { void load(next) }} onChange={updateSelection}
         onNext={() => { void load(current(), offset() + 100) }} onPrevious={() => { void load(current(), Math.max(0, offset() - 100)) }} onBack={props.back} />
       <ActionBar actions={[
+        ...(props.pickFiles && props.pickerScope ? [{ title: "Desktop picker", key: "D", disabled: working(), run: () => { void openDesktopPicker() } }] : []),
         { title: "Enter path", key: "P", run: enterPath },
         { title: `Selected items (${props.selection!.paths.length})`, key: "B", run: () => setView("basket") },
         { title: "Select this folder", key: ".", run: () => toggle(current()) },
@@ -707,7 +737,7 @@ export function LocalChooser(props: { directoryOnly: boolean; filesOnly?: boolea
       { title: "Next", key: "PageDown", disabled: offset() + 100 >= total(), run: () => { void load(current(), offset() + 100) } },
     ]}
     empty={error() || (working() ? "Reading directory…" : "No selectable entries. Backspace opens the parent directory.")}
-    details={false} back={props.back} /></Show><Show when={error()}><text flexShrink={0} fg={theme.feedback.warning}>{error()}</text></Show><Show when={working()}><BusyModal text="Reading local path" /></Show></box>
+    details={false} back={props.back} /></Show><Show when={error()}><text flexShrink={0} fg={theme.feedback.warning}>{error()}</text></Show><Show when={working()}><BusyModal text={picker() ? "Choose files in the desktop window" : "Reading local path"} cancel={picker() ? () => picker()?.abort() : undefined} /></Show></box>
 }
 
 export function GuestChooser(props: { safe: string; runtime: NativeRuntime; media?: { device: LiveDevice; browser: UsbBrowser }; selection: FileSelection; back: () => void }) {

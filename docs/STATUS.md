@@ -20,8 +20,16 @@ one literal path, a terminal-escaped path or a local file URL. The Windows
 parser preserves native separators and rejects UNC and device path syntax.
 Neither entry path starts a copy before the existing manifest approval.
 On Unix the Files overlay requests paste framing at handoff and drops queued
-overlay input before restoring input to the agent. Physical drop gestures and
-OS-native drag-and-drop APIs remain open.
+overlay input before restoring input to the agent.
+
+The **Desktop picker** in Files opens a host-only AppKit, Win32 or GTK4
+window. Drag and drop or use its file chooser. The manager owns the window's
+lifetime channel and reviews the literal paths before adding them to the
+import basket. Copy approval still uses the existing manifest. Closing
+Files, locking or changing the Safe opening revokes an outstanding result.
+The Debian desktop package recommends GTK4 and PyGObject. Live and
+terminal-only installs keep the text picker. Native dialog and file manager
+history are controlled by the desktop OS. See [Desktop picker](DESKTOP.md#select-files-from-the-desktop).
 
 Windows interactive attachments now use the same F7 and F9 panel parser
 and VT snapshot as Unix. The bridge joins its console reader before handing
@@ -71,8 +79,7 @@ folders and colliding leaf names, and the manager verifies every ordered mapping
 page and its digest before enabling review. Absolute local source paths remain
 in the calling process; only logical aliases enter the source offer. The CLI uses
 repeated `--source` or `--path` selectors, with an explicit collection name for
-multiple inputs. Native GUI drop APIs and installed-platform acceptance remain
-incomplete.
+multiple inputs. Installed-platform acceptance remains open.
 
 Cross-agent conversation sharing, synchronization, conversion and handoff are
 outside the 1.0 scope. Each agent owns its native chats and resume inside the

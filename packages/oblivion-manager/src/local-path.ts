@@ -6,7 +6,7 @@ import parse from "shell-quote/parse"
 
 export const unsafePathText = /[\p{Cc}\p{Bidi_Control}\p{Zl}\p{Zp}]/u
 
-const maximumPaths = 128
+export const maximumPaths = 128
 export const maximumPathBytes = 64 * 1024
 const fileURL = /^file:/i
 const drivePath = /^[a-z]:[\\/]/i
@@ -30,8 +30,18 @@ export async function inspectLocalPaths(input: string, current: string, batch: b
   }
   const words = terminalWords(spelling, batch ? maximumPaths : 1)
   const filenames = [...new Set(words.map((value) => resolveInput(value, current, words.length > 1)))]
-  if (filenames.reduce((bytes, value) => bytes + Buffer.byteLength(value), 0) > maximumPathBytes) throw new Error("Invalid path")
-  return Promise.all(filenames.map(async (filename) => ({ path: filename, info: await lstat(filename) })))
+  return inspectSelectedLocalPaths(filenames)
+}
+
+export async function inspectSelectedLocalPaths(paths: string[]): Promise<{ path: string; info: Stats }[]> {
+  if (paths.length > maximumPaths || paths.reduce((bytes, value) => bytes + Buffer.byteLength(value), 0) > maximumPathBytes) throw new Error("Invalid path")
+  // Native dialogs already return path boundaries. Keep shell metacharacters
+  // literal and reject URL spellings and relative or device paths.
+  const filenames = paths.map((value) => {
+    if (fileURL.test(value)) throw new Error("Local filesystem path required")
+    return resolveInput(value, "/", true)
+  })
+  return Promise.all([...new Set(filenames)].map(async (filename) => ({ path: filename, info: await lstat(filename) })))
 }
 
 function existingPath(filename: string) {

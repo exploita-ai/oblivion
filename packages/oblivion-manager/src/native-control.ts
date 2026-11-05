@@ -61,6 +61,7 @@ export type NativeRuntime = {
   query: (args: string[]) => Promise<unknown>
   files: NativeFileClient
   usb?: NativeUsbClient
+  pickFiles?: (signal: AbortSignal) => Promise<string[]>
   activity: (input: z.infer<typeof nativeActivity>) => Promise<void>
   chooseLiveStorage?: () => Promise<void>
   exit: () => Promise<void> | void

@@ -30,6 +30,24 @@ unsupported destination is refused before copy approval, rather than recording
 a device number that may change after restart. Local import sources do not use
 this requirement; their receiver is inside the current Debian Safe image.
 
+## Select files from the desktop
+
+Open **Files → Import → Desktop picker** (D). Drag files or folders from the
+desktop file manager into the Oblivion window, or use its file chooser. From an
+agent terminal, open the trusted Files panel with **F7** first.
+
+The picker returns the selected paths to the desktop manager. Review them,
+add them to the selection, and approve the normal copy manifest before any
+file contents move into the Safe. Oblivion stores no picker history. Native
+desktop and file manager behavior is part of the host's trust boundary.
+
+The window uses AppKit on macOS, Win32 on Windows and GTK 4 on Linux. The
+Debian **desktop** package recommends `python3-gi` and `gir1.2-gtk-4.0`
+(GTK 4.6 or newer). Linux bundles need those desktop dependencies for the
+window. In a terminal without a desktop or on Oblivion Live, use the keyboard
+file list or **Enter path** (P). These also work when the desktop window
+cannot start.
+
 ## Build
 
 Run the manual [native desktop workflow](../.github/workflows/oblivion-desktop.yml)
@@ -107,7 +125,7 @@ and fixed evidence filenames in `SHA256SUMS`, verifies every entry, and compares
 the exact `host-sources.sha256` bytes against a freshly generated source inventory. It
 extracts the kernel and initrd directly from that verified ISO's
 `live/vmlinuz` and `live/initrd.img`. End-user installation does not extract an
-ISO and does not require Python or bsdtar.
+ISO or require build tools such as bsdtar.
 
 The inventory is shared with the Docker compiler through
 `script/oblivion/native-bundle/host-sources.py`. It covers host Rust code, tests,

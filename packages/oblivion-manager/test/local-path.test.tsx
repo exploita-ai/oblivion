@@ -141,7 +141,7 @@ test("multi-line paste is rejected and cancelling path entry preserves the brows
   } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
 })
 
-test.each(["literal", "path-field-drop", "browser-drop"])("an import %s path cannot mutate a Safe before the existing transfer review", async (spelling) => {
+test.each(["literal", "path-field-drop", "browser-drop", "desktop-picker"])("an import %s path cannot mutate a Safe before the existing transfer review", async (spelling) => {
   const fixture = await files()
   const source = path.join(fixture.root, "$(touch literal-only).txt")
   const commands: string[][] = []
@@ -149,7 +149,7 @@ test.each(["literal", "path-field-drop", "browser-drop"])("an import %s path can
   await base.run(["unlock"])
   const copies: FileCopyRequest[] = []
   let approvals = 0
-  const runtime = { ...base, files: { ...base.files, start(request: FileCopyRequest, event: Parameters<typeof base.files.start>[1]) {
+  const runtime = { ...base, pickFiles: spelling === "desktop-picker" ? async () => [source] : undefined, files: { ...base.files, start(request: FileCopyRequest, event: Parameters<typeof base.files.start>[1]) {
     copies.push(request)
     const copy = base.files.start(request, event)
     return { ...copy, approve: async (digest: string) => { approvals++; await copy.approve(digest) }, done: copy.done.then((result) => ({ ...result, code: 1 })) }
@@ -161,6 +161,9 @@ test.each(["literal", "path-field-drop", "browser-drop"])("an import %s path can
     if (spelling === "browser-drop") {
       await visible(app, "0 selected")
       await app.mockInput.pasteBracketedText(source)
+    } else if (spelling === "desktop-picker") {
+      await visible(app, "Desktop picker")
+      await app.mockInput.pressKey("d")
     } else {
       await enter(app, spelling === "literal" ? source : `${fixture.root}/\\$\\(touch\\ literal-only\\).txt `)
     }
@@ -201,7 +204,7 @@ test.each([[80, 24], [160, 50]])("a grouped drop is reviewed before it changes t
     expect(selected()).toEqual([fixture.file])
 
     await app.mockInput.pasteBracketedText(group)
-    await visible(app, "Review dropped paths")
+    await visible(app, "Review selected paths")
     expect(app.captureCharFrame()).toContain("Add to selection")
     expect(selected()).toEqual([fixture.file])
     await app.mockInput.pressEscape()
@@ -209,10 +212,35 @@ test.each([[80, 24], [160, 50]])("a grouped drop is reviewed before it changes t
     expect(selected()).toEqual([fixture.file])
 
     await app.mockInput.pasteBracketedText(group)
-    await visible(app, "Review dropped paths")
+    await visible(app, "Review selected paths")
     await app.mockInput.pressEnter()
     await visible(app, "2 selected")
     expect(selected()).toEqual([fixture.file, fixture.folder])
+  } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
+})
+
+test("an old desktop picker result is revoked when the Safe opening changes", async () => {
+  const fixture = await files()
+  const [scope, setScope] = createSignal("opening-one")
+  const [selected, setSelected] = createSignal<string[]>([])
+  const result = Promise.withResolvers<string[]>()
+  let request: AbortSignal | undefined
+  const app = await testRender(() => <LocalChooser directoryOnly={false} initialDirectory={fixture.root}
+    pickerScope={scope()} pickFiles={(signal) => { request = signal; return result.promise }}
+    selection={{ paths: selected(), change: setSelected, continue: () => {} }} choose={() => {}} back={() => {}} />,
+  { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await visible(app, "0 selected")
+    await app.mockInput.pressKey("d")
+    await visible(app, "Choose files in the desktop window")
+    setScope("opening-two")
+    await app.renderOnce()
+    expect(request?.aborted).toBe(true)
+    result.resolve([fixture.file])
+    await result.promise
+    await app.renderOnce()
+    expect(app.captureCharFrame()).not.toContain("Review local path")
+    expect(selected()).toEqual([])
   } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
 })
 
@@ -227,7 +255,7 @@ test.skipIf(process.platform !== "win32")("Windows Terminal drop preserves nativ
   try {
     await visible(app, "0 selected")
     await app.mockInput.pasteBracketedText(`"${file}" "${folder}"`)
-    await visible(app, "Review dropped paths")
+    await visible(app, "Review selected paths")
     expect(selected()).toEqual([])
     await app.mockInput.pressEnter()
     await visible(app, "2 selected")
