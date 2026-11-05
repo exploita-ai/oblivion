@@ -7,10 +7,10 @@ use crate::{
     activity, backup, child_task, family_password, file_copy, files, network, proxy,
     proxy_profiles, run, safe, settings, share, shell, storage, windows_file_copy,
 };
+use oblivion_native_windows::broker::{self, Action, Layout};
 use oblivion_native_windows::bundle::VerifiedBundle;
-use oblivion_native_windows::installation::{self, Installed, Root};
+use oblivion_native_windows::installation::{self, Root};
 use oblivion_native_windows::security::Identity;
-use oblivion_native_windows::supervisor;
 use oblivion_wire::idle::Activity;
 use oblivion_wire::slot::Slot;
 use std::io::{IsTerminal, Read};
@@ -66,39 +66,33 @@ pub fn run() -> Result<i32> {
         }
         _ => {}
     }
-    let root = Root::current()?;
     match command {
-        Command::Activity => forward_activity(&root),
-        Command::Runtime(command) => runtime_command(&root, command),
+        Command::Activity => forward_activity(),
+        Command::Runtime(command) => runtime_command(&Root::current()?, command),
         // A polling manager already owns a supervisor lease. Reading status
         // must not hash a whole controller image or start a VM at every poll.
         Command::Controller(controller::Command::StatusJson) => controller::execute(
-            &mut Client::new(&installation::control_id(&root)?)?,
+            &mut Client::new(&control_id()?)?,
             controller::Command::StatusJson,
             &mut std::io::stdout().lock(),
         ),
         command => {
-            let installed = installation::discover(&root)?;
-            if installed.source() != source_id()? {
-                return Err("installed_runtime_source_mismatch".into());
-            }
-            let mut runtime = Runtime::supervised(
-                &installed.settings()?,
-                Arc::new(AtomicBool::new(false)),
-                Instant::now() + STARTUP,
-            )?;
-            execute(command, &installed, &mut runtime)
+            let stop = Arc::new(AtomicBool::new(false));
+            let lease = broker::acquire(source_id()?, Arc::clone(&stop), Instant::now() + STARTUP)?;
+            let layout = lease.layout().clone();
+            let mut runtime = Runtime::brokered(lease, stop)?;
+            execute(command, &layout, &mut runtime)
         }
     }
 }
 
 fn execute(
     command: Command<file_copy::CopyCommand, share::Command>,
-    installed: &Installed,
+    layout: &Layout,
     runtime: &mut Runtime,
 ) -> Result<i32> {
     match command {
-        Command::Manager => manager(installed),
+        Command::Manager => manager(layout),
         Command::Controller(command) => {
             controller::execute(runtime, command, &mut std::io::stdout().lock())
         }
@@ -162,12 +156,12 @@ fn execute(
     }
 }
 
-fn manager(installed: &Installed) -> Result<i32> {
-    // Installed owns the verified bundle's non-deletable asset handles until
-    // this actual child has exited. The caller keeps the runtime lease too.
-    let status = std::process::Command::new(installed.manager())
-        .env("OBLIVION_LAUNCHER", installed.launcher())
-        .env("OTUI_ASSET_ROOT", installed.assets())
+fn manager(layout: &Layout) -> Result<i32> {
+    // The authenticated broker supplies administrator-owned software paths.
+    // This child and every explicit host-side file copy remain unelevated.
+    let status = std::process::Command::new(&layout.manager)
+        .env("OBLIVION_LAUNCHER", &layout.launcher)
+        .env("OTUI_ASSET_ROOT", &layout.assets)
         .env("OBLIVION_RUNTIME_MODE", "desktop")
         .env_remove("OBLIVION_LIVE_STORAGE")
         .env_remove("OBLIVION_SHOW_INTRO")
@@ -230,25 +224,22 @@ fn runtime_command(root: &Root, command: RuntimeCommand) -> Result<i32> {
             Ok(0)
         }
         RuntimeCommand::Start => {
-            let installed = installation::discover(root)?;
-            if installed.source() != source_id()? {
-                return Err("installed_runtime_source_mismatch".into());
-            }
-            let lease = installed.acquire(Arc::clone(&stop), Instant::now() + STARTUP)?;
-            lease.start_resident(stop, Instant::now() + Duration::from_secs(10))?;
+            broker::command(Action::Start, source_id()?, stop, Instant::now() + STARTUP)?;
             Ok(0)
         }
         RuntimeCommand::Stop => {
-            supervisor::stop(
-                &installation::owned_settings(root)?,
+            broker::command(
+                Action::Stop,
+                source_id()?,
                 stop,
                 Instant::now() + Duration::from_secs(180),
             )?;
             Ok(0)
         }
         RuntimeCommand::Recover => {
-            if let Err(error) = supervisor::recover(
-                &installation::owned_settings(root)?,
+            if let Err(error) = broker::command(
+                Action::Recover,
+                source_id()?,
                 stop,
                 Instant::now() + Duration::from_secs(180),
             ) {
@@ -281,7 +272,7 @@ fn bundle_input(path: &str) -> Result<VerifiedBundle> {
     )?)
 }
 
-fn forward_activity(root: &Root) -> Result<i32> {
+fn forward_activity() -> Result<i32> {
     let mut bytes = Vec::new();
     std::io::stdin().take(1025).read_to_end(&mut bytes)?;
     if bytes.len() > 1024 {
@@ -289,11 +280,16 @@ fn forward_activity(root: &Root) -> Result<i32> {
     }
     let activity: Activity<Slot> =
         serde_json::from_slice(&bytes).map_err(|_| "invalid_activity_request")?;
-    activity::report(
-        &mut Client::new(&installation::control_id(root)?)?,
-        &activity,
-    )?;
+    activity::report(&mut Client::new(&control_id()?)?, &activity)?;
     Ok(0)
+}
+
+fn control_id() -> Result<String> {
+    Ok(broker::control_id(
+        source_id()?,
+        Arc::new(AtomicBool::new(false)),
+        Instant::now() + Duration::from_secs(10),
+    )?)
 }
 
 fn source_id() -> Result<&'static str> {

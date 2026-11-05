@@ -153,19 +153,31 @@ mod native {
         FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
     };
     use windows_sys::Win32::System::Com::CoTaskMemFree;
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetCurrentProcessId, OpenProcessToken,
+    };
+    use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
 
     #[derive(Clone)]
-    pub struct Root(PathBuf);
+    pub struct Root {
+        path: PathBuf,
+        storage: Identity,
+        client: Identity,
+        broker: bool,
+    }
     impl Root {
         /// Discovery only: this never creates the directory or changes its ACL.
         pub fn current() -> Result<Self> {
+            Self::for_user(&Identity::current()?)
+        }
+        /// The broker supplies the authenticated caller identity. No client
+        /// request or environment variable supplies a root path.
+        pub fn for_user(client: &Identity) -> Result<Self> {
             let mut path = null_mut();
             let status =
-                unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, null_mut(), &mut path) };
+                unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, null_mut(), &mut path) };
             if status < 0 || path.is_null() {
-                return Err(Error("local_app_data_unavailable"));
+                return Err(Error("program_data_unavailable"));
             }
             let length = (0..32768).find(|index| unsafe { *path.add(*index) == 0 });
             let text = length.and_then(|length| {
@@ -174,24 +186,44 @@ mod native {
             unsafe {
                 CoTaskMemFree(path.cast());
             }
-            Self::at(
-                &PathBuf::from(text.ok_or(Error("local_app_data_unavailable"))?).join("Oblivion"),
+            Self::new(
+                PathBuf::from(text.ok_or(Error("program_data_unavailable"))?)
+                    .join("Oblivion")
+                    .join(client.sid()),
+                Identity::administrators()?,
+                client.clone(),
+                true,
             )
         }
         /// An explicit test/embedding prefix uses the same private-root checks.
         /// Construction is lexical and has no filesystem side effects.
         pub fn at(path: &Path) -> Result<Self> {
-            let root = Self(path.to_owned());
+            let identity = Identity::current()?;
+            Self::new(path.to_owned(), identity.clone(), identity, false)
+        }
+        fn new(path: PathBuf, storage: Identity, client: Identity, broker: bool) -> Result<Self> {
+            let root = Self {
+                path,
+                storage,
+                client,
+                broker,
+            };
             if !crate::config::drive_file(&root.file("installation.json")?) {
                 return Err(Error("unsupported_installation_path"));
             }
             Ok(root)
         }
         pub fn path(&self) -> &Path {
-            &self.0
+            &self.path
+        }
+        pub fn client_identity(&self) -> &Identity {
+            &self.client
+        }
+        pub fn storage_identity(&self) -> &Identity {
+            &self.storage
         }
         fn file(&self, leaf: &str) -> Result<String> {
-            self.0
+            self.path
                 .join(leaf)
                 .to_str()
                 .map(str::to_owned)
@@ -200,15 +232,34 @@ mod native {
         fn release(&self, id: &str) -> Result<String> {
             self.file(&format!(r"releases\{id}"))
         }
-        fn guard(&self, identity: &Identity) -> Result<CreationParent> {
-            match std::fs::symlink_metadata(&self.0) {
+        fn guard(&self) -> Result<CreationParent> {
+            if self.broker
+                && !self
+                    .storage
+                    .permits(unsafe { GetCurrentProcessId() }, false)
+                    .unwrap_or(false)
+            {
+                return Err(Error("windows_administrator_required"));
+            }
+            match std::fs::symlink_metadata(&self.path) {
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     return Err(Error("runtime_not_installed"));
                 }
                 Err(_) => return Err(Error("installation_directory_unavailable")),
             }
-            CreationParent::open(&self.file("installation.json")?, identity)
+            CreationParent::open(&self.file("installation.json")?, &self.storage)
+        }
+        fn create(&self) -> Result<()> {
+            if self.broker {
+                ensure_directory(
+                    self.path
+                        .parent()
+                        .ok_or(Error("unsupported_installation_path"))?,
+                    &self.storage,
+                )?;
+            }
+            ensure_directory(&self.path, &self.storage)
         }
     }
 
@@ -223,6 +274,15 @@ mod native {
         }
         pub fn launcher(&self) -> &str {
             self.bundle.cli()
+        }
+        pub fn helper(&self) -> &str {
+            self.bundle.helper()
+        }
+        pub fn client_identity(&self) -> &Identity {
+            self.root.client_identity()
+        }
+        pub fn storage_identity(&self) -> &Identity {
+            self.root.storage_identity()
         }
         pub fn source(&self) -> &str {
             self.bundle.source()
@@ -295,9 +355,28 @@ mod native {
         .map_err(|_| Error("invalid_runtime_data_authority"))?;
         preflight()?;
         check(&stop, deadline)?;
-        let identity = Identity::current()?;
-        ensure_directory(root.path(), &identity)?;
-        let _root = root.guard(&identity)?;
+        let identity = root.storage.clone();
+        root.create()?;
+        let _root = root.guard()?;
+        if root.broker && exists(&root.file("installation.json")?)? {
+            let record = read_record(root, &identity)?;
+            if !matches!(record.phase, Phase::Ready { .. })
+                || !same_binding(&record.bundle, &bundle.binding()?)?
+            {
+                return Err(Error("installation_already_present_or_pending"));
+            }
+            // A failed SCM registration does not grant a second disk-create
+            // capability. Retry only the exact, fully verified Ready bundle.
+            let installed = discover(root)?;
+            let _stopped = supervisor::stopped(
+                &maintenance(root, &record, &record.bundle)?,
+                Arc::clone(&stop),
+                deadline,
+            )?;
+            crate::scm::quiesce(&root.client, Arc::clone(&stop), deadline)?;
+            crate::scm::install(&root.client, Path::new(installed.helper()))?;
+            return Ok(installed);
+        }
         if std::fs::read_dir(root.path())
             .map_err(|_| Error("installation_directory_unavailable"))?
             .next()
@@ -328,10 +407,14 @@ mod native {
         let (mut registry, _) = registry(root, &identity)?;
         // Everything after the durable Pending record is a one-shot setup.
         // Failure retains that record; a subsequent run never reinitializes it.
-        ensure_directory(&root.0.join("releases"), &identity)?;
-        ensure_directory(&root.0.join("boot"), &identity)?;
+        ensure_directory(&root.path.join("releases"), &identity)?;
+        ensure_directory(&root.path.join("boot"), &identity)?;
         check(&stop, deadline)?;
-        let bundle = bundle.publish(&root.release(&record.bundle.bundle_id)?, &identity)?;
+        let bundle = bundle.publish(
+            &root.release(&record.bundle.bundle_id)?,
+            &identity,
+            &root.client,
+        )?;
         for asset in &record.bundle.boot {
             check(&stop, deadline)?;
             let source = format!(r"{}\{}", bundle.root(), asset.path.replace('/', r"\"));
@@ -363,6 +446,9 @@ mod native {
             data: FileIdentity { volume, file },
         };
         registry.save(&record)?;
+        if root.broker {
+            crate::scm::install(&root.client, Path::new(bundle.helper()))?;
+        }
         Ok(Installed {
             root: root.clone(),
             record,
@@ -372,8 +458,8 @@ mod native {
 
     pub fn discover(root: &Root) -> Result<Installed> {
         preflight()?;
-        let identity = Identity::current()?;
-        let _root = root.guard(&identity)?;
+        let identity = root.storage.clone();
+        let _root = root.guard()?;
         let record = read_record(root, &identity)?;
         let Phase::Ready { data } = &record.phase else {
             return Err(phase_error(&record.phase));
@@ -395,21 +481,29 @@ mod native {
     /// Cheap activity/status discovery. This reads only private metadata and the
     /// bounded configuration; it never hashes an ISO, boots or probes HCS.
     pub fn control_id(root: &Root) -> Result<String> {
-        let identity = Identity::current()?;
-        let _root = root.guard(&identity)?;
+        let record = control_record(root, true)?;
+        Ok(record.runtime_id)
+    }
+    pub fn control_binding(root: &Root) -> Result<(String, String)> {
+        let record = control_record(root, false)?;
+        Ok((record.runtime_id, record.bundle.source_sha256))
+    }
+    fn control_record(root: &Root, ready: bool) -> Result<Record> {
+        let identity = root.storage.clone();
+        let _root = root.guard()?;
         let record = read_record(root, &identity)?;
-        if !matches!(record.phase, Phase::Ready { .. }) {
+        if ready && !matches!(record.phase, Phase::Ready { .. }) {
             return Err(phase_error(&record.phase));
         }
         verify_config(root, &record, &identity)?;
-        Ok(record.runtime_id)
+        Ok(record)
     }
 
     /// Explicit stop/control may address an interrupted setup. This grants no
     /// initialization capability and never clears Pending or Recovery records.
     pub fn owned_settings(root: &Root) -> Result<Settings> {
-        let identity = Identity::current()?;
-        let _root = root.guard(&identity)?;
+        let identity = root.storage.clone();
+        let _root = root.guard()?;
         let record = read_record(root, &identity)?;
         verify_config(root, &record, &identity)?;
         maintenance(root, &record, &record.bundle)
@@ -423,8 +517,8 @@ mod native {
         stop: Arc<AtomicBool>,
         deadline: Instant,
     ) -> Result<Installed> {
-        let identity = Identity::current()?;
-        let _root = root.guard(&identity)?;
+        let identity = root.storage.clone();
+        let _root = root.guard()?;
         let mut record = read_record(root, &identity)?;
         let data = record
             .data()
@@ -444,6 +538,9 @@ mod native {
         let base = maintenance(root, &record, &record.bundle)?;
         let next = maintenance(root, &record, &target)?;
         let mut stopped = supervisor::stopped_update(&base, &next, Arc::clone(&stop), deadline)?;
+        if root.broker {
+            crate::scm::quiesce(&root.client, Arc::clone(&stop), deadline)?;
+        }
         let mut registry = locked_registry(root, &record, &identity)?;
         check(&stop, deadline)?;
         if matches!(record.phase, Phase::Ready { .. }) {
@@ -462,7 +559,7 @@ mod native {
                 existing
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                incoming.publish(&release, &identity)?
+                incoming.publish(&release, &identity, &root.client)?
             }
             Err(_) => return Err(Error("runtime_release_unavailable")),
         };
@@ -529,6 +626,11 @@ mod native {
         verify_boot(root, &ready, &identity)?;
         stopped.rebind(&next)?;
         registry.save(&ready)?;
+        if root.broker {
+            // SCM demand-start stays disabled from quiesce until both durable
+            // bindings are committed. Keep Stopped held through ImagePath swap.
+            crate::scm::install(&root.client, Path::new(bundle.helper()))?;
+        }
         Ok(Installed {
             root: root.clone(),
             record: ready,
@@ -552,8 +654,8 @@ mod native {
         stop: Arc<AtomicBool>,
         deadline: Instant,
     ) -> Result<Cleanup> {
-        let identity = Identity::current()?;
-        let _root = root.guard(&identity)?;
+        let identity = root.storage.clone();
+        let _root = root.guard()?;
         let mut record = read_record(root, &identity)?;
         if matches!(record.phase, Phase::Updating { .. }) {
             return Err(Error("installation_update_requires_matching_bundle"));
@@ -569,6 +671,12 @@ mod native {
             Arc::clone(&stop),
             deadline,
         )?;
+        if root.broker {
+            crate::scm::quiesce(&root.client, Arc::clone(&stop), deadline)?;
+            if uninstall {
+                crate::scm::remove(&root.client)?;
+            }
+        }
         let mut registry = locked_registry(root, &record, &identity)?;
         if uninstall {
             record.phase = Phase::Uninstalled { data };
@@ -645,6 +753,10 @@ mod native {
                 .count();
             report.software_removed = releases.names(256)?.is_empty() && remaining.is_empty();
         }
+        if root.broker && !uninstall && matches!(record.phase, Phase::Ready { .. }) {
+            let bundle = verified_bundle(root, &record, &identity)?;
+            crate::scm::install(&root.client, Path::new(bundle.helper()))?;
+        }
         Ok(report)
     }
 
@@ -660,7 +772,7 @@ mod native {
         record: &Record,
         binding: &oblivion_bundle::Binding,
     ) -> Result<Settings> {
-        Settings::maintenance(
+        Settings::maintenance_for(
             &record.runtime_id,
             Path::new(&format!(
                 r"{}\bin\oblivion-vm.exe",
@@ -669,6 +781,8 @@ mod native {
             Path::new(&root.file("vm.json")?),
             &record.config_sha256,
             &binding.source_sha256,
+            &root.client,
+            &root.storage,
         )
     }
     fn verify_data(root: &Root, data: &FileIdentity) -> Result<()> {
@@ -715,6 +829,7 @@ mod native {
     struct Registry {
         directory: Directory,
         current: Option<Asset>,
+        storage: Identity,
     }
     impl Registry {
         fn save(&mut self, record: &Record) -> Result<()> {
@@ -722,10 +837,10 @@ mod native {
                 .map_err(|_| Error("installation_record_encode_failed"))?;
             Record::decode(&bytes)?;
             self.directory.sync()?;
-            let identity = Identity::current()?;
+            let identity = &self.storage;
             let mut pending = self
                 .directory
-                .create_file(&format!("installation-{}.pending", random_id()?), &identity)?;
+                .create_file(&format!("installation-{}.pending", random_id()?), identity)?;
             pending
                 .writer()
                 .write_all(&bytes)
@@ -736,7 +851,7 @@ mod native {
                 .current
                 .take()
                 .ok_or(Error("installation_record_unavailable"))?;
-            self.current = Some(pending.replace(previous, &identity)?);
+            self.current = Some(pending.replace(previous, identity)?);
             self.directory.sync()
         }
     }
@@ -761,6 +876,7 @@ mod native {
             Registry {
                 directory,
                 current: Some(current),
+                storage: identity.clone(),
             },
             Record::decode(&bytes)?,
         ))
@@ -795,12 +911,14 @@ mod native {
     }
 
     fn settings(root: &Root, record: &Record, bundle: &VerifiedBundle) -> Result<Settings> {
-        Settings::new(
+        Settings::new_for(
             &record.runtime_id,
             Path::new(bundle.helper()),
             Path::new(&root.file("vm.json")?),
             &record.config_sha256,
             &record.bundle.source_sha256,
+            &root.client,
+            &root.storage,
         )
     }
     fn verified_bundle(
@@ -1088,6 +1206,24 @@ mod native {
             }
         }
 
+        #[test]
+        fn broker_roots_derive_programdata_and_storage_from_the_authenticated_user_only() {
+            let owner = Identity::current().unwrap();
+            let root = Root::for_user(&owner).unwrap();
+            assert!(root.broker);
+            assert_eq!(root.client_identity().sid(), owner.sid());
+            assert_eq!(root.storage_identity().sid(), "S-1-5-32-544");
+            assert_eq!(root.path().file_name().unwrap(), owner.sid());
+            assert_eq!(
+                root.path().parent().unwrap().file_name().unwrap(),
+                "Oblivion"
+            );
+            let area = Area::new();
+            assert!(!area.0.broker);
+            assert_eq!(area.0.storage_identity().sid(), owner.sid());
+            assert_eq!(area.0.client_identity().sid(), owner.sid());
+        }
+
         // No VHDX or HCS is fabricated: this filesystem fixture represents the
         // already-recorded file identity, while supervisor Stopped is admitted
         // through its actual private journal and exclusive writer.
@@ -1100,7 +1236,11 @@ mod native {
             let bundle = source.open().unwrap();
             let binding = bundle.binding().unwrap();
             let bundle = bundle
-                .publish(&root.release(&binding.bundle_id).unwrap(), &identity)
+                .publish(
+                    &root.release(&binding.bundle_id).unwrap(),
+                    &identity,
+                    root.client_identity(),
+                )
                 .unwrap();
             let runtime_id = random_id().unwrap();
             let config = serde_json::to_vec(
@@ -1143,8 +1283,9 @@ mod native {
             let mut journal =
                 create_private(&root.file("vm.json.supervision.json").unwrap(), &identity).unwrap();
             journal.write_all(&serde_json::to_vec(&json!({"version":1,
-                "binding":{"runtime_id":record.runtime_id,"config_sha256":record.config_sha256,"source_sha256":record.bundle.source_sha256},
-                "generation":random_id().unwrap(),"phase":"stopped","resident":false,"boot":"existing"})).unwrap()).unwrap();
+                "binding":{"runtime_id":record.runtime_id,"config_sha256":record.config_sha256,"source_sha256":record.bundle.source_sha256,
+                    "client_sid":root.client_identity().sid(),"storage_sid":root.storage_identity().sid()},
+                "generation":random_id().unwrap(),"phase":"stopped","resident":false,"boot":{"kind":"existing"}})).unwrap()).unwrap();
             journal.sync_all().unwrap();
             record
         }
@@ -1252,7 +1393,11 @@ mod native {
             let target = next.open().unwrap();
             let binding = target.binding().unwrap();
             let target = target
-                .publish(&root.release(&binding.bundle_id).unwrap(), &identity)
+                .publish(
+                    &root.release(&binding.bundle_id).unwrap(),
+                    &identity,
+                    root.client_identity(),
+                )
                 .unwrap();
             let data = record.data().unwrap().clone();
             record.phase = Phase::Updating {
@@ -1385,8 +1530,8 @@ mod native {
 }
 #[cfg(windows)]
 pub use native::{
-    Installed, Root, collect, control_id, discover, install_bundle, owned_settings, preflight,
-    uninstall, update_bundle,
+    Installed, Root, collect, control_binding, control_id, discover, install_bundle,
+    owned_settings, preflight, uninstall, update_bundle,
 };
 
 #[cfg(test)]

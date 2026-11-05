@@ -1,6 +1,6 @@
 //! Local byte pipes with private ACLs. Every outstanding OVERLAPPED owns its
 //! event, file handle and bounded buffer until Windows confirms completion.
-use crate::security::Identity;
+use crate::security::{Identity, PIPE_CLIENT_ACCESS};
 use crate::{Error, Result};
 use std::io::{self, Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -12,8 +12,8 @@ use windows_sys::Win32::Foundation::{
     CompareObjectHandles, DuplicateHandle, ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE,
     ERROR_FILE_NOT_FOUND, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_NO_DATA,
     ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
-    ERROR_SEM_TIMEOUT, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
-    INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0,
+    ERROR_SEM_TIMEOUT, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -45,6 +45,7 @@ pub enum Purpose {
     Bootstrap,
     Control,
     Supervision,
+    Broker,
 }
 
 pub struct Endpoint {
@@ -275,6 +276,10 @@ impl Drop for Operation {
 
 impl Endpoint {
     pub fn bind(name: &str, purpose: Purpose) -> Result<Self> {
+        Self::bind_for(name, purpose, &Identity::current()?)
+    }
+
+    pub fn bind_for(name: &str, purpose: Purpose, identity: &Identity) -> Result<Self> {
         let tail = name
             .strip_prefix(r"\\.\pipe\oblivion.")
             .ok_or(Error("invalid_private_pipe_name"))?;
@@ -287,19 +292,21 @@ impl Endpoint {
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         };
-        if !id(runtime)
-            || match purpose {
-                Purpose::Control => role != "control",
-                Purpose::Supervision => role != "supervision",
-                Purpose::Bootstrap => !role.strip_prefix("auth.").is_some_and(id),
+        let valid = match purpose {
+            Purpose::Broker => {
+                role == "broker" && runtime == identity.sid() && Identity::from_sid(runtime).is_ok()
             }
-        {
+            Purpose::Control => id(runtime) && role == "control",
+            Purpose::Supervision => id(runtime) && role == "supervision",
+            Purpose::Bootstrap => id(runtime) && role.strip_prefix("auth.").is_some_and(id),
+        };
+        if !valid {
             return Err(Error("invalid_private_pipe_name"));
         }
         let mut endpoint = Self {
             name: name.encode_utf16().chain(Some(0)).collect(),
             purpose,
-            identity: Identity::current()?,
+            identity: identity.clone(),
             listener: None,
             connect: None,
         };
@@ -308,7 +315,7 @@ impl Endpoint {
     }
 
     fn create(&self, first: bool) -> Result<Pipe> {
-        let descriptor = self.identity.descriptor()?;
+        let descriptor = self.identity.pipe_descriptor()?;
         let attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: descriptor.as_ptr(),
@@ -424,7 +431,7 @@ impl Endpoint {
         let peer = identified
             && self
                 .identity
-                .permits(pid, self.purpose == Purpose::Bootstrap)
+                .permits(pid, self.purpose != Purpose::Broker)
                 .unwrap_or(false);
         let next = if self.purpose != Purpose::Bootstrap {
             Some(self.create(false)?)
@@ -478,6 +485,16 @@ impl Drop for Endpoint {
 }
 
 impl Pipe {
+    pub(crate) fn authenticate_client(&self, owner: &Identity) -> Result<()> {
+        if self.role != Role::Server {
+            return Err(Error("broker_server_pipe_required"));
+        }
+        crate::security::authenticate_pipe(
+            self.handle.raw().map_err(|_| Error("broker_pipe_closed"))?,
+            owner,
+        )
+    }
+
     pub(crate) fn verify_server_process(&self, expected: &impl AsRawHandle) -> io::Result<()> {
         let mut pid = 0;
         if self.role != Role::Client
@@ -728,7 +745,7 @@ pub(crate) fn connect_control(
         let handle = unsafe {
             CreateFileW(
                 name.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
+                PIPE_CLIENT_ACCESS,
                 0,
                 null(),
                 OPEN_EXISTING,
@@ -757,15 +774,9 @@ pub(crate) fn connect_control(
         if unsafe { SetHandleInformation(handle.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) } == 0 {
             return Err(failed());
         }
-        let mut pid = 0;
-        if unsafe { GetNamedPipeServerProcessId(handle.as_raw_handle(), &mut pid) } == 0
-            || !identity.permits(pid, false).unwrap_or(false)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "untrusted_runtime_peer",
-            ));
-        }
+        crate::security::pipe_permissions(handle.as_raw_handle(), identity).map_err(|_| {
+            io::Error::new(io::ErrorKind::PermissionDenied, "untrusted_runtime_peer")
+        })?;
         check_connect(stop, deadline)?;
         return Ok(Pipe::new(handle, Role::Client));
     }
@@ -827,16 +838,21 @@ pub(crate) mod tests {
     pub(crate) fn name(purpose: Purpose) -> String {
         let mut bytes = [0; 16];
         getrandom::getrandom(&mut bytes).unwrap();
-        let id = bytes
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let id = if purpose == Purpose::Broker {
+            Identity::current().unwrap().sid().to_owned()
+        } else {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
         format!(
             r"\\.\pipe\oblivion.{id}.{}",
             match purpose {
                 Purpose::Control => "control".to_owned(),
                 Purpose::Supervision => "supervision".to_owned(),
                 Purpose::Bootstrap => format!("auth.{id}"),
+                Purpose::Broker => "broker".to_owned(),
             }
         )
     }

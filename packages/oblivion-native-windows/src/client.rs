@@ -57,8 +57,13 @@ impl Client {
         })
     }
 
-    pub(crate) fn for_child(runtime_id: &str, child: &Child) -> crate::Result<Self> {
+    pub(crate) fn for_child(
+        runtime_id: &str,
+        child: &Child,
+        expected_client: &Identity,
+    ) -> crate::Result<Self> {
         let mut client = Self::new(runtime_id)?;
+        client.identity = expected_client.clone();
         let mut process = null_mut();
         let current = unsafe { GetCurrentProcess() };
         if unsafe {
@@ -155,6 +160,12 @@ impl Client {
 }
 
 impl Channel {
+    /// Named-pipe impersonation identifies the token of the last message read.
+    /// Broker admission calls this only after consuming its bounded request.
+    pub(crate) fn authenticate_broker(&self, owner: &Identity) -> crate::Result<()> {
+        crate::broker_pipe::authenticate(&self.pipe, owner)
+    }
+
     pub(crate) fn new(pipe: Pipe, stop: Arc<AtomicBool>, deadline: Instant) -> Self {
         Self {
             pipe,

@@ -46,6 +46,8 @@ struct Binding {
     runtime_id: String,
     config_sha256: String,
     source_sha256: String,
+    client_sid: String,
+    storage_sid: String,
 }
 
 #[derive(Clone)]
@@ -53,6 +55,7 @@ pub struct Settings {
     binding: Binding,
     helper: PathBuf,
     config: PathBuf,
+    storage: Identity,
 }
 
 impl Settings {
@@ -63,7 +66,36 @@ impl Settings {
         config_sha256: &str,
         source_sha256: &str,
     ) -> Result<Self> {
-        let settings = Self::binding(runtime_id, helper, config, config_sha256, source_sha256)?;
+        let identity = Identity::current()?;
+        Self::new_for(
+            runtime_id,
+            helper,
+            config,
+            config_sha256,
+            source_sha256,
+            &identity,
+            &identity,
+        )
+    }
+
+    pub fn new_for(
+        runtime_id: &str,
+        helper: &Path,
+        config: &Path,
+        config_sha256: &str,
+        source_sha256: &str,
+        client: &Identity,
+        storage: &Identity,
+    ) -> Result<Self> {
+        let settings = Self::binding(
+            runtime_id,
+            helper,
+            config,
+            config_sha256,
+            source_sha256,
+            client,
+            storage,
+        )?;
         settings.verify()?;
         Ok(settings)
     }
@@ -77,9 +109,62 @@ impl Settings {
         config_sha256: &str,
         source_sha256: &str,
     ) -> Result<Self> {
-        let settings = Self::binding(runtime_id, helper, config, config_sha256, source_sha256)?;
+        let identity = Identity::current()?;
+        Self::maintenance_for(
+            runtime_id,
+            helper,
+            config,
+            config_sha256,
+            source_sha256,
+            &identity,
+            &identity,
+        )
+    }
+
+    pub fn maintenance_for(
+        runtime_id: &str,
+        helper: &Path,
+        config: &Path,
+        config_sha256: &str,
+        source_sha256: &str,
+        client: &Identity,
+        storage: &Identity,
+    ) -> Result<Self> {
+        let settings = Self::binding(
+            runtime_id,
+            helper,
+            config,
+            config_sha256,
+            source_sha256,
+            client,
+            storage,
+        )?;
         settings.verify_configuration()?;
         Ok(settings)
+    }
+
+    pub fn with_client(mut self, client: &Identity) -> Result<Self> {
+        self.binding.client_sid = client.sid().into();
+        Ok(self)
+    }
+
+    pub fn with_storage(mut self, storage: &Identity) -> Result<Self> {
+        self.binding.storage_sid = storage.sid().into();
+        self.storage = storage.clone();
+        self.verify_configuration()?;
+        Ok(self)
+    }
+
+    pub fn client_sid(&self) -> &str {
+        &self.binding.client_sid
+    }
+
+    pub fn storage_sid(&self) -> &str {
+        &self.binding.storage_sid
+    }
+
+    fn storage_identity(&self) -> Identity {
+        self.storage.clone()
     }
 
     fn binding(
@@ -88,6 +173,8 @@ impl Settings {
         config: &Path,
         config_sha256: &str,
         source_sha256: &str,
+        client: &Identity,
+        storage: &Identity,
     ) -> Result<Self> {
         if !valid_id(runtime_id)
             || runtime_id.bytes().all(|byte| byte == b'0')
@@ -101,9 +188,12 @@ impl Settings {
                 runtime_id: runtime_id.into(),
                 config_sha256: config_sha256.into(),
                 source_sha256: source_sha256.into(),
+                client_sid: client.sid().into(),
+                storage_sid: storage.sid().into(),
             },
             helper: helper.to_owned(),
             config: config.to_owned(),
+            storage: storage.clone(),
         })
     }
 
@@ -134,13 +224,13 @@ impl Settings {
                 self.helper
                     .to_str()
                     .ok_or(Error("invalid_supervisor_path"))?,
-                &Identity::current()?,
+                &self.storage_identity(),
             )?,
         })
     }
 
     fn verify_configuration(&self) -> Result<VerifiedConfiguration> {
-        let identity = Identity::current()?;
+        let identity = self.storage_identity();
         let config = self
             .config
             .to_str()
@@ -337,7 +427,7 @@ fn acquire_as(
     stop: Arc<AtomicBool>,
     deadline: Instant,
 ) -> Result<Lease> {
-    let identity = Identity::current()?;
+    let identity = settings.storage_identity();
     let election = Election::acquire(settings.runtime_id(), &identity, &stop, deadline)?;
     // Maintenance owns this same mutex. Do not pin old software while waiting
     // for an update/collection to release it.
@@ -381,6 +471,12 @@ fn acquire_as(
             let result = Command::new(verified.helper.path())
                 .args(["supervise", "--config"])
                 .arg(&settings.config)
+                .args([
+                    "--client-sid",
+                    settings.client_sid(),
+                    "--storage-sid",
+                    settings.storage_sid(),
+                ])
                 .args([
                     "--runtime-id",
                     settings.runtime_id(),
@@ -473,7 +569,7 @@ fn acquire_as(
 }
 
 pub fn stop(settings: &Settings, cancelled: Arc<AtomicBool>, deadline: Instant) -> Result<()> {
-    let identity = Identity::current()?;
+    let identity = settings.storage_identity();
     let record = Journal::read(settings, &identity)?.ok_or(Error("runtime_not_owned"))?;
     if record.phase == Phase::Stopped {
         return Ok(());
@@ -542,7 +638,11 @@ pub fn stopped_update(
 }
 
 fn same_runtime(base: &Settings, target: &Settings) -> Result<()> {
-    if base.runtime_id() != target.runtime_id() || base.config != target.config {
+    if base.runtime_id() != target.runtime_id()
+        || base.config != target.config
+        || base.client_sid() != target.client_sid()
+        || base.storage_sid() != target.storage_sid()
+    {
         return Err(Error("runtime_maintenance_binding_changed"));
     }
     Ok(())
@@ -554,7 +654,7 @@ fn stopped_for(
     stop: Arc<AtomicBool>,
     deadline: Instant,
 ) -> Result<Stopped> {
-    let identity = Identity::current()?;
+    let identity = settings.storage_identity();
     let bindings = match target {
         Some(target) => vec![&settings.binding, &target.binding],
         None => vec![&settings.binding],
@@ -602,7 +702,7 @@ fn stopped_for(
 /// A live, authenticated supervisor may retry its owned shutdown. No HCS/HCN/
 /// ACL adoption exists here: pipe absence cannot clear an unknown helper exit.
 pub fn recover(settings: &Settings, stop: Arc<AtomicBool>, deadline: Instant) -> Result<()> {
-    let identity = Identity::current()?;
+    let identity = settings.storage_identity();
     match Journal::read(settings, &identity)? {
         None => return Err(Error("runtime_not_owned")),
         Some(record) if record.phase.admitting() => return Err(Error("runtime_busy")),
@@ -639,7 +739,7 @@ fn exchange(
 ) -> Result<(Channel, Reply)> {
     check(&stop, deadline)?;
     let name: Vec<_> = settings.name().encode_utf16().chain(Some(0)).collect();
-    let pipe = private::connect_control(&name, &Identity::current()?, &stop, deadline)
+    let pipe = private::connect_control(&name, &settings.storage_identity(), &stop, deadline)
         .map_err(|_| Error("supervisor_unavailable"))?;
     if let Some(process) = process {
         pipe.verify_server_process(process)
@@ -685,8 +785,8 @@ pub fn supervise(settings: Settings, generation: &str) -> Result<()> {
         return Err(Error("invalid_runtime_generation"));
     }
     let verified = settings.verify()?;
-    let identity = Identity::current()?;
-    let mut endpoint = Endpoint::bind(&settings.name(), Purpose::Supervision)?;
+    let identity = settings.storage_identity();
+    let mut endpoint = Endpoint::bind_for(&settings.name(), Purpose::Supervision, &identity)?;
     let mut journal = Journal::writer(&settings, &identity, false)?;
     let mut record = journal.load()?.ok_or(Error("runtime_generation_missing"))?;
     if record.generation != generation || record.phase != Phase::Starting {
@@ -863,7 +963,13 @@ impl Backend {
                 "install"
             })
             .arg("--config")
-            .arg(&settings.config);
+            .arg(&settings.config)
+            .args([
+                "--client-sid",
+                settings.client_sid(),
+                "--storage-sid",
+                settings.storage_sid(),
+            ]);
         if let Boot::Initialize { bytes } = boot {
             command.args(["--data-mib", &(bytes / (1024 * 1024)).to_string()]);
         }
@@ -878,7 +984,11 @@ impl Backend {
             .stdin
             .take()
             .ok_or(Error("runtime_lifetime_unavailable"))?;
-        let client = Client::for_child(settings.runtime_id(), &child)?;
+        let client = Client::for_child(
+            settings.runtime_id(),
+            &child,
+            &Identity::from_sid(settings.client_sid())?,
+        )?;
         Ok(Self {
             child,
             writer: Some(writer),
@@ -1109,7 +1219,7 @@ impl Journal {
             file: Some(file),
             parent,
             path,
-            identity: Identity::current()?,
+            identity: identity.clone(),
             binding: settings.binding.clone(),
         })
     }
@@ -1297,7 +1407,9 @@ impl Election {
         stop: &AtomicBool,
         deadline: Instant,
     ) -> Result<Self> {
-        let name: Vec<_> = format!("Local\\Oblivion.{}.{}.startup", identity.sid(), runtime_id)
+        // SCM runs in session zero; an elevated installer can run in another
+        // session. Their writer handoff must use the same kernel namespace.
+        let name: Vec<_> = format!("Global\\Oblivion.{}.{}.startup", identity.sid(), runtime_id)
             .encode_utf16()
             .chain(Some(0))
             .collect();
@@ -1405,9 +1517,12 @@ mod tests {
                     runtime_id: random_id().unwrap(),
                     config_sha256: "1".repeat(64),
                     source_sha256: "2".repeat(64),
+                    client_sid: Identity::current().unwrap().sid().into(),
+                    storage_sid: Identity::current().unwrap().sid().into(),
                 },
                 config: self.0.join("vm.json"),
                 helper: self.0.join("oblivion-vm.exe"),
+                storage: Identity::current().unwrap(),
             }
         }
     }
@@ -1668,6 +1783,59 @@ mod tests {
                 .unwrap()
                 .0,
                 "invalid_supervision_journal"
+            );
+        }
+    }
+
+    #[test]
+    fn stopped_proof_and_updates_cannot_switch_client_or_storage_principal() {
+        let area = Area::new();
+        let settings = area.settings();
+        let identity = Identity::current().unwrap();
+        let other = if identity.sid() == "S-1-5-18" {
+            Identity::administrators().unwrap()
+        } else {
+            Identity::from_sid("S-1-5-18").unwrap()
+        };
+        let mut writer = Journal::writer(&settings, &identity, true).unwrap();
+        writer
+            .save(&Record {
+                version: 1,
+                binding: settings.binding.clone(),
+                generation: random_id().unwrap(),
+                phase: Phase::Stopped,
+                resident: false,
+                boot: Boot::Existing,
+            })
+            .unwrap();
+        drop(writer);
+        let changed = settings.clone().with_client(&other).unwrap();
+        assert_eq!(
+            stopped(
+                &changed,
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .err()
+            .unwrap()
+            .0,
+            "invalid_supervision_journal"
+        );
+        let mut storage = settings.clone();
+        storage.binding.storage_sid = other.sid().into();
+        storage.storage = other.clone();
+        for changed in [changed, storage] {
+            assert_eq!(
+                stopped_update(
+                    &settings,
+                    &changed,
+                    Arc::new(AtomicBool::new(false)),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .err()
+                .unwrap()
+                .0,
+                "runtime_maintenance_binding_changed"
             );
         }
     }
@@ -1992,7 +2160,9 @@ mod tests {
             0
         );
         let observed = unsafe { OwnedHandle::from_raw_handle(observed) };
-        let client = Client::for_child(&random_id().unwrap(), &child).unwrap();
+        let client =
+            Client::for_child(&random_id().unwrap(), &child, &Identity::current().unwrap())
+                .unwrap();
         let backend = Backend {
             child,
             writer: Some(writer),
@@ -2011,7 +2181,7 @@ mod tests {
         let name = format!(r"\\.\pipe\oblivion.{runtime_id}.control");
         let mut endpoint = Endpoint::bind(&name, Purpose::Control).unwrap();
         let mut child = lifetime_child();
-        let client = Client::for_child(&runtime_id, &child).unwrap();
+        let client = Client::for_child(&runtime_id, &child, &Identity::current().unwrap()).unwrap();
         let worker = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(3);
             let mut pipe = endpoint

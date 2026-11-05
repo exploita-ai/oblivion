@@ -27,6 +27,15 @@ pub fn main() -> Result<()> {
         return Err(Error("windows_x86_64_required"));
     }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if let [operation, option, sid] = args.as_slice() {
+        if operation == "broker" && option == "--owner" {
+            if Identity::current()?.sid() != "S-1-5-18" {
+                return Err(Error("windows_broker_service_required"));
+            }
+            let owner = Identity::from_sid(sid.to_str().ok_or(Error("invalid_broker_owner"))?)?;
+            return crate::broker::service(owner);
+        }
+    }
     if args.len() == 1 && args[0] == "capabilities" {
         let observation = hcs::capabilities();
         // Availability of the helper core is distinct from product support:
@@ -52,7 +61,29 @@ pub fn main() -> Result<()> {
     if option != "--config" {
         return Err(Error("invalid_arguments"));
     }
-    let identity = Identity::current()?;
+    let [
+        client_option,
+        client_sid,
+        storage_option,
+        storage_sid,
+        rest @ ..,
+    ] = rest
+    else {
+        return Err(Error("invalid_arguments"));
+    };
+    if client_option != "--client-sid" || storage_option != "--storage-sid" {
+        return Err(Error("invalid_arguments"));
+    }
+    let client = Identity::from_sid(
+        client_sid
+            .to_str()
+            .ok_or(Error("invalid_runtime_identity"))?,
+    )?;
+    let storage = Identity::from_sid(
+        storage_sid
+            .to_str()
+            .ok_or(Error("invalid_runtime_identity"))?,
+    )?;
     if operation == "supervise" {
         let [
             runtime_option,
@@ -75,7 +106,7 @@ pub fn main() -> Result<()> {
             return Err(Error("invalid_arguments"));
         }
         let helper = std::env::current_exe().map_err(|_| Error("runtime_helper_unavailable"))?;
-        let settings = crate::supervisor::Settings::new(
+        let settings = crate::supervisor::Settings::new_for(
             runtime_id
                 .to_str()
                 .ok_or(Error("invalid_runtime_identifier"))?,
@@ -87,6 +118,8 @@ pub fn main() -> Result<()> {
             source_sha
                 .to_str()
                 .ok_or(Error("invalid_runtime_binding"))?,
+            &client,
+            &storage,
         )?;
         return crate::supervisor::supervise(
             settings,
@@ -98,17 +131,17 @@ pub fn main() -> Result<()> {
     let lifetime = Lifetime::inherited()?;
     let config = files::read_config(
         path.to_str().ok_or(Error("invalid_runtime_config_path"))?,
-        &identity,
+        &storage,
     )?;
     match (operation.to_str(), rest) {
-        (Some("run"), []) => run(config, lifetime, identity)?,
+        (Some("run"), []) => run_with_data(config, lifetime, client, storage, Data::Existing)?,
         (Some("install"), [option, mib]) if option == "--data-mib" => {
             let bytes = mib
                 .to_str()
                 .and_then(|value| value.parse::<u64>().ok())
                 .and_then(|value| value.checked_mul(1024 * 1024))
                 .ok_or(Error("invalid_runtime_disk_size"))?;
-            install(config, lifetime, identity, bytes)?;
+            install_for(config, lifetime, client, storage, bytes)?;
         }
         _ => return Err(Error("invalid_arguments")),
     }
@@ -117,7 +150,7 @@ pub fn main() -> Result<()> {
 }
 
 pub fn run(config: RuntimeConfig, lifetime: Lifetime, identity: Identity) -> Result<()> {
-    run_with_data(config, lifetime, identity, Data::Existing)
+    run_with_data(config, lifetime, identity.clone(), identity, Data::Existing)
 }
 
 /// Only this fresh creation path can grant guest initialization. Ordinary run
@@ -128,18 +161,28 @@ pub fn install(
     identity: Identity,
     bytes: u64,
 ) -> Result<()> {
+    install_for(config, lifetime, identity.clone(), identity, bytes)
+}
+
+fn install_for(
+    config: RuntimeConfig,
+    lifetime: Lifetime,
+    client: Identity,
+    storage: Identity,
+    bytes: u64,
+) -> Result<()> {
     lifetime.check()?;
     config.validate()?;
     if !available(&hcs::capabilities()?) {
         return Err(Error("hcs_nested_virtualization_required"));
     }
-    let created = crate::disk::create(&config.disks[1].path, &config.runtime_id, bytes, &identity)?;
+    let created = crate::disk::create(&config.disks[1].path, &config.runtime_id, bytes, &storage)?;
     let evidence = created.evidence()?;
     let data = Data::NewDisk {
         runtime_id: evidence.runtime_id().to_owned(),
         bytes: evidence.bytes(),
     };
-    let result = run_with_data(config, lifetime, identity, data);
+    let result = run_with_data(config, lifetime, client, storage, data);
     drop(created);
     result
 }
@@ -147,7 +190,8 @@ pub fn install(
 fn run_with_data(
     config: RuntimeConfig,
     lifetime: Lifetime,
-    identity: Identity,
+    client: Identity,
+    storage: Identity,
     data: Data,
 ) -> Result<()> {
     lifetime.check()?;
@@ -155,8 +199,8 @@ fn run_with_data(
     if !available(&hcs::capabilities()?) {
         return Err(Error("hcs_nested_virtualization_required"));
     }
-    let mut leases = files::Lease::acquire(&config, &identity)?;
-    let mut endpoint = Endpoint::bind(&config.control_pipe, Purpose::Control)?;
+    let mut leases = files::Lease::acquire(&config, &storage)?;
+    let mut endpoint = Endpoint::bind_for(&config.control_pipe, Purpose::Control, &client)?;
     let mut suffix = Zeroizing::new([0; 16]);
     getrandom::getrandom(suffix.as_mut_slice())
         .map_err(|_| Error("runtime_entropy_unavailable"))?;
@@ -164,7 +208,7 @@ fn run_with_data(
     let bootstrap_name = format!(r"\\.\pipe\oblivion.{}.auth.{suffix}", config.runtime_id);
     // HCS connects a serial port during VM construction; its private server
     // therefore has to exist first, not after the guest has booted.
-    let bootstrap = Endpoint::bind(&bootstrap_name, Purpose::Bootstrap)?;
+    let bootstrap = Endpoint::bind_for(&bootstrap_name, Purpose::Bootstrap, &storage)?;
     // HCN has synchronous service calls, not cancellable operation handles.
     // Create networking before any VM exists; remove it only after the VM is
     // confirmed stopped. A stalled HCN call never leaves an authorized guest.
@@ -181,7 +225,7 @@ fn run_with_data(
     let result = (|| {
         let configuration = config.hcs(
             &bootstrap_name,
-            &identity.sddl(),
+            &client.sddl(),
             network.as_ref().map(network::Lease::attachment),
         )?;
         lifetime.check()?;

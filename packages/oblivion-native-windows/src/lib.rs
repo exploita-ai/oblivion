@@ -15,28 +15,33 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 pub mod auth;
 #[cfg(windows)]
+pub mod bridge;
+pub mod broker;
+#[cfg(windows)]
+pub mod broker_pipe;
+#[cfg(windows)]
 pub mod bundle;
 #[cfg(windows)]
-pub mod bridge;
+pub mod client;
 pub mod config;
 pub mod disk;
-#[cfg(windows)]
-pub mod client;
 #[cfg(windows)]
 pub mod files;
 #[cfg(windows)]
 pub mod hcs;
 pub mod hcs_model;
 pub mod installation;
-pub mod network_model;
-#[cfg(windows)]
-pub mod network;
 #[cfg(windows)]
 pub mod lifetime;
+#[cfg(windows)]
+pub mod network;
+pub mod network_model;
 #[cfg(windows)]
 pub mod private;
 #[cfg(windows)]
 pub mod runtime;
+#[cfg(windows)]
+pub mod scm;
 #[cfg(windows)]
 pub mod security;
 #[cfg(windows)]

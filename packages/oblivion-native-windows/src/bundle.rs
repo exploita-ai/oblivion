@@ -48,7 +48,7 @@ pub struct VerifiedBundle {
 
 impl VerifiedBundle {
     pub fn open(root: &str, expected_source: Option<&str>, identity: &Identity) -> Result<Self> {
-        let root = Directory::open(root, identity, true)?;
+        let root = Directory::open(root, identity, false)?;
         let manifest_file = root.asset("bundle.json", identity, false)?;
         if manifest_file.bytes() > MAX_MANIFEST as u64 {
             return Err(Error("desktop_bundle_manifest_limit"));
@@ -129,7 +129,12 @@ impl VerifiedBundle {
     /// Publication is visible to the installer only after this returns. On an
     /// error retain the new private tree for explicit inspection; never delete
     /// an existing destination or unknown entries by path.
-    pub fn publish(self, destination: &str, identity: &Identity) -> Result<Self> {
+    pub fn publish(
+        self,
+        destination: &str,
+        identity: &Identity,
+        client: &Identity,
+    ) -> Result<Self> {
         let (parent, name) = destination
             .rsplit_once('\\')
             .ok_or(Error("invalid_runtime_asset_path"))?;
@@ -147,7 +152,7 @@ impl VerifiedBundle {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let stage = format!(r"{}\.bundle-{suffix}", parent.path());
-        let copied = self.copy_into(&stage, identity)?;
+        let copied = self.copy_into(&stage, identity, client)?;
         let source = copied.source().to_owned();
         let Self {
             root,
@@ -166,7 +171,7 @@ impl VerifiedBundle {
         result
     }
 
-    fn copy_into(self, destination: &str, identity: &Identity) -> Result<Self> {
+    fn copy_into(self, destination: &str, identity: &Identity, client: &Identity) -> Result<Self> {
         self.root.verify()?;
         self.manifest_file.verify()?;
         for asset in self.files.values() {
@@ -220,6 +225,13 @@ impl VerifiedBundle {
             &self.manifest_sha256,
             &mut std::io::sink(),
         )?;
+        for file in files.values() {
+            file.software_for(identity, client)?;
+        }
+        manifest_file.software_for(identity, client)?;
+        for directory in parents.values() {
+            directory.software_for(identity, client)?;
+        }
         root.verify()?;
         Ok(Self {
             paths: Paths::new(root.path(), &self.manifest),
@@ -279,7 +291,7 @@ impl VerifiedBundle {
             let child = parents
                 .get(parent)
                 .ok_or(Error("desktop_bundle_file_missing"))?
-                .child(name, identity, true)?;
+                .child(name, identity, false)?;
             parents.insert(relative, child);
         }
         let mut removals = Vec::with_capacity(self.files.len() + 1);
@@ -538,7 +550,9 @@ pub(crate) mod tests {
         let bundle = fixture.open().unwrap();
         let expected = bundle.binding().unwrap();
         let destination = fixture.destination();
-        let published = bundle.publish(&destination, &fixture.identity).unwrap();
+        let published = bundle
+            .publish(&destination, &fixture.identity, &fixture.identity)
+            .unwrap();
         assert_eq!(published.id(), fixture.manifest.bundle_id);
         assert_eq!(published.source(), fixture.manifest.source_sha256);
         assert_eq!(published.binding().unwrap().bundle_id, expected.bundle_id);
@@ -575,6 +589,47 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn published_code_grants_only_reader_rights_and_keeps_storage_ownership() {
+        let fixture = Fixture::new();
+        let reader = Identity::from_sid("S-1-5-21-100000001-100000002-100000003-1001").unwrap();
+        let destination = fixture.destination();
+        // A SYSTEM/Administrators reader must not accept user-owned source code.
+        assert!(
+            VerifiedBundle::open(
+                fixture.source().path(),
+                None,
+                &Identity::administrators().unwrap()
+            )
+            .is_err()
+        );
+        let published = fixture
+            .open()
+            .unwrap()
+            .publish(&destination, &fixture.identity, &reader)
+            .unwrap();
+        let file = std::fs::File::open(published.manager()).unwrap();
+        crate::security::file_permissions(
+            &file,
+            fixture.identity.sid(),
+            crate::security::FilePolicy::Immutable,
+        )
+        .unwrap();
+        assert!(
+            crate::security::file_permissions(
+                &file,
+                fixture.identity.sid(),
+                crate::security::FilePolicy::Private
+            )
+            .is_err()
+        );
+        drop(file);
+        // The same immutable policy permits cleanup of the exact inventory;
+        // granting read access must not strand a verified old software release.
+        published.remove(&fixture.identity).unwrap();
+        assert!(!std::path::Path::new(&destination).exists());
+    }
+
+    #[test]
     fn source_tampering_or_unlisted_entries_fail_before_destination_creation() {
         for change in [
             "hash",
@@ -607,7 +662,11 @@ pub(crate) mod tests {
             assert!(
                 fixture
                     .open()
-                    .and_then(|bundle| bundle.publish(&destination, &fixture.identity))
+                    .and_then(|bundle| bundle.publish(
+                        &destination,
+                        &fixture.identity,
+                        &fixture.identity
+                    ))
                     .is_err()
             );
             assert!(!std::path::Path::new(&destination).exists());
@@ -625,7 +684,7 @@ pub(crate) mod tests {
             fixture
                 .open()
                 .unwrap()
-                .publish(&destination, &fixture.identity)
+                .publish(&destination, &fixture.identity, &fixture.identity)
                 .is_err()
         );
         assert_eq!(std::fs::read(unknown).unwrap(), b"PRESERVE_UNKNOWN_CANARY");

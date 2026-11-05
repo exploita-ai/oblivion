@@ -14,7 +14,11 @@ use windows_sys::Win32::Foundation::GENERIC_WRITE;
 use windows_sys::Win32::Foundation::{
     ERROR_SHARING_VIOLATION, GENERIC_READ, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
 };
+use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+use windows_sys::Win32::Security::{
+    DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE,
     FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
@@ -23,7 +27,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
     FileDispositionInfo, FileIdInfo, FileRenameInfo, GetFileInformationByHandle,
     GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW, OPEN_EXISTING,
-    READ_CONTROL, SetFileInformationByHandle,
+    READ_CONTROL, SetFileInformationByHandle, WRITE_DAC,
 };
 use windows_sys::Win32::Storage::Vhd::{
     GET_VIRTUAL_DISK_INFO, GET_VIRTUAL_DISK_INFO_IDENTIFIER, GET_VIRTUAL_DISK_INFO_IS_LOADED,
@@ -354,7 +358,7 @@ impl Directory {
     pub(crate) fn remove(self, identity: &Identity) -> Result<()> {
         self.verify()?;
         let pin = Arc::try_unwrap(self.0).map_err(|_| Error("runtime_software_in_use"))?;
-        Mutation::open(pin.file, &pin.path, pin.id, true, identity)?.remove()
+        Mutation::open(pin.file, &pin.path, pin.id, true, false, identity)?.remove()
     }
 
     pub(crate) fn move_to(
@@ -367,10 +371,15 @@ impl Directory {
         destination.verify()?;
         let path = destination.child_path(name)?;
         let pin = Arc::try_unwrap(self.0).map_err(|_| Error("runtime_software_in_use"))?;
-        let mutation = Mutation::open(pin.file, &pin.path, pin.id, true, identity)?;
+        let mutation = Mutation::open(pin.file, &pin.path, pin.id, true, false, identity)?;
         mutation.rename(&path, false)?;
         drop(mutation);
-        destination.child(name, identity, true)
+        destination.child(name, identity, false)
+    }
+
+    pub(crate) fn software_for(&self, storage: &Identity, client: &Identity) -> Result<()> {
+        self.verify()?;
+        software_acl(&self.0.file, &self.0.path, self.0.id, true, storage, client)
     }
 
     pub(crate) fn child(&self, name: &str, identity: &Identity, private: bool) -> Result<Self> {
@@ -535,9 +544,14 @@ impl Asset {
     pub(crate) fn removal(self, identity: &Identity) -> Result<Removal> {
         self.verify()?;
         Ok(Removal {
-            mutation: Mutation::open(self.file, &self.path, self.id, false, identity)?,
+            mutation: Mutation::open(self.file, &self.path, self.id, false, false, identity)?,
             _parent: self.parent,
         })
+    }
+
+    pub(crate) fn software_for(&self, storage: &Identity, client: &Identity) -> Result<()> {
+        self.verify()?;
+        software_acl(&self.file, &self.path, self.id, false, storage, client)
     }
 
     pub(crate) fn move_to(
@@ -577,10 +591,10 @@ impl Asset {
                 if asset.path != path {
                     return Err(Error("runtime_asset_changed"));
                 }
-                Mutation::open(asset.file, &asset.path, asset.id, false, identity)
+                Mutation::open(asset.file, &asset.path, asset.id, false, true, identity)
             })
             .transpose()?;
-        let mutation = Mutation::open(self.file, &self.path, self.id, false, identity)?;
+        let mutation = Mutation::open(self.file, &self.path, self.id, false, true, identity)?;
         mutation.rename(&path, replace)?;
         drop(mutation);
         drop(_previous);
@@ -613,6 +627,7 @@ impl Mutation {
         path: &str,
         expected: FileId,
         directory: bool,
+        private: bool,
         identity: &Identity,
     ) -> Result<Self> {
         // Downgrade the immutable read pin before requesting DELETE, while a
@@ -647,7 +662,7 @@ impl Mutation {
             if inspect(&file, path, directory)?.0 != expected {
                 return Err(Error("runtime_asset_changed"));
             }
-            permissions(&file, identity.sid(), true)?;
+            permissions(&file, identity.sid(), private)?;
             Ok(file)
         };
         let guard = open(READ_CONTROL | FILE_READ_ATTRIBUTES)?;
@@ -699,6 +714,52 @@ impl Mutation {
         }
         Ok(())
     }
+}
+
+fn software_acl(
+    original: &File,
+    path: &str,
+    expected: FileId,
+    directory: bool,
+    storage: &Identity,
+    client: &Identity,
+) -> Result<()> {
+    // Only an already private, storage-owned object can become published code.
+    // The owner is retained; the descriptor grants the client read/execute only.
+    permissions(original, storage.sid(), true)?;
+    let file = open_raw(
+        path,
+        READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES,
+        false,
+        directory,
+    )?;
+    if inspect(&file, path, directory)?.0 != expected {
+        return Err(Error("runtime_asset_changed"));
+    }
+    let descriptor = storage.software_for(client)?;
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut acl = null_mut();
+    if unsafe {
+        GetSecurityDescriptorDacl(descriptor.as_ptr(), &mut present, &mut acl, &mut defaulted)
+    } == 0
+        || present == 0
+        || acl.is_null()
+        || unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                acl,
+                null_mut(),
+            )
+        } != 0
+    {
+        return Err(Error("runtime_software_permissions_failed"));
+    }
+    permissions(&file, storage.sid(), false)
 }
 
 fn create_directory(path: &str, identity: &Identity) -> Result<()> {
