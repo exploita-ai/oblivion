@@ -1,5 +1,5 @@
+use crate::file_identity::FileIdentity;
 use crate::{MAX_ENTRIES, invalid, require};
-use serde::{Deserialize, Serialize};
 use std::ffi::{CStr, CString};
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -9,35 +9,6 @@ use std::path::Path;
 
 /// All peer paths are resolved one component at a time from pinned descriptors.
 pub(crate) struct Directory(File);
-
-/// A volume UUID identifies the filesystem across device-number reassignment.
-/// It is not authentication against a cloned or attacker-controlled volume.
-#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "platform", rename_all = "kebab-case", deny_unknown_fields)]
-enum FilesystemIdentity {
-    Linux { kind: i64, uuid: Vec<u8> },
-    MacOs { kind: String, uuid: [u8; 16] },
-}
-
-#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct FileIdentity {
-    filesystem: FilesystemIdentity,
-    pub inode: u64,
-}
-
-impl FileIdentity {
-    pub fn of(file: &File) -> io::Result<Self> {
-        Ok(Self {
-            filesystem: filesystem_identity(file)?,
-            inode: file.metadata()?.ino(),
-        })
-    }
-
-    pub fn matches(&self, file: &File) -> io::Result<bool> {
-        Ok(*self == Self::of(file)?)
-    }
-}
 
 impl Directory {
     pub fn open(path: &Path) -> io::Result<Self> {
@@ -78,6 +49,27 @@ impl Directory {
 
     pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
         self.0.metadata()
+    }
+
+    /// Same currently mounted device, independent of durable filesystem UUID.
+    pub fn same_device(&self, file: &File) -> io::Result<bool> {
+        Ok(self.0.metadata()?.dev() == file.metadata()?.dev())
+    }
+
+    /// Recovery records are receiver-owned regular files, never links or data
+    /// from an agent-controlled publication tree.
+    pub fn record(&self, name: &str, limit: u64) -> io::Result<File> {
+        let file = self.source(name)?;
+        let metadata = file.metadata()?;
+        require(
+            metadata.is_file()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.nlink() == 1
+                && metadata.mode() & 0o077 == 0
+                && metadata.len() <= limit,
+            "unsafe_file_operation_record",
+        )?;
+        Ok(file)
     }
 
     pub fn identity(&self) -> io::Result<FileIdentity> {
@@ -181,7 +173,15 @@ impl Directory {
 
     /// Publish a verified entry without replacing an existing destination,
     /// including an empty directory created concurrently by the agent.
-    pub fn move_exclusive(&self, from: &str, destination: &Self, to: &str) -> io::Result<()> {
+    pub fn move_exclusive(
+        &self,
+        from: &str,
+        destination: &Self,
+        to: &str,
+        expected: &FileIdentity,
+    ) -> io::Result<()> {
+        let file = self.source(from)?;
+        require(expected.matches(&file)?, "publication_changed")?;
         let from = component(from)?;
         let to = component(to)?;
         #[cfg(target_os = "linux")]
@@ -288,7 +288,7 @@ impl Directory {
 }
 
 #[cfg(target_os = "linux")]
-fn filesystem_identity(file: &File) -> io::Result<FilesystemIdentity> {
+pub(crate) fn file_identity(file: &File) -> io::Result<FileIdentity> {
     // Linux 6.9+ FS_IOC_GETFSUUID returns the filesystem's complete external
     // UUID from this descriptor. f_fsid folds ext4's UUID to only 64 bits.
     #[repr(C)]
@@ -316,14 +316,15 @@ fn filesystem_identity(file: &File) -> io::Result<FilesystemIdentity> {
     if unsafe { libc::fstatfs(file.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(FilesystemIdentity::Linux {
+    Ok(FileIdentity::Linux {
         kind: unsafe { stats.assume_init() }.f_type as i64,
         uuid,
+        inode: file.metadata()?.ino(),
     })
 }
 
 #[cfg(target_os = "macos")]
-fn filesystem_identity(file: &File) -> io::Result<FilesystemIdentity> {
+pub(crate) fn file_identity(file: &File) -> io::Result<FileIdentity> {
     #[repr(C)]
     struct Attributes {
         length: u32,
@@ -365,9 +366,10 @@ fn filesystem_identity(file: &File) -> io::Result<FilesystemIdentity> {
         .to_str()
         .map_err(|_| invalid("invalid_filesystem_identity"))?
         .to_owned();
-    Ok(FilesystemIdentity::MacOs {
+    Ok(FileIdentity::MacOs {
         kind,
         uuid: value.uuid,
+        inode: file.metadata()?.ino(),
     })
 }
 
@@ -402,6 +404,47 @@ fn component(name: &str) -> io::Result<CString> {
 #[cfg(test)]
 mod tests {
     use super::Directory;
+    use crate::file_identity::FileIdentity;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn receiver_records_reject_aliases_public_permissions_and_oversized_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "oblivion-record-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let directory = Directory::open(&root).unwrap();
+        let file = directory.create_file("record").unwrap();
+        file.set_len(4).unwrap();
+        assert!(directory.record("record", 4).is_ok());
+        assert!(directory.record("record", 3).is_err());
+        assert!(directory.same_device(&file).unwrap());
+        let identity = FileIdentity::of(&file).unwrap();
+        directory.rename("record", "renamed").unwrap();
+        assert!(
+            identity
+                .matches(&directory.source("renamed").unwrap())
+                .unwrap()
+        );
+        let other = directory.create_file("other").unwrap();
+        assert!(!identity.matches(&other).unwrap());
+        std::fs::hard_link(root.join("renamed"), root.join("alias")).unwrap();
+        assert!(directory.record("renamed", 4).is_err());
+        std::fs::remove_file(root.join("alias")).unwrap();
+        std::fs::set_permissions(root.join("renamed"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        assert!(directory.record("renamed", 4).is_err());
+        symlink(root.join("other"), root.join("link")).unwrap();
+        assert!(directory.record("link", 4).is_err());
+        directory.create_directory("folder").unwrap();
+        assert!(directory.record("folder", 4096).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn private_cleanup_supports_every_valid_transfer_directory() {
@@ -440,9 +483,23 @@ mod tests {
         let directory = Directory::open(&root).unwrap();
         directory.create_directory("source").unwrap();
         directory.create_directory("destination").unwrap();
+        let expected = directory.directory("source").unwrap().identity().unwrap();
+        let other = directory
+            .create_directory("foreign")
+            .unwrap()
+            .identity()
+            .unwrap();
         assert_eq!(
             directory
-                .move_exclusive("source", &directory, "destination")
+                .move_exclusive("source", &directory, "unreviewed", &other)
+                .unwrap_err()
+                .to_string(),
+            "publication_changed"
+        );
+        assert!(!root.join("unreviewed").exists());
+        assert_eq!(
+            directory
+                .move_exclusive("source", &directory, "destination", &expected)
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::AlreadyExists
@@ -450,7 +507,7 @@ mod tests {
         assert!(root.join("source").is_dir());
         assert!(root.join("destination").is_dir());
         directory
-            .move_exclusive("source", &directory, "unused")
+            .move_exclusive("source", &directory, "unused", &expected)
             .unwrap();
         assert!(!root.join("source").exists());
         assert!(root.join("unused").is_dir());

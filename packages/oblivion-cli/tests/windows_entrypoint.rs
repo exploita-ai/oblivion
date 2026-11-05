@@ -66,18 +66,26 @@ fn syntax_and_unimplemented_endpoints_fail_before_hyperv_or_installation_discove
         (vec!["files", "list"], "Choose a Safe with --safe NAME"),
         (
             vec!["files", "import", "--safe", "GB", "--source", "unopened"],
-            "windows_filesystem_endpoint_not_implemented",
+            "A file copy needs review in a terminal, --yes for an explicit unattended copy, or --events for the manager",
         ),
         (
             vec![
                 "files",
-                "transfers",
+                "export",
                 "--safe",
                 "GB",
+                "--path",
+                "outside/secret",
                 "--destination",
                 "unopened",
             ],
-            "windows_filesystem_endpoint_not_implemented",
+            "Export paths must be under workspace or imports",
+        ),
+        (
+            vec![
+                "files", "import", "--safe", "GB", "--source", "unopened", "--events", "--yes",
+            ],
+            "Event copies require their reviewed approval; --yes cannot be combined with --events",
         ),
         (
             vec!["backup", "import", "unopened.oblivion"],

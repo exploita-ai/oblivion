@@ -4,8 +4,8 @@ use crate::command::{self, Command, Files, RuntimeCommand};
 use crate::controller::{self, Result};
 use crate::windows::{Client, Runtime};
 use crate::{
-    activity, backup, child_task, family_password, files, network, proxy, proxy_profiles, run,
-    safe, settings, shell, storage,
+    activity, backup, child_task, family_password, file_copy, files, network, proxy,
+    proxy_profiles, run, safe, settings, shell, storage, windows_file_copy,
 };
 use oblivion_native_windows::bundle::VerifiedBundle;
 use oblivion_native_windows::installation::{self, Installed, Root};
@@ -32,9 +32,9 @@ pub fn run() -> Result<i32> {
                 .map_err(|_| "Arguments must use valid UTF-8")
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let command = command::parse(&args, |_| unavailable_copy(), |_| unavailable_share())?;
-    // Unsupported local endpoints must not initialize or boot a runtime merely
-    // to discover that their native filesystem implementation is still absent.
+    let command = command::parse(&args, file_copy::parse, |_| unavailable_share())?;
+    // Reject unavailable endpoints and missing review before discovering or
+    // booting a runtime. Files uses native local endpoints after this admission.
     match &command {
         Command::Help => {
             print!("{}", command::HELP);
@@ -47,8 +47,10 @@ pub fn run() -> Result<i32> {
         Command::Backup(backup::Command::Export { .. } | backup::Command::Import { .. }) => {
             return Err("windows_backup_endpoint_not_implemented".into());
         }
-        Command::Files(Files::Inspect(command)) if command.needs_local_filesystem() => {
-            return Err("windows_filesystem_endpoint_not_implemented".into());
+        Command::Files(Files::Copy(command))
+            if !command.events_output && !command.confirmed && !std::io::stdin().is_terminal() =>
+        {
+            return Err("A file copy needs review in a terminal, --yes for an explicit unattended copy, or --events for the manager".into());
         }
         Command::Shell(_) if !interactive() => {
             return Err("Workspace requires an interactive terminal".into());
@@ -93,7 +95,7 @@ pub fn run() -> Result<i32> {
 }
 
 fn execute(
-    command: Command<Infallible, Infallible>,
+    command: Command<file_copy::CopyCommand, Infallible>,
     installed: &Installed,
     runtime: &mut Runtime,
 ) -> Result<i32> {
@@ -151,7 +153,8 @@ fn execute(
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
         ),
-        Command::Files(Files::Copy(never)) | Command::Share(never) => match never {},
+        Command::Files(Files::Copy(command)) => windows_file_copy::run(runtime, command),
+        Command::Share(never) => match never {},
         _ => Err("Command was not handled by the platform adapter".into()),
     }
 }
@@ -249,10 +252,6 @@ fn source_id() -> Result<&'static str> {
         .ok_or_else(|| {
             "Build a current source-bound desktop bundle before using the Windows runtime".into()
         })
-}
-
-fn unavailable_copy() -> Result<Infallible> {
-    Err("windows_filesystem_endpoint_not_implemented".into())
 }
 
 fn unavailable_share() -> Result<Infallible> {

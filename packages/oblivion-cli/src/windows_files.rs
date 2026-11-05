@@ -1,5 +1,5 @@
-//! Guest-owned Files metadata for the native Windows frontend. Local Windows
-//! publication remains a separate filesystem endpoint, never a stream fallback.
+//! Guest and explicitly selected native receiver metadata use the same Files
+//! outcomes. Inspecting a local destination never mounts the Safe filesystem.
 use crate::controller::Result;
 use crate::files::Backend;
 use crate::windows::Runtime;
@@ -14,8 +14,13 @@ impl Backend for Runtime {
         query: &TransfersQuery,
         destination: Option<&str>,
     ) -> Result<TransfersPage> {
-        if destination.is_some() {
-            return Err("windows_filesystem_endpoint_not_implemented".into());
+        if let Some(destination) = destination {
+            let target = std::path::absolute(destination)?;
+            return Ok(oblivion_transfer::stream::operations::inventory(
+                &target.join(".oblivion-transfers"),
+                &target,
+                query,
+            )?);
         }
         self.file_query(
             opening,
@@ -35,8 +40,17 @@ impl Backend for Runtime {
         action: Action,
         destination: Option<&str>,
     ) -> Result<Status> {
-        if destination.is_some() {
-            return Err("windows_filesystem_endpoint_not_implemented".into());
+        if let Some(destination) = destination {
+            let target = std::path::absolute(destination)?;
+            return Ok(oblivion_transfer::stream::operations::manage(
+                &target.join(".oblivion-transfers"),
+                &target,
+                operation,
+                &opening.safe_id,
+                &opening.nonce,
+                oblivion_transfer::native_files::Direction::Export,
+                action,
+            )?);
         }
         let request = match action {
             Action::Status => Request::Status {

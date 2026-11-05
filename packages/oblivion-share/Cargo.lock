@@ -926,6 +926,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "oblivion-bundle"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "oblivion-native-windows"
+version = "0.1.0"
+dependencies = [
+ "getrandom",
+ "oblivion-bundle",
+ "oblivion-wire",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "windows-sys",
+ "zeroize",
+]
+
+[[package]]
 name = "oblivion-share"
 version = "0.1.0"
 dependencies = [
@@ -944,9 +967,20 @@ dependencies = [
  "icu_casemap",
  "icu_normalizer",
  "libc",
+ "oblivion-native-windows",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "windows-sys",
+]
+
+[[package]]
+name = "oblivion-wire"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "zeroize",
 ]
 
 [[package]]
@@ -1698,6 +1732,7 @@ version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 

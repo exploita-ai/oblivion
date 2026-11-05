@@ -2,18 +2,20 @@
 //! A pathname is never evidence of a completed copy, and publication is never
 //! undone by recovery or discard.
 use super::{Publication, validate_name, verify_receipt};
-use crate::channel::Channel;
-use crate::directory::{Directory, FileIdentity};
+#[cfg(unix)]
+use crate::copy_protocol::Transport;
+use crate::directory::Directory;
+use crate::file_identity::FileIdentity;
 use crate::{Limits, Manifest, Receipt, invalid, require, validate_id};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{self, Read};
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
+#[cfg(unix)]
+use crate::native_files::Request;
 use crate::native_files::{
-    Action, Context, Direction, Request, State, Status, TransferEntry, TransfersPage,
-    TransfersQuery,
+    Action, Context, Direction, State, Status, TransferEntry, TransfersPage, TransfersQuery,
 };
 
 #[derive(Deserialize, Serialize)]
@@ -64,23 +66,9 @@ fn read<T: serde::de::DeserializeOwned>(
     name: &str,
     limit: u64,
 ) -> io::Result<T> {
-    let file = record_file(directory, name, limit)?;
+    let file = directory.record(name, limit)?;
     serde_json::from_reader(file.take(limit + 1))
         .map_err(|_| invalid("invalid_file_operation_record"))
-}
-
-fn record_file(directory: &Directory, name: &str, limit: u64) -> io::Result<std::fs::File> {
-    let file = directory.source(name)?;
-    let metadata = file.metadata()?;
-    require(
-        metadata.is_file()
-            && metadata.uid() == unsafe { libc::geteuid() }
-            && metadata.nlink() == 1
-            && metadata.mode() & 0o077 == 0
-            && metadata.len() <= limit,
-        "unsafe_file_operation_record",
-    )?;
-    Ok(file)
 }
 
 fn optional<T>(result: io::Result<T>) -> io::Result<Option<T>> {
@@ -156,7 +144,7 @@ fn inspect(
         return Ok(status);
     };
     status.source_opening = Some(record.context.opening.clone());
-    if optional(record_file(&operation, "discarded", 0))?.is_some() {
+    if optional(operation.record("discarded", 0))?.is_some() {
         status.state = State::Discarded;
         return Ok(status);
     }
@@ -167,7 +155,7 @@ fn inspect(
     };
     transaction.require_private()?;
     let publication = optional(read::<Publication>(&transaction, "publication.json", 8192))?;
-    let published = optional(record_file(&transaction, "published", 0))?.is_some();
+    let published = optional(transaction.record("published", 0))?.is_some();
     // No publication can occur before its durable identity record. An
     // incomplete private receive is safely discardable under this same lock.
     if publication.is_none() {
@@ -182,7 +170,7 @@ fn inspect(
         "file_operation_changed",
     )?;
     let receipt: Receipt = read(&transaction, "receipt.json", 1024)?;
-    let mut manifest = record_file(&transaction, "manifest.bin", 8 * 1024 * 1024 + 12)?;
+    let mut manifest = transaction.record("manifest.bin", 8 * 1024 * 1024 + 12)?;
     let manifest = Manifest::read(
         &mut manifest,
         Limits {
@@ -346,8 +334,9 @@ pub fn inventory(inbox: &Path, target: &Path, query: &TransfersQuery) -> io::Res
     Ok(page)
 }
 
-pub fn serve(
-    channel: &mut Channel,
+#[cfg(unix)]
+pub fn serve<T: Transport>(
+    channel: &mut T,
     inbox: &Path,
     target: &Path,
     request: Request,
@@ -440,6 +429,7 @@ pub fn serve(
     }
 }
 
+#[cfg(unix)]
 pub(super) fn require_active(
     inbox: &Directory,
     target: &Directory,
@@ -456,7 +446,7 @@ pub(super) fn require_active(
     require(
         record.context.opening == context.opening
             && record.context.name == context.name
-            && optional(record_file(&operation, "discarded", 0))?.is_none(),
+            && optional(operation.record("discarded", 0))?.is_none(),
         "file_operation_changed",
     )
 }

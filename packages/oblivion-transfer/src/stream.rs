@@ -1,30 +1,46 @@
 //! Explicit desktop copies over an already authorized private stream.
 //! Manifest, file hashes, limits and receipts use the existing copy protocol.
+#[cfg(unix)]
+use crate::Selection;
+#[cfg(unix)]
 use crate::channel::Channel;
-use crate::directory::{Directory, FileIdentity};
-use crate::endpoint::{
-    Approval, OfferRequest, ReceiveRequest, SelectionOffer, read_message, write_message,
-};
+#[cfg(unix)]
+use crate::copy_protocol;
+use crate::copy_protocol::{Payload, Transport, verify_receipt};
+use crate::directory::Directory;
+#[cfg(unix)]
+use crate::endpoint::ReceiveRequest;
+use crate::endpoint::{Approval, OfferRequest, SelectionOffer, read_message, write_message};
+use crate::file_identity::FileIdentity;
 use crate::native_file_events::{Phase, Summary};
 use crate::native_files::{Context, Direction};
-use crate::{Limits, Manifest, Receipt, Selection, invalid, require, validate_id, validate_path};
+#[cfg(unix)]
+use crate::validate_id;
+use crate::{Limits, Manifest, Receipt, invalid, require, validate_path};
 #[path = "stream_operations.rs"]
 pub mod operations;
 
 use crate::selection::{self, Input, Plan};
 use serde::{Deserialize, Serialize};
-use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::io::Write;
+use std::io::{self, Read};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 /// The source selection is prepared once, then retained through human review.
 /// No destination connection, receiver state or source snapshot is created here.
+#[cfg(unix)]
 pub struct PreparedUpload {
     selection: Selection,
     context: Context,
     plan: Plan,
 }
 
+#[cfg(unix)]
 impl PreparedUpload {
     pub fn prepare(
         sources: &[PathBuf],
@@ -67,74 +83,47 @@ impl PreparedUpload {
         approved_digest: &str,
         observer: &mut dyn FnMut(Phase, u64) -> io::Result<()>,
     ) -> io::Result<Receipt> {
-        let summary = self.summary()?;
-        require(
-            approved_digest == summary.manifest_sha256,
-            "offer_not_approved",
-        )?;
-        send_observed(channel, &mut self.selection, &self.context.id, observer)
+        copy_protocol::send(
+            channel,
+            &mut self.selection,
+            &self.context.id,
+            approved_digest,
+            observer,
+        )
     }
 }
 
 /// Personal ciphertext backups already own their reviewed Selection. They
 /// share this exact source protocol without introducing native Files state.
+#[cfg(unix)]
 pub fn send(channel: &mut Channel, selection: &mut Selection, id: &str) -> io::Result<Receipt> {
-    send_observed(channel, selection, id, &mut |_, _| Ok(()))
+    let digest = selection.manifest().sha256();
+    copy_protocol::send(channel, selection, id, &digest, &mut |_, _| Ok(()))
 }
 
-fn send_observed(
-    channel: &mut Channel,
-    selection: &mut Selection,
-    id: &str,
-    observer: &mut dyn FnMut(Phase, u64) -> io::Result<()>,
-) -> io::Result<Receipt> {
-    validate_id(id)?;
-    observer(Phase::Copying, 0)?;
-    channel.check()?;
-    write_message(
-        channel,
-        &ReceiveRequest {
-            approval: Approval {
-                id: id.into(),
-                manifest_sha256: selection.manifest().sha256(),
-            },
-            limits: Limits {
-                entries: selection.manifest().entries().len(),
-                bytes: selection.manifest().bytes(),
-            },
-        },
-    )?;
-    selection.manifest().write(channel)?;
-    let mut accepted = [0; 8];
-    channel.read_exact(&mut accepted)?;
-    require(&accepted == b"receive\n", "offer_rejected")?;
-    let total = selection.manifest().bytes();
-    selection.send_data(&mut Payload {
-        inner: channel,
-        observer,
-        bytes: 0,
-        total,
-    })?;
-    observer(Phase::Finalizing, total)?;
-    channel.check()?;
-    let receipt: Receipt = read_message(channel, 1024)?;
-    verify_receipt(&receipt, id, selection.manifest())?;
-    Ok(receipt)
+#[cfg(unix)]
+impl copy_protocol::Source for Selection {
+    fn manifest(&self) -> &Manifest {
+        Selection::manifest(self)
+    }
+    fn write_payload<W: Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        self.send_data(writer)
+    }
 }
 
 /// The source offer and destination descriptor remain pinned during review.
 /// The source receives no Approval and the receiver writes nothing in prepare.
-pub struct PreparedDownload {
-    channel: Channel,
+pub struct PreparedDownload<T: Transport> {
+    channel: T,
     manifest: Manifest,
     target: Directory,
     context: Context,
     plan: Plan,
 }
 
-impl PreparedDownload {
+impl<T: Transport> PreparedDownload<T> {
     pub fn prepare(
-        mut channel: Channel,
+        mut channel: T,
         selected: &[String],
         target: &Path,
         context: Context,
@@ -167,6 +156,7 @@ impl PreparedDownload {
                 paths: selected.to_vec(),
             },
         )?;
+        channel.flush()?;
         let offer: SelectionOffer = read_message(&mut channel, 64 * 1024)?;
         let plan = selection_plan(selected, &offer)?;
         let manifest = Manifest::read(
@@ -177,6 +167,8 @@ impl PreparedDownload {
             },
         )?;
         require_collection(&manifest, &plan, &offer.directories)?;
+        #[cfg(windows)]
+        crate::windows_destination::validate(&manifest, &context.name)?;
         let prepared = Self {
             channel,
             manifest,
@@ -212,6 +204,8 @@ impl PreparedDownload {
         // even if the destination's pathname was replaced while showing review.
         let inbox = match self.target.create_directory(".oblivion-transfers") {
             Ok(directory) => {
+                #[cfg(windows)]
+                directory.initialize_lock()?;
                 self.target.sync()?;
                 directory
             }
@@ -231,7 +225,8 @@ impl PreparedDownload {
                 manifest_sha256: summary.manifest_sha256,
             },
         )?;
-        let receipt = crate::filesystem::receive_at(
+        self.channel.flush()?;
+        let receipt = receive_payload(
             &mut Payload {
                 inner: &mut self.channel,
                 observer,
@@ -253,6 +248,7 @@ impl PreparedDownload {
             &self.manifest,
         )?;
         write_message(&mut self.channel, &receipt)?;
+        self.channel.flush()?;
         let mut completed = [0; 7];
         self.channel.read_exact(&mut completed)?;
         require(&completed == b"copied\n", "source_not_completed")?;
@@ -260,43 +256,21 @@ impl PreparedDownload {
     }
 }
 
-// Wrap only the existing payload copy, not its offer or manifest. END is part
-// of that stream but never contributes to document-byte progress.
-struct Payload<'a, T> {
-    inner: &'a mut T,
-    observer: &'a mut dyn FnMut(Phase, u64) -> io::Result<()>,
-    bytes: u64,
-    total: u64,
-}
-impl<T> Payload<'_, T> {
-    fn advance(&mut self, count: usize) -> io::Result<()> {
-        self.bytes += (count as u64).min(self.total - self.bytes);
-        (self.observer)(Phase::Copying, self.bytes)
-    }
-}
-impl<T: Read> Read for Payload<'_, T> {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        (self.observer)(Phase::Copying, self.bytes)?;
-        let count = self.inner.read(buffer)?;
-        self.advance(count)?;
-        Ok(count)
-    }
-}
-impl<T: Write> Write for Payload<'_, T> {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        (self.observer)(Phase::Copying, self.bytes)?;
-        let count = self.inner.write(buffer)?;
-        self.advance(count)?;
-        Ok(count)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        (self.observer)(Phase::Copying, self.bytes)?;
-        self.inner.flush()
-    }
+fn receive_payload(
+    reader: &mut impl Read,
+    manifest: &Manifest,
+    inbox: &Directory,
+    id: &str,
+) -> io::Result<Receipt> {
+    #[cfg(unix)]
+    return crate::filesystem::receive_at(reader, manifest, inbox, id);
+    #[cfg(windows)]
+    return crate::windows_destination::receive_at(reader, manifest, inbox, id);
 }
 
 /// A personal backup receiver owns one empty local file. The peer can offer
 /// only the fixed LUKS2 payload, never a local path or an archive to extract.
+#[cfg(unix)]
 pub fn download_open_file(
     channel: &mut Channel,
     mut file: std::fs::File,
@@ -382,8 +356,9 @@ pub fn download_open_file(
 
 /// The local launcher chooses both roots, name and ceiling. The peer supplies
 /// only one declared top-level file/directory, never an archive to extract.
-pub fn receive_directory(
-    channel: &mut Channel,
+#[cfg(unix)]
+pub fn receive_directory<T: Transport>(
+    channel: &mut T,
     inbox: &Path,
     target: &Path,
     context: &crate::native_files::Context,
@@ -439,15 +414,16 @@ fn recover_directory_locked(
 ) -> io::Result<Receipt> {
     let transaction = guard.directory(id)?;
     let publication: Publication =
-        serde_json::from_reader(transaction.source("publication.json")?.take(8192))
+        serde_json::from_reader(transaction.record("publication.json", 8192)?.take(8192))
             .map_err(|_| invalid("invalid_publication"))?;
     validate_name(&publication.name)?;
     validate_path(&publication.selected)?;
-    let receipt: Receipt = serde_json::from_reader(transaction.source("receipt.json")?.take(1024))
-        .map_err(|_| invalid("invalid_receipt"))?;
+    let receipt: Receipt =
+        serde_json::from_reader(transaction.record("receipt.json", 1024)?.take(1024))
+            .map_err(|_| invalid("invalid_receipt"))?;
     require(receipt.id == id, "invalid_receipt")?;
     let manifest = Manifest::read(
-        &mut transaction.source("manifest.bin")?,
+        &mut transaction.record("manifest.bin", 8 * 1024 * 1024 + 12)?,
         Limits {
             entries: crate::MAX_ENTRIES,
             bytes: crate::MAX_DOCUMENT_BYTES,
@@ -466,25 +442,14 @@ fn recover_directory_locked(
                 .next()
                 .ok_or_else(|| invalid("invalid_selection"))?,
         ) {
+            require(publication.source.matches(&file)?, "publication_changed")?;
             require(
-                publication.source.matches(&file)?,
-                "publication_changed",
-            )?;
-            let current = Selection::prepare_at(
-                transaction.directory("files")?,
-                &[publication.selected.clone()],
-                Limits {
-                    entries: crate::MAX_ENTRIES,
-                    bytes: crate::MAX_DOCUMENT_BYTES,
-                },
-            )?;
-            require(
-                current.manifest().sha256() == manifest.sha256(),
+                staged_digest(&transaction, &publication.selected)? == manifest.sha256(),
                 "publication_changed",
             )?;
         }
     }
-    finish_publication(&transaction, target, &publication, target.metadata()?.dev())?;
+    finish_publication(&transaction, target, &publication)?;
     Ok(receipt)
 }
 
@@ -509,7 +474,6 @@ fn publish(
             .next()
             .ok_or_else(|| invalid("invalid_selection"))?,
     )?;
-    let metadata = file.metadata()?;
     let publication = Publication {
         name: name.to_owned(),
         selected: selected.to_owned(),
@@ -520,22 +484,21 @@ fn publish(
     record.sync_all()?;
     transaction.rename("publication.pending", "publication.json")?;
     transaction.sync()?;
-    finish_publication(&transaction, target, &publication, metadata.dev())
+    drop(file);
+    finish_publication(&transaction, target, &publication)
 }
 
 fn finish_publication(
     transaction: &Directory,
     target: &Directory,
     publication: &Publication,
-    device: u64,
 ) -> io::Result<()> {
     target.require_controlled()?;
     let current = target.source(&publication.name);
     match current {
         Ok(file) => {
-            let metadata = file.metadata()?;
             require(
-                metadata.dev() == device && publication.source.matches(&file)?,
+                target.same_device(&file)? && publication.source.matches(&file)?,
                 "destination_exists",
             )?;
         }
@@ -547,12 +510,12 @@ fn finish_publication(
                 .next()
                 .ok_or_else(|| invalid("invalid_selection"))?;
             let file = parent.source(selected)?;
-            let metadata = file.metadata()?;
             require(
-                metadata.dev() == device && publication.source.matches(&file)?,
+                target.same_device(&file)? && publication.source.matches(&file)?,
                 "publication_changed",
             )?;
-            parent.move_exclusive(selected, target, &publication.name)?;
+            drop(file);
+            parent.move_exclusive(selected, target, &publication.name, &publication.source)?;
             parent.sync()?;
         }
         Err(error) => return Err(error),
@@ -564,6 +527,27 @@ fn finish_publication(
         Err(error) => return Err(error),
     }
     transaction.sync()
+}
+
+fn staged_digest(transaction: &Directory, selected: &str) -> io::Result<String> {
+    let root = transaction.directory("files")?;
+    let paths = [selected.to_owned()];
+    let limits = Limits {
+        entries: crate::MAX_ENTRIES,
+        bytes: crate::MAX_DOCUMENT_BYTES,
+    };
+    #[cfg(unix)]
+    return Ok(Selection::prepare_at(root, &paths, limits)?
+        .manifest()
+        .sha256());
+    #[cfg(windows)]
+    return Ok(crate::windows_source::SourceSelection::manifest_at(
+        &root,
+        &paths,
+        limits,
+        &mut || Ok(()),
+    )?
+    .sha256());
 }
 
 fn selected_parent(transaction: &Directory, selected: &str) -> io::Result<Directory> {
@@ -677,14 +661,4 @@ fn require_selection(manifest: &Manifest, selected: &str) -> io::Result<()> {
 fn validate_name(name: &str) -> io::Result<()> {
     validate_path(name)?;
     require(!name.contains('/'), "invalid_destination_name")
-}
-
-fn verify_receipt(receipt: &Receipt, id: &str, manifest: &Manifest) -> io::Result<()> {
-    require(
-        receipt.id == id
-            && receipt.manifest_sha256 == manifest.sha256()
-            && receipt.entries == manifest.entries().len()
-            && receipt.bytes == manifest.bytes(),
-        "invalid_receipt",
-    )
 }

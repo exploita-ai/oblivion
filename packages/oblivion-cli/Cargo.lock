@@ -257,9 +257,11 @@ dependencies = [
  "icu_casemap",
  "icu_normalizer",
  "libc",
+ "oblivion-native-windows",
  "serde",
  "serde_json",
  "sha2",
+ "windows-sys",
 ]
 
 [[package]]

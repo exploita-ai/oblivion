@@ -63,7 +63,7 @@ fn run() -> control::Result<i32> {
                 .map_err(|_| "Arguments must use valid UTF-8")
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let command = command::parse(&args, file_commands::parse, share_commands::parse)?;
+    let command = command::parse(&args, oblivion_cli::file_copy::parse, share_commands::parse)?;
     match &command {
         command::Command::Help => {
             print!("{}", command::HELP);

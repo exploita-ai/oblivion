@@ -8,7 +8,7 @@ use oblivion_wire::agent::{Command, Launch, Size};
 use oblivion_wire::control::{Operation, Request};
 use oblivion_wire::idle;
 use oblivion_wire::slot::Slot;
-use std::io::Write;
+use std::io::{self, Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
@@ -81,6 +81,52 @@ impl Controller for Client {
     }
 }
 
+/// An attachment owns both its data stream and a quiet kernel lease. Revoking
+/// data I/O never substitutes for an explicit controller release acknowledgement.
+pub struct FileAttachment {
+    runtime_id: String,
+    slot: Slot,
+    safe_id: String,
+    client_id: String,
+    stream: FileStream,
+    lease: Option<client::Lease>,
+    stop: Arc<AtomicBool>,
+    released: bool,
+}
+
+pub struct FileStream(client::Channel);
+impl FileAttachment {
+    pub fn stream(&mut self) -> &mut FileStream {
+        &mut self.stream
+    }
+    pub fn cancellation(&self) -> Cancellation {
+        Cancellation(Arc::clone(&self.stop))
+    }
+}
+impl FileStream {
+    pub fn set_deadline(&mut self, deadline: Instant) -> io::Result<()> {
+        self.0.set_deadline(deadline)
+    }
+}
+impl Read for FileStream {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        self.0.read(output)
+    }
+}
+impl Write for FileStream {
+    fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+        self.0.write(input)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+impl oblivion_transfer::copy_protocol::Transport for FileStream {
+    fn check(&mut self) -> io::Result<()> {
+        self.0.check()
+    }
+}
+
 /// Platform hooks for the common launch/storage/administration workflows. The
 /// owning supervisor must elect and authenticate the runtime before construction.
 pub struct Runtime {
@@ -140,39 +186,150 @@ impl Runtime {
         self.client.cancellation()
     }
 
+    pub fn attach_file(
+        &mut self,
+        opening: &idle::Opening<Slot>,
+        request: &oblivion_transfer::native_files::Request,
+        stop: Arc<AtomicBool>,
+    ) -> Result<FileAttachment> {
+        use oblivion_transfer::native_files::Request;
+        let (safe, nonce) = match request {
+            Request::Import {
+                safe_id, opening, ..
+            }
+            | Request::Transfers {
+                safe_id, opening, ..
+            }
+            | Request::Status {
+                safe_id, opening, ..
+            }
+            | Request::Recover {
+                safe_id, opening, ..
+            }
+            | Request::Discard {
+                safe_id, opening, ..
+            } => (safe_id, opening),
+        };
+        if safe != &opening.safe_id || nonce != &opening.nonce {
+            return Err("invalid_file_opening".into());
+        }
+        self.attach_file_request(opening, request, stop)
+    }
+
+    /// Export uses the existing dispatch frame, followed by the shared bounded
+    /// offer exchange; lease ownership is identical to import and metadata.
+    pub fn attach_file_export(
+        &mut self,
+        opening: &idle::Opening<Slot>,
+        stop: Arc<AtomicBool>,
+    ) -> Result<FileAttachment> {
+        self.attach_file_request(opening, &serde_json::json!({"operation":"export"}), stop)
+    }
+
+    fn attach_file_request(
+        &mut self,
+        opening: &idle::Opening<Slot>,
+        request: &impl serde::Serialize,
+        stop: Arc<AtomicBool>,
+    ) -> Result<FileAttachment> {
+        if self.client.cancelled.load(Ordering::Acquire) {
+            return Err("controller_cancelled".into());
+        }
+        if !oblivion_wire::control::valid_id(&opening.safe_id)
+            || !oblivion_wire::control::valid_id(&opening.nonce)
+        {
+            return Err("invalid_file_opening".into());
+        }
+        let secret = serde_json::to_vec(opening).map_err(|_| "invalid_file_opening")?;
+        let (mut channel, client_id) = self.client.transport.attach(
+            header(&Call {
+                operation: Operation::FileAttach,
+                slot: Some(opening.slot),
+                session: None,
+                expected_session: Some(&opening.safe_id),
+                secret: &secret,
+            })?,
+            &secret,
+            Arc::clone(&stop),
+            Instant::now() + Operation::FileAttach.response_budget(),
+        )?;
+        let retained = channel.retain_lease();
+        let mut attachment = FileAttachment {
+            runtime_id: self.runtime_id.clone(),
+            slot: opening.slot,
+            safe_id: opening.safe_id.clone(),
+            client_id,
+            stream: FileStream(channel),
+            lease: None,
+            stop,
+            released: false,
+        };
+        match retained {
+            Ok(lease) => attachment.lease = Some(lease),
+            Err(error) => {
+                self.release_file(&mut attachment)?;
+                return Err(error.into());
+            }
+        }
+        let sent = (|| -> Result<()> {
+            attachment
+                .stream
+                .set_deadline(Instant::now() + Duration::from_secs(3600))?;
+            oblivion_transfer::endpoint::write_message(&mut attachment.stream, request)?;
+            attachment.stream.flush()?;
+            Ok(())
+        })();
+        if let Err(error) = sent {
+            self.release_file(&mut attachment)?;
+            return Err(error);
+        }
+        Ok(attachment)
+    }
+
+    /// Cleanup uses a new cancellation scope. A cancelled copy must still be
+    /// able to release its exact controller client before the quiet lease ends.
+    /// Errors remain errors even though all local handles are closed fail-closed.
+    pub fn release_file(&mut self, attachment: &mut FileAttachment) -> Result<()> {
+        if attachment.runtime_id != self.runtime_id {
+            return Err("invalid_file_attachment".into());
+        }
+        if attachment.released {
+            return Ok(());
+        }
+        let released = Client::new(&self.runtime_id).and_then(|mut client| {
+            client.request(Call {
+                operation: Operation::AgentRelease,
+                slot: Some(attachment.slot),
+                session: Some(&attachment.client_id),
+                expected_session: Some(&attachment.safe_id),
+                secret: &[],
+            })
+        });
+        let closed = attachment.stream.0.close();
+        drop(attachment.lease.take());
+        released?;
+        closed?;
+        attachment.released = true;
+        Ok(())
+    }
+
     pub fn file_query<T: serde::de::DeserializeOwned>(
         &mut self,
         opening: &idle::Opening<Slot>,
         request: &oblivion_transfer::native_files::Request,
     ) -> Result<T> {
-        let (mut channel, client) = self.client.attach(Call {
-            operation: Operation::FileAttach,
-            slot: Some(opening.slot),
-            session: None,
-            expected_session: Some(&opening.safe_id),
-            secret: &serde_json::to_vec(opening).map_err(|_| "invalid_file_opening")?,
-        })?;
+        let mut attachment =
+            self.attach_file(opening, request, Arc::new(AtomicBool::new(false)))?;
         let result = (|| -> Result<T> {
-            channel.set_deadline(Instant::now() + Duration::from_secs(60))?;
-            oblivion_transfer::endpoint::write_message(&mut channel, request)?;
-            channel.flush()?;
+            attachment
+                .stream
+                .set_deadline(Instant::now() + Duration::from_secs(60))?;
             Ok(oblivion_transfer::endpoint::read_message(
-                &mut channel,
+                &mut attachment.stream,
                 8192,
             )?)
         })();
-        // Keep the attachment alive through release, even after malformed or
-        // truncated metadata. EOF alone is not proof of controller cleanup.
-        let released = self.client.request(Call {
-            operation: Operation::AgentRelease,
-            slot: Some(opening.slot),
-            session: Some(&client),
-            expected_session: Some(&opening.safe_id),
-            secret: &[],
-        });
-        let closed = channel.close();
-        released?;
-        closed?;
+        self.release_file(&mut attachment)?;
         result
     }
 

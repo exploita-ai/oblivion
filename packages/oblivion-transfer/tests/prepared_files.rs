@@ -5,6 +5,7 @@ use oblivion_transfer::native_files::{Action, Context, Direction, State};
 use oblivion_transfer::{endpoint, stream};
 use std::fs::{self, File};
 use std::io;
+use std::io::{BufWriter, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
@@ -25,6 +26,109 @@ fn context(direction: Direction) -> Context {
 fn channel(stream: UnixStream) -> Channel {
     Channel::new(File::from(OwnedFd::from(stream)), Duration::from_secs(5)).unwrap()
 }
+
+struct BufferedChannel {
+    reader: UnixStream,
+    writer: BufWriter<UnixStream>,
+}
+impl Read for BufferedChannel {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.reader.read(bytes)
+    }
+}
+impl Write for BufferedChannel {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.writer.write(bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+impl oblivion_transfer::copy_protocol::Transport for BufferedChannel {
+    fn check(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+fn buffered(stream: UnixStream) -> BufferedChannel {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    BufferedChannel {
+        writer: BufWriter::with_capacity(64 * 1024, stream.try_clone().unwrap()),
+        reader: stream,
+    }
+}
+
+#[test]
+fn buffered_source_flushes_the_offer_and_payload_before_awaiting_the_receiver() {
+    let source = Tree::new();
+    fs::write(source.0.join("note"), b"reviewed contents").unwrap();
+    let mut selection = oblivion_transfer::Selection::prepare(
+        &source.0,
+        &["note".into()],
+        oblivion_transfer::Limits {
+            entries: 1,
+            bytes: 1024,
+        },
+    )
+    .unwrap();
+    let digest = selection.manifest().sha256();
+    let context = context(Direction::Import);
+    let inbox = Tree::new();
+    let target = Tree::new();
+    stream::operations::begin(&inbox.0, &target.0, &context).unwrap();
+    let (sender, receiver) = UnixStream::pair().unwrap();
+    let destination = target.0.clone();
+    let receiver = std::thread::spawn(move || {
+        stream::receive_directory(&mut channel(receiver), &inbox.0, &destination, &context)
+    });
+    let mut sender = buffered(sender);
+    let receipt = oblivion_transfer::copy_protocol::send(
+        &mut sender,
+        &mut selection,
+        ID,
+        &digest,
+        &mut |_, _| Ok(()),
+    );
+    drop(sender);
+    let received = receiver.join().unwrap();
+    assert_eq!(receipt.unwrap(), received.unwrap());
+    assert_eq!(
+        fs::read(target.0.join("reviewed")).unwrap(),
+        b"reviewed contents"
+    );
+}
+
+#[test]
+fn buffered_export_flushes_the_offer_approval_and_receipt_before_awaiting_the_source() {
+    let source = Tree::new();
+    fs::create_dir(source.0.join("workspace")).unwrap();
+    fs::write(source.0.join("workspace/note"), b"reviewed contents").unwrap();
+    let target = Tree::new();
+    let (sender, receiver) = UnixStream::pair().unwrap();
+    let source = std::thread::spawn(move || endpoint::documents(&mut channel(sender), &source.0));
+    let prepared = stream::PreparedDownload::prepare(
+        buffered(receiver),
+        &["workspace/note".into()],
+        &target.0,
+        context(Direction::Export),
+    )
+    .unwrap();
+    let summary = prepared.summary().unwrap();
+    assert!(fs::read_dir(&target.0).unwrap().next().is_none());
+    let receipt = prepared
+        .receive(&summary.manifest_sha256, &mut |_, _| Ok(()))
+        .unwrap();
+    source.join().unwrap().unwrap();
+    assert_eq!(receipt.manifest_sha256, summary.manifest_sha256);
+    assert_eq!(
+        fs::read(target.0.join("reviewed")).unwrap(),
+        b"reviewed contents"
+    );
+}
 fn progress(events: &[(Phase, u64)]) {
     assert_eq!(events.first(), Some(&(Phase::Copying, 0)));
     assert_eq!(events.last(), Some(&(Phase::Finalizing, BYTES as u64)));
@@ -39,7 +143,7 @@ fn progress(events: &[(Phase, u64)]) {
 fn export(
     watch: Option<OwnedFd>,
 ) -> (
-    stream::PreparedDownload,
+    stream::PreparedDownload<Channel>,
     Tree,
     std::thread::JoinHandle<io::Result<()>>,
 ) {

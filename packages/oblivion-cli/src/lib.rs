@@ -13,6 +13,8 @@ pub mod child_task;
 pub mod command;
 pub mod controller;
 pub mod family_password;
+pub mod file_copy;
+pub mod file_review;
 pub mod files;
 pub mod network;
 pub mod proxy_profiles;
@@ -23,6 +25,12 @@ pub mod windows;
 #[cfg(windows)]
 pub mod windows_entrypoint;
 #[cfg(windows)]
+pub mod windows_file_copy;
+#[cfg(windows)]
+pub mod windows_file_events;
+#[cfg(windows)]
 pub mod windows_files;
+#[cfg(windows)]
+mod windows_io;
 #[cfg(windows)]
 pub mod windows_terminal;

@@ -1,5 +1,5 @@
 //! Pure selection planning. Source paths remain private; only aliases leave the
-//! source process. Physical objects are opened and pinned by the Unix endpoint.
+//! source process. Physical objects are opened and pinned by the OS endpoint.
 use crate::{invalid, require};
 use icu_casemap::CaseMapper;
 use icu_normalizer::ComposingNormalizer;
@@ -48,7 +48,10 @@ pub fn validate_paths(paths: &[String]) -> io::Result<()> {
             !path.is_empty() && path.len() <= 4096 && !path.chars().any(unsafe_character),
             "invalid_selection_path",
         )?;
-        let logical = path.strip_prefix('/').unwrap_or(path);
+        let drive = path.as_bytes().get(..3).is_some_and(|prefix| {
+            prefix[0].is_ascii_uppercase() && prefix[1] == b':' && prefix[2] == b'/'
+        });
+        let logical = if drive { &path[3..] } else { path.strip_prefix('/').unwrap_or(path) };
         let components = logical.split('/').collect::<Vec<_>>();
         require(
             !components.is_empty()
@@ -63,8 +66,16 @@ pub fn validate_paths(paths: &[String]) -> io::Result<()> {
                 .all(|part| !part.contains('\\')),
             "invalid_selection_path",
         )?;
+        if drive {
+            require(
+                components.iter().all(|part| {
+                    !part.ends_with(['.', ' ']) && !part.contains([':', '\\', '<', '>', '"', '|', '?', '*'])
+                }),
+                "invalid_selection_path",
+            )?;
+        }
         require(
-            path.starts_with('/') || matches!(components[0], "workspace" | "imports"),
+            drive || path.starts_with('/') || matches!(components[0], "workspace" | "imports"),
             "invalid_selection_root",
         )?;
     }
@@ -259,7 +270,8 @@ fn collision_key(alias: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Input, Plan, validate_paths};
+    use sha2::{Digest, Sha256};
     fn file(path: &str) -> Input {
         Input {
             path: path.into(),
@@ -314,6 +326,22 @@ mod tests {
                 "a_b.txt"
             ]
         );
+    }
+
+    #[test]
+    fn canonical_windows_drives_share_the_same_collection_and_alias_rules() {
+        let plan = Plan::new(&[
+            file("C:/Users/alice/project/note.txt"),
+            directory("C:/Users/alice/project"),
+            file("D:/Documents/project"),
+        ]).unwrap();
+        assert_eq!(plan.mappings[0].covered_by, Some(1));
+        assert_eq!(plan.manifest_path(1).as_deref(), Some("selection/project"));
+        assert_eq!(plan.manifest_path(2).as_deref(), Some("selection/project (2)"));
+        assert!(!serde_json::to_string(&plan).unwrap().contains("Users"));
+        for path in ["C:/", "c:/lower", "C:relative", "C:/file:stream", "C:/trailing.", "C:/trailing ", "C:/a/../b", "C:/bad?name", "C:/a\\b", "//server/share/file", r"\\?\C:\file", r"\\server\share\file"] {
+            assert!(Plan::new(&[file(path)]).is_err(), "{path:?}");
+        }
     }
 
     #[test]

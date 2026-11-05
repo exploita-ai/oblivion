@@ -1,11 +1,10 @@
 //! One event-mode copy owns its stdin reader, cancellation channel and stdout.
-use oblivion_transfer::Receipt;
 use oblivion_transfer::channel::Channel;
-use oblivion_transfer::native_file_events::{
-    self, Event, Identity, Input, Outcome, Phase, Summary,
-};
+use oblivion_transfer::file_consent::{Admission, Flow, Review, Stage};
+use oblivion_transfer::native_file_events::{self, Event, Identity, Outcome, Phase, Summary};
 use oblivion_transfer::native_files::Direction;
-use oblivion_transfer::selection::{MAPPING_PAGE, Plan};
+use oblivion_transfer::selection::Plan;
+use oblivion_transfer::Receipt;
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -18,38 +17,20 @@ use std::time::{Duration, Instant};
 const BUDGET: Duration = Duration::from_secs(3600);
 const OUTPUT_BUDGET: Duration = Duration::from_secs(2);
 
-enum Stage {
-    Preparing,
-    Review(String),
-    Approved,
-    CancelledBeforeCopy,
-    Cancelled,
-    Failed,
-}
-struct State {
-    stage: Stage,
-    pending: usize,
-}
 struct Shared {
-    state: Mutex<State>,
+    state: Mutex<Admission>,
     changed: Condvar,
 }
 
 pub struct Control {
-    identity: Identity,
-    direction: Direction,
-    name: String,
+    flow: Flow,
     shared: Arc<Shared>,
     watch: UnixStream,
     stop: Option<UnixStream>,
     input: File,
     output: File,
     reader: Option<JoinHandle<()>>,
-    summary: Option<Summary>,
-    mapping: Option<(String, usize)>,
     deadline: Instant,
-    progress: Option<(Phase, u64, Instant)>,
-    finished: bool,
 }
 
 impl Control {
@@ -71,7 +52,7 @@ impl Control {
         direction: Direction,
         name: String,
     ) -> io::Result<Self> {
-        identity.validate()?;
+        let (flow, admission) = Flow::new(identity, direction, name)?;
         for file in [&input, &output] {
             let kind = file.metadata()?.file_type();
             if !kind.is_fifo() && !kind.is_socket() {
@@ -88,77 +69,44 @@ impl Control {
         let mut channel = Channel::new(input, BUDGET)?;
         channel.watch(stopped.try_clone()?.into());
         let shared = Arc::new(Shared {
-            state: Mutex::new(State {
-                stage: Stage::Preparing,
-                pending: 0,
-            }),
+            state: Mutex::new(admission),
             changed: Condvar::new(),
         });
         let state = Arc::clone(&shared);
-        let operation = identity.operation_id.clone();
         let reader = std::thread::spawn(move || {
-            read_input(channel, descriptor, stopped, revoke, &operation, &state);
+            read_input(channel, descriptor, stopped, revoke, &state);
             state.changed.notify_all();
         });
         Ok(Self {
-            identity,
-            direction,
-            name,
+            flow,
             shared,
             watch,
             stop: Some(stop),
             input: probe,
             output,
             reader: Some(reader),
-            summary: None,
-            mapping: None,
             deadline: Instant::now() + BUDGET,
-            progress: None,
-            finished: false,
         })
     }
 
     pub fn plan(&mut self, plan: &Plan) -> io::Result<()> {
-        if self.mapping.is_some()
-            || self.finished
-            || !matches!(
-                self.shared.state.lock().map_err(|_| aborted())?.stage,
-                Stage::Preparing
-            )
-        {
-            return Err(aborted());
+        let mapping = {
+            let admission = self.shared.state.lock().map_err(|_| aborted())?;
+            self.flow.plan(&admission, plan)?
+        };
+        for event in mapping.events() {
+            self.emit(event, true)?;
         }
-        let digest = plan.sha256()?;
-        for (page, entries) in plan.mappings.chunks(MAPPING_PAGE).enumerate() {
-            self.emit(
-                &Event::Mapping {
-                    identity: self.identity.clone(),
-                    start: page * MAPPING_PAGE,
-                    total: plan.mappings.len(),
-                    selected: plan.selected.clone(),
-                    entries: entries.to_vec(),
-                    mapping_sha256: digest.clone(),
-                },
-                true,
-            )?;
-        }
-        // A failed or cancelled page never arms a review over an incomplete map.
         self.check()?;
-        self.mapping = Some((digest, plan.mappings.len()));
-        Ok(())
+        let admission = self.shared.state.lock().map_err(|_| aborted())?;
+        self.flow.mapped(&admission, mapping)
     }
 
     pub fn review(&mut self, summary: Summary) -> io::Result<()> {
-        summary.validate()?;
-        let mut state = self.shared.state.lock().map_err(|_| aborted())?;
+        let mut admission = self.shared.state.lock().map_err(|_| aborted())?;
         loop {
-            match state.stage {
-                Stage::CancelledBeforeCopy => return Ok(()),
-                Stage::Preparing => {}
-                _ => return Err(aborted()),
-            }
-            // The reader parses under this same mutex. Never arm approval over
-            // bytes already buffered before the review, including partial lines.
+            // Readiness and incremental input share this lock. Prebuffered or
+            // partial approval cannot cross the pure machine's review boundary.
             let mut input = libc::pollfd {
                 fd: self.input.as_raw_fd(),
                 events: libc::POLLIN,
@@ -168,35 +116,21 @@ impl Control {
             if ready < 0 {
                 return Err(io::Error::last_os_error());
             }
-            if ready == 0 && state.pending == 0 {
-                break;
+            match self.flow.review(&mut admission, &summary, ready != 0)? {
+                Review::CancelledBeforeCopy => return Ok(()),
+                Review::Waiting => admission = self.wait(admission)?,
+                Review::Ready(event) => {
+                    drop(admission);
+                    return self.emit(&event, true);
+                }
             }
-            state = self.wait(state)?;
         }
-        if !self.mapping.as_ref().is_some_and(|(digest, count)| {
-            *digest == summary.mapping_sha256
-                && summary.files + summary.directories == summary.entries - usize::from(*count > 1)
-        }) {
-            return Err(aborted());
-        }
-        state.stage = Stage::Review(summary.manifest_sha256.clone());
-        drop(state);
-        self.summary = Some(summary.clone());
-        self.emit(
-            &Event::Review {
-                identity: self.identity.clone(),
-                direction: self.direction,
-                name: self.name.clone(),
-                summary,
-            },
-            true,
-        )
     }
 
     pub fn wait_approval(&self) -> io::Result<bool> {
         let mut state = self.shared.state.lock().map_err(|_| aborted())?;
         loop {
-            match state.stage {
+            match state.stage() {
                 Stage::Approved => {
                     self.check()?;
                     return Ok(true);
@@ -210,8 +144,8 @@ impl Control {
 
     fn wait<'a>(
         &self,
-        state: std::sync::MutexGuard<'a, State>,
-    ) -> io::Result<std::sync::MutexGuard<'a, State>> {
+        state: std::sync::MutexGuard<'a, Admission>,
+    ) -> io::Result<std::sync::MutexGuard<'a, Admission>> {
         let remaining = self
             .deadline
             .checked_duration_since(Instant::now())
@@ -254,84 +188,33 @@ impl Control {
         self.shared
             .state
             .lock()
-            .is_ok_and(|state| matches!(state.stage, Stage::CancelledBeforeCopy))
+            .is_ok_and(|state| matches!(state.stage(), Stage::CancelledBeforeCopy))
     }
 
     pub fn progress(&mut self, phase: Phase, bytes: u64) -> io::Result<()> {
         self.check()?;
-        if self.finished
-            || !matches!(
-                self.shared.state.lock().map_err(|_| aborted())?.stage,
-                Stage::Approved
-            )
-        {
-            return Err(aborted());
+        let event = {
+            let admission = self.shared.state.lock().map_err(|_| aborted())?;
+            self.flow
+                .progress(&admission, phase, bytes, Instant::now())?
+        };
+        if let Some(event) = event {
+            self.emit(&event, true)?;
         }
-        let summary = self.summary.as_ref().ok_or_else(aborted)?;
-        if bytes > summary.bytes
-            || self.progress.as_ref().is_some_and(|(last, sent, _)| {
-                bytes < *sent || *last == Phase::Finalizing && phase != Phase::Finalizing
-            })
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid_file_progress",
-            ));
-        }
-        if let Some((last, sent, at)) = self.progress {
-            if last == phase
-                && (bytes != summary.bytes || bytes == sent)
-                && at.elapsed() < Duration::from_millis(100)
-            {
-                self.progress = Some((phase, bytes, at));
-                return Ok(());
-            }
-        }
-        self.emit(
-            &Event::Progress {
-                identity: self.identity.clone(),
-                phase,
-                bytes,
-                total_bytes: summary.bytes,
-            },
-            true,
-        )?;
-        self.progress = Some((phase, bytes, Instant::now()));
         Ok(())
     }
 
     pub fn finish(&mut self, outcome: Outcome, receipt: Option<Receipt>) -> io::Result<()> {
-        if self.finished {
-            return Err(aborted());
-        }
         if outcome == Outcome::Completed {
             self.check()?;
-            if !matches!(
-                self.shared.state.lock().map_err(|_| aborted())?.stage,
-                Stage::Approved
-            ) || !self
-                .summary
-                .as_ref()
-                .zip(receipt.as_ref())
-                .is_some_and(|(summary, receipt)| summary.matches(receipt, &self.identity))
-            {
-                return Err(aborted());
-            }
         }
-        if outcome == Outcome::CancelledBeforeCopy && !self.cancelled_before_copy() {
-            return Err(aborted());
-        }
-        self.finished = true;
-        // Cancellation stops progress immediately; its terminal outcome still
-        // gets one bounded delivery attempt over an unwatched stdout channel.
-        self.emit(
-            &Event::Finished {
-                identity: self.identity.clone(),
-                outcome,
-                receipt,
-            },
-            false,
-        )
+        let event = {
+            let admission = self.shared.state.lock().map_err(|_| aborted())?;
+            self.flow.finish(&admission, outcome, receipt)?
+        };
+        // A terminal outcome still gets one bounded, unwatched delivery attempt
+        // after cancellation. The pure machine alone decides its validity.
+        self.emit(&event, false)
     }
 
     fn emit(&self, event: &Event, watched: bool) -> io::Result<()> {
@@ -355,7 +238,7 @@ impl Drop for Control {
 }
 
 fn aborted() -> io::Error {
-    io::Error::new(io::ErrorKind::ConnectionAborted, "file_events_revoked")
+    oblivion_transfer::file_consent::revoked()
 }
 
 fn read_input(
@@ -363,11 +246,9 @@ fn read_input(
     descriptor: i32,
     stopped: UnixStream,
     revoke: UnixStream,
-    operation: &str,
     shared: &Shared,
 ) {
     let result = (|| -> io::Result<()> {
-        let mut line = Vec::new();
         let mut buffer = [0u8; 1024];
         loop {
             let mut descriptors = [
@@ -411,46 +292,18 @@ fn read_input(
                 return Err(error);
             }
             if read == 0 {
-                return Err(aborted());
+                return state.eof();
             }
-            for byte in &buffer[..read as usize] {
-                if line.len() >= native_file_events::LINE_LIMIT {
-                    return Err(aborted());
-                }
-                line.push(*byte);
-                if *byte != b'\n' {
-                    continue;
-                }
-                match native_file_events::input(&line, operation)? {
-                    Input::Approve {
-                        manifest_sha256, ..
-                    } => {
-                        if !matches!(&state.stage, Stage::Review(expected) if *expected == manifest_sha256)
-                        {
-                            return Err(aborted());
-                        }
-                        state.stage = Stage::Approved;
-                    }
-                    Input::Cancel { .. } => {
-                        state.stage = if matches!(state.stage, Stage::Preparing | Stage::Review(_))
-                        {
-                            Stage::CancelledBeforeCopy
-                        } else {
-                            Stage::Cancelled
-                        };
-                        revoke.shutdown(std::net::Shutdown::Both)?;
-                        return Ok(());
-                    }
-                }
-                line.clear();
+            if state.feed(&buffer[..read as usize])? {
+                revoke.shutdown(std::net::Shutdown::Both)?;
+                return Ok(());
             }
-            state.pending = line.len();
             shared.changed.notify_all();
         }
     })();
     if result.is_err() {
         if let Ok(mut state) = shared.state.lock() {
-            state.stage = Stage::Failed;
+            state.fail();
             let _ = revoke.shutdown(std::net::Shutdown::Both);
         }
     }
@@ -705,19 +558,17 @@ mod tests {
                 ..
             }
         ));
-        assert!(
-            control
-                .finish(
-                    Outcome::Completed,
-                    Some(Receipt {
-                        id: identity().operation_id,
-                        manifest_sha256: "e".repeat(64),
-                        entries: 1,
-                        bytes: 8
-                    })
-                )
-                .is_err()
-        );
+        assert!(control
+            .finish(
+                Outcome::Completed,
+                Some(Receipt {
+                    id: identity().operation_id,
+                    manifest_sha256: "e".repeat(64),
+                    entries: 1,
+                    bytes: 8
+                })
+            )
+            .is_err());
         control
             .finish(
                 Outcome::Completed,
@@ -781,7 +632,7 @@ mod tests {
         let started = Instant::now();
         let writer = std::thread::spawn(move || control.review(summary()));
         loop {
-            if matches!(shared.state.lock().unwrap().stage, Stage::Review(_)) {
+            if matches!(shared.state.lock().unwrap().stage(), Stage::Review(_)) {
                 break;
             }
             assert!(started.elapsed() < Duration::from_secs(1));
@@ -821,16 +672,14 @@ mod tests {
         let parent = slave.try_clone().unwrap();
         let before = unsafe { libc::fcntl(parent.as_raw_fd(), libc::F_GETFL) };
         let (output, _reader) = UnixStream::pair().unwrap();
-        assert!(
-            Control::new(
-                slave,
-                File::from(OwnedFd::from(output)),
-                identity(),
-                Direction::Import,
-                "note".into()
-            )
-            .is_err()
-        );
+        assert!(Control::new(
+            slave,
+            File::from(OwnedFd::from(output)),
+            identity(),
+            Direction::Import,
+            "note".into()
+        )
+        .is_err());
         assert_eq!(
             unsafe { libc::fcntl(parent.as_raw_fd(), libc::F_GETFL) },
             before

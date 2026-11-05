@@ -443,3 +443,465 @@ fn guest_file_metadata_holds_the_exact_opening_lease_until_explicit_release_even
     );
     server.join().unwrap();
 }
+
+#[test]
+fn cancelled_pending_file_read_keeps_quiet_lease_until_fresh_scoped_release() {
+    use oblivion_transfer::native_files::Request;
+    use oblivion_wire::idle::Opening;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+    for (export, refused) in [(false, false), (false, true), (true, false)] {
+        let (id, mut data) = listener();
+        let mut release = instance(&id, false);
+        let opening = Opening {
+            slot: 5.try_into().unwrap(),
+            safe_id: SAFE.into(),
+            nonce: "cccccccccccccccccccccccccccccccc".into(),
+        };
+        let expected = serde_json::to_value(&opening).unwrap();
+        let server = std::thread::spawn(move || {
+            let request = connect(&mut data);
+            assert_eq!(request["operation"], json!(Operation::FileAttach));
+            assert_eq!(request["slot"], 5);
+            assert_eq!(request["expected_session"], SAFE);
+            let mut secret = vec![0; request["secret_len"].as_u64().unwrap() as usize];
+            data.read_exact(&mut secret).unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&secret).unwrap(), expected);
+            let client = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+            frame::write(
+                &mut data,
+                &serde_json::to_vec(&json!({"ok":true,"output":client})).unwrap(),
+                1..=RESPONSE_LIMIT,
+            )
+            .unwrap();
+            let metadata: Value =
+                serde_json::from_slice(&frame::read(&mut data, 1..=8192).unwrap()).unwrap();
+            if export {
+                assert_eq!(metadata, json!({"operation":"export"}));
+            } else {
+                assert_eq!(metadata["operation"], "status");
+                assert_eq!(metadata["safe_id"], SAFE);
+                assert_eq!(metadata["opening"], expected["nonce"]);
+            }
+            // No reply: the real client starts an overlapped read and cancels it.
+            let request = connect(&mut release);
+            assert_eq!(request["operation"], json!(Operation::AgentRelease));
+            assert_eq!(request["slot"], 5);
+            assert_eq!(request["expected_session"], SAFE);
+            assert_eq!(request["session"], client);
+            assert_ne!(
+                unsafe {
+                    PeekNamedPipe(
+                        data.as_raw_handle(),
+                        null_mut(),
+                        0,
+                        null_mut(),
+                        null_mut(),
+                        null_mut(),
+                    )
+                },
+                0,
+                "cancelling pending data IO must retain a kernel lease through AgentRelease"
+            );
+            let response = if refused {
+                json!({"ok":false,"output":"","error":"release_refused"})
+            } else {
+                json!({"ok":true,"output":""})
+            };
+            frame::write(
+                &mut release,
+                &serde_json::to_vec(&response).unwrap(),
+                1..=RESPONSE_LIMIT,
+            )
+            .unwrap();
+            disconnect(&mut data);
+            disconnect(&mut release);
+        });
+        let mut runtime = oblivion_cli::windows::Runtime::new(&id).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut attachment = if export {
+            runtime.attach_file_export(&opening, stop).unwrap()
+        } else {
+            runtime
+                .attach_file(
+                    &opening,
+                    &Request::Status {
+                        id: "dddddddddddddddddddddddddddddddd".into(),
+                        safe_id: SAFE.into(),
+                        opening: opening.nonce.clone(),
+                    },
+                    stop,
+                )
+                .unwrap()
+        };
+        let cancellation = attachment.cancellation();
+        let cancel = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            cancellation.cancel();
+        });
+        let started = Instant::now();
+        assert!(attachment.stream().read(&mut [0]).is_err());
+        assert!(started.elapsed() < Duration::from_secs(3));
+        cancel.join().unwrap();
+        runtime.cancellation().cancel();
+        assert_eq!(
+            runtime.release_file(&mut attachment).is_err(),
+            refused,
+            "a cancelled Runtime/data scope cannot cancel the independent cleanup RPC, and denied cleanup cannot become success"
+        );
+        server.join().unwrap();
+    }
+}
+
+struct CopyArea(std::path::PathBuf);
+impl CopyArea {
+    fn new() -> Self {
+        let mut id = [0u8; 16];
+        getrandom::getrandom(&mut id).unwrap();
+        let id: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
+        let path = std::env::temp_dir().join(format!("PRIVATE_HOST_COPY_{id}"));
+        let identity = Identity::current().unwrap();
+        let descriptor = identity.file_descriptor().unwrap();
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.as_ptr(),
+            bInheritHandle: 0,
+        };
+        let path_wide = path
+            .to_str()
+            .unwrap()
+            .encode_utf16()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        assert_ne!(
+            unsafe {
+                windows_sys::Win32::Storage::FileSystem::CreateDirectoryW(
+                    path_wide.as_ptr(),
+                    &attributes,
+                )
+            },
+            0
+        );
+        Self(path)
+    }
+}
+impl Drop for CopyArea {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+const COPY_OPERATION: &str = "dddddddddddddddddddddddddddddddd";
+const COPY_OPENING: &str = "cccccccccccccccccccccccccccccccc";
+const COPY_CLIENT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+fn copy_preflight(pipe: &mut File) {
+    let mut status: Value = serde_json::from_str(&state(4)).unwrap();
+    status["idle_lock"] = json!({"preferences":{"version":1,"safe_minutes":15,"host_minutes":30},
+        "host":{"nonce":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","remaining_seconds":100,"closing":false},
+        "safes":[{"opening":{"slot":4,"safe_id":SAFE,"nonce":COPY_OPENING},"remaining_seconds":100,"closing":false}],
+        "last_error":null,"storage":"saved-encrypted","writable":true});
+    for scoped in [false, true] {
+        let request = connect(pipe);
+        assert_eq!(request["operation"], json!(Operation::Status));
+        assert_eq!(request["slot"], if scoped { 4 } else { 0 });
+        assert_eq!(
+            request["expected_session"],
+            if scoped { json!(SAFE) } else { Value::Null }
+        );
+        assert_eq!(request["secret_len"], 0);
+        frame::write(
+            pipe,
+            &serde_json::to_vec(&json!({"ok":true,"output":status.to_string()})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        disconnect(pipe);
+    }
+    let request = connect(pipe);
+    assert_eq!(request["operation"], json!(Operation::FileAttach));
+    assert_eq!(request["slot"], 4);
+    assert_eq!(request["expected_session"], SAFE);
+    let mut secret = vec![0; request["secret_len"].as_u64().unwrap() as usize];
+    pipe.read_exact(&mut secret).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&secret).unwrap(),
+        json!({"slot":4,"safe_id":SAFE,"nonce":COPY_OPENING})
+    );
+    frame::write(
+        pipe,
+        &serde_json::to_vec(&json!({"ok":true,"output":COPY_CLIENT})).unwrap(),
+        1..=RESPONSE_LIMIT,
+    )
+    .unwrap();
+}
+
+fn copy_release(data: &mut File, release: &mut File, refused: bool) {
+    let request = connect(release);
+    assert_eq!(request["operation"], json!(Operation::AgentRelease));
+    assert_eq!(request["slot"], 4);
+    assert_eq!(request["expected_session"], SAFE);
+    assert_eq!(request["session"], COPY_CLIENT);
+    assert_eq!(request["secret_len"], 0);
+    assert_ne!(
+        unsafe {
+            PeekNamedPipe(
+                data.as_raw_handle(),
+                null_mut(),
+                0,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+            )
+        },
+        0
+    );
+    let reply = if refused {
+        json!({"ok":false,"output":"","error":"release_refused"})
+    } else {
+        json!({"ok":true,"output":""})
+    };
+    frame::write(
+        release,
+        &serde_json::to_vec(&reply).unwrap(),
+        1..=RESPONSE_LIMIT,
+    )
+    .unwrap();
+    disconnect(data);
+    disconnect(release);
+}
+
+#[test]
+fn complete_windows_import_command_sends_only_selected_manifest_and_verified_payload() {
+    use oblivion_cli::file_copy::{CopyCommand, CopyInput};
+    use oblivion_transfer::endpoint::{ReceiveRequest, read_message, write_message};
+    use oblivion_transfer::{Entry, Manifest, Receipt, relay_payload};
+    let area = CopyArea::new();
+    let source = area.0.join("chosen.txt");
+    std::fs::write(&source, b"abc").unwrap();
+    std::fs::write(area.0.join("not-selected.txt"), b"do not transmit").unwrap();
+    let (id, mut data) = listener();
+    let mut release = instance(&id, false);
+    let server = std::thread::spawn(move || {
+        copy_preflight(&mut data);
+        let dispatch: Value = read_message(&mut data, 8192).unwrap();
+        assert_eq!(
+            dispatch,
+            json!({"operation":"import","id":COPY_OPERATION,"safe_id":SAFE,"opening":COPY_OPENING,"name":"imported"})
+        );
+        assert!(!dispatch.to_string().contains("PRIVATE_HOST_COPY_"));
+        let receive: ReceiveRequest = read_message(&mut data, 4096).unwrap();
+        assert_eq!(receive.approval.id, COPY_OPERATION);
+        let manifest = Manifest::read(&mut data, receive.limits).unwrap();
+        assert_eq!(manifest.sha256(), receive.approval.manifest_sha256);
+        assert_eq!(manifest.entries().len(), 1);
+        let Entry::File { path, size, sha256 } = &manifest.entries()[0] else {
+            panic!("selected file expected");
+        };
+        assert_eq!(
+            (path.as_str(), *size, sha256.as_str()),
+            ("chosen.txt", 3, ABC_SHA256)
+        );
+        let mut encoded = Vec::new();
+        manifest.write(&mut encoded).unwrap();
+        assert!(!String::from_utf8_lossy(&encoded).contains("PRIVATE_HOST_COPY_"));
+        assert!(!String::from_utf8_lossy(&encoded).contains(":\\"));
+        data.write_all(b"receive\n").unwrap();
+        let mut payload = Vec::new();
+        relay_payload(&mut data, &mut payload, &manifest).unwrap();
+        assert_eq!(payload, b"abcOBLVEND1");
+        write_message(
+            &mut data,
+            &Receipt {
+                id: COPY_OPERATION.into(),
+                manifest_sha256: manifest.sha256(),
+                entries: 1,
+                bytes: 3,
+            },
+        )
+        .unwrap();
+        copy_release(&mut data, &mut release, false);
+    });
+    let mut runtime = oblivion_cli::windows::Runtime::new(&id).unwrap();
+    assert_eq!(
+        oblivion_cli::windows_file_copy::run(
+            &mut runtime,
+            CopyCommand {
+                safe: "GB".into(),
+                name: Some("imported".into()),
+                selection: CopyInput::Upload(vec![source.to_str().unwrap().into()]),
+                operation_id: Some(COPY_OPERATION.into()),
+                expected_opening: Some(COPY_OPENING.into()),
+                events_output: false,
+                confirmed: true,
+            }
+        )
+        .unwrap(),
+        0
+    );
+    server.join().unwrap();
+    assert_eq!(std::fs::read(source).unwrap(), b"abc");
+}
+
+#[test]
+fn complete_windows_export_command_publishes_recovers_and_never_reports_denied_release_as_complete()
+{
+    use oblivion_cli::file_copy::{CopyCommand, CopyInput};
+    use oblivion_cli::files::Backend;
+    use oblivion_transfer::endpoint::{
+        Approval, OfferRequest, SelectionOffer, read_message, write_message,
+    };
+    use oblivion_transfer::native_files::{Action, Direction, State, TransfersQuery};
+    use oblivion_transfer::selection::{Input, Plan};
+    use oblivion_transfer::{Entry, Limits, Manifest, Receipt, relay_payload};
+    use oblivion_wire::idle::Opening;
+    for refused in [false, true] {
+        let area = CopyArea::new();
+        let (id, mut data) = listener();
+        let mut release = instance(&id, false);
+        let server = std::thread::spawn(move || {
+            copy_preflight(&mut data);
+            let dispatch: Value = read_message(&mut data, 4096).unwrap();
+            assert_eq!(dispatch, json!({"operation":"export"}));
+            let offer: OfferRequest = read_message(&mut data, 65536).unwrap();
+            assert_eq!(offer.id, COPY_OPERATION);
+            assert_eq!(offer.paths, ["workspace/project"]);
+            let encoded = serde_json::to_string(&offer).unwrap();
+            assert!(!encoded.contains("PRIVATE_HOST_COPY_") && !encoded.contains(":\\"));
+            let plan = Plan::new(&[Input {
+                path: "workspace/project".into(),
+                directory: true,
+            }])
+            .unwrap();
+            let manifest = Manifest::new(
+                vec![
+                    Entry::Directory {
+                        path: "project".into(),
+                    },
+                    Entry::Directory {
+                        path: "project/empty".into(),
+                    },
+                    Entry::File {
+                        path: "project/report.txt".into(),
+                        size: 3,
+                        sha256: ABC_SHA256.into(),
+                    },
+                ],
+                Limits {
+                    entries: 3,
+                    bytes: 3,
+                },
+            )
+            .unwrap();
+            write_message(
+                &mut data,
+                &SelectionOffer {
+                    directories: vec![true],
+                    plan,
+                },
+            )
+            .unwrap();
+            manifest.write(&mut data).unwrap();
+            let approval: Approval = read_message(&mut data, 4096).unwrap();
+            assert_eq!(approval.id, COPY_OPERATION);
+            assert_eq!(approval.manifest_sha256, manifest.sha256());
+            relay_payload(
+                &mut std::io::Cursor::new(b"abcOBLVEND1"),
+                &mut data,
+                &manifest,
+            )
+            .unwrap();
+            let receipt: Receipt = read_message(&mut data, 4096).unwrap();
+            assert_eq!(
+                receipt,
+                Receipt {
+                    id: COPY_OPERATION.into(),
+                    manifest_sha256: manifest.sha256(),
+                    entries: 3,
+                    bytes: 3
+                }
+            );
+            data.write_all(b"copied\n").unwrap();
+            copy_release(&mut data, &mut release, refused);
+        });
+        let mut runtime = oblivion_cli::windows::Runtime::new(&id).unwrap();
+        let result = oblivion_cli::windows_file_copy::run(
+            &mut runtime,
+            CopyCommand {
+                safe: "GB".into(),
+                name: Some("exported project".into()),
+                selection: CopyInput::Download {
+                    selected: vec!["workspace/project".into()],
+                    destination: area.0.to_str().unwrap().into(),
+                },
+                operation_id: Some(COPY_OPERATION.into()),
+                expected_opening: Some(COPY_OPENING.into()),
+                events_output: false,
+                confirmed: true,
+            },
+        );
+        if refused {
+            assert!(
+                result.is_err(),
+                "published bytes do not prove controller cleanup"
+            );
+        } else {
+            assert_eq!(result.unwrap(), 0);
+        }
+        server.join().unwrap();
+        let opening = Opening {
+            slot: 4.try_into().unwrap(),
+            safe_id: SAFE.into(),
+            nonce: COPY_OPENING.into(),
+        };
+        let destination = area.0.to_str().unwrap();
+        let published = runtime
+            .manage(&opening, COPY_OPERATION, Action::Status, Some(destination))
+            .unwrap();
+        assert_eq!(published.state, State::Published);
+        assert_eq!(
+            std::fs::read(area.0.join("exported project/report.txt")).unwrap(),
+            b"abc"
+        );
+        assert!(area.0.join("exported project/empty").is_dir());
+        let query = TransfersQuery {
+            safe_id: SAFE.into(),
+            opening: COPY_OPENING.into(),
+            direction: Direction::Export,
+            after: None,
+            limit: 8,
+        };
+        let page = runtime
+            .transfers(&opening, &query, Some(destination))
+            .unwrap();
+        page.validate(&query).unwrap();
+        assert_eq!(page.entries[0].operation_id, COPY_OPERATION);
+        // Simulate publication persisted before its completion marker, then let
+        // the user edit the working tree. Recovery must finish without recopying.
+        std::fs::remove_file(
+            area.0
+                .join(".oblivion-transfers")
+                .join(COPY_OPERATION)
+                .join("published"),
+        )
+        .unwrap();
+        std::fs::write(area.0.join("exported project/report.txt"), b"user edit").unwrap();
+        let ready = runtime
+            .manage(&opening, COPY_OPERATION, Action::Status, Some(destination))
+            .unwrap();
+        assert!(ready.state == State::Ready && ready.can_recover && !ready.can_discard);
+        assert_eq!(
+            runtime
+                .manage(&opening, COPY_OPERATION, Action::Recover, Some(destination))
+                .unwrap()
+                .state,
+            State::Published
+        );
+        assert_eq!(
+            std::fs::read(area.0.join("exported project/report.txt")).unwrap(),
+            b"user edit"
+        );
+    }
+}

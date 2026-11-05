@@ -1,4 +1,5 @@
 use oblivion_cli::controller::{Call, Controller};
+use oblivion_cli::file_copy::{CopyCommand, CopyInput};
 use oblivion_cli::files;
 use oblivion_host::autolock::Opening;
 use oblivion_host::{control, scope};
@@ -9,7 +10,7 @@ use oblivion_transfer::native_files::{
 };
 use oblivion_transfer::selection::{self, Plan};
 use oblivion_transfer::stream::{PreparedDownload, PreparedUpload};
-use oblivion_transfer::{Receipt, stream};
+use oblivion_transfer::{stream, Receipt};
 use serde_json::json;
 use std::fs::File;
 use std::io::IsTerminal;
@@ -101,166 +102,6 @@ impl files::Backend for NativeFiles {
         };
         scope::within(opening.slot, || file_query(opening, &request))
     }
-}
-
-/// Copy streams and local selections are the remaining Unix adapter commands.
-/// Other Files grammar and orchestration have one owner in oblivion-cli.
-pub fn parse(args: &[String]) -> control::Result<CopyCommand> {
-    let operation = args
-        .first()
-        .map(String::as_str)
-        .ok_or("Choose files import or export")?;
-    if !matches!(operation, "import" | "export") {
-        return Err("Choose files import or export".into());
-    }
-    let mut safe = None;
-    let mut name = None;
-    let mut paths = vec![];
-    let mut sources = vec![];
-    let mut selected = vec![];
-    let mut operation_id = None;
-    let mut expected_opening = None;
-    let mut destination = None;
-    let mut events_output = false;
-    let mut confirmed = false;
-    let mut options = args.iter().skip(1);
-    while let Some(value) = options.next() {
-        match value.as_str() {
-            "--safe" => {
-                if safe.is_some() {
-                    return Err("Duplicate --safe".into());
-                }
-                safe = Some(options.next().ok_or("Missing Safe name")?.clone());
-            }
-            "--json" => {}
-            "--events" => events_output = true,
-            "--yes" => confirmed = true,
-            "--operation" => {
-                if operation_id.is_some() {
-                    return Err("Duplicate --operation".into());
-                }
-                operation_id = Some(options.next().ok_or("Missing operation ID")?.clone());
-            }
-            "--opening" => {
-                if expected_opening.is_some() {
-                    return Err("Duplicate --opening".into());
-                }
-                expected_opening = Some(options.next().ok_or("Missing opening nonce")?.clone());
-            }
-            "--destination" => {
-                if destination.is_some() {
-                    return Err("Duplicate --destination".into());
-                }
-                destination = Some(
-                    options
-                        .next()
-                        .ok_or("Missing destination directory")?
-                        .clone(),
-                );
-            }
-            "--source" => sources.push(options.next().ok_or("Missing source path")?.clone()),
-            "--path" => selected.push(options.next().ok_or("Missing Safe path")?.clone()),
-            "--name" => {
-                if name.is_some() {
-                    return Err("Duplicate --name".into());
-                }
-                name = Some(options.next().ok_or("Missing destination name")?.clone());
-            }
-            "--limit" => return Err("--limit applies only to files transfers".into()),
-            "--cursor" => {
-                return Err("--cursor applies to directory listing or files transfers".into());
-            }
-            value if value.starts_with('-') => return Err("Unknown file option".into()),
-            _ => paths.push(value),
-        }
-    }
-    if events_output && confirmed {
-        return Err(
-            "Event copies require their reviewed approval; --yes cannot be combined with --events"
-                .into(),
-        );
-    }
-    if operation == "import"
-        && (!paths.is_empty()
-            || sources.is_empty()
-            || !selected.is_empty()
-            || destination.is_some())
-        || operation == "export"
-            && (!paths.is_empty()
-                || selected.is_empty()
-                || !sources.is_empty()
-                || destination.is_none())
-    {
-        return Err("Use files import --safe SAFE --source PATH [--source PATH...], or files export --safe SAFE --path workspace/PATH [--path imports/PATH...] --destination DIRECTORY".into());
-    }
-    for value in operation_id.iter().chain(expected_opening.iter()) {
-        if !oblivion_host::managed::id(value) {
-            return Err("Invalid operation or opening ID".into());
-        }
-    }
-    let safe = safe.ok_or("Choose a Safe with --safe NAME")?;
-    let paths = if operation == "import" {
-        &sources
-    } else {
-        &selected
-    };
-    if paths.len() > selection::MAX_SELECTIONS {
-        return Err("selection_limit".into());
-    }
-    if paths.iter().map(String::len).sum::<usize>() > selection::MAX_SELECTION_BYTES {
-        return Err("selection_byte_limit".into());
-    }
-    if paths.len() > 1 && name.is_none() {
-        return Err("Choose a collection name with --name when selecting multiple paths".into());
-    }
-    if let Some(name) = &name {
-        oblivion_transfer::native_files::validate_name(name)
-            .map_err(|_| "Choose a valid destination name with --name")?;
-    }
-    let selection = if operation == "import" {
-        CopyInput::Upload(sources)
-    } else {
-        selection::validate_paths(&selected)?;
-        if selected
-            .iter()
-            .any(|path| !matches!(path.split('/').next(), Some("workspace" | "imports")))
-        {
-            return Err("Export paths must be under workspace or imports".into());
-        }
-        CopyInput::Download {
-            selected,
-            destination: destination.ok_or("Missing destination directory")?,
-        }
-    };
-    Ok(CopyCommand {
-        safe,
-        name,
-        selection,
-        operation_id,
-        expected_opening,
-        events_output,
-        confirmed,
-    })
-}
-
-/// Syntax is admitted before runtime startup; filesystem resolution remains in
-/// this adapter and cannot turn an unknown command into a runtime side effect.
-pub struct CopyCommand {
-    safe: String,
-    name: Option<String>,
-    selection: CopyInput,
-    operation_id: Option<String>,
-    expected_opening: Option<String>,
-    events_output: bool,
-    confirmed: bool,
-}
-
-enum CopyInput {
-    Upload(Vec<String>),
-    Download {
-        selected: Vec<String>,
-        destination: String,
-    },
 }
 
 pub fn run(command: CopyCommand) -> control::Result<i32> {
@@ -376,7 +217,7 @@ impl CopySelection {
 
 enum PreparedCopy {
     Upload(PreparedUpload),
-    Download(PreparedDownload),
+    Download(PreparedDownload<Channel>),
 }
 
 impl PreparedCopy {
@@ -566,53 +407,25 @@ fn review(
     plan: &Plan,
     confirmed: bool,
 ) -> control::Result<bool> {
-    eprintln!(
-        "Review {} · Safe {}",
-        if context.direction == Direction::Import {
-            "import"
-        } else {
-            "export"
-        },
-        context.safe_id
-    );
-    for mapping in &plan.mappings {
-        let source = match selection {
-            CopySelection::Upload(sources) => format!("{:?}", sources[mapping.input_index]),
-            CopySelection::Download { selected, .. } => {
-                format!("{:?}", selected[mapping.input_index])
-            }
-        };
-        if let Some(owner) = mapping.covered_by {
-            eprintln!(
-                "  {}. {source} · included in selection {}",
-                mapping.input_index + 1,
-                owner + 1
-            );
-            continue;
-        }
-        let output = if plan.mappings.len() == 1 {
-            context.name.clone()
-        } else {
-            format!(
-                "{}/{}",
-                context.name,
-                mapping.alias.as_deref().ok_or("Invalid file mapping")?
-            )
-        };
-        eprintln!("  {}. {source} → {output:?}", mapping.input_index + 1);
-    }
-    match selection {
-        CopySelection::Download { destination, .. } => {
-            eprintln!("To this computer · {:?}", destination.join(&context.name));
-            eprintln!("Exported files use the destination filesystem's protection.");
-        }
-        CopySelection::Upload(_) => eprintln!("To the Safe · workspace/{:?}", context.name),
-    }
-    eprintln!(
-        "{} files · {} folders · {} bytes",
-        summary.files, summary.directories, summary.bytes
-    );
-    eprintln!("Manifest SHA-256 {}", summary.manifest_sha256);
+    let sources = match selection {
+        CopySelection::Upload(sources) => sources
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        CopySelection::Download { selected, .. } => selected.clone(),
+    };
+    let destination = match selection {
+        CopySelection::Download { destination, .. } => Some(destination.as_path()),
+        CopySelection::Upload(_) => None,
+    };
+    oblivion_cli::file_review::write(
+        &mut std::io::stderr(),
+        context,
+        summary,
+        plan,
+        &sources,
+        destination,
+    )?;
     if confirmed {
         return Ok(true);
     }
@@ -680,116 +493,6 @@ fn file_query<T: serde::de::DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
-
-    #[test]
-    fn event_copies_cannot_bypass_their_manifest_approval_with_yes() {
-        let args = [
-            "import",
-            "--safe",
-            "research",
-            "--source",
-            "/selected",
-            "--events",
-            "--yes",
-        ]
-        .map(str::to_owned);
-        assert_eq!(
-            parse(&args).err().unwrap().to_string(),
-            "Event copies require their reviewed approval; --yes cannot be combined with --events"
-        );
-    }
-
-    #[test]
-    fn copy_selectors_are_explicit_and_never_reuse_the_positional_grammar() {
-        for args in [
-            vec!["import", "--safe", "research", "/selected"],
-            vec![
-                "export",
-                "--safe",
-                "research",
-                "workspace/project",
-                "/destination",
-            ],
-            vec![
-                "import",
-                "--safe",
-                "research",
-                "--path",
-                "workspace/project",
-            ],
-        ] {
-            assert!(
-                parse(&args.into_iter().map(str::to_owned).collect::<Vec<_>>())
-                    .err()
-                    .unwrap()
-                    .to_string()
-                    .starts_with("Use files import --safe SAFE --source PATH")
-            );
-        }
-    }
-
-    #[test]
-    fn copy_grammar_keeps_selection_order_and_does_not_open_paths() {
-        let args = [
-            "import",
-            "--safe",
-            "GB",
-            "--source",
-            "relative/missing",
-            "--source",
-            "/also-missing",
-            "--name",
-            "collection",
-            "--events",
-            "--operation",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "--opening",
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        ]
-        .map(str::to_owned);
-        let command = parse(&args).unwrap();
-        assert_eq!(command.safe, "GB");
-        assert_eq!(command.name.as_deref(), Some("collection"));
-        assert!(command.events_output && !command.confirmed);
-        assert_eq!(
-            command.operation_id.as_deref(),
-            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        );
-        assert_eq!(
-            command.expected_opening.as_deref(),
-            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-        );
-        let super::CopyInput::Upload(sources) = command.selection else {
-            panic!("expected import")
-        };
-        assert_eq!(sources, ["relative/missing", "/also-missing"]);
-        let command = parse(
-            &[
-                "export",
-                "--safe",
-                "GB",
-                "--path",
-                "workspace/project",
-                "--destination",
-                "/missing",
-                "--yes",
-            ]
-            .map(str::to_owned),
-        )
-        .unwrap();
-        assert!(command.confirmed && !command.events_output);
-        let super::CopyInput::Download {
-            selected,
-            destination,
-        } = command.selection
-        else {
-            panic!("expected export")
-        };
-        assert_eq!(selected, ["workspace/project"]);
-        assert_eq!(destination, "/missing");
-    }
-
     #[test]
     fn multiple_inputs_require_an_explicit_collection_name() {
         let selection = super::CopySelection::Upload(vec!["/a/notes".into(), "/b/notes".into()]);

@@ -2,22 +2,20 @@
 //! Console secrets never consume redirected stdin. One owned reader retains VT
 //! input bytes; its synchronous I/O is cancelled and joined before mode restore.
 use crate::controller::Result;
+use crate::windows_io::{cancel_and_join, duplicate};
 use oblivion_native_windows::client::Channel;
 use oblivion_wire::agent::{self, Command, Size};
 use oblivion_wire::terminal_guard::Guard;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::windows::io::{AsRawHandle, FromRawHandle};
+use std::os::windows::io::AsRawHandle;
 use std::ptr::null_mut;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, TrySendError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use windows_sys::Win32::Foundation::{
-    DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_NOT_FOUND, GetLastError, HANDLE,
-    INVALID_HANDLE_VALUE,
-};
+use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::Console::{
     CONSOLE_SCREEN_BUFFER_INFO, CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT,
     CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT, ENABLE_ECHO_INPUT, ENABLE_EXTENDED_FLAGS,
@@ -27,8 +25,7 @@ use windows_sys::Win32::System::Console::{
     GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleW, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
     STD_OUTPUT_HANDLE, SetConsoleCP, SetConsoleCtrlHandler, SetConsoleMode, SetConsoleOutputCP,
 };
-use windows_sys::Win32::System::IO::CancelSynchronousIo;
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, Sleep};
+use windows_sys::Win32::System::Threading::Sleep;
 use zeroize::Zeroizing;
 
 static IN_USE: AtomicBool = AtomicBool::new(false);
@@ -241,29 +238,6 @@ impl Read for Available<'_> {
     }
 }
 
-fn duplicate(handle: HANDLE) -> io::Result<File> {
-    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::other("standard_handle_missing"));
-    }
-    let mut owned = null_mut();
-    let process = unsafe { GetCurrentProcess() };
-    if unsafe {
-        DuplicateHandle(
-            process,
-            handle,
-            process,
-            &mut owned,
-            0,
-            0,
-            DUPLICATE_SAME_ACCESS,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(unsafe { File::from_raw_handle(owned) })
-}
-
 fn mode(file: &File) -> Option<u32> {
     let mut value = 0;
     (unsafe { GetConsoleMode(file.as_raw_handle(), &mut value) } != 0).then_some(value)
@@ -468,26 +442,10 @@ impl Input {
         })
     }
     fn stop(&mut self) -> Result<()> {
-        self.stopped.store(true, Ordering::Release);
         let Some(worker) = self.worker.take() else {
             return Ok(());
         };
-        let mut failed = false;
-        // ERROR_NOT_FOUND can race the reader entering ReadFile. Repeat until
-        // actual thread completion; never detach a live stdin consumer.
-        while !worker.is_finished() {
-            if unsafe { CancelSynchronousIo(worker.as_raw_handle()) } == 0
-                && unsafe { GetLastError() } != ERROR_NOT_FOUND
-            {
-                failed = true;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        worker.join().map_err(|_| "terminal_input_failed")?;
-        if failed {
-            return Err("terminal_input_cancellation_failed".into());
-        }
-        Ok(())
+        cancel_and_join(worker, &self.stopped).map_err(Into::into)
     }
 }
 impl Drop for Input {

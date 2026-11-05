@@ -3,23 +3,33 @@
 pub mod browser;
 #[cfg(unix)]
 pub mod channel;
+pub mod copy_protocol;
 #[cfg(unix)]
 mod directory;
+#[cfg(windows)]
+#[path = "windows_directory.rs"]
+mod directory;
 pub mod endpoint;
-pub mod native_files;
-pub mod native_file_events;
-pub mod selection;
+mod file_identity;
+pub mod file_consent;
 #[cfg(unix)]
 mod filesystem;
+pub mod native_file_events;
+pub mod native_files;
 #[cfg(target_os = "linux")]
 pub mod onion_file;
 #[cfg(unix)]
 pub mod recovery;
 #[cfg(unix)]
 pub mod relay;
-#[cfg(unix)]
-pub mod stream;
+pub mod selection;
 pub mod share;
+#[cfg(any(unix, windows))]
+pub mod stream;
+#[cfg(windows)]
+mod windows_destination;
+#[cfg(windows)]
+pub mod windows_source;
 
 #[cfg(unix)]
 pub use filesystem::{ExportMode, Selection, publish, receive, receive_external};
@@ -158,10 +168,17 @@ pub struct Receipt {
 /// Forward an already approved payload without opening or publishing a file.
 /// Encrypted Share containers use the same hashes and terminator as the guest
 /// copy endpoints; a corrupt source never produces a completed payload.
-pub fn relay_payload(reader: &mut impl Read, writer: &mut impl Write, manifest: &Manifest) -> io::Result<()> {
+pub fn relay_payload(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    manifest: &Manifest,
+) -> io::Result<()> {
     for entry in manifest.entries() {
         if let Entry::File { size, sha256, .. } = entry {
-            require(copy_hash(reader, writer, *size)? == *sha256, "source_changed")?;
+            require(
+                copy_hash(reader, writer, *size)? == *sha256,
+                "source_changed",
+            )?;
         }
     }
     let mut end = [0; 8];

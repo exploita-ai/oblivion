@@ -972,6 +972,7 @@ dependencies = [
 name = "oblivion-cli"
 version = "0.1.0"
 dependencies = [
+ "getrandom",
  "oblivion-native-windows",
  "oblivion-transfer",
  "oblivion-transport",
@@ -1043,9 +1044,11 @@ dependencies = [
  "icu_casemap",
  "icu_normalizer",
  "libc",
+ "oblivion-native-windows",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "windows-sys",
 ]
 
 [[package]]
