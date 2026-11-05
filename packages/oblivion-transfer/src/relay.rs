@@ -26,8 +26,8 @@ pub struct Permit {
     pub limits: Limits,
 }
 
-/// Selection metadata comes from the same offer that produced the verified
-/// receipt. A later publication cannot silently substitute another selection.
+/// The paths name the staged objects in the verified manifest's selection
+/// order. A later publication can recheck the receipt against those objects.
 pub struct Approved {
     pub receipt: Receipt,
     pub paths: Vec<String>,
@@ -144,7 +144,7 @@ pub fn stage(
     budget: Duration,
     permit: Permit,
 ) -> io::Result<Receipt> {
-    stage_selected(source, destination, control, owners, budget, permit)
+    stage_selected(source, destination, control, owners, budget, permit, false)
         .map(|approved| approved.receipt)
 }
 
@@ -155,6 +155,7 @@ pub fn stage_selected(
     owners: Vec<OwnedFd>,
     budget: Duration,
     permit: Permit,
+    documents: bool,
 ) -> io::Result<Approved> {
     copy(
         source,
@@ -164,7 +165,7 @@ pub fn stage_selected(
         budget,
         Some(permit),
         false,
-        false,
+        documents,
     )
     .map(|(approved, _)| approved)
 }
@@ -254,9 +255,15 @@ fn exchange(
         None
     };
     let manifest = Manifest::read(source, request.limits)?;
-    if let Some((offer, plan)) = selection {
+    let paths = if let Some((offer, plan)) = selection {
         crate::stream::require_collection(&manifest, &plan, &offer.directories)?;
-    }
+        plan.mappings
+            .iter()
+            .filter_map(|mapping| plan.manifest_path(mapping.input_index))
+            .collect()
+    } else {
+        request.paths
+    };
     // Media control already reviews the complete output manifest and retains
     // its own source choices; no redundant path/mapping ledger is persisted.
     manifest.write(control)?;
@@ -307,10 +314,7 @@ fn exchange(
     let mut done = [0; 7];
     source.read_exact(&mut done)?;
     require(&done == b"copied\n", "sender_not_complete")?;
-    Ok(Approved {
-        receipt,
-        paths: request.paths,
-    })
+    Ok(Approved { receipt, paths })
 }
 
 struct Progress<'a> {

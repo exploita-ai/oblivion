@@ -2,7 +2,7 @@ use oblivion_host::onion_copy;
 use oblivion_host::transfers;
 use oblivion_transfer::channel::Channel;
 use oblivion_transfer::endpoint::{self, Approval, OfferRequest, read_message, write_message};
-use oblivion_transfer::{Manifest, Receipt};
+use oblivion_transfer::{Manifest, Receipt, Selection};
 use std::fs::{self, DirBuilder, File};
 use std::io::{Read, Write};
 use std::net::Shutdown;
@@ -181,10 +181,12 @@ fn endpoint_readiness_is_revoked_by_owner_death_without_waiting_for_data() {
 }
 
 #[test]
-fn sharing_stages_only_the_approved_documents_and_retains_the_original_selection() {
+fn sharing_stages_only_the_approved_documents_in_manifest_order() {
     let tree = Tree::new();
     fs::create_dir(tree.0.join("source/workspace")).unwrap();
+    fs::create_dir(tree.0.join("source/imports")).unwrap();
     fs::write(tree.0.join("source/workspace/document.txt"), CONTENT).unwrap();
+    fs::write(tree.0.join("source/imports/a.txt"), b"second document").unwrap();
     fs::write(
         tree.0.join("source/workspace/unselected.txt"),
         b"not shared",
@@ -204,12 +206,11 @@ fn sharing_stages_only_the_approved_documents_and_retains_the_original_selection
         assert_eq!(&gate, b"G");
         endpoint::documents(&mut channel, &root)
     });
-    let inbox = tree.0.join("inbox");
     let staging = tree.0.join("imports");
     let receiver = std::thread::spawn(move || {
         let mut channel = channel(receiver);
         channel.write_all(b"ready\n")?;
-        endpoint::import(&mut channel, &inbox, &staging)
+        endpoint::accept(&mut channel, &staging)
     });
     let bridge = std::thread::spawn(move || {
         let source = file(source);
@@ -231,7 +232,7 @@ fn sharing_stages_only_the_approved_documents_and_retains_the_original_selection
         &mut manager,
         &OfferRequest {
             id: ID.into(),
-            paths: vec!["workspace/document.txt".into()],
+            paths: vec!["workspace/document.txt".into(), "imports/a.txt".into()],
             limits: transfers::limits(),
         },
     )
@@ -249,25 +250,22 @@ fn sharing_stages_only_the_approved_documents_and_retains_the_original_selection
     let completed = bridge.join().unwrap().unwrap();
     sender.join().unwrap().unwrap();
     receiver.join().unwrap().unwrap();
-    assert_eq!(completed.paths(), ["workspace/document.txt"]);
     assert_eq!(
-        fs::read(
-            tree.0
-                .join("imports")
-                .join(ID)
-                .join("files/workspace/document.txt")
-        )
-        .unwrap(),
+        completed.paths(),
+        ["selection/document.txt", "selection/a.txt"]
+    );
+    let staged = tree.0.join("imports").join(ID).join("files");
+    let verified = Selection::prepare(&staged, completed.paths(), transfers::limits()).unwrap();
+    assert_eq!(verified.manifest().sha256(), manifest.sha256());
+    assert_eq!(
+        fs::read(staged.join("selection/document.txt")).unwrap(),
         CONTENT
     );
-    assert!(
-        !tree
-            .0
-            .join("imports")
-            .join(ID)
-            .join("files/workspace/unselected.txt")
-            .exists()
+    assert_eq!(
+        fs::read(staged.join("selection/a.txt")).unwrap(),
+        b"second document"
     );
+    assert!(!staged.join("selection/unselected.txt").exists());
     let receipt = completed.acknowledge().unwrap();
     assert_eq!(
         read_message::<Receipt>(&mut manager, 1024).unwrap(),
