@@ -21,8 +21,14 @@ parser preserves native separators and rejects UNC and device path syntax.
 Neither entry path starts a copy before the existing manifest approval.
 On Unix the Files overlay requests paste framing at handoff and drops queued
 overlay input before restoring input to the agent. Physical drop gestures and
-OS-native drag-and-drop APIs remain open. Windows uses the separate manager for
-Files while an agent runs.
+OS-native drag-and-drop APIs remain open.
+
+Windows interactive attachments now use the same F7 and F9 panel parser
+and VT snapshot as Unix. The bridge joins its console reader before handing
+input to the manager, drains guest output while the panel is visible, and
+restores input after the panel's Windows job has emptied. Redirected stdio
+keeps the binary stream path. The native console fixture and installed
+Windows Terminal behavior still need execution on Windows.
 
 Native copies now have stable operation IDs and receiver-side outcome records.
 CLI and manager distinguish unknown, incomplete, ready, published and discarded

@@ -184,6 +184,9 @@ paths and add them to your selection. **P** opens **Enter path** to type,
 paste or drop one local path or `file://` URL. Both paths lead to the same
 copy review and approval.
 
+While attached to an agent or shell, **F7** opens Files and **F9** opens Network
+for its Safe. **Esc** returns to the guest terminal.
+
 Before approval, Oblivion prepares the selected content and shows recursive file
 and folder counts, total bytes and the manifest digest. The same prepared
 selection is used for the copy. The manager stays visible during preparation

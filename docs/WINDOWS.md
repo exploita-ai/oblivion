@@ -102,6 +102,15 @@ registered installation and holds a supervisor lease while running these workflo
 or the real manager child. Its terminal keeps the control lease until explicit agent release;
 guest Exit alone must not race the controller's EOF cleanup.
 
+In an interactive agent or shell, F7 opens Files and F9 opens Network for the
+attached Safe. Esc returns to the guest. The launcher waits for its console
+reader to stop before the panel takes input and continues draining the guest
+stream while the panel is visible. The panel and its CLI children run in an
+owned Windows job. Before restoring guest input, the launcher observes that
+the job has emptied, restores the console modes and screen, and clears
+queued input. The physical gesture and the installed Windows Terminal and
+Hyper-V paths require on-device acceptance.
+
 ## Installed development entrypoint
 
 The Windows `oblivion.exe` is built from `packages/oblivion-cli` with the explicit
