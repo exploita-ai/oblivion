@@ -500,8 +500,8 @@ impl<'a> ExternalExport<'a> {
             validate_portable_export(manifest, mode)?;
         }
         let root = Directory::open(root)?;
-        let name = format!("Oblivion-{id}");
-        let pending = format!(".{name}.pending");
+        root.lock()?;
+        let (name, pending) = crate::media_export::operation_names(id);
         for candidate in [&name, &pending] {
             match root.source(candidate) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => (),
@@ -534,43 +534,10 @@ impl<'a> ExternalExport<'a> {
         };
         let result = (|| {
             self.root.sync()?;
+            crate::media_export::write_operation(&transaction, self.manifest, &receipt)?;
             receive_transaction(reader, self.manifest, &transaction)?;
-            let files = transaction.directory("files")?;
-            // FAT/exFAT use mount-synthesized modes. POSIX exports are readable
-            // by the user's other machine after unplugging the medium.
-            if self.mode == ExportMode::Posix {
-                for entry in self.manifest.entries() {
-                    check(reader)?;
-                    let mut parent = files.clone()?;
-                    let mut components = entry.path().split('/').peekable();
-                    while let Some(component) = components.next() {
-                        if components.peek().is_some() {
-                            parent = parent.directory(component)?;
-                            continue;
-                        }
-                        let file = parent.source(component)?;
-                        file.set_permissions(std::fs::Permissions::from_mode(
-                            if matches!(entry, Entry::Directory { .. }) {
-                                0o755
-                            } else {
-                                0o644
-                            },
-                        ))?;
-                        file.sync_all()?;
-                    }
-                }
-                files.mode(0o755)?;
-                transaction.mode(0o755)?;
-            }
-            files.sync()?;
-            let mut manifest_file = transaction.create_file("manifest.bin")?;
-            self.manifest.write(&mut manifest_file)?;
-            manifest_file.sync_all()?;
-            let mut receipt_file = transaction.create_file("receipt.json")?;
-            serde_json::to_writer(&mut receipt_file, &receipt)
-                .map_err(|_| invalid("invalid_receipt"))?;
-            receipt_file.sync_all()?;
-            transaction.sync()?;
+            finish_export_files(&transaction, self.manifest, self.mode, &mut || check(reader))?;
+            crate::media_export::write_receipt(&transaction, &receipt)?;
             check(reader)?;
             self.root
                 .rename_exclusive(&self.pending, &self.root, &self.name)
@@ -587,7 +554,39 @@ impl<'a> ExternalExport<'a> {
     }
 }
 
-fn validate_portable_export(manifest: &Manifest, mode: ExportMode) -> io::Result<()> {
+pub(crate) fn finish_export_files(
+    transaction: &Directory,
+    manifest: &Manifest,
+    mode: ExportMode,
+    check: &mut dyn FnMut() -> io::Result<()>,
+) -> io::Result<()> {
+    let files = transaction.directory("files")?;
+    // FAT/exFAT use mount-synthesized modes. POSIX exports are readable by
+    // the user's other machine after unplugging the medium.
+    if mode == ExportMode::Posix {
+        for entry in manifest.entries() {
+            check()?;
+            let mut parent = files.clone()?;
+            let mut components = entry.path().split('/').peekable();
+            while let Some(component) = components.next() {
+                if components.peek().is_some() {
+                    parent = parent.directory(component)?;
+                    continue;
+                }
+                let file = parent.source(component)?;
+                let mode = if matches!(entry, Entry::Directory { .. }) { 0o755 } else { 0o644 };
+                file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+                file.sync_all()?;
+            }
+        }
+        files.mode(0o755)?;
+        transaction.mode(0o755)?;
+    }
+    files.sync()?;
+    transaction.sync()
+}
+
+pub(crate) fn validate_portable_export(manifest: &Manifest, mode: ExportMode) -> io::Result<()> {
     let mut paths = BTreeSet::new();
     for entry in manifest.entries() {
         for name in entry.path().split('/') {

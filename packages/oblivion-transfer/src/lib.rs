@@ -18,6 +18,7 @@ mod file_identity;
 pub mod file_consent;
 #[cfg(unix)]
 mod filesystem;
+pub mod media_export;
 pub mod native_file_events;
 pub mod native_files;
 #[cfg(target_os = "linux")]
