@@ -3,7 +3,7 @@
 use crate::storage::{self, Error, Result, random_id, require};
 use oblivion_host::channel::Channel;
 use oblivion_host::{autolock::Opening, scope::Slot};
-use oblivion_wire::live_media::{DETACHED, Direction, REVOKED, Reserve, STOP, Source};
+use oblivion_wire::live_media::{DETACHED, Direction, Purpose, REVOKED, Reserve, STOP, Source};
 use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -20,6 +20,7 @@ struct Reservation {
     opening: Opening,
     device_id: String,
     direction: Direction,
+    purpose: Purpose,
     signal: UnixStream,
     owner: Arc<OwnedFd>,
     deadline: Instant,
@@ -70,6 +71,10 @@ impl Registry {
         host: String,
         owner: OwnedFd,
     ) -> Result<(UnixStream, Lease)> {
+        require(
+            request.purpose.valid_for(request.direction),
+            "invalid_live_media_request",
+        )?;
         let mut entries = self
             .0
             .lock()
@@ -94,6 +99,7 @@ impl Registry {
             opening: request.opening,
             device_id: request.device_id,
             direction: request.direction,
+            purpose: request.purpose,
             signal,
             owner: owner.clone(),
             deadline,
@@ -138,7 +144,8 @@ impl Registry {
                 && entry.host == host
                 && entry.opening == request.opening
                 && entry.device_id == request.device_id
-                && entry.direction == request.direction,
+                && entry.direction == request.direction
+                && entry.purpose == request.purpose,
             "live_media_reservation_changed",
         )?;
         let watch = entry
@@ -357,7 +364,7 @@ mod tests {
     use super::{DETACHED, Lease, REVOKED, Registry, STOP, live_profile};
     use crate::storage::Result;
     use oblivion_host::autolock::Opening;
-    use oblivion_wire::live_media::{Direction, Reserve, Source};
+    use oblivion_wire::live_media::{Direction, Purpose, Reserve, Source};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
@@ -378,6 +385,7 @@ mod tests {
                 opening,
                 device_id: device.repeat(64),
                 direction: Direction::Import,
+                purpose: Purpose::Copy,
             },
             "b".repeat(32),
             owner.into(),
@@ -460,6 +468,33 @@ mod tests {
     }
 
     #[test]
+    fn reservation_rejects_purposes_with_the_wrong_media_access() {
+        let registry = Registry::default();
+        for (purpose, direction) in [
+            (Purpose::Inspect, Direction::Export),
+            (Purpose::Recover, Direction::Import),
+            (Purpose::Discard, Direction::Import),
+        ] {
+            let (owner, _alive) = UnixStream::pair().unwrap();
+            let selected = Reserve {
+                opening: Opening {
+                    slot: 0.try_into().unwrap(),
+                    safe_id: "a".repeat(32),
+                    nonce: "b".repeat(32),
+                },
+                device_id: "c".repeat(64),
+                direction,
+                purpose,
+            };
+            assert!(matches!(
+                registry.reserve(selected, "d".repeat(32), owner.into()),
+                Err(crate::storage::Error("invalid_live_media_request"))
+            ));
+            assert!(matches!(registry.active(0.try_into().unwrap()), Ok(false)));
+        }
+    }
+
+    #[test]
     fn source_claim_requires_the_exact_reservation_and_cannot_be_reused() {
         let registry = Registry::default();
         let (_client, lease, _owner) =
@@ -474,6 +509,7 @@ mod tests {
             },
             device_id: "1".repeat(64),
             direction: Direction::Import,
+            purpose: Purpose::Copy,
         };
         assert!(registry.claim(&request, &host).is_err());
         request.opening.slot = 1.try_into().unwrap();
@@ -486,6 +522,9 @@ mod tests {
         request.direction = Direction::Export;
         assert!(registry.claim(&request, &host).is_err());
         request.direction = Direction::Import;
+        request.purpose = Purpose::Inspect;
+        assert!(registry.claim(&request, &host).is_err());
+        request.purpose = Purpose::Copy;
         assert!(registry.claim(&request, &"c".repeat(32)).is_err());
         let source = registry
             .claim(&request, &host)

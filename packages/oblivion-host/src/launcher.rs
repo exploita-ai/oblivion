@@ -62,6 +62,7 @@ fn run() -> control::Result<i32> {
     let live_media = match &command {
         command::Command::Files(command::Files::MediaBrowse(_)) => true,
         command::Command::Files(command::Files::Copy(command)) => command.needs_live_media(),
+        command::Command::Files(command::Files::Inspect(command)) => command.needs_live_media(),
         _ => false,
     };
     if live_media && oblivion_host::native_runtime::mode()? != oblivion_host::native_runtime::Mode::Live {

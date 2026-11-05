@@ -308,6 +308,7 @@ impl Worker {
                 opening: selection.opening,
                 device_id: selection.device_id,
                 direction: selection.direction,
+                purpose: selection.purpose,
             };
             let (connection, acknowledged) = self.controller(
                 Operation::LiveMediaAttach,
@@ -449,6 +450,7 @@ fn read_selection(reader: &mut impl Read) -> Result<Reserve<Slot>> {
         || !valid_id(&selected.opening.safe_id)
         || !valid_id(&selected.opening.nonce)
         || !valid_device_id(&selected.device_id)
+        || !selected.purpose.valid_for(selected.direction)
     {
         return Err(Error("invalid_live_media_request"));
     }
@@ -699,7 +701,7 @@ mod tests {
         control::{Operation, Request},
         control_client::{self, Framing},
         idle::Opening,
-        live_media::{Direction, Reserve},
+        live_media::{Direction, Purpose, Reserve},
         slot::Slot,
     };
     use std::io::{Read, Write};
@@ -711,7 +713,7 @@ mod tests {
 
     #[test]
     fn sidecar_binds_native_request_to_the_exact_opening() {
-        let selection = Reserve {
+        let mut selection = Reserve {
             opening: Opening {
                 slot: Slot::try_from(3).unwrap(),
                 safe_id: "a".repeat(32),
@@ -719,17 +721,10 @@ mod tests {
             },
             device_id: "c".repeat(64),
             direction: Direction::Import,
+            purpose: Purpose::Copy,
         };
-        let body = serde_json::to_vec(&selection).unwrap();
-        for (expected, slot, success) in [
-            (
-                selection.opening.safe_id.clone(),
-                selection.opening.slot,
-                true,
-            ),
-            ("d".repeat(32), selection.opening.slot, false),
-            (selection.opening.safe_id.clone(), Slot::ZERO, false),
-        ] {
+        let read_request = |selection: &Reserve<Slot>, expected, slot| {
+            let body = serde_json::to_vec(selection).unwrap();
             let request = Request {
                 operation: Operation::LiveMediaReserve,
                 session: None,
@@ -739,7 +734,40 @@ mod tests {
             };
             let mut bytes = Vec::new();
             control_client::write_request(&mut bytes, &request, &body, Framing::Native).unwrap();
-            assert_eq!(read_selection(&mut bytes.as_slice()).is_ok(), success);
+            read_selection(&mut bytes.as_slice())
+        };
+        for (expected, slot, success) in [
+            (
+                selection.opening.safe_id.clone(),
+                selection.opening.slot,
+                true,
+            ),
+            ("d".repeat(32), selection.opening.slot, false),
+            (selection.opening.safe_id.clone(), Slot::ZERO, false),
+        ] {
+            assert_eq!(read_request(&selection, expected, slot).is_ok(), success);
+        }
+        for (purpose, direction, allowed) in [
+            (Purpose::Copy, Direction::Import, true),
+            (Purpose::Copy, Direction::Export, true),
+            (Purpose::Inspect, Direction::Import, true),
+            (Purpose::Inspect, Direction::Export, false),
+            (Purpose::Recover, Direction::Import, false),
+            (Purpose::Recover, Direction::Export, true),
+            (Purpose::Discard, Direction::Import, false),
+            (Purpose::Discard, Direction::Export, true),
+        ] {
+            selection.direction = direction;
+            selection.purpose = purpose;
+            let admitted = read_request(
+                &selection,
+                selection.opening.safe_id.clone(),
+                selection.opening.slot,
+            );
+            assert_eq!(admitted.is_ok(), allowed);
+            if let Ok(admitted) = admitted {
+                assert_eq!((admitted.purpose, admitted.direction), (purpose, direction));
+            }
         }
     }
 

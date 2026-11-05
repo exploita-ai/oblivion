@@ -3,7 +3,7 @@ use crate::vm::{self, Role};
 use oblivion_host::channel::Channel;
 use oblivion_host::transfers::{self, Source, SourceKind, Started, Status};
 use oblivion_transfer::relay::{self, Permit};
-use oblivion_wire::live_media::{DETACHED, Direction, STOP};
+use oblivion_wire::live_media::{DETACHED, Direction, Purpose, STOP};
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
@@ -24,7 +24,7 @@ fn pending_job() -> String { oblivion_host::scope::path("/run/oblivion/transfer.
 #[serde(deny_unknown_fields)]
 struct Job {
     id: String,
-    live_media: bool,
+    live_media: Option<Purpose>,
     #[serde(default)]
     recovery: bool,
     #[serde(default)]
@@ -37,7 +37,7 @@ struct Job {
 
 impl Job {
     fn matches_live(&self, id: &str, direction: Direction) -> bool {
-        self.live_media && self.id == id && self.export == (direction == Direction::Export)
+        self.live_media.is_some() && self.id == id && self.export == (direction == Direction::Export)
     }
 }
 
@@ -342,7 +342,7 @@ fn start_job(
         .or_else(|| restore.as_ref().map(|restore| restore.maximum));
     publish_job(&Job {
         id: id.clone(),
-        live_media: false,
+        live_media: None,
         recovery,
         export,
         backup,
@@ -440,7 +440,12 @@ fn verify_live_device(device: &LiveDevice) -> Result<()> {
     )
 }
 
-pub fn start_live_media(id: &str, direction: Direction, device: &LiveDevice) -> Result<()> {
+pub fn start_live_media(
+    id: &str,
+    direction: Direction,
+    purpose: Purpose,
+    device: &LiveDevice,
+) -> Result<()> {
     crate::storage::validate_id(id)?;
     let current = live_media_device(Path::new("/sys"), &format!("obl-{}", &id[..16]), direction)?;
     require(
@@ -456,7 +461,7 @@ pub fn start_live_media(id: &str, direction: Direction, device: &LiveDevice) -> 
     // Publish exact cleanup authority before the first external mutation.
     publish_job(&Job {
         id: id.into(),
-        live_media: true,
+        live_media: Some(purpose),
         recovery: false,
         export,
         backup: None,
@@ -692,7 +697,7 @@ fn live_mapping_present(direction: Direction) -> Result<bool> {
 }
 
 pub fn live_media_prepared() -> Result<bool> {
-    Ok(job()?.is_some_and(|job| job.live_media))
+    Ok(job()?.is_some_and(|job| job.live_media.is_some()))
 }
 
 /// Only the daemon that owns the current reservation can acquire this one
@@ -700,6 +705,7 @@ pub fn live_media_prepared() -> Result<bool> {
 pub fn attach_live_media(
     id: &str,
     direction: Direction,
+    purpose: Purpose,
     deadline: Instant,
     mut check: impl FnMut() -> Result<()>,
 ) -> Result<(UnixStream, UnixStream)> {
@@ -707,7 +713,7 @@ pub fn attach_live_media(
     loop {
         check()?;
         require(
-            job()?.is_some_and(|job| job.matches_live(id, direction)),
+            job()?.is_some_and(|job| job.matches_live(id, direction) && job.live_media == Some(purpose)),
             "live_media_worker_changed",
         )?;
         require(Instant::now() < deadline, "live_media_source_timeout")?;
@@ -740,7 +746,7 @@ pub fn prepared() -> Result<bool> {
 
 pub fn stop() -> Result<()> {
     let record = job().ok().flatten();
-    if let Some(job) = &record && job.live_media && job.export {
+    if let Some(job) = &record && job.live_media.is_some() && job.export {
         // Reservation revocation has closed the copy holder. The worker can
         // still cancel the guest receiver and collect its final flush proof.
         let deadline = Instant::now() + EXPORT_FLUSH_GRACE + Duration::from_secs(2);
@@ -754,7 +760,7 @@ pub fn stop() -> Result<()> {
     }
     // Live admission queues an asynchronous start. A stop must cancel that
     // exact unit job even if the unit has not entered "activating" yet.
-    if record.is_some_and(|job| job.live_media)
+    if record.is_some_and(|job| job.live_media.is_some())
         || !matches!(vm::unit_state(&unit())?.as_str(), "inactive" | "failed") {
         vm::execute("/usr/bin/systemctl", &["stop".into(), unit()])?;
     }
@@ -790,7 +796,13 @@ fn job() -> Result<Option<Job>> {
         "invalid_transfer_state",
     )?;
     require(!(job.export && job.recovery), "invalid_transfer_state")?;
-    require(!job.live_media || !job.recovery && job.backup.is_none() && job.restore.is_none(), "invalid_transfer_state")?;
+    if let Some(purpose) = job.live_media {
+        let direction = if job.export { Direction::Export } else { Direction::Import };
+        require(
+            purpose.valid_for(direction) && !job.recovery && job.backup.is_none() && job.restore.is_none(),
+            "invalid_transfer_state",
+        )?;
+    }
     if let Some(backup) = &job.backup {
         require(
             job.export
@@ -824,7 +836,7 @@ pub fn cleanup() -> Result<()> {
     vm::stop_role(Role::Export, true)?;
     let record = job()?;
     if let Some(job) = &record {
-        if !job.live_media { vm::remove_copy_port(&job.id)?; }
+        if job.live_media.is_none() { vm::remove_copy_port(&job.id)?; }
         if job.restore.is_some() {
             crate::storage::cleanup_restore(&job.id)?;
         }
@@ -834,7 +846,7 @@ pub fn cleanup() -> Result<()> {
         if Path::new(&format!("/dev/mapper/{name}"))
             .try_exists()
             .map_err(|_| Error("device_check_failed"))?
-            || record.as_ref().is_some_and(|job| job.live_media && job.export == (base == "oblivion-export"))
+            || record.as_ref().is_some_and(|job| job.live_media.is_some() && job.export == (base == "oblivion-export"))
                 && live_mapping_present(if base == "oblivion-export" { Direction::Export } else { Direction::Import })?
         {
             vm::execute(
@@ -858,9 +870,9 @@ pub fn cleanup() -> Result<()> {
 
 pub fn serve(import: Option<&vm::Config>, export: Option<&vm::Config>, uid: u32) -> Result<()> {
     let job = job()?.ok_or(Error("transfer_not_prepared"))?;
-    if job.live_media {
+    if let Some(purpose) = job.live_media {
         let config = if job.export { export } else { import };
-        return serve_live_media(config.ok_or(Error("transfers_not_configured"))?, &job);
+        return serve_live_media(config.ok_or(Error("transfers_not_configured"))?, &job, purpose);
     }
     if let Some(restore) = &job.restore {
         let config = import.ok_or(Error("transfers_not_configured"))?;
@@ -983,7 +995,7 @@ pub fn serve(import: Option<&vm::Config>, export: Option<&vm::Config>, uid: u32)
     relay_job(job, source, destination, owners, uid, None)
 }
 
-fn serve_live_media(config: &vm::Config, job: &Job) -> Result<()> {
+fn serve_live_media(config: &vm::Config, job: &Job, purpose: Purpose) -> Result<()> {
     config.validate()?;
     let (role, direction) = if job.export {
         config.start_live_export()?;
@@ -1037,8 +1049,14 @@ fn serve_live_media(config: &vm::Config, job: &Job) -> Result<()> {
         // media. A crashed worker leaves an unconfirmed proof behind.
         write_export_proof(&job.id, false)?;
     }
+    let command = match purpose {
+        Purpose::Copy => b"M",
+        Purpose::Inspect => b"I",
+        Purpose::Recover => b"R",
+        Purpose::Discard => b"D",
+    };
     let handoff = Channel::new(&port, Duration::from_secs(2))
-        .write_all(b"M")
+        .write_all(command)
         .map_err(|_| Error("transfer_guest_not_ready"))
         .and_then(|()| crate::ipc::send_console(&control, &port));
     // Only the admitted caller holds the connected copy port after handoff.

@@ -34,10 +34,51 @@ impl Command {
             }
         )
     }
+
+    pub fn needs_live_media(&self) -> bool {
+        matches!(&self.action, CommandAction::Usb { .. })
+    }
+
+    pub fn into_usb(self) -> std::result::Result<UsbCommand, Self> {
+        let CommandAction::Usb { device, action } = self.action else {
+            return Err(self);
+        };
+        Ok(UsbCommand {
+            safe: self.safe,
+            device,
+            expected_opening: self.expected_opening,
+            json: self.json,
+            action,
+        })
+    }
+}
+
+pub struct UsbCommand {
+    pub safe: String,
+    pub device: String,
+    pub expected_opening: Option<String>,
+    pub json: bool,
+    pub action: UsbAction,
+}
+
+pub enum UsbAction {
+    Inventory {
+        after: Option<String>,
+        limit: usize,
+    },
+    Manage {
+        operation: String,
+        action: Action,
+        confirmed_state: Option<String>,
+    },
 }
 
 enum CommandAction {
     List(browser::Request),
+    Usb {
+        device: String,
+        action: UsbAction,
+    },
     Transfers {
         destination: Option<String>,
         after: Option<String>,
@@ -69,6 +110,8 @@ pub fn parse(args: &[String]) -> Result<Option<Command>> {
     let mut operation_id = None;
     let mut expected_opening = None;
     let mut destination = None;
+    let mut usb = None;
+    let mut confirmed_state = None;
     let mut path = None;
     let mut json = false;
     let mut values = args.iter().skip(1);
@@ -108,6 +151,20 @@ pub fn parse(args: &[String]) -> Result<Option<Command>> {
                         .clone(),
                 );
             }
+            "--usb" if usb.is_none() => {
+                let device = values.next().ok_or("Missing USB device ID")?;
+                if !oblivion_wire::live_media::valid_device_id(device) {
+                    return Err("Invalid USB device ID".into());
+                }
+                usb = Some(device.clone());
+            }
+            "--confirmed-state" if confirmed_state.is_none() => {
+                let digest = values.next().ok_or("Missing reviewed USB state")?;
+                if !oblivion_wire::live_media::valid_device_id(digest) {
+                    return Err("Invalid reviewed USB state".into());
+                }
+                confirmed_state = Some(digest.clone());
+            }
             "--json" if !json => json = true,
             "--events" | "--yes" => {
                 return Err("--events and --yes apply only to file import or export".into());
@@ -122,6 +179,15 @@ pub fn parse(args: &[String]) -> Result<Option<Command>> {
         if !valid_id(value) {
             return Err("Invalid operation or opening ID".into());
         }
+    }
+    if confirmed_state.is_some() && (usb.is_none() || !matches!(operation, "recover" | "discard")) {
+        return Err("A reviewed state applies only to USB recover or discard".into());
+    }
+    if usb.is_some() && (destination.is_some() || path.is_some() || operation == "list") {
+        return Err(
+            "Use --usb with files transfers, status, recover or discard without a local path"
+                .into(),
+        );
     }
     let action = match operation {
         "list" => {
@@ -143,23 +209,45 @@ pub fn parse(args: &[String]) -> Result<Option<Command>> {
             if cursor.as_deref().is_some_and(|cursor| !valid_id(cursor)) {
                 return Err("Invalid transfer cursor".into());
             }
-            CommandAction::Transfers {
-                destination,
-                after: cursor,
-                limit: limit.unwrap_or(TRANSFERS_PAGE_LIMIT),
+            let limit = limit.unwrap_or(TRANSFERS_PAGE_LIMIT);
+            match usb {
+                Some(device) => CommandAction::Usb {
+                    device,
+                    action: UsbAction::Inventory {
+                        after: cursor,
+                        limit,
+                    },
+                },
+                None => CommandAction::Transfers {
+                    destination,
+                    after: cursor,
+                    limit,
+                },
             }
         }
         _ => {
             if path.is_some() || cursor.is_some() {
                 return Err("Use files status, recover or discard --safe SAFE --operation ID [--destination DIRECTORY]".into());
             }
-            CommandAction::Manage {
-                destination,
-                operation: operation_id.ok_or("Choose an operation ID")?,
-                action: match operation {
-                    "recover" => Action::Recover,
-                    "discard" => Action::Discard,
-                    _ => Action::Status,
+            let action = match operation {
+                "recover" => Action::Recover,
+                "discard" => Action::Discard,
+                _ => Action::Status,
+            };
+            let operation = operation_id.ok_or("Choose an operation ID")?;
+            match usb {
+                Some(device) => CommandAction::Usb {
+                    device,
+                    action: UsbAction::Manage {
+                        operation,
+                        action,
+                        confirmed_state,
+                    },
+                },
+                None => CommandAction::Manage {
+                    destination,
+                    operation,
+                    action,
                 },
             }
         }
@@ -261,6 +349,9 @@ pub fn execute<B: Backend>(
     output: &mut impl Write,
     diagnostics: &mut impl Write,
 ) -> Result<i32> {
+    if command.needs_live_media() {
+        return Err("USB transfer records require the Live launcher".into());
+    }
     let target = target(backend, &command.safe)?;
     if let CommandAction::List(request) = command.action {
         let response = backend.request(Call {
@@ -342,6 +433,7 @@ pub fn execute<B: Backend>(
             writeln!(output, "{}", serde_json::to_string(&result)?)?;
         }
         CommandAction::List(_) => unreachable!("listing handled before opening admission"),
+        CommandAction::Usb { .. } => unreachable!("USB operation handled by the Live launcher"),
     }
     Ok(0)
 }

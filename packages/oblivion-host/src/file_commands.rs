@@ -22,6 +22,10 @@ use std::time::Duration;
 use std::time::Instant;
 
 pub fn inspect(command: files::Command) -> control::Result<i32> {
+    let command = match command.into_usb() {
+        Ok(command) => return super::live_media_commands::operations(command),
+        Err(command) => command,
+    };
     files::execute(
         &mut NativeFiles(control::Client::new()),
         command,

@@ -1278,10 +1278,10 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
             require(require_current_file_opening(&selected.opening.safe_id, request.slot, &selected.opening)? == host, "idle_opening_changed")?;
             source.check(stream)?;
             crate::transfer_host::idle()?;
-            crate::transfer_host::start_live_media(&selected.lease_id, selected.direction, &device)?;
+            crate::transfer_host::start_live_media(&selected.lease_id, selected.direction, selected.purpose, &device)?;
         }
         drop(device);
-        let (console, worker) = crate::transfer_host::attach_live_media(&selected.lease_id, selected.direction, deadline, || source.check(stream))?;
+        let (console, worker) = crate::transfer_host::attach_live_media(&selected.lease_id, selected.direction, selected.purpose, deadline, || source.check(stream))?;
         {
             let _lock = crate::storage::recovery_lock()?;
             require(require_current_file_opening(&selected.opening.safe_id, request.slot, &selected.opening)? == host, "idle_opening_changed")?;

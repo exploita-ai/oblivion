@@ -72,6 +72,90 @@ fn usb_transfer_grammar_accepts_only_a_device_identity_and_relative_sources() {
 }
 
 #[test]
+fn usb_recovery_requires_a_device_operation_and_explicit_review_shape() {
+    use oblivion_cli::files::UsbAction;
+    use oblivion_transfer::native_files::Action;
+
+    let device = "a".repeat(64);
+    let operation = "b".repeat(32);
+    let review = "c".repeat(64);
+    let Command::Files(Files::Inspect(command)) = parse(&[
+        "files",
+        "transfers",
+        "--safe",
+        "GB",
+        "--usb",
+        &device,
+        "--cursor",
+        &operation,
+        "--limit",
+        "2",
+    ])
+    .unwrap() else {
+        panic!("expected USB inventory");
+    };
+    assert!(command.needs_live_media());
+    assert!(matches!(command.into_usb().ok().unwrap().action,
+        UsbAction::Inventory { after: Some(id), limit: 2 } if id == operation));
+    let Command::Files(Files::Inspect(command)) = parse(&[
+        "files",
+        "recover",
+        "--safe",
+        "GB",
+        "--usb",
+        &device,
+        "--operation",
+        &operation,
+        "--confirmed-state",
+        &review,
+        "--json",
+    ])
+    .unwrap() else {
+        panic!("expected USB recovery");
+    };
+    let command = command.into_usb().ok().unwrap();
+    assert!(command.json);
+    assert_eq!(command.device, device);
+    assert!(matches!(command.action, UsbAction::Manage {
+        operation: id, action: Action::Recover, confirmed_state: Some(digest),
+    } if id == operation && digest == review));
+    for values in [
+        vec!["transfers", "--usb", &device, "--cursor", "raw/name"],
+        vec!["transfers", "--usb", &device, "--limit", "9"],
+        vec!["transfers", "--usb", &device, "--destination", "/tmp"],
+        vec!["recover", "--usb", &device, "--confirmed-state", &review],
+        vec![
+            "recover",
+            "--operation",
+            &operation,
+            "--confirmed-state",
+            &review,
+        ],
+        vec![
+            "discard",
+            "--usb",
+            &device,
+            "--operation",
+            &operation,
+            "--yes",
+        ],
+        vec![
+            "status",
+            "--usb",
+            &device,
+            "--operation",
+            &operation,
+            "--confirmed-state",
+            &review,
+        ],
+    ] {
+        let mut command = vec!["files", values[0], "--safe", "GB"];
+        command.extend_from_slice(&values[1..]);
+        assert!(parse(&command).is_err());
+    }
+}
+
+#[test]
 fn all_control_families_dispatch_to_their_existing_typed_grammar() {
     assert!(matches!(
         parse(&["status", "--json"]).unwrap(),

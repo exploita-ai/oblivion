@@ -8,12 +8,33 @@ pub enum Direction {
     Export,
 }
 
+/// A lease only admits the guest endpoint for this exact operation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Purpose {
+    Copy,
+    Inspect,
+    Recover,
+    Discard,
+}
+
+impl Purpose {
+    pub fn valid_for(self, direction: Direction) -> bool {
+        match self {
+            Self::Copy => true,
+            Self::Inspect => direction == Direction::Import,
+            Self::Recover | Self::Discard => direction == Direction::Export,
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reserve<S> {
     pub opening: Opening<S>,
     pub device_id: String,
     pub direction: Direction,
+    pub purpose: Purpose,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -23,6 +44,7 @@ pub struct Source<S> {
     pub opening: Opening<S>,
     pub device_id: String,
     pub direction: Direction,
+    pub purpose: Purpose,
 }
 
 pub const STOP: u8 = b'X';

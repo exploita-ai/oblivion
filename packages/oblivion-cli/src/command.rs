@@ -202,6 +202,8 @@ Files
   oblivion files status --safe SAFE --operation ID [--destination DIR] --json
   oblivion files recover --safe SAFE --operation ID [--destination DIR]
   oblivion files discard --safe SAFE --operation ID [--destination DIR]
+  On Live, use --usb ID with transfers, status, recover or discard to inspect
+  and manage USB export records. Recover and discard require reviewed consent.
   Copy commands accept --operation ID; exports reconcile only inside DIR.
   Discard removes private incomplete staging, never published files.
 

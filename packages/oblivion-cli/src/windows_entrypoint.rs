@@ -49,6 +49,9 @@ pub fn run() -> Result<i32> {
         Command::Files(Files::Copy(command)) if command.needs_live_media() => {
             return Err("USB transfers are available only on Oblivion Live".into());
         }
+        Command::Files(Files::Inspect(command)) if command.needs_live_media() => {
+            return Err("USB transfers are available only on Oblivion Live".into());
+        }
         Command::Files(Files::Copy(command))
             if !command.events_output && !command.confirmed && !std::io::stdin().is_terminal() =>
         {
