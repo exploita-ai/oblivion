@@ -5,8 +5,9 @@ or qualified.** An experimental HCS helper core and owned HCN ICS network are
 implemented. A same-user authenticated named-pipe client and shared CLI adapter
 are now present. The installed command entrypoint, bundle verification and
 one-shot per-user setup and local Files payload endpoints are connected in source;
-ordinary-user admission now uses a demand-start SCM broker in source, while
-unknown-resource reconciliation and installed privilege qualification remain open.
+ordinary-user admission uses a demand-start SCM broker and owned-resource
+recovery uses private receipts. Interrupted initial setup and installed
+privilege qualification remain open.
 Stopped-only update, software collection and uninstall are now connected in source.
 The manager has a Windows x64 build target; its PE
 execution and complete installed path still need qualification. This is a proposal for phase 8 of the
@@ -18,8 +19,8 @@ terminal a lease. It owns the helper process and lifetime pipe; control probes
 verify that exact kernel process object, not merely an SID or recorded PID.
 The last lease requests guarded shutdown, and only a confirmed helper exit after
 HCS/network/grant cleanup permits Stopped. Failed or uncertain shutdown persists
-Recovery. Recovery after losing the supervisor still needs the dedicated owned
-resource reconciliation; an absent pipe cannot clear that fence.
+Recovery. After losing the supervisor, recovery requires exclusive journal ownership and
+the backend resource lock. An absent pipe alone cannot clear that fence.
 
 ## Ordinary-user privilege boundary
 
@@ -177,13 +178,31 @@ incomplete; retry from a verified external bundle after closing installed progra
 Reinstall through `runtime update BUNDLE` preserves the retained data and identity.
 No data-purge or delete-at-reboot operation is introduced.
 
-`runtime recover` retries a guarded stop only in stop/recovery states, using the
-authenticated live supervisor and then requiring the same Stopped proof. It
-refuses a healthy active runtime with an instruction to use `runtime stop`. An
-absent supervisor, unknown HCS/HCN resources or uncertain ACL grants remain fenced;
-this is not orphan-resource adoption or complete crash recovery. Filesystem,
-mutex, pipe and replacement fixtures are compiled for Windows, not executed on
-this Mac. Power-loss durability and installed lifecycle remain acceptance gates.
+`runtime recover` refuses a healthy supervisor that still owns its journal.
+A live supervisor already stopping can retry its authenticated stop. If the
+writer is gone, recovery first acquires the exclusive journal writer and the
+backend's lifetime resource lock. It records Recovery before external work and
+records Stopped only after the following checks complete.
+
+The private resource receipt binds source/configuration, client/storage SIDs,
+runtime/generation, the original four file identities and virtual disk capacity,
+and the exact HCN plan. It is flushed, atomically published and read back before
+HCN creation, VM grants or HCS creation. HCS Owner and HCN names include that
+same generation. Reconciliation stops only the matching VM, verifies actual
+Stopped or scoped absence, validates both HCN objects before deleting either,
+and revokes access only on the receipt's original files. Changed identities,
+foreign properties and unknown permissions preserve Recovery; no arbitrary
+resource adoption or ACL rewrite is performed.
+
+Without a receipt, recovery performs no external mutation: it requires positive
+HCS absence, both HCN IDs absent and strict ungranted runtime files with the
+correct VHDX identity. A missing pipe or file is not sufficient evidence. A
+helper still finishing cleanup retains the resource lock and prevents recovery
+from racing its operations. Interrupted initial disk setup is not automatically
+reinitialized. Filesystem, mutex, receipt replacement and SDK fixtures compile
+for Windows but have not been executed here. Forced interruption, power loss,
+HcsRevokeVmAccess with an already-absent ACE and installed lifecycle remain
+acceptance gates.
 
 ## Local Files copies
 
@@ -266,8 +285,8 @@ the guest separately verifies the virtual disk's runtime marker or filesystem
 UUID. Configuring a VHDX container is not sufficient to initialize that content.
 Supervisor EOF revokes the helper, including during bounded HCS waits. A successful
 HCS request is not a stopped observation. Unknown cleanup retains leases until the
-one-shot process exits and requires explicit grant reconciliation; that recovery
-frontend is still to be implemented.
+one-shot process exits. Explicit recovery uses the protected generation receipt
+and original file identities; the actual SDK cleanup remains a qualification gate.
 
 ## Owned controller network
 
@@ -296,7 +315,8 @@ are synchronous and expose no cancellation handle. Creation occurs before HCS VM
 creation, and deletion only after Stopped is observed. A blocked service call is
 not turned into a fabricated deadline or a detached mutating worker. Cleanup
 checks both resource identity and observed absence; failed cleanup requires
-reconciliation by the unfinished recovery frontend.
+reconciliation through the protected generation receipt; actual HCN behavior
+still requires Windows qualification.
 
 The installer should automate feature detection, explicit elevation, VM creation,
 image verification and any restart handoff. Everyday commands should run as the
@@ -479,8 +499,8 @@ retain POSIX paths. The source-bound bundle validator supports Windows assets
 without depending on Unix ownership APIs. Compilation and fixture definitions
 do not qualify the installed manager or Hyper-V path.
 
-Remaining work includes installed broker qualification and explicit reconciliation of owned HCS,
-network and ACL grants after uncertain shutdown or interrupted setup. The full
+Remaining work includes installed broker/recovery qualification and interrupted
+initial setup after disk creation. Foreign resources are never adopted by recovery. The full
 installed path must then pass the acceptance gates below. There is no second
 Windows command grammar, beta compatibility reader or automatic emulation fallback.
 

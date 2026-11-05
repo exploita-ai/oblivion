@@ -257,7 +257,7 @@ automatic Hyper-V DHCP fallback. HCN responses must confirm the requested
 identity and addresses. Creation precedes the VM, and cleanup requires its
 confirmed stop and observed network-resource absence. HCN calls are synchronous;
 service hangs, exact flags, coexistence and recovery still require Windows tests.
-The Windows installed entrypoint, initial setup and local Files payload endpoints are now connected in source; the normal-user SCM broker and stopped-only software maintenance are connected in source, while grant/network-recovery integration and installed qualification remain open.
+The Windows installed entrypoint, initial setup and local Files payload endpoints are now connected in source; the normal-user SCM broker and stopped-only software maintenance are connected in source, with receipt-bound grant/network recovery now connected and installed qualification still open.
 Pipe peer/ACL behavior
 with the actual HCS worker, boot, inner KVM and the installed lifecycle remain
 Windows acceptance gates. See the [Windows backend](WINDOWS.md).
@@ -494,3 +494,24 @@ and the Windows CLI library/entrypoint/tests compile for MSVC without warnings.
 The added SID, protected descriptor, caller-token and principal-binding fixtures
 are compiled evidence only; no SCM service was installed and no Windows VM was
 run on the development Mac.
+
+Windows owned-resource recovery is now connected in source. The helper persists
+a private receipt before external effects, binding the exact generation, source/
+configuration, principals, original file IDs/VHDX capacity and HCN plan. Its
+exclusive lifetime file lock also covers cleanup. Recovery can replace a lost
+supervisor only after acquiring its journal writer and that resource lock; it
+stops only the receipt-owned HCS generation, verifies both HCN objects before
+deleting either and revokes grants only on the original files. The clean receipt
+precedes the supervisor's Stopped record. Foreign identities and unknown state
+remain fenced. No-receipt recovery requires positive HCS and HCN absence plus
+strict runtime-file admission and performs no external mutation.
+
+Normal termination also accepts a confirmed ID-scoped HCS absence after an
+ephemeral VM disappears. A generic failed Properties request never means stopped.
+Portable model evidence is five HCS, nine configuration, eight network and two
+receipt cases passing. Native Windows all-targets compiles without warnings,
+including new receipt-lock/atomic-publication and file-evidence fixtures; these
+Windows I/O/SDK cases have not been executed. Full lifecycle, interrupted initial
+disk setup, forced interruption/power loss and SDK revoke behavior when a VM ACE
+is already absent remain qualification or implementation gates. No image was
+built or platform qualified by this source increment.

@@ -3,8 +3,9 @@
 Experimental `oblivion-vm.exe` source for a headless, owned Hyper-V controller.
 This is the backend core, **not an installable Windows Oblivion release**.
 The installed Windows frontend and initial setup are connected in source.
-Ordinary-user privilege setup, interrupted-install/resource recovery and actual
-nested-Safe boot remain unfinished or unqualified.
+Ordinary-user broker and receipt-bound resource recovery are connected in source.
+Interrupted initial disk setup, SDK crash recovery and actual nested-Safe boot
+remain incomplete or unqualified.
 The surrounding architecture is described in [Windows](../../docs/WINDOWS.md).
 
 The helper uses the Windows SDK through the pinned `windows-sys` bindings.
@@ -29,8 +30,8 @@ not authorize recovery or VM adoption.
 
 `bundle.rs` consumes the common manifest and verifies the actual inventory,
 ACLs, file identities and hashes before publishing into a new private directory.
-`installation.rs` derives a per-user SID catalog from the ProgramData known folder and a strict
-Pending/Ready registry. It prepares boot copies outside the immutable release,
+`installation.rs` derives a per-user SID catalog from the ProgramData known
+folder and a strict Pending/Ready registry. It prepares boot copies outside the immutable release,
 boots and stops the new runtime, and commits Ready only after checking the VHDX.
 Interrupted setup never authorizes another initialization or automatic deletion.
 Metadata-only status/activity discovery does not hash boot assets or call HCS.
@@ -41,8 +42,8 @@ software and state; it never accepts executable/configuration paths from clients
 User processes retain their terminal, local Files endpoints and runtime lease.
 Client/storage SIDs are explicit supervisor bindings and cross-session election
 uses a global mutex. Update/GC/uninstall quiesce the broker only while retaining
-the observed-Stopped guard. Real Windows execution, interrupted-setup/resource
-reconciliation and signed distribution remain unqualified.
+the observed-Stopped guard. Real Windows execution, completion of interrupted
+initial disk setup and signed distribution remain open.
 
 The network follows the HCN default schema used by Microsoft's WSL implementation:
 ICS with `IsolateSwitch: true` and the nonpersistent flag, a requested private
@@ -146,3 +147,14 @@ The symlink fixture is explicitly ignored unless the Windows machine has the
 required privilege or Developer Mode; execute it separately when available.
 These tests do not prove HCS bootstrap permissions, controller boot, nested KVM,
 provider login, Tor routing, persistence or the complete installation lifecycle.
+
+`resources.rs` owns a private, atomic receipt and an exclusive backend lifetime
+file lock. The snapshot precedes external effects and binds the exact runtime,
+generation, principals, original file identities, VHDX capacity and HCN plan. HCS
+Owner and HCN names are generation-specific. Only a recovery caller that owns
+the abandoned supervisor journal and this resource lock can reconcile them.
+Without a receipt, positive HCS/HCN absence plus strict file admission is required;
+no external resources are modified on that branch. Normal termination and
+recovery share the same Stopped-or-confirmed-absence observation. No recovery
+operation rewrites arbitrary ACLs or creates/starts an existing VM. Windows SDK
+execution and forced-interruption durability remain unqualified.
