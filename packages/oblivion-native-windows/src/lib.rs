@@ -36,6 +36,8 @@ pub mod lifetime;
 #[cfg(windows)]
 pub mod network;
 pub mod network_model;
+#[cfg(windows)]
+mod picker;
 pub mod prerequisites;
 #[cfg(windows)]
 pub mod private;

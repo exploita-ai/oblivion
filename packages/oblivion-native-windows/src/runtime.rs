@@ -18,7 +18,7 @@ use windows_sys::core::GUID;
 use zeroize::Zeroizing;
 
 pub fn main() -> Result<()> {
-    // This process has no UI. Host-wide paging/dump policy remains an OS trust
+    // Suppress implicit system error dialogs. Host-wide paging/dump policy remains an OS trust
     // boundary; suppressing error dialogs does not claim to disable host dumps.
     unsafe {
         SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
@@ -27,6 +27,9 @@ pub fn main() -> Result<()> {
         return Err(Error("windows_x86_64_required"));
     }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.len() == 1 && args[0] == "pick-files" {
+        return crate::picker::run();
+    }
     if let [operation, staging_option, staging, pipe_option, pipe] = args.as_slice() {
         if operation == "setup" && staging_option == "--staging" && pipe_option == "--pipe" {
             return crate::setup::service(
