@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, TrySendError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::{ERROR_OPERATION_ABORTED, HANDLE};
 use windows_sys::Win32::System::Console::{
     CONSOLE_SCREEN_BUFFER_INFO, CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT,
     CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT, ENABLE_ECHO_INPUT, ENABLE_EXTENDED_FLAGS,
@@ -770,6 +770,69 @@ pub fn new_password(
 
 pub fn confirm(word: &str, on_activity: impl FnMut(Instant)) -> Result<bool> {
     Ok(password(&format!("Type {word} to confirm"), 0, on_activity)?.as_slice() == word.as_bytes())
+}
+
+pub(crate) fn review_share(mut on_activity: impl FnMut(Instant)) -> Result<Option<String>> {
+    let _exclusive = Exclusive::claim()?;
+    let input = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("CONIN$")
+        .map_err(|_| "Share review requires an interactive terminal")?;
+    let _handler = Handler::install(true)?;
+    let old = mode(&input).ok_or("Share review requires an interactive terminal")?;
+    let mut guard = Modes::empty();
+    guard.set(
+        &input,
+        (old | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT)
+            & !ENABLE_VIRTUAL_TERMINAL_INPUT,
+    )?;
+    let result = (|| -> Result<Option<String>> {
+        let mut units = [0u16; crate::share::io::REVIEW_LINE_LIMIT + 2];
+        let mut count = 0;
+        let read = unsafe {
+            ReadConsoleW(
+                input.as_raw_handle(),
+                units.as_mut_ptr().cast(),
+                units.len() as u32,
+                &mut count,
+                null_mut(),
+            )
+        };
+        if read == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) {
+                return Ok(None);
+            }
+            return Err(error.into());
+        }
+        if SIGNAL.load(Ordering::Acquire) != 0 || count == 0 {
+            return Ok(None);
+        }
+        on_activity(Instant::now());
+        let units = &units[..count as usize];
+        let line = units
+            .strip_suffix(&[13, 10])
+            .or_else(|| units.strip_suffix(&[13]))
+            .or_else(|| units.strip_suffix(&[10]));
+        let command = line.unwrap_or(units);
+        let text = (command.len() <= crate::share::io::REVIEW_LINE_LIMIT)
+            .then(|| String::from_utf16(command))
+            .transpose()
+            .map_err(|_| "Invalid Share review command encoding")?;
+        let Some(text) = text.filter(|text| text.len() <= crate::share::io::REVIEW_LINE_LIMIT) else {
+            if unsafe { FlushConsoleInputBuffer(input.as_raw_handle()) } == 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+            return Err("Share review command is too long".into());
+        };
+        if line.is_none() || units.iter().any(|unit| matches!(unit, 3 | 4 | 26)) {
+            return Ok(None);
+        }
+        Ok(Some(text))
+    })();
+    guard.restore()?;
+    result
 }
 
 #[cfg(test)]

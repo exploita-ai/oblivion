@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import json
 import os
@@ -7,7 +8,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from native_fixture import codex, claude
+from native_fixture import claude, codex, opencode
 from oblivion_history.portable import encode
 
 spec = importlib.util.spec_from_file_location("share_plan", Path(__file__).resolve().parents[2] / "oblivion-host/guest/share_plan.py")
@@ -60,19 +61,81 @@ class SharePlanTests(unittest.TestCase):
     def test_native_chat_selection_is_filtered_and_cancel_only_removes_staging(self):
         with tempfile.TemporaryDirectory() as tmp:
             vault = self.vault(Path(tmp))
-            chat, transcript, _ = codex(vault, text="sk-publicfixturecredential123456789")
+            secret = "sk-publicfixturecredential123456789"
+            chat, transcript, rows = codex(vault, text=secret)
+            (vault / "home/.codex/session_index.jsonl").write_text(
+                encode({"id": rows[0]["payload"]["id"], "thread_name": secret}) + "\n"
+            )
             plan = module.Plan(vault, self.request(chat_ids=[chat]))
             self.assertEqual(plan.public["chats"], [])
             self.assertNotIn("history/chats.jsonl", {entry["path"] for entry in plan.public["manifest"]})
             plan.close()
             plan = module.Plan(vault, self.request(chat_ids=[chat], include_sensitive_chats=[chat]))
-            self.assertEqual(plan.public["chats"], [chat])
+            self.assertEqual(plan.public["chats"], [{"id": chat, "agent": "codex", "title": None}])
+            self.assertNotIn(secret, json.dumps(plan.public))
             self.assertIn("history/chats.jsonl", {entry["path"] for entry in plan.public["manifest"]})
             generated = plan.stage / "chats.jsonl"
             self.assertTrue(generated.is_file())
             plan.close()
             self.assertFalse(generated.exists())
             self.assertTrue(transcript.is_file())
+
+    def test_review_lists_included_native_titles_in_selection_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = self.vault(Path(tmp))
+            codex_id, _, _ = codex(vault, text="DO-NOT-USE-AS-TITLE")
+            claude_id, _, _ = claude(vault)
+            opencode_id, _ = opencode(vault)
+            plan = module.Plan(vault, self.request(chat_ids=[opencode_id, claude_id, codex_id]))
+            self.assertEqual(plan.public["chats"], sorted([
+                {"id": codex_id, "agent": "codex", "title": None},
+                {"id": claude_id, "agent": "claude", "title": "Claude research"},
+                {"id": opencode_id, "agent": "opencode2", "title": "Native OpenCode chat"},
+            ], key=lambda entry: entry["id"]))
+            self.assertNotIn("DO-NOT-USE-AS-TITLE", json.dumps(plan.public))
+            review = {key: value for key, value in plan.public.items() if key != "plan_sha256"}
+            self.assertEqual(plan.plan_sha256, hashlib.sha256(module.encode(review)).hexdigest())
+            plan.close()
+
+    def test_review_title_omits_controls_bidi_and_oversize_utf8(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = self.vault(Path(tmp))
+            chat, transcript, rows = claude(vault)
+            for title in (" \t", "name\u0085next", "name\u061c", "name\u202e", "name\u2028next", "é" * 129, "é" * 128):
+                rows[-1]["customTitle"] = title
+                transcript.write_text("".join(encode(row) + "\n" for row in rows))
+                plan = module.Plan(vault, self.request(chat_ids=[chat]))
+                self.assertEqual(plan.public["chats"][0]["title"], title if title == "é" * 128 else None)
+                plan.close()
+
+    def test_explicitly_excluded_codex_prefix_refuses_selected_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = self.vault(Path(tmp))
+            parent, parent_transcript, parent_rows = codex(vault)
+            child, child_transcript, child_rows = codex(vault)
+            physical_id = str(uuid.uuid4())
+            parent_rollout = parent_transcript.with_name(
+                parent_transcript.name.replace(parent_rows[0]["payload"]["id"], physical_id)
+            )
+            parent_transcript.rename(parent_rollout)
+            prefix = b"".join(parent_rollout.read_bytes().splitlines(keepends=True)[:2])
+            child_rows[0]["payload"]["history_base"] = {
+                "thread_id": physical_id,
+                "end_ordinal_exclusive": 2,
+                "end_byte_offset": len(prefix),
+            }
+            child_transcript.write_text("".join(encode(row) + "\n" for row in child_rows))
+            plan = module.Plan(vault, self.request(chat_ids=[child]))
+            self.assertEqual([entry["id"] for entry in plan.public["chats"]], [child])
+            self.assertIn({"reason": "native_history_dependency_included", "chat_id": child, "included": True},
+                          plan.public["warnings"])
+            plan.close()
+            denied = self.request(chat_ids=[child], exclude_chats=[parent])
+            with self.assertRaisesRegex(ValueError, "^share_excluded_chat_required$"):
+                module.Plan(vault, denied)
+            self.assertFalse((vault / "state/.oblivion-share" / denied["request_id"]).exists())
+            self.assertTrue(parent_rollout.is_file())
+            self.assertTrue(child_transcript.is_file())
 
     def test_native_attachment_must_be_explicitly_selected_in_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -85,7 +148,7 @@ class SharePlanTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "share_native_dependency_not_selected"):
                 module.Plan(vault, self.request(paths=[], chat_ids=[selected]))
             plan = module.Plan(vault, self.request(paths=["workspace/document.pdf"], chat_ids=[selected]))
-            self.assertEqual(plan.public["chats"], [selected])
+            self.assertEqual(plan.public["chats"], [{"id": selected, "agent": "claude", "title": "Claude research"}])
             self.assertIn("workspace/document.pdf", {entry["path"] for entry in plan.public["manifest"]})
             plan.close()
 

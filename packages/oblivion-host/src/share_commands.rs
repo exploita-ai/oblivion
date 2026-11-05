@@ -1,14 +1,14 @@
 //! Unix stream ownership for the shared Share engine. The native launcher and
 //! Windows entrypoint consume the same parser, review and container workflow.
 use oblivion_cli::controller::{Call, Controller};
-use oblivion_cli::share::io::{Attachment, Lease, Native};
+use oblivion_cli::share::io::{Attachment, Lease, Native, REVIEW_LINE_LIMIT};
 use oblivion_host::{autolock::Opening, control, scope};
 use oblivion_transfer::channel::Channel;
-use std::fs::File;
-use std::io;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub fn run(command: oblivion_cli::share::Command) -> control::Result<i32> {
     oblivion_cli::share::run(
@@ -84,6 +84,49 @@ impl Drop for ExportLease {
 impl Native for super::UnixRuntime {
     type Attachment = ShareAttachment;
     type ExportLease = ExportLease;
+
+    fn review_share(&mut self) -> control::Result<Option<String>> {
+        let mut tty = OpenOptions::new()
+            .read(true)
+            .open("/dev/tty")
+            .map_err(|_| "Share review requires an interactive terminal")?;
+        let mut mode = std::mem::MaybeUninit::<libc::termios>::uninit();
+        if unsafe { libc::tcgetattr(tty.as_raw_fd(), mode.as_mut_ptr()) } != 0
+            || unsafe { mode.assume_init() }.c_lflag & libc::ICANON == 0
+        {
+            return Err("Share review requires line-oriented terminal input".into());
+        }
+        let mut activity = oblivion_host::activity::Reporter::current_host()?;
+        let mut buffer = [0; REVIEW_LINE_LIMIT + 2];
+        let count = loop {
+            match tty.read(&mut buffer) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => break result?,
+            }
+        };
+        if count > 0 {
+            if let Some(activity) = &mut activity {
+                activity.touch(Instant::now());
+            }
+        }
+        let bytes = &buffer[..count];
+        let line = bytes.strip_suffix(b"\r\n").or_else(|| bytes.strip_suffix(b"\n"));
+        if line.map_or(bytes.len(), <[u8]>::len) > REVIEW_LINE_LIMIT {
+            if unsafe { libc::tcflush(tty.as_raw_fd(), libc::TCIFLUSH) } != 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+            return Err("Share review command is too long".into());
+        }
+        let Some(line) = line else { return Ok(None) };
+        if line.iter().any(|byte| matches!(byte, 3 | 4 | 26)) {
+            return Ok(None);
+        }
+        Ok(Some(
+            std::str::from_utf8(line)
+                .map_err(|_| "Invalid Share review command encoding")?
+                .to_owned(),
+        ))
+    }
 
     fn lease_share_export(&mut self, export: &str) -> control::Result<ExportLease> {
         let (signal, lease, _) =

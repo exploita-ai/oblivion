@@ -99,10 +99,21 @@ def export(fd, vault, request_id=None, copy=COPY, runtime=None):
     raw = False
     try:
         request = read_frame(fd, time.monotonic() + 30)
+        revising = False
         while True:
             if request_id is not None and request.get("request_id") != request_id:
                 raise ValueError("invalid_share_request")
-            plan = Plan(vault, request)
+            if revising and cancel_requested(request, request_id):
+                frame(fd, {"version": 1, "request_id": request_id, "ok": True, "cancelled": True})
+                return
+            try:
+                plan = Plan(vault, request)
+            except ValueError as error:
+                if not revising or str(error) not in ("share_native_dependency_not_selected", "share_excluded_chat_required"):
+                    raise
+                frame(fd, {"version": 1, "request_id": request_id, "ok": False, "error": str(error)})
+                request = read_frame(fd, time.monotonic() + 1800)
+                continue
             request_id = plan.request["request_id"]
             if runtime is not None:
                 target = os.open(Path(runtime) / "request_id", os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -115,8 +126,9 @@ def export(fd, vault, request_id=None, copy=COPY, runtime=None):
             if decision.get("operation") == "plan":
                 plan.close(); plan = None
                 request = decision
+                revising = True
                 continue
-            if decision == {"version": 1, "operation": "cancel", "request_id": request_id} and type(decision["version"]) is int:
+            if cancel_requested(decision, request_id):
                 plan.close(); plan = None
                 frame(fd, {"version": 1, "request_id": request_id, "ok": True, "cancelled": True})
                 return
@@ -159,6 +171,10 @@ def export(fd, vault, request_id=None, copy=COPY, runtime=None):
     finally:
         if plan:
             plan.close()
+
+
+def cancel_requested(decision, request_id):
+    return decision == {"version": 1, "operation": "cancel", "request_id": request_id} and type(decision["version"]) is int
 
 
 def require_empty_import(vault):

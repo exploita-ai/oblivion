@@ -40,6 +40,23 @@ fn export_control_and_source_metadata_are_the_exact_producer_consumer_types() {
 }
 
 #[test]
+fn only_the_all_export_can_request_portable_settings() {
+    for include_settings in [false, true] {
+        let value = json!({"kind":"all","include_settings":include_settings});
+        let decoded: ExportSelection = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+    }
+    for invalid in [
+        json!({"kind":"all"}),
+        json!({"kind":"all","include_settings":"true"}),
+        json!({"kind":"safe","safe_id":"a".repeat(32),"include_settings":true}),
+        json!({"kind":"branch","safe_id":"a".repeat(32),"include_settings":true}),
+    ] {
+        assert!(serde_json::from_value::<ExportSelection>(invalid).is_err());
+    }
+}
+
+#[test]
 fn private_open_passwords_accept_only_the_current_scoped_request_fields() {
     let import = json!({"transaction":"a".repeat(32),"nonce":"b".repeat(32),"package_id":"c".repeat(32),"request_id":"d".repeat(32),"password":"SYNTHETIC_TEST_SECRET"});
     assert!(serde_json::from_value::<Open>(import.clone()).is_ok());

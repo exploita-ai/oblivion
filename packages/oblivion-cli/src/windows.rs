@@ -600,6 +600,15 @@ impl crate::share::io::Native for Runtime {
     type Attachment = ShareAttachment;
     type ExportLease = ExportLease;
 
+    fn review_share(&mut self) -> Result<Option<String>> {
+        let mut activity = self.host_activity()?;
+        windows_terminal::review_share(|at| {
+            if let Some(activity) = activity.as_mut() {
+                activity.touch(at);
+            }
+        })
+    }
+
     fn lease_share_export(&mut self, export: &str) -> Result<ExportLease> {
         if !oblivion_wire::control::valid_id(export) {
             return Err("invalid_share_export".into());

@@ -1199,7 +1199,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         require(request.expected_session.is_none(), "invalid_share_request")?;
         let _lock = lock_named("storage.lock")?;
         let selection: crate::share_export::ExportSelection = serde_json::from_slice(&secret).map_err(|_| Error("invalid_share_request"))?;
-        let settings = if matches!(&selection, crate::share_export::ExportSelection::All) {
+        let settings = if matches!(&selection, crate::share_export::ExportSelection::All { include_settings: true }) {
             idle.observe(crate::storage::idle_snapshot()?)?;
             let preferences = idle.status()?.state.preferences;
             Some(oblivion_share::Settings { safe_idle_minutes: preferences.safe_minutes, host_idle_minutes: preferences.host_minutes })

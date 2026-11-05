@@ -37,8 +37,49 @@ fn share_parser_preserves_review_selection_without_opening_files() {
     else {
         panic!("expected all")
     };
-    assert!(matches!(selector, Selector::All));
+    assert!(matches!(
+        selector,
+        Selector::All {
+            include_settings: false
+        }
+    ));
     assert_eq!(selection.paths, ["workspace", "imports"]);
+}
+
+#[test]
+fn portable_settings_require_an_explicit_all_export() {
+    let args = ["export", "--include-settings", "--all", "file"].map(str::to_owned);
+    assert!(matches!(
+        parse(&args).unwrap().into_action(),
+        Action::Export {
+            selector: Selector::All {
+                include_settings: true
+            },
+            ..
+        }
+    ));
+    for args in [
+        &["export", "--safe", "GB", "file", "--include-settings"][..],
+        &["export", "--branch", "GB", "file", "--include-settings"],
+        &[
+            "export",
+            "--all",
+            "file",
+            "--include-settings",
+            "--include-settings",
+        ],
+        &["import", "file", "--include-settings"],
+    ] {
+        assert!(
+            parse(
+                &args
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect::<Vec<_>>()
+            )
+            .is_err()
+        );
+    }
 }
 
 #[test]

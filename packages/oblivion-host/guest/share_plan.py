@@ -33,6 +33,16 @@ def path(value):
     return value
 
 
+def review_title(title):
+    encoded = title.encode()
+    if not title.strip() or len(encoded) > 256 or SECRET.search(encoded) or any(
+        ord(char) < 32 or 127 <= ord(char) < 160 or char in "\u061c\u200e\u200f\u2028\u2029\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+        for char in title
+    ):
+        return None
+    return title
+
+
 def private(directory):
     directory = Path(directory)
     directory.mkdir(mode=0o700, exist_ok=True)
@@ -198,7 +208,8 @@ class Plan:
         histories = {entry["id"]: entry for entry in native_histories(self.vault)}
         available = set(histories)
         selected = sorted(available if requested is None else set(requested))
-        selected = [value for value in selected if value not in self.request["exclude_chats"]]
+        explicitly_excluded = set(self.request["exclude_chats"])
+        selected = [value for value in selected if value not in explicitly_excluded]
         if not set(selected) <= available or len(selected) > MAX_CHATS:
             raise ValueError("invalid_share_chat_selection")
         if not selected:
@@ -245,9 +256,12 @@ class Plan:
                 return
             report = export_histories(self.vault, selected, archive)
         for selected_id in selected:
-            if histories[selected_id].get("required_prefixes", 0):
+            history = histories[selected_id]
+            if explicitly_excluded.intersection(history.get("required_chat_ids", ())):
+                raise ValueError("share_excluded_chat_required")
+            if history.get("required_prefixes", 0):
                 self.warn("native_history_dependency_included", chat_id=selected_id, included=True)
-        self.chats = selected
+            self.chats.append({"id": selected_id, "agent": history["agent"], "title": review_title(history["title"])})
         self.omitted = report["omitted"]
         digest = hashlib.sha256()
         with open(archive, "rb") as source:

@@ -43,7 +43,7 @@ pub enum Action {
 pub enum Selector {
     Safe(String),
     Branch(String),
-    All,
+    All { include_settings: bool },
 }
 
 pub fn parse(args: &[String]) -> Result<Command> {
@@ -80,6 +80,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
     }
     let mut selector = None;
     let mut output = None;
+    let mut include_settings = false;
     let mut selection = Selection {
         paths: vec![],
         chat_ids: None,
@@ -99,7 +100,12 @@ pub fn parse(args: &[String]) -> Result<Command> {
                     Selector::Branch(name)
                 });
             }
-            "--all" if selector.is_none() => selector = Some(Selector::All),
+            "--all" if selector.is_none() => {
+                selector = Some(Selector::All {
+                    include_settings: false,
+                })
+            }
+            "--include-settings" if !include_settings => include_settings = true,
             "--path" => selection
                 .paths
                 .push(values.next().ok_or("Missing guest path")?.clone()),
@@ -130,7 +136,11 @@ pub fn parse(args: &[String]) -> Result<Command> {
             _ => return Err("Unknown or duplicate Share option".into()),
         }
     }
-    let selector = selector.ok_or("Choose --safe NAME, --branch NAME or --all")?;
+    let selector = match selector.ok_or("Choose --safe NAME, --branch NAME or --all")? {
+        Selector::All { .. } => Selector::All { include_settings },
+        _ if include_settings => return Err("--include-settings requires --all".into()),
+        selector => selector,
+    };
     if !matches!(&selector, Selector::Safe(_))
         && selection
             .chat_ids

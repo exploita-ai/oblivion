@@ -4346,7 +4346,7 @@ pub(crate) fn share_export_sources(selection: crate::share_export::ExportSelecti
     let records = agent_safe_records()?;
     let parents = persistent_safe_parents()?;
     let selected = match selection {
-        crate::share_export::ExportSelection::All => all.clone(),
+        crate::share_export::ExportSelection::All { .. } => all.clone(),
         crate::share_export::ExportSelection::Safe { safe_id } => { validate_id(&safe_id)?; vec![safe_id] },
         crate::share_export::ExportSelection::Branch { safe_id } => {
             validate_id(&safe_id)?;

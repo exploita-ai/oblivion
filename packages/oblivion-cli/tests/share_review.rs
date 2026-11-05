@@ -152,8 +152,8 @@ fn review_binds_manifest_digest_size_request_and_best_effort_scan_limits() {
         (
             "chats",
             json!([
-                "11111111-1111-4111-8111-111111111111",
-                "11111111-1111-4111-8111-111111111111"
+                {"id":"11111111-1111-4111-8111-111111111111","agent":"codex","title":"Research"},
+                {"id":"11111111-1111-4111-8111-111111111111","agent":"claude","title":null}
             ]),
         ),
         ("omitted", json!({"PRIVATE_PEER_CANARY":1})),
@@ -186,6 +186,30 @@ fn review_binds_manifest_digest_size_request_and_best_effort_scan_limits() {
         assert_eq!(
             validate(changed).err().unwrap().to_string(),
             "invalid_share_review"
+        );
+    }
+}
+
+#[test]
+fn review_displays_selectable_native_chats_and_rejects_unsafe_titles() {
+    let mut value = fixture();
+    value["chats"] = json!([
+        {"id":"11111111-1111-4111-8111-111111111111","agent":"codex","title":"Research notes"},
+        {"id":"22222222-2222-4222-8222-222222222222","agent":"opencode2","title":null},
+    ]);
+    let (review, manifest) = validate(value.clone()).unwrap();
+    let mut output = Vec::new();
+    show_review(&mut output, "GB", &review, &manifest).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(
+        output.contains("C 1 · Codex · \"Research notes\" (11111111-1111-4111-8111-111111111111)")
+    );
+    assert!(output.contains("C 2 · OpenCode 2 · \"Untitled conversation\""));
+    for title in ["\u{1b}[2J", "\u{202e}", "   ", &"è".repeat(129)] {
+        value["chats"][0]["title"] = json!(title);
+        assert_eq!(
+            validate(value.clone()).err().unwrap().to_string(),
+            "invalid_share_chat_title"
         );
     }
 }

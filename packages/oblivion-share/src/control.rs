@@ -113,7 +113,7 @@ pub struct Status<S> {
 pub enum ExportSelection {
     Safe { safe_id: String },
     Branch { safe_id: String },
-    All,
+    All { include_settings: bool },
 }
 
 #[derive(Clone, Deserialize, Serialize)]

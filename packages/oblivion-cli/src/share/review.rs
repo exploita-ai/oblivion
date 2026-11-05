@@ -1,5 +1,5 @@
 //! The current guest plan, validated once before review or approval.
-use super::command::{validate_chat, validate_path};
+use super::command::{Selection, validate_chat, validate_path};
 use crate::controller::Result;
 use oblivion_share::Manifest;
 pub use oblivion_share::control::SourceMetadata;
@@ -7,6 +7,65 @@ use oblivion_transfer::Entry;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(super) enum Reply {
+    Reviewed(Review),
+    Rejected(Rejection),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Rejection {
+    version: u8,
+    request_id: Option<String>,
+    ok: bool,
+    error: String,
+}
+
+#[derive(Debug)]
+pub(super) enum Conflict {
+    RequiredFile,
+    RequiredConversation,
+}
+
+impl std::fmt::Display for Conflict {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str(match self {
+            Self::RequiredFile => {
+                "A selected conversation requires a file omitted by this selection."
+            }
+            Self::RequiredConversation => {
+                "A selected conversation requires saved context from an excluded conversation."
+            }
+        })
+    }
+}
+
+impl std::error::Error for Conflict {}
+
+pub(super) fn validate_reply(reply: Reply, request: &str) -> Result<(Review, Manifest)> {
+    match reply {
+        Reply::Reviewed(mut review) => {
+            let manifest = validate_review(&mut review, request)?;
+            Ok((review, manifest))
+        }
+        Reply::Rejected(reply) => {
+            if reply.version == 1 && !reply.ok && reply.request_id.as_deref() == Some(request) {
+                let conflict = match reply.error.as_str() {
+                    "share_native_dependency_not_selected" => Some(Conflict::RequiredFile),
+                    "share_excluded_chat_required" => Some(Conflict::RequiredConversation),
+                    _ => None,
+                };
+                if let Some(conflict) = conflict {
+                    return Err(conflict.into());
+                }
+            }
+            Err("The Safe could not prepare this Share selection".into())
+        }
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,11 +76,38 @@ pub struct Review {
     pub manifest_sha256: String,
     pub plan_sha256: String,
     pub bytes: u64,
-    pub chats: Vec<String>,
+    pub chats: Vec<Chat>,
     pub omitted: BTreeMap<String, u64>,
     pub warnings: Vec<Warning>,
     pub warning_count: u64,
     pub scan: Scan,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Chat {
+    pub id: String,
+    pub agent: Agent,
+    pub title: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Agent {
+    Codex,
+    Claude,
+    #[serde(rename = "opencode2")]
+    OpenCode,
+}
+
+impl Agent {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude Code",
+            Self::OpenCode => "OpenCode 2",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -56,16 +142,31 @@ pub fn show_review(
         review.bytes,
         review.chats.len()
     )?;
-    for entry in manifest.entries() {
+    for (index, entry) in manifest.entries().iter().enumerate() {
+        let number = if selectable_path(entry.path()) {
+            format!("F {}", index + 1)
+        } else {
+            "   ".into()
+        };
         writeln!(
             output,
-            "  {:?}{}",
+            "  {number} · {:?}{}",
             entry.path(),
             if matches!(entry, Entry::Directory { .. }) {
                 "/"
             } else {
                 ""
             }
+        )?;
+    }
+    for (index, chat) in review.chats.iter().enumerate() {
+        writeln!(
+            output,
+            "  C {} · {} · {:?} ({})",
+            index + 1,
+            chat.agent.label(),
+            chat.title.as_deref().unwrap_or("Untitled conversation"),
+            chat.id,
         )?;
     }
     for (kind, count) in &review.omitted {
@@ -98,6 +199,45 @@ pub fn show_review(
     Ok(())
 }
 
+fn selectable_path(path: &str) -> bool {
+    matches!(path.split('/').next(), Some("workspace" | "imports"))
+}
+
+pub(super) fn exclude(
+    value: &str,
+    selection: &mut Selection,
+    manifest: &Manifest,
+    review: &Review,
+) -> Option<usize> {
+    let mut words = value.split_ascii_whitespace();
+    let (target, paths) = match words.next()? {
+        "F" | "f" => (&mut selection.exclude_paths, true),
+        "C" | "c" => (&mut selection.exclude_chats, false),
+        _ => return None,
+    };
+    let requested = words
+        .map(|word| {
+            let index = word.parse::<usize>().ok()?.checked_sub(1)?;
+            if paths {
+                let path = manifest.entries().get(index)?.path();
+                return selectable_path(path).then_some(path);
+            }
+            review.chats.get(index).map(|chat| chat.id.as_str())
+        })
+        .collect::<Option<BTreeSet<_>>>()?;
+    if requested.is_empty() {
+        return None;
+    }
+    let added = requested
+        .into_iter()
+        .filter(|value| !target.iter().any(|entry| entry == value))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let count = added.len();
+    target.extend(added);
+    Some(count)
+}
+
 pub fn validate_review(review: &mut Review, request: &str) -> io::Result<Manifest> {
     let hash = |value: &str| {
         value.len() == 64
@@ -109,7 +249,13 @@ pub fn validate_review(review: &mut Review, request: &str) -> io::Result<Manifes
         || review.request_id != request
         || !hash(&review.plan_sha256)
         || review.chats.len() > 2048
-        || review.chats.iter().collect::<BTreeSet<_>>().len() != review.chats.len()
+        || review
+            .chats
+            .iter()
+            .map(|chat| &chat.id)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != review.chats.len()
         || review.warnings.len() > 512
         || review.warning_count < review.warnings.len() as u64
         || review.omitted.len() > 64
@@ -121,7 +267,13 @@ pub fn validate_review(review: &mut Review, request: &str) -> io::Result<Manifes
         return Err(io::Error::other("invalid_share_review"));
     }
     for chat in &review.chats {
-        validate_chat(chat)?;
+        validate_chat(&chat.id)?;
+        if chat.title.as_ref().is_some_and(|title| {
+            title.trim().is_empty() || title.len() > 256 || title.chars().any(|character|
+                character.is_control() || matches!(character, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        }) {
+            return Err(io::Error::other("invalid_share_chat_title"));
+        }
     }
     for kind in review.omitted.keys() {
         if kind.len() > 64

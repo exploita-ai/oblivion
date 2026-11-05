@@ -11,6 +11,7 @@ use oblivion_transfer::{Receipt, Selection};
 use oblivion_wire::control::Operation;
 use oblivion_wire::idle::Opening;
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
@@ -109,6 +110,8 @@ struct Frontend {
     root: PathBuf,
     output: PathBuf,
     changed: bool,
+    without_note: Option<PathBuf>,
+    choices: VecDeque<&'static str>,
     attached: usize,
     confirmed: bool,
     first_plan: Arc<Mutex<Option<Value>>>,
@@ -190,6 +193,11 @@ impl Runtime for Frontend {
 impl Native for Frontend {
     type Attachment = Attached;
     type ExportLease = ExportLease;
+    fn review_share(&mut self) -> Result<Option<String>> {
+        assert_eq!(self.attached, 1);
+        assert!(!self.confirmed && !self.output.exists());
+        Ok(self.choices.pop_front().map(str::to_owned))
+    }
     fn lease_share_export(&mut self, export: &str) -> Result<ExportLease> {
         assert_eq!(export, EXPORT);
         Ok(ExportLease {
@@ -213,52 +221,63 @@ impl Native for Frontend {
         let first_plan = Arc::clone(&self.first_plan);
         let completed = Arc::clone(&self.payload_completed);
         let root = self.root.clone();
+        let without_note = self.without_note.clone();
         let (client, mut peer) = UnixStream::pair()?;
         for stream in [&client, &peer] {
             stream.set_read_timeout(Some(Duration::from_secs(10)))?;
             stream.set_write_timeout(Some(Duration::from_secs(10)))?;
         }
         self.peers.push(std::thread::spawn(move || {
-            let mut source = Selection::prepare(
-                &root,
-                &["workspace".into()],
-                oblivion_transfer::share::LIMITS,
-            )
-            .unwrap();
             peer.write_all(b"OBSH1\n").unwrap();
-            let request: Value = read_message(&mut peer, 4096).unwrap();
-            assert_eq!(request["operation"], "plan");
-            assert_eq!(request["paths"], json!(["workspace"]));
-            assert_eq!(request["chat_ids"], json!([]));
-            if second {
-                assert_eq!(first_plan.lock().unwrap().as_ref().unwrap(), &request);
-            } else {
-                *first_plan.lock().unwrap() = Some(request.clone());
-            }
-            let digest = if changed { "3" } else { "2" }.repeat(64);
-            let manifest = source.manifest();
-            write_message(&mut peer, &json!({"version":1,"request_id":request["request_id"],
-                "manifest":manifest.entries(),"manifest_sha256":manifest.sha256(),
-                "plan_sha256":digest,"bytes":manifest.bytes(),"chats":[],"omitted":{},
-                "warnings":[],"warning_count":0,
-                "scan":{"files_bytes":CONTENT.len(),"history_bytes":0,"limit_per_kind":16777216,"best_effort":true}})).unwrap();
-            let decision: Value = read_message(&mut peer, 4096).unwrap();
-            assert_eq!(decision["request_id"], request["request_id"]);
-            if !second || changed {
-                assert_eq!(decision["operation"], "cancel");
-                write_message(&mut peer, &json!({"version":1,"request_id":request["request_id"],"ok":true,"cancelled":true})).unwrap();
-            } else {
-                assert_eq!(decision["operation"], "confirm");
-                assert_eq!(decision["plan_sha256"], digest);
-                manifest.write(&mut peer).unwrap();
-                source.send_data(&mut peer).unwrap();
-                let receipt: Receipt = read_message(&mut peer, 4096).unwrap();
-                assert_eq!(receipt.id, request["request_id"].as_str().unwrap());
-                assert_eq!(receipt.manifest_sha256, source.manifest().sha256());
-                assert_eq!(receipt.entries, 2);
-                assert_eq!(receipt.bytes, CONTENT.len() as u64);
-                completed.store(true, Ordering::SeqCst);
-                peer.write_all(b"copied\n").unwrap();
+            let mut request: Value = read_message(&mut peer, 4096).unwrap();
+            loop {
+                assert_eq!(request["operation"], "plan");
+                assert_eq!(request["paths"], json!(["workspace"]));
+                assert_eq!(request["chat_ids"], json!([]));
+                if second {
+                    assert_eq!(first_plan.lock().unwrap().as_ref().unwrap(), &request);
+                }
+                let edited = request["exclude_paths"] == json!(["workspace/note.txt"]);
+                let selected = if edited { without_note.as_ref().unwrap() } else { &root };
+                let mut source = Selection::prepare(selected, &["workspace".into()], oblivion_transfer::share::LIMITS).unwrap();
+                let manifest = source.manifest();
+                let digest = if changed { "3" } else if edited { "4" } else { "2" }.repeat(64);
+                write_message(&mut peer, &json!({"version":1,"request_id":request["request_id"],
+                    "manifest":manifest.entries(),"manifest_sha256":manifest.sha256(),
+                    "plan_sha256":digest,"bytes":manifest.bytes(),"chats":[],"omitted":{},
+                    "warnings":[],"warning_count":0,
+                    "scan":{"files_bytes":manifest.bytes(),"history_bytes":0,"limit_per_kind":16777216,"best_effort":true}})).unwrap();
+                let decision: Value = read_message(&mut peer, 4096).unwrap();
+                assert_eq!(decision["request_id"], request["request_id"]);
+                if decision["operation"] == "plan" {
+                    assert!(!second && !edited && without_note.is_some());
+                    assert_eq!(decision["exclude_paths"], json!(["workspace/note.txt"]));
+                    request = decision;
+                    continue;
+                }
+                if !second || changed {
+                    assert_eq!(decision["operation"], "cancel");
+                    if !second {
+                        assert_eq!(edited, without_note.is_some());
+                        *first_plan.lock().unwrap() = Some(request.clone());
+                    }
+                    write_message(&mut peer, &json!({"version":1,"request_id":request["request_id"],"ok":true,"cancelled":true})).unwrap();
+                } else {
+                    assert_eq!(decision["operation"], "confirm");
+                    assert_eq!(decision["plan_sha256"], digest);
+                    let expected_entries = manifest.entries().len();
+                    let expected_bytes = manifest.bytes();
+                    manifest.write(&mut peer).unwrap();
+                    source.send_data(&mut peer).unwrap();
+                    let receipt: Receipt = read_message(&mut peer, 4096).unwrap();
+                    assert_eq!(receipt.id, request["request_id"].as_str().unwrap());
+                    assert_eq!(receipt.manifest_sha256, source.manifest().sha256());
+                    assert_eq!(receipt.entries, expected_entries);
+                    assert_eq!(receipt.bytes, expected_bytes);
+                    completed.store(true, Ordering::SeqCst);
+                    peer.write_all(b"copied\n").unwrap();
+                }
+                break;
             }
             assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
         }));
@@ -307,8 +326,12 @@ impl Native for Frontend {
 
 #[test]
 fn reviewed_export_reopens_the_same_plan_and_publishes_only_after_all_releases() {
-    for changed in [false, true] {
+    for (changed, edited) in [(false, false), (true, false), (false, true)] {
         let scope = Scope::new();
+        let empty = edited.then(Scope::new);
+        if let Some(empty) = &empty {
+            std::fs::remove_file(empty.0.join("workspace/note.txt")).unwrap();
+        }
         let output = scope.0.join("research.oblivion-share");
         let mut state = state("persistent");
         state["sessions"] = json!([ID]);
@@ -340,6 +363,12 @@ fn reviewed_export_reopens_the_same_plan_and_publishes_only_after_all_releases()
             root: scope.0.clone(),
             output: output.clone(),
             changed,
+            without_note: empty.as_ref().map(|scope| scope.0.clone()),
+            choices: if edited {
+                ["F 2", "", ""].into()
+            } else {
+                [""].into()
+            },
             attached: 0,
             confirmed: false,
             first_plan: Arc::new(Mutex::new(None)),

@@ -11,7 +11,7 @@ import tempfile
 import unittest
 import uuid
 
-from native_fixture import codex
+from native_fixture import claude, codex
 from oblivion_history.portable import encode, export_histories
 
 HISTORY = Path(__file__).resolve().parents[1]
@@ -98,6 +98,52 @@ class ShareChannelTests(unittest.TestCase):
             client.close()
             self.assertNotEqual(child.wait(timeout=15), 0)
             self.assertFalse((vault / "state/.oblivion-share" / request["request_id"]).exists())
+
+    def test_same_request_replans_after_a_required_attachment_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault, _ = self.vault(Path(tmp), with_chat=False)
+            chat, transcript, rows = claude(vault)
+            attachment = "workspace/document.pdf"
+            document = vault / attachment
+            document.write_bytes(b"%PDF synthetic attachment")
+            (vault / "workspace/keep.txt").write_text("Keep this document")
+            rows[0]["message"]["content"] = [{
+                "type": "document", "source": {"type": "file", "path": "/vault/" + attachment},
+            }]
+            transcript.write_text("".join(encode(row) + "\n" for row in rows))
+            client, child = self.start(vault)
+            request = self.request(chat)
+            request_id = request["request_id"]
+            staging = vault / "state/.oblivion-share" / request_id
+
+            frame(client, request)
+            initial = read_frame(client)
+            self.assertEqual(initial["chats"], [{"id": chat, "agent": "claude", "title": "Claude research"}])
+            self.assertIn(attachment, [entry["path"] for entry in initial["manifest"]])
+            self.assertTrue((staging / "chats.jsonl").is_file())
+
+            without_attachment = {**request, "exclude_paths": [attachment]}
+            frame(client, without_attachment)
+            self.assertEqual(read_frame(client), {
+                "version": 1, "request_id": request_id, "ok": False, "error": "share_native_dependency_not_selected",
+            })
+            self.assertFalse(staging.exists())
+
+            frame(client, {**without_attachment, "exclude_chats": [chat]})
+            revised = read_frame(client)
+            self.assertEqual(revised["request_id"], request_id)
+            self.assertEqual(revised["chats"], [])
+            self.assertNotEqual(revised["plan_sha256"], initial["plan_sha256"])
+            self.assertEqual([entry["path"] for entry in revised["manifest"]], ["imports", "workspace", "workspace/keep.txt"])
+
+            frame(client, {"version": 1, "operation": "cancel", "request_id": request_id})
+            self.assertEqual(read_frame(client), {
+                "version": 1, "request_id": request_id, "ok": True, "cancelled": True,
+            })
+            self.assertEqual(child.wait(timeout=15), 0)
+            self.assertFalse(staging.exists())
+            self.assertEqual(document.read_bytes(), b"%PDF synthetic attachment")
+            self.assertTrue(transcript.is_file())
 
     @unittest.skipUnless(sys.platform == "linux" and os.environ.get("OBLIVION_COPY_TEST_BINARY"), "requires real Linux oblivion-copy binary")
     def test_confirm_streams_real_copy_protocol_and_acknowledges_only_after_cleanup(self):

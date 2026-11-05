@@ -56,8 +56,14 @@ where
         Selector::Branch(name) => ExportSelection::Branch {
             safe_id: state.find_safe(&name)?.ok_or("Safe not found")?,
         },
-        Selector::All => ExportSelection::All,
+        Selector::All { include_settings } => ExportSelection::All { include_settings },
     };
+    let include_settings = matches!(
+        selector,
+        ExportSelection::All {
+            include_settings: true
+        }
+    );
     let started: ExportStarted = serde_json::from_str(&runtime.request(Call {
         operation: Operation::ShareExportBegin,
         slot: Some(Default::default()),
@@ -86,13 +92,15 @@ where
         runtime,
         export_id: started.export_id,
         lease,
-        selection,
         approved: Vec::new(),
         current: None,
         ended: false,
         diagnostics,
     };
     let result = (|| -> Result<i32> {
+        if started.settings.is_some() != include_settings {
+            return Err("Share settings approval changed".into());
+        }
         if started.sources.is_empty() || started.sources.len() > oblivion_share::manifest::MAX_SAFES
         {
             return Err("invalid_share_source_set".into());
@@ -120,13 +128,13 @@ where
             )?;
             let metadata = sources.open_source(&source.id, true)?;
             let request = random_id()?;
-            let (review, manifest) = sources.plan(&request)?;
-            review::show_review(
-                &mut sources.diagnostics,
-                &metadata.title,
-                &review,
-                &manifest,
-            )?;
+            let Some((review, manifest, selection)) =
+                sources.review_source(&request, &metadata.title, &selection)?
+            else {
+                sources.cancel_plan(&request)?;
+                sources.close_source()?;
+                return Ok(130);
+            };
             let parent = source
                 .parent
                 .as_deref()
@@ -156,6 +164,7 @@ where
                 package_id: safe.id.clone(),
                 request_id: request.clone(),
                 plan_sha256: review.plan_sha256,
+                selection,
             });
             package.safes.push(safe);
             sources.cancel_plan(&request)?;
@@ -174,10 +183,6 @@ where
                 settings.safe_idle_minutes, settings.host_idle_minutes
             )?;
         }
-        writeln!(
-            sources.diagnostics,
-            "Use --exclude PATH or --exclude-chat UUID to omit more content before confirming a new export."
-        )?;
         if !sources.runtime.confirm("SHARE")? {
             return Ok(130);
         }
@@ -220,6 +225,7 @@ struct Approved {
     package_id: String,
     request_id: String,
     plan_sha256: String,
+    selection: Selection,
 }
 struct Attached<A, S> {
     capability: A,
@@ -229,7 +235,6 @@ struct BatchSource<'a, R: Native> {
     runtime: &'a mut R,
     export_id: String,
     lease: R::ExportLease,
-    selection: Selection,
     approved: Vec<Approved>,
     current: Option<Attached<R::Attachment, R::Slot>>,
     ended: bool,
@@ -324,7 +329,72 @@ where
             .stream())
     }
 
-    fn plan(&mut self, request: &str) -> Result<(review::Review, Manifest)> {
+    fn review_source(
+        &mut self,
+        request: &str,
+        title: &str,
+        original: &Selection,
+    ) -> Result<Option<(review::Review, Manifest, Selection)>> {
+        let mut selection = original.clone();
+        let mut current = self.plan(request, &selection)?;
+        loop {
+            review::show_review(&mut self.diagnostics, title, &current.0, &current.1)?;
+            let mut edited = selection.clone();
+            let mut changes = 0;
+            loop {
+                write!(
+                    self.diagnostics,
+                    "{} · F <numbers> exclude files or folders · C <numbers> exclude chats · U reset edits · Q cancel: ",
+                    if changes == 0 {
+                        "Enter keep this selection"
+                    } else {
+                        "Enter review edited selection"
+                    },
+                )?;
+                self.diagnostics.flush()?;
+                let Some(line) = self.runtime.review_share()? else {
+                    return Ok(None);
+                };
+                match line.trim() {
+                    "" => break,
+                    "Q" | "q" => return Ok(None),
+                    "U" | "u" => {
+                        edited = selection.clone();
+                        changes = 0;
+                    }
+                    input => match review::exclude(input, &mut edited, &current.1, &current.0) {
+                        Some(added) => {
+                            changes += added;
+                            writeln!(self.diagnostics, "{changes} exclusion(s) staged.")?;
+                        }
+                        None => writeln!(
+                            self.diagnostics,
+                            "Choose numbers shown beside F or C in the current review."
+                        )?,
+                    },
+                }
+            }
+            if changes == 0 {
+                return Ok(Some((current.0, current.1, selection)));
+            }
+            match self.plan(request, &edited) {
+                Ok(plan) => {
+                    current = plan;
+                    selection = edited;
+                }
+                Err(error) if error.is::<review::Conflict>() => {
+                    writeln!(
+                        self.diagnostics,
+                        "{error} These edits were cleared. Stage both exclusions together."
+                    )?;
+                    current = self.plan(request, &selection)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn plan(&mut self, request: &str, selection: &Selection) -> Result<(review::Review, Manifest)> {
         let current = self
             .current
             .as_mut()
@@ -335,13 +405,11 @@ where
         write_message(
             current,
             &serde_json::json!({"version":1,"operation":"plan","request_id":request,
-            "paths":self.selection.paths,"chat_ids":self.selection.chat_ids,"exclude_paths":self.selection.exclude_paths,
-            "exclude_chats":self.selection.exclude_chats,"include_sensitive_paths":self.selection.include_sensitive_paths,"include_sensitive_chats":self.selection.include_sensitive_chats}),
+            "paths":selection.paths,"chat_ids":selection.chat_ids,"exclude_paths":selection.exclude_paths,
+            "exclude_chats":selection.exclude_chats,"include_sensitive_paths":selection.include_sensitive_paths,"include_sensitive_chats":selection.include_sensitive_chats}),
         )?;
         current.flush()?;
-        let mut review = read_message(current, 10 * 1024 * 1024)?;
-        let manifest = review::validate_review(&mut review, request)?;
-        Ok((review, manifest))
+        review::validate_reply(read_message(current, 10 * 1024 * 1024)?, request)
     }
 
     fn cancel_plan(&mut self, request: &str) -> Result<()> {
@@ -426,7 +494,7 @@ where
                 .clone();
             let metadata = self.open_source(&approved.source, false)?;
             writeln!(self.diagnostics, "Sharing {:?}…", metadata.title)?;
-            let (review, manifest) = self.plan(&approved.request_id)?;
+            let (review, manifest) = self.plan(&approved.request_id, &approved.selection)?;
             if review.plan_sha256 != approved.plan_sha256
                 || review.manifest_sha256 != safe.contents_sha256
                 || review.bytes != safe.bytes

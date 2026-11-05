@@ -724,6 +724,9 @@ mod tests {
         impl Native for Frontend {
             type Attachment = Attached;
             type ExportLease = NoExport;
+            fn review_share(&mut self) -> Result<Option<String>> {
+                panic!("no export review")
+            }
             fn lease_share_export(&mut self, _: &str) -> Result<NoExport> {
                 panic!("no export")
             }

@@ -181,6 +181,13 @@ def collect(vault, titles):
         meta = current["meta"]
         title = index.get(identity, {}).get("title") or titles.get(identity, "")
         entry = portable.chat("codex", identity, meta["cwd"], title, payload, "/vault")
-        if set(wanted) - set(roots):
-            entry["required_prefixes"] = len(set(wanted) - set(roots))
+        dependencies = set(wanted) - set(roots)
+        if dependencies:
+            entry["required_prefixes"] = len(dependencies)
+            # history_base points to physical files; exclusion uses their
+            # logical conversation IDs, which survive native reverts.
+            entry["required_chat_ids"] = sorted({
+                portable.reference("codex", physical[key]["meta"]["id"])
+                for key in dependencies if physical[key]["meta"]["id"] != identity
+            })
         yield entry

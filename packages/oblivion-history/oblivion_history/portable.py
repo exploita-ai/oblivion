@@ -248,7 +248,7 @@ def export_histories(vault, chat_ids, destination):
                 output.write(data)
             write({"format": FORMAT, "version": VERSION, "agents": VERSIONS})
             for entry in selected:
-                write({"kind": "chat", **{key: value for key, value in entry.items() if key not in ("records", "omitted", "required_prefixes")}})
+                write({"kind": "chat", **{key: value for key, value in entry.items() if key not in ("records", "omitted", "required_prefixes", "required_chat_ids")}})
                 for record in entry["records"]:
                     count += 1
                     if count > MAX_RECORDS:

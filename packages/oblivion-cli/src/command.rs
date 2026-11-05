@@ -217,7 +217,7 @@ Personal backup (complete encrypted Safe, including saved logins)
 Share (closed persistent Safes, no provider credentials)
   oblivion share export --safe SAFE FILE [--path workspace/PATH] [--no-chats]
   oblivion share export --branch SAFE FILE
-  oblivion share export --all FILE
+  oblivion share export --all FILE [--include-settings]
   oblivion share import FILE [--apply-settings]
   oblivion share imports [--json]   Inspect incomplete and committed imports
   oblivion share discard TRANSACTION
