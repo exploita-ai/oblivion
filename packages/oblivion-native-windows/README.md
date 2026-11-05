@@ -29,13 +29,20 @@ not authorize recovery or VM adoption.
 
 `bundle.rs` consumes the common manifest and verifies the actual inventory,
 ACLs, file identities and hashes before publishing into a new private directory.
-`installation.rs` uses the actual LocalAppData known folder and a strict
+`installation.rs` derives a per-user SID catalog from the ProgramData known folder and a strict
 Pending/Ready registry. It prepares boot copies outside the immutable release,
 boots and stops the new runtime, and commits Ready only after checking the VHDX.
 Interrupted setup never authorizes another initialization or automatic deletion.
 Metadata-only status/activity discovery does not hash boot assets or call HCS.
-Initial setup currently requires elevation; a normal-user broker, software
-update/removal and interrupted-setup/resource reconciliation remain unfinished.
+Initial setup and maintenance require elevation. `broker.rs` connects ordinary
+launch, metadata discovery and runtime controls to a per-user demand-start SCM
+service. The service authenticates the caller token and uses administrator-owned
+software and state; it never accepts executable/configuration paths from clients.
+User processes retain their terminal, local Files endpoints and runtime lease.
+Client/storage SIDs are explicit supervisor bindings and cross-session election
+uses a global mutex. Update/GC/uninstall quiesce the broker only while retaining
+the observed-Stopped guard. Real Windows execution, interrupted-setup/resource
+reconciliation and signed distribution remain unqualified.
 
 The network follows the HCN default schema used by Microsoft's WSL implementation:
 ICS with `IsolateSwitch: true` and the nonpersistent flag, a requested private

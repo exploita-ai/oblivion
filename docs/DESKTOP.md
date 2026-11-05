@@ -12,8 +12,9 @@ three native `.exe` files and the pinned OpenTUI DLL. Validation is shared throu
 `oblivion-bundle`, including Windows path and case-alias checks. This is a build
 contract. The Windows command entrypoint, initial managed setup and bundle
 verification, Files, backup, Share and stopped-only software maintenance are
-connected in source. The ordinary-user broker, unknown-resource recovery and
-hardware qualification remain unfinished; see
+connected in source, including an ordinary-user SCM broker backed by protected
+per-user installations. Unknown-resource recovery and installed/hardware
+qualification remain unfinished; see
 [Windows status](WINDOWS.md). Do not substitute the Unix launcher in a Windows bundle.
 
 Linux ARM64 additionally requires QEMU 10.1 or newer for its outer nested
@@ -150,8 +151,11 @@ Use the new verified bundle's CLI for an update to another source version.
 Uninstall preserves runtime identity, configuration, the supervision journal and
 the exact encrypted data VHDX. Its cleanup report distinguishes removed software,
 unknown retained files and binaries still in use; exit code 2 means incomplete
-removal, to retry from a verified external bundle. Ordinary-user elevation and
-installed Windows lifecycle are still unqualified; see [Windows maintenance](WINDOWS.md#stopped-only-software-maintenance).
+removal, to retry from a verified external bundle. Windows setup and maintenance
+require elevation; ordinary launch uses the per-user SCM broker and leaves the
+CLI and manager unelevated. Maintenance stops that broker while holding the same
+observed-Stopped guard. Actual Windows lifecycle is still unqualified; see
+[Windows maintenance](WINDOWS.md#stopped-only-software-maintenance).
 
 ## Remove old software or uninstall on macOS and Linux
 

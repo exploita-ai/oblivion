@@ -5,7 +5,8 @@ or qualified.** An experimental HCS helper core and owned HCN ICS network are
 implemented. A same-user authenticated named-pipe client and shared CLI adapter
 are now present. The installed command entrypoint, bundle verification and
 one-shot per-user setup and local Files payload endpoints are connected in source;
-ordinary-user privilege setup and unknown-resource reconciliation remain open.
+ordinary-user admission now uses a demand-start SCM broker in source, while
+unknown-resource reconciliation and installed privilege qualification remain open.
 Stopped-only update, software collection and uninstall are now connected in source.
 The manager has a Windows x64 build target; its PE
 execution and complete installed path still need qualification. This is a proposal for phase 8 of the
@@ -22,30 +23,35 @@ resource reconciliation; an absent pipe cannot clear that fence.
 
 ## Ordinary-user privilege boundary
 
-The development boot path still requires elevation: `Installed.settings()` calls
-`preflight()`, which rejects a non-elevated token. Removing that check is not a
-qualified solution: HCN authorizes calls against the caller's token, and the HCS
-create API reserves its security-descriptor argument as NULL. [HCN authorization](https://learn.microsoft.com/en-us/windows-server/networking/technologies/hcn/hcn-top),
+HCS and HCN calls run in the privileged helper, while the CLI, manager and explicit
+host-side file copies remain in the calling user's process. HCN authorizes calls
+against the caller's token, and the HCS create API reserves its security-descriptor
+argument as NULL. [HCN authorization](https://learn.microsoft.com/en-us/windows-server/networking/technologies/hcn/hcn-top),
 [HCS create contract](https://learn.microsoft.com/en-us/virtualization/api/hcs/reference/hcscreatecomputesystem).
 
-The intended product path is one demand-start SCM broker installed by elevated
-setup, with the CLI, manager and explicit file copies remaining in the ordinary
-user process. Its authenticated client SID must be distinct from the privileged
-process identity: the current `Identity::current()` and LocalAppData discovery
-cannot simply run unchanged as SYSTEM. Broker/helper code belongs in an
-administrator/service-owned installation, with a protected SID/runtime catalog;
-a per-user writable helper or manifest is not an elevation trust anchor.
+Elevated setup registers one demand-start LocalSystem SCM service per user SID.
+The broker derives `%PROGRAMDATA%\Oblivion\SID` from the Windows known-folder API
+and its fixed owner identity. Catalog, configuration and data are administrator/
+SYSTEM owned; published software grants the user read/execute only. The service
+never executes a helper from a user-writable installation. Client and storage SIDs
+are explicit, durable supervisor bindings; process identity is not substituted
+for the authenticated user's identity. The election mutex uses the global object
+namespace so setup and Session 0 share the same maintenance exclusion.
 
-The broker must admit only typed lifecycle operations for the authenticated
-caller's runtime. It must not accept a helper path, shell command or arbitrary
-HCS configuration. A local-only private pipe authenticates the client token,
-reverts impersonation and fails closed on authentication error. Setup/update/
-removal handle elevation; ordinary start/query rights must not grant service
-configuration changes. [Service access rights](https://learn.microsoft.com/en-us/windows/win32/services/service-security-and-access-rights),
+The broker admits only describe, acquire, resident-start, stop and recovery for
+that caller's runtime. Requests contain no SID, helper path, shell command or HCS
+configuration. Before sending a request the client verifies the protected SCM
+object, its LocalSystem configuration and the pinned running service process.
+It queries no foreign process token and receives only metadata/synchronization
+process rights. After reading the request, the local pipe server impersonates
+the actual caller, checks its SID and reverts before privileged work. Each terminal
+holds one broker channel and supervisor lease; EOF cancels pending startup and
+releases only that terminal. Ordinary service rights allow start/query, not
+configuration changes or service stop. [Service access rights](https://learn.microsoft.com/en-us/windows/win32/services/service-security-and-access-rights),
 [pipe access rights](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights),
 [client impersonation](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-impersonatenamedpipeclient).
-This broker and its installed principal/privilege flow are not implemented or
-qualified by the maintenance implementation.
+These paths are connected in source. Real SCM installation, ordinary-user use,
+pipe/ACL execution and nested Hyper-V boot still require Windows qualification.
 
 ## First target: Windows 11 x64 with an HCS-owned Hyper-V VM
 
@@ -104,7 +110,7 @@ discovery, private prompts or VM startup.
 
 `runtime install-bundle DIRECTORY` verifies a current source-bound manifest,
 the exact inventory, hashes, file identities and ACLs. It creates a private
-`%LOCALAPPDATA%\Oblivion` root discovered with the Windows known-folder API,
+`%PROGRAMDATA%\Oblivion\SID` root discovered with the Windows known-folder API,
 rather than trusting an environment override. The durable Pending record precedes
 publication, configuration and VHDX creation. It publishes into a new release
 directory and prepares separate boot copies; HCS grants never modify the immutable
@@ -117,10 +123,19 @@ init` or the manager. A failed or interrupted setup remains Pending and cannot
 be retried as a new disk initialization. No automatic deletion of partial or
 unknown content is implemented.
 
-This development path currently requires an elevated token and available nested
-HCS capabilities before creating any files. It neither elevates implicitly nor
-installs a privileged service. A normal-user broker and its privilege contract
-are still required for the intended everyday experience. The source bundle must
+If bootstrap committed Ready but SCM registration failed, rerunning installation
+with the exact verified bundle completes registration under the stopped-runtime
+guard. It never creates or initializes another disk. During maintenance the
+broker is Disabled before stopping it; the new ImagePath and demand-start mode
+are committed together before the guard is released. An interrupted maintenance
+operation can leave the broker disabled and requires retrying the matching
+verified bundle, rather than bypassing that fence.
+
+Setup requires an elevated token and available nested HCS capabilities before
+creating files, then registers the protected helper as the user's SCM service.
+Normal launch starts that service through limited SCM rights; no terminal or
+manager elevation is requested. Setup/update/removal do not elevate implicitly.
+The source bundle must
 also meet the private ACL contract; arbitrary extraction into a broadly writable
 directory is not accepted as a trusted installation source.
 
@@ -464,7 +479,7 @@ retain POSIX paths. The source-bound bundle validator supports Windows assets
 without depending on Unix ownership APIs. Compilation and fixture definitions
 do not qualify the installed manager or Hyper-V path.
 
-Remaining work is a normal-user privilege broker and explicit reconciliation of owned HCS,
+Remaining work includes installed broker qualification and explicit reconciliation of owned HCS,
 network and ACL grants after uncertain shutdown or interrupted setup. The full
 installed path must then pass the acceptance gates below. There is no second
 Windows command grammar, beta compatibility reader or automatic emulation fallback.

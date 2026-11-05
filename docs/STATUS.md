@@ -257,7 +257,7 @@ automatic Hyper-V DHCP fallback. HCN responses must confirm the requested
 identity and addresses. Creation precedes the VM, and cleanup requires its
 confirmed stop and observed network-resource absence. HCN calls are synchronous;
 service hangs, exact flags, coexistence and recovery still require Windows tests.
-The Windows installed entrypoint, initial setup and local Files payload endpoints are now connected in source; a normal-user privilege broker and grant/network-recovery integration remain unfinished, while stopped-only software maintenance is connected in source.
+The Windows installed entrypoint, initial setup and local Files payload endpoints are now connected in source; the normal-user SCM broker and stopped-only software maintenance are connected in source, while grant/network-recovery integration and installed qualification remain open.
 Pipe peer/ACL behavior
 with the actual HCS worker, boot, inner KVM and the installed lifecycle remain
 Windows acceptance gates. See the [Windows backend](WINDOWS.md).
@@ -338,8 +338,8 @@ and ACLs; publication creates only a new private directory. Boot copies are
 separate from the immutable release. Setup commits Ready only after authenticated
 controller startup, verified shutdown and VHDX UUID/capacity/file-identity checks.
 Interrupted setup never retries as disk initialization. Current preflight requires
-an elevated token and nested HCS capabilities; no implicit elevation or normal-user
-broker is implemented. Portable installation tests and MSVC compilation pass.
+an elevated token and nested HCS capabilities for setup and the privileged worker;
+ordinary launch now delegates to the SCM broker described below. Portable installation tests and MSVC compilation pass.
 Windows-only fixture execution, actual installation/boot, privilege setup and
 HCS/network/ACL reconciliation remain acceptance gates. No ISO was built for this
 increment.
@@ -460,12 +460,37 @@ journal. It reports unknown or in-use software rather than deleting it or claimi
 complete removal; exit code 2 is the explicit incomplete outcome. Recovery only
 retries a stop on a live authenticated stop/recovery supervisor and then proves
 Stopped. Healthy active runtimes are refused, and absent/unknown HCS/HCN/ACL
-state is still not adopted. Ordinary-user startup remains blocked by the current
-elevated-token preflight; a real privileged broker/principal separation is still
-required and is specified in WINDOWS, not implemented by this increment.
+state is still not adopted. This maintenance evidence does not qualify ordinary-user service startup; the
+SCM broker and principal separation are described in the following increment.
 
 Four portable installation-model cases and six common grammar cases pass on the
 Mac, as does the canonical root check. Native Windows all-targets and the full
 CLI/entrypoint/tests compile for MSVC without warnings. Windows filesystem,
 mutex, journal replacement and pipe fixtures are compiled evidence only; their
 execution, forced-interruption durability and real lifecycle remain open.
+
+The Windows CLI now delegates ordinary launch, metadata discovery, resident start,
+stop and recovery to a demand-start LocalSystem SCM service scoped to the actual
+user SID. Terminal rendering and host Files endpoints stay in the user process.
+The broker authenticates the token of the bounded pipe request before dispatch;
+the client verifies the protected SCM LocalSystem configuration and pinned process
+handle before sending, without querying a foreign SYSTEM token.
+Requests cannot carry a user SID, executable, filesystem root or HCS JSON. Each
+calling terminal owns one retained broker channel and supervisor lease; loss of
+the channel cancels pending admission and releases only that owner.
+
+ProgramData catalogs, boot copies and VHDX files are administrator/SYSTEM owned.
+Only published software grants the user read/execute. Supervisor bindings now
+include separate client/storage identities, and their global election mutex
+serializes Session 0 with elevated setup. Maintenance holds its Stopped proof
+while quiescing the broker and switching protected service software. These are
+current 1.0 records, with no previous-format reader. Actual SCM installation,
+ordinary-user pipe/ACL behavior, interruption and nested Hyper-V acceptance
+remain Windows execution gates. No new ISO or platform support is claimed.
+
+For this increment, all 18 portable native-backend library tests passed on the
+Mac, and the canonical root lint/typecheck passed. Native Windows all-targets
+and the Windows CLI library/entrypoint/tests compile for MSVC without warnings.
+The added SID, protected descriptor, caller-token and principal-binding fixtures
+are compiled evidence only; no SCM service was installed and no Windows VM was
+run on the development Mac.
