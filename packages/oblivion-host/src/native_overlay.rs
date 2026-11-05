@@ -1,5 +1,6 @@
 //! Desktop overlays own the TTY while the parent keeps draining the Safe.
 
+use oblivion_cli::terminal_overlay::{self, Keys, Page, Screen};
 use oblivion_host::{agent, control};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -7,89 +8,6 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Page {
-    Files,
-    Network,
-}
-
-#[derive(Default)]
-pub struct Keys {
-    pending: Vec<u8>,
-    pasted: bool,
-    since: Option<Instant>,
-}
-
-impl Keys {
-    pub fn feed(&mut self, byte: u8, output: &mut Vec<u8>, now: Instant) -> Option<Page> {
-        const FILES: [&[u8]; 3] = [b"\x1b[18~", b"\x1b[18;1~", b"\x1b[57370u"];
-        const NETWORK: [&[u8]; 3] = [b"\x1b[20~", b"\x1b[20;1~", b"\x1b[57372u"];
-        const PASTE_START: &[u8] = b"\x1b[200~";
-        const PASTE_END: &[u8] = b"\x1b[201~";
-        self.pending.push(byte);
-        self.since = Some(now);
-        loop {
-            if self.pasted {
-                if self.pending == PASTE_END {
-                    self.pasted = false;
-                    output.append(&mut self.pending);
-                    return None;
-                }
-                if PASTE_END.starts_with(&self.pending) {
-                    return None;
-                }
-            } else {
-                let action = if FILES.contains(&self.pending.as_slice()) {
-                    Some(Page::Files)
-                } else if NETWORK.contains(&self.pending.as_slice()) {
-                    Some(Page::Network)
-                } else {
-                    None
-                };
-                if action.is_some() {
-                    self.pending.clear();
-                    return action;
-                }
-                if self.pending == PASTE_START {
-                    self.pasted = true;
-                    output.append(&mut self.pending);
-                    return None;
-                }
-                if FILES
-                    .iter()
-                    .chain(NETWORK.iter())
-                    .any(|key| key.starts_with(&self.pending))
-                    || PASTE_START.starts_with(&self.pending)
-                {
-                    return None;
-                }
-            }
-            output.push(self.pending.remove(0));
-            if self.pending.is_empty() {
-                return None;
-            }
-        }
-    }
-
-    pub fn expire(&mut self, output: &mut Vec<u8>, now: Instant) {
-        if !self.pasted
-            && self
-                .since
-                .is_some_and(|since| now.duration_since(since) >= Duration::from_millis(50))
-        {
-            output.append(&mut self.pending);
-        }
-    }
-
-    pub fn waiting(&self) -> bool {
-        !self.pending.is_empty() && !self.pasted
-    }
-
-    pub fn finish(&mut self, output: &mut Vec<u8>) {
-        output.append(&mut self.pending);
-    }
-}
 
 pub struct Overlay {
     child: Child,
@@ -114,19 +32,11 @@ impl Overlay {
             .join("oblivion-manager");
         let mut command = Command::new(manager);
         command
-            .args([
-                "--native-overlay",
-                match page {
-                    Page::Files => "files",
-                    Page::Network => "network",
-                },
-                "--safe",
-                safe,
-            ])
+            .args(["--native-overlay", page.argument(), "--safe", safe])
             .env("OBLIVION_LAUNCHER", &launcher);
         // The parent is already raw. Keep queued bytes intact and request
         // paste framing before OpenTUI takes over the foreground terminal.
-        std::io::stdout().write_all(b"\x1b[?2004h\x1b[?2026l\x1b[>0u\x1b[0m\x1b[r\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?25h")?;
+        terminal_overlay::begin(&mut std::io::stdout())?;
         std::io::stdout().flush()?;
         let mut handoff = oblivion_host::native_runtime::ManagerHandoff::prepare(&mut command)?;
         // The child claims the foreground before exec. A parent/child pipe gate
@@ -212,7 +122,7 @@ fn restore(group: libc::pid_t, raw: &libc::termios) -> control::Result<()> {
     }
     // A failed or killed child may skip its OpenTUI cleanup. Leave a usable
     // terminal even if the guest connection also failed before a repaint.
-    std::io::stdout().write_all(b"\x1b[?2026l\x1b[<u\x1b[0m\x1b[r\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[?1049l")?;
+    terminal_overlay::reset(&mut std::io::stdout())?;
     std::io::stdout().flush()?;
     Ok(())
 }
@@ -230,8 +140,8 @@ pub fn bridge(
     let mut human = oblivion_host::activity::HumanInput::default();
     let mut viewport = super::size();
     let mut parser = interactive.then(|| {
-        let mut parser = oblivion_host::terminal_screen::parser(viewport.rows, viewport.cols);
-        parser.callbacks_mut().enable_synchronized_output();
+        let mut parser = terminal_overlay::parser(viewport.rows, viewport.cols);
+        parser.enable_synchronized_output();
         parser
     });
     let mut overlay: Option<Overlay> = None;
@@ -239,7 +149,7 @@ pub fn bridge(
         if let Some(child) = overlay.as_mut() {
             if child.poll()?.is_some() {
                 overlay.take();
-                repaint(parser.as_ref().unwrap())?;
+                restore_screen(parser.as_ref().unwrap())?;
                 // Native clients may maintain modes outside VT100's visible
                 // cell model. Ask for their ordinary resize redraw as well.
                 agent::write_frame(stream, 6, &libc::SIGWINCH.to_be_bytes())?;
@@ -256,10 +166,7 @@ pub fn bridge(
             {
                 viewport = current;
                 if let Some(parser) = parser.as_mut() {
-                    parser.screen_mut().set_size(
-                        std::num::NonZeroU16::new(current.rows).unwrap(),
-                        std::num::NonZeroU16::new(current.cols).unwrap(),
-                    );
+                    parser.resize(current.rows, current.cols);
                 }
                 agent::write_frame(
                     stream,
@@ -314,7 +221,7 @@ pub fn bridge(
                     if let Some(parser) = parser.as_mut() {
                         parser.process(&bytes);
                         let mut replies = Vec::new();
-                        parser.callbacks_mut().write_replies(&mut replies)?;
+                        parser.write_replies(&mut replies)?;
                         if overlay.is_some() && !replies.is_empty() {
                             agent::write_frame(stream, 0, &replies)?;
                         }
@@ -332,7 +239,7 @@ pub fn bridge(
                 4 if bytes.len() == 4 => {
                     let code = i32::from_be_bytes(bytes.try_into().unwrap());
                     if overlay.take().is_some() {
-                        repaint(parser.as_ref().unwrap())?;
+                        restore_screen(parser.as_ref().unwrap())?;
                     }
                     return Ok(if code < 0 { 128 - code } else { code });
                 }
@@ -390,7 +297,7 @@ pub fn bridge(
                     match Overlay::start(page, safe, saved) {
                         Ok(child) => overlay = Some(child),
                         Err(error) => {
-                            repaint(parser.as_ref().unwrap())?;
+                            restore_screen(parser.as_ref().unwrap())?;
                             eprintln!("\r\nOblivion overlay could not open: {error}");
                         }
                     }
@@ -409,23 +316,12 @@ pub fn bridge(
     }
 }
 
-fn repaint(parser: &vt100::Parser<oblivion_host::terminal_screen::Replies>) -> control::Result<()> {
+fn restore_screen(parser: &Screen) -> control::Result<()> {
     if unsafe { libc::tcgetpgrp(0) != libc::getpgrp() } {
         return Err("Cannot return input to the agent while the terminal is in the background".into());
     }
-    let screen = parser.screen();
     let mut stdout = std::io::stdout().lock();
-    stdout.write_all(if screen.alternate_screen() {
-        b"\x1b[?1049h"
-    } else {
-        b"\x1b[?1049l"
-    })?;
-    stdout.write_all(b"\x1b[?2026l\x1b[0m\x1b[2J\x1b[H")?;
-    // The serializer emits cells, attributes and supported input modes only;
-    // guest OSC/DCS envelopes never replay into the desktop on restoration.
-    stdout.write_all(screen.state_formatted().as_bytes())?;
-    stdout.write_all(screen.cursor_state_formatted().as_bytes())?;
-    stdout.write_all(screen.attributes_formatted().as_bytes())?;
+    terminal_overlay::repaint(parser, &mut stdout)?;
     stdout.flush()?;
     // Anything still queued at the handoff belonged to the host panel, even
     // after a failed launch. Do this after replaying the guest's input modes.
@@ -433,53 +329,4 @@ fn repaint(parser: &vt100::Parser<oblivion_host::terminal_screen::Replies>) -> c
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Keys, Page};
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn host_keys_preserve_text_and_modified_keys() {
-        let now = Instant::now();
-        let mut keys = Keys::default();
-        let mut output = Vec::new();
-        let mut actions = Vec::new();
-        for byte in b"normal\x1b[18~\x1b[20~\x1b[57370u\x1b[20;2~\x1b[A\xc3\xa8" {
-            if let Some(page) = keys.feed(*byte, &mut output, now) {
-                actions.push(page);
-            }
-        }
-        assert_eq!(actions, [Page::Files, Page::Network, Page::Files]);
-        assert_eq!(output, b"normal\x1b[20;2~\x1b[A\xc3\xa8");
-    }
-
-    #[test]
-    fn pasted_function_keys_cannot_open_host_controls() {
-        let now = Instant::now();
-        let mut keys = Keys::default();
-        let mut output = Vec::new();
-        let text = b"\x1b[200~paste\x1b[18~\x1b[20~\x1b[57372u\x1b[201~";
-        for byte in text {
-            assert!(keys.feed(*byte, &mut output, now).is_none());
-        }
-        assert_eq!(output, text);
-        let action = b"\x1b[20~"
-            .iter()
-            .find_map(|byte| keys.feed(*byte, &mut output, now));
-        assert_eq!(action, Some(Page::Network));
-    }
-
-    #[test]
-    fn standalone_escape_expires_without_losing_bytes() {
-        let now = Instant::now();
-        let mut keys = Keys::default();
-        let mut output = Vec::new();
-        keys.feed(27, &mut output, now);
-        keys.expire(&mut output, now + Duration::from_millis(49));
-        assert!(output.is_empty());
-        keys.expire(&mut output, now + Duration::from_millis(50));
-        assert_eq!(output, [27]);
-    }
 }

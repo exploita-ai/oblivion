@@ -21,8 +21,8 @@ for line in built.stdout.splitlines():
     value = json.loads(line)
     if value.get("reason") != "compiler-artifact" or value["target"]["name"] not in (
         "oblivion_host",
+        "oblivion_cli",
         "libc",
-        "vt100",
     ):
         continue
     for filename in value["filenames"]:

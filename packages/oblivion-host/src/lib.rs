@@ -27,7 +27,6 @@ pub mod session_title;
 pub mod safe_access;
 pub mod safe_origin;
 pub mod sharing;
-pub mod terminal_screen;
 pub mod terminal_guard;
 pub mod tor_profile;
 pub mod transfers;

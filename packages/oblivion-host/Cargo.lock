@@ -980,6 +980,7 @@ dependencies = [
  "oblivion-wire",
  "serde",
  "serde_json",
+ "vt100",
  "windows-sys",
  "zeroize",
 ]
@@ -1004,7 +1005,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "vt100",
  "zeroize",
 ]
 

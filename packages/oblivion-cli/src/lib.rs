@@ -6,6 +6,7 @@ pub mod proxy;
 pub mod run;
 pub mod shell;
 pub mod storage;
+pub mod terminal_overlay;
 
 pub mod activity;
 pub mod backup;
