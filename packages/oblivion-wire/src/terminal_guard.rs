@@ -8,6 +8,7 @@
 pub struct Guard {
     state: State,
     utf8_remaining: u8,
+    virtual_viewport: bool,
 }
 
 #[derive(Default)]
@@ -26,6 +27,11 @@ enum State {
 }
 
 impl Guard {
+    /// The size request is safe only when a virtual screen will answer it.
+    pub fn virtual_viewport() -> Self {
+        Self { virtual_viewport: true, ..Self::default() }
+    }
+
     pub fn filter(&mut self, bytes: &[u8]) -> Vec<u8> {
         let mut output = Vec::with_capacity(bytes.len());
         for &byte in bytes {
@@ -95,7 +101,9 @@ impl Guard {
                     if (0x40..=0x7e).contains(&byte) {
                         // Window reports can expose desktop state; printer
                         // controls can hand data to a terminal-side service.
-                        if !matches!(byte, b't' | b'i') {
+                        if !matches!(byte, b't' | b'i')
+                            || self.virtual_viewport && byte == b't' && sequence == b"\x1b[18"
+                        {
                             output.extend_from_slice(sequence);
                             output.push(byte);
                         }

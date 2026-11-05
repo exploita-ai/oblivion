@@ -1,4 +1,4 @@
-use super::{Attachment, Input, Keys, Modes, Page, Terminal, mode};
+use super::{Attachment, Chrome, Input, Keys, Modes, Page, Size, Terminal, mode};
 use std::fs::{File, OpenOptions};
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
@@ -108,7 +108,7 @@ fn console_handoff_fixture() {
         .collect::<Vec<_>>();
     inject(&terminal.input, &queued);
     assert!(queued_count(&terminal.input) > 0);
-    terminal.restore_panel(&modes, None).unwrap();
+    terminal.restore_panel(&modes).unwrap();
     assert_eq!(settings(&terminal), agent);
     assert_eq!(queued_count(&terminal.input), 0);
 
@@ -170,7 +170,7 @@ fn expect_panel(reader: Input, page: Page, prefix: &[u8]) {
         input: Some(reader),
         opening: None,
         overlay: None,
-        screen: Some(crate::terminal_overlay::parser(24, 80)),
+        chrome: Some(Chrome::new(Size { rows: 24, cols: 80 }, "test", "codex")),
     };
     let mut keys = Keys::default();
     let mut human = crate::activity::HumanInput::default();

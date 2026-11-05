@@ -3,6 +3,9 @@ use std::io::{self, Write};
 use std::num::NonZeroU16;
 use std::time::{Duration, Instant};
 
+mod chrome;
+pub use chrome::{Chrome, guest_size};
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Page {
     Files,
@@ -18,14 +21,26 @@ impl Page {
     }
 }
 
+mod mouse;
+
 #[derive(Default)]
 pub struct Keys {
     pending: Vec<u8>,
     pasted: bool,
     since: Option<Instant>,
+    viewport: Option<oblivion_wire::agent::Size>,
+    mouse_utf8: bool,
 }
 
 impl Keys {
+    pub fn set_viewport(&mut self, viewport: Option<oblivion_wire::agent::Size>) {
+        self.viewport = viewport;
+    }
+
+    pub fn set_mouse_utf8(&mut self, enabled: bool) {
+        self.mouse_utf8 = enabled;
+    }
+
     pub fn feed(&mut self, byte: u8, output: &mut Vec<u8>, now: Instant) -> Option<Page> {
         const FILES: [&[u8]; 3] = [b"\x1b[18~", b"\x1b[18;1~", b"\x1b[57370u"];
         const NETWORK: [&[u8]; 3] = [b"\x1b[20~", b"\x1b[20;1~", b"\x1b[57372u"];
@@ -60,6 +75,16 @@ impl Keys {
                     output.append(&mut self.pending);
                     return None;
                 }
+                if let Some(viewport) = self.viewport {
+                    match mouse::translate(&self.pending, viewport, self.mouse_utf8, output) {
+                        mouse::Packet::Pending => return None,
+                        mouse::Packet::Complete => {
+                            self.pending.clear();
+                            return None;
+                        }
+                        mouse::Packet::Other => {}
+                    }
+                }
                 if FILES
                     .iter()
                     .chain(NETWORK.iter())
@@ -77,7 +102,7 @@ impl Keys {
     }
 
     pub fn expire(&mut self, output: &mut Vec<u8>, now: Instant) {
-        if !self.pasted
+        if self.waiting()
             && self
                 .since
                 .is_some_and(|since| now.duration_since(since) >= Duration::from_millis(50))
@@ -88,6 +113,7 @@ impl Keys {
 
     pub fn waiting(&self) -> bool {
         !self.pending.is_empty() && !self.pasted
+            && !(self.viewport.is_some() && mouse::recognized(&self.pending))
     }
 
     pub fn finish(&mut self, output: &mut Vec<u8>) {
@@ -148,21 +174,22 @@ impl vt100::Callbacks for Replies {
             }
             return;
         }
-        if first.is_some() || second.is_some() || self.bytes.len() > 4096 {
+        if second.is_some() || self.bytes.len() > 4096 {
             return;
         }
         let value = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
-        let reply = match (command, value) {
-            ('n', 5) => "\x1b[0n".to_owned(),
-            ('n', 6) => {
+        let reply = match (first, command, value) {
+            (None, 'n', 5) => "\x1b[0n".to_owned(),
+            (None | Some(b'?'), 'n', 6) => {
                 let (row, col) = screen.cursor_position();
-                format!("\x1b[{};{}R", row + 1, col + 1)
+                let private = if first.is_some() { "?" } else { "" };
+                format!("\x1b[{private}{};{}R", row + 1, col.min(screen.size().1.get() - 1) + 1)
             }
-            ('t', 18) => {
+            (None, 't', 18) => {
                 let (rows, cols) = screen.size();
                 format!("\x1b[8;{rows};{cols}t")
             }
-            ('c', 0) => "\x1b[?1;2c".to_owned(),
+            (None, 'c', 0) => "\x1b[?1;2c".to_owned(),
             _ => String::new(),
         };
         self.bytes.extend_from_slice(reply.as_bytes());

@@ -2,12 +2,12 @@
 //! Console secrets never consume redirected stdin. One owned reader retains VT
 //! input bytes; its synchronous I/O is cancelled and joined before mode restore.
 use crate::controller::Result;
-use crate::terminal_overlay::{self, Keys, Page, Screen};
+use crate::terminal_overlay::{self, Chrome, Keys, Page};
 use crate::windows_io::{cancel_and_join, cancel_read, duplicate};
 use crate::windows_overlay::Overlay;
 use oblivion_native_windows::broker::Layout;
 use oblivion_native_windows::client::Channel;
-use oblivion_wire::agent::{self, Command, Size};
+use oblivion_wire::agent::{self, Command, Launch, Size};
 use oblivion_wire::terminal_guard::Guard;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -53,7 +53,7 @@ struct Attachment {
     input: Option<Input>,
     opening: Option<Page>,
     overlay: Option<Overlay>,
-    screen: Option<Screen>,
+    chrome: Option<Chrome>,
 }
 
 impl Attachment {
@@ -75,7 +75,7 @@ impl Attachment {
         let mut forwarded = Zeroizing::new(Vec::new());
         keys.expire(&mut forwarded, now);
         let eof = match input.events.try_recv() {
-            Ok(InputEvent::Bytes(bytes)) if self.screen.is_some() => {
+            Ok(InputEvent::Bytes(bytes)) if self.chrome.is_some() => {
                 let mut touched = false;
                 for &byte in bytes.iter() {
                     touched |= human.feed(byte, now);
@@ -88,6 +88,9 @@ impl Attachment {
                     }
                 }
                 if touched {
+                    if let Some(chrome) = self.chrome.as_mut() {
+                        chrome.user_input();
+                    }
                     on_activity(now);
                 }
                 false
@@ -182,18 +185,38 @@ impl Terminal {
                 || mode(&self.output).is_some()
                 || mode(&self.error).is_some(),
         )?;
-        command.write(channel)?;
-        channel.flush()?;
         let panels = panels.filter(|_| initial.is_some());
+        let chrome = if let (Some(physical), Some(panels)) = (initial, panels) {
+            let terminal = terminal_overlay::guest_size(physical);
+            let name = match command {
+                Command::Agent(launch) => {
+                    launch.validate()?;
+                    Launch {
+                        agent: launch.agent.clone(),
+                        argv: launch.argv.clone(),
+                        terminal: Some(terminal),
+                        // A validated interactive launch cannot be a managed job.
+                        managed: None,
+                    }
+                    .write(channel)?;
+                    launch.agent.as_str()
+                }
+                Command::Workspace { .. } => {
+                    Command::Workspace { terminal }.write(channel)?;
+                    "workspace"
+                }
+            };
+            Some(Chrome::new(physical, panels.safe, name))
+        } else {
+            command.write(channel)?;
+            None
+        };
+        channel.flush()?;
         let mut attachment = Attachment {
             input: Some(Input::start(self.input.try_clone()?)?),
             opening: None,
             overlay: None,
-            screen: initial.filter(|_| panels.is_some()).map(|size| {
-                let mut screen = terminal_overlay::parser(size.rows, size.cols);
-                screen.enable_synchronized_output();
-                screen
-            }),
+            chrome,
         };
         let result = self.bridge(
             channel,
@@ -207,15 +230,21 @@ impl Terminal {
         // request. Keep the reader and its buffers until its thread exits.
         let stopped = attachment.input.as_mut().map(Input::stop).transpose();
         let panel_closed = if let Some(overlay) = attachment.overlay.take() {
-            overlay
-                .close()
-                .and_then(|()| self.restore_panel(&modes, attachment.screen.as_ref()))
+            let closed = overlay.close();
+            let restored = self.restore_panel(&modes);
+            closed.and(restored)
         } else {
             Ok(())
         };
+        let chrome_finished = attachment
+            .chrome
+            .as_mut()
+            .map(|chrome| chrome.finish(&mut &self.output))
+            .transpose();
         let restored = modes.restore();
         stopped?;
         panel_closed?;
+        chrome_finished?;
         restored?;
         result
     }
@@ -239,7 +268,8 @@ impl Terminal {
         let mut output_guard = Guard::default();
         let mut error_guard = Guard::default();
         let mut keys = Keys::default();
-        let mut replies = Vec::new();
+        keys.set_viewport(viewport.filter(|_| attachment.chrome.is_some()));
+        let mut replies = Zeroizing::new(Vec::new());
         let mut redraw = false;
         loop {
             if let Some(page) = attachment.opening {
@@ -252,6 +282,11 @@ impl Terminal {
                     // The old reader may have consumed a prefix of a paste.
                     // Discard the old receiver and console queue as one handoff.
                     self.flush_input()?;
+                    attachment
+                        .chrome
+                        .as_mut()
+                        .ok_or("terminal_panel_unavailable")?
+                        .suspend(&mut output)?;
                     terminal_overlay::begin(&mut output)?;
                     output.flush()?;
                     match Overlay::start(
@@ -264,7 +299,7 @@ impl Terminal {
                     ) {
                         Ok(overlay) => attachment.overlay = Some(overlay),
                         Err(error) => {
-                            self.restore_panel(modes, attachment.screen.as_ref())?;
+                            self.restore_panel(modes)?;
                             attachment.input = Some(Input::start(self.input.try_clone()?)?);
                             writeln!(&self.error, "\r\nOblivion panel could not open: {error}")?;
                             redraw = true;
@@ -279,10 +314,7 @@ impl Terminal {
                         .take()
                         .ok_or("terminal_panel_unavailable")?
                         .close()?;
-                    if let Some(screen) = attachment.screen.as_mut() {
-                        screen.write_replies(&mut replies)?;
-                    }
-                    self.restore_panel(modes, attachment.screen.as_ref())?;
+                    self.restore_panel(modes)?;
                     if !status.success() {
                         writeln!(&self.error, "\r\nOblivion panel closed unexpectedly.")?;
                     }
@@ -307,19 +339,16 @@ impl Terminal {
                         } else {
                             (&self.error, &mut error_guard)
                         };
-                        let console = mode(file).is_some();
-                        let bytes = if console { guard.filter(&bytes) } else { bytes };
-                        if console {
-                            if let Some(screen) = attachment.screen.as_mut() {
-                                screen.process(&bytes);
-                                if attachment.overlay.is_none() {
-                                    screen.write_replies(&mut io::sink())?;
-                                }
-                            }
-                            if attachment.overlay.is_some() {
+                        let bytes = if mode(file).is_some() {
+                            if let Some(chrome) = attachment.chrome.as_mut() {
+                                chrome.process(&bytes);
+                                keys.set_mouse_utf8(chrome.mouse_utf8());
                                 continue;
                             }
-                        }
+                            guard.filter(&bytes)
+                        } else {
+                            bytes
+                        };
                         let mut destination = file;
                         destination.write_all(&bytes)?;
                         destination.flush()?;
@@ -370,9 +399,13 @@ impl Terminal {
                     if current != viewport {
                         let size = current.ok_or("terminal_console_lost")?;
                         viewport = Some(size);
-                        if let Some(screen) = attachment.screen.as_mut() {
-                            screen.resize(size.rows, size.cols);
-                        }
+                        let size = if let Some(chrome) = attachment.chrome.as_mut() {
+                            chrome.resize(size);
+                            keys.set_viewport(Some(size));
+                            terminal_overlay::guest_size(size)
+                        } else {
+                            size
+                        };
                         agent::write_frame(
                             &mut *pending,
                             3,
@@ -380,14 +413,12 @@ impl Terminal {
                         )?;
                     }
                 } else {
-                    if attachment.overlay.is_some() {
-                        if let Some(screen) = attachment.screen.as_mut() {
-                            screen.write_replies(&mut replies)?;
-                        }
+                    if let Some(chrome) = attachment.chrome.as_mut() {
+                        chrome.write_replies(&mut *replies)?;
                     }
                     if !replies.is_empty() {
                         agent::write_frame(&mut *pending, 0, &replies)?;
-                        replies.clear();
+                        replies.zeroize();
                     } else if !ended {
                         ended = attachment.enqueue_input(
                             &mut pending,
@@ -397,6 +428,11 @@ impl Terminal {
                             on_activity,
                         )?;
                     }
+                }
+            }
+            if attachment.overlay.is_none() && attachment.opening.is_none() {
+                if let Some(chrome) = attachment.chrome.as_mut() {
+                    chrome.paint(&mut &self.output, now)?;
                 }
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -410,13 +446,10 @@ impl Terminal {
         Ok(())
     }
 
-    fn restore_panel(&self, modes: &Modes, screen: Option<&Screen>) -> Result<()> {
+    fn restore_panel(&self, modes: &Modes) -> Result<()> {
         modes.resume()?;
         let mut output = &self.output;
         terminal_overlay::reset(&mut output)?;
-        if let Some(screen) = screen {
-            terminal_overlay::repaint(screen, &mut output)?;
-        }
         output.flush()?;
         self.flush_input()
     }

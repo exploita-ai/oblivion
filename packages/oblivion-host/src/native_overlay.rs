@@ -1,6 +1,6 @@
 //! Desktop overlays own the TTY while the parent keeps draining the Safe.
 
-use oblivion_cli::terminal_overlay::{self, Keys, Page, Screen};
+use oblivion_cli::terminal_overlay::{self, Chrome, Keys, Page};
 use oblivion_host::{agent, control};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -129,50 +129,59 @@ fn restore(group: libc::pid_t, raw: &libc::termios) -> control::Result<()> {
 
 pub fn bridge(
     stream: &mut std::os::unix::net::UnixStream,
-    interactive: bool,
+    viewport: Option<agent::Size>,
+    safe: &str,
+    name: &str,
+    saved: libc::termios,
+    activity: Option<oblivion_host::activity::Reporter>,
+) -> control::Result<i32> {
+    let mut chrome = viewport.map(|size| Chrome::new(size, safe, name));
+    let result = forward(stream, viewport, safe, saved, activity, chrome.as_mut());
+    if let Some(chrome) = chrome.as_mut() {
+        chrome.finish(&mut std::io::stdout())?;
+    }
+    result
+}
+
+fn forward(
+    stream: &mut std::os::unix::net::UnixStream,
+    mut viewport: Option<agent::Size>,
     safe: &str,
     saved: libc::termios,
     mut activity: Option<oblivion_host::activity::Reporter>,
+    mut chrome: Option<&mut Chrome>,
 ) -> control::Result<i32> {
+    let interactive = viewport.is_some();
     let mut input = true;
-    let mut guard = oblivion_host::terminal_guard::Guard::default();
     let mut keys = Keys::default();
+    keys.set_viewport(viewport);
     let mut human = oblivion_host::activity::HumanInput::default();
-    let mut viewport = super::size();
-    let mut parser = interactive.then(|| {
-        let mut parser = terminal_overlay::parser(viewport.rows, viewport.cols);
-        parser.enable_synchronized_output();
-        parser
-    });
     let mut overlay: Option<Overlay> = None;
     loop {
         if let Some(child) = overlay.as_mut() {
             if child.poll()?.is_some() {
                 overlay.take();
-                restore_screen(parser.as_ref().unwrap())?;
-                // Native clients may maintain modes outside VT100's visible
-                // cell model. Ask for their ordinary resize redraw as well.
+                flush_panel_input()?;
                 agent::write_frame(stream, 6, &libc::SIGWINCH.to_be_bytes())?;
             }
         }
         let caught = super::SIGNAL.swap(0, Ordering::Relaxed);
-        // A foreground overlay receives the terminal SIGWINCH. Observing its
-        // dimensions does not consume its input or count as human activity.
-        if interactive && (caught == libc::SIGWINCH || overlay.is_some()) {
+        if let Some(chrome) = chrome.as_deref_mut() {
+            // The overlay may receive SIGWINCH instead of the parent.
             let current = super::size();
-            if current.rows != viewport.rows
-                || current.cols != viewport.cols
-                || caught == libc::SIGWINCH
-            {
-                viewport = current;
-                if let Some(parser) = parser.as_mut() {
-                    parser.resize(current.rows, current.cols);
-                }
+            if Some(current) != viewport {
+                viewport = Some(current);
+                keys.set_viewport(viewport);
+                chrome.resize(current);
+                let guest = terminal_overlay::guest_size(current);
                 agent::write_frame(
                     stream,
                     3,
-                    &[current.rows.to_be_bytes(), current.cols.to_be_bytes()].concat(),
+                    &[guest.rows.to_be_bytes(), guest.cols.to_be_bytes()].concat(),
                 )?;
+            }
+            if overlay.is_none() {
+                chrome.paint(&mut std::io::stdout(), Instant::now())?;
             }
         }
         if caught != 0 && caught != libc::SIGWINCH {
@@ -203,7 +212,14 @@ pub fn bridge(
                 revents: 0,
             },
         ];
-        if unsafe { libc::poll(polls.as_mut_ptr(), 2, if keys.waiting() { 20 } else { 100 }) } < 0 {
+        let timeout = if overlay.is_none() && chrome.as_deref().is_some_and(Chrome::has_pending_frame) {
+            16
+        } else if keys.waiting() {
+            20
+        } else {
+            100
+        };
+        if unsafe { libc::poll(polls.as_mut_ptr(), 2, timeout) } < 0 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
@@ -211,36 +227,26 @@ pub fn bridge(
         }
         if polls[0].revents != 0 {
             let (kind, bytes) = agent::read_frame(stream)?;
-            let bytes = if interactive && matches!(kind, 1 | 2) {
-                guard.filter(&bytes)
-            } else {
-                bytes
-            };
             match kind {
                 1 | 2 => {
-                    if let Some(parser) = parser.as_mut() {
-                        parser.process(&bytes);
+                    if let Some(chrome) = chrome.as_deref_mut() {
+                        chrome.process(&bytes);
+                        keys.set_mouse_utf8(chrome.mouse_utf8());
                         let mut replies = Vec::new();
-                        parser.write_replies(&mut replies)?;
-                        if overlay.is_some() && !replies.is_empty() {
+                        chrome.write_replies(&mut replies)?;
+                        if !replies.is_empty() {
                             agent::write_frame(stream, 0, &replies)?;
                         }
-                    }
-                    if overlay.is_none() {
-                        if kind == 1 {
-                            std::io::stdout().write_all(&bytes)?;
-                            std::io::stdout().flush()?;
-                        } else {
-                            std::io::stderr().write_all(&bytes)?;
-                            std::io::stderr().flush()?;
-                        }
+                    } else if kind == 1 {
+                        std::io::stdout().write_all(&bytes)?;
+                        std::io::stdout().flush()?;
+                    } else {
+                        std::io::stderr().write_all(&bytes)?;
+                        std::io::stderr().flush()?;
                     }
                 }
                 4 if bytes.len() == 4 => {
                     let code = i32::from_be_bytes(bytes.try_into().unwrap());
-                    if overlay.take().is_some() {
-                        restore_screen(parser.as_ref().unwrap())?;
-                    }
                     return Ok(if code < 0 { 128 - code } else { code });
                 }
                 _ => return Err("Invalid agent response".into()),
@@ -284,6 +290,9 @@ pub fn bridge(
                     keys.finish(&mut outgoing);
                 }
                 if touched {
+                    if let Some(chrome) = chrome.as_deref_mut() {
+                        chrome.user_input();
+                    }
                     if let Some(activity) = activity.as_mut() { activity.touch(Instant::now()) }
                 }
                 if !outgoing.is_empty() {
@@ -294,10 +303,13 @@ pub fn bridge(
                     agent::write_frame(stream, 5, &[])?;
                 }
                 if let Some(page) = page {
+                    if let Some(chrome) = chrome.as_deref_mut() {
+                        chrome.suspend(&mut std::io::stdout())?;
+                    }
                     match Overlay::start(page, safe, saved) {
                         Ok(child) => overlay = Some(child),
                         Err(error) => {
-                            restore_screen(parser.as_ref().unwrap())?;
+                            flush_panel_input()?;
                             eprintln!("\r\nOblivion overlay could not open: {error}");
                         }
                     }
@@ -316,15 +328,12 @@ pub fn bridge(
     }
 }
 
-fn restore_screen(parser: &Screen) -> control::Result<()> {
+fn flush_panel_input() -> control::Result<()> {
     if unsafe { libc::tcgetpgrp(0) != libc::getpgrp() } {
         return Err("Cannot return input to the agent while the terminal is in the background".into());
     }
-    let mut stdout = std::io::stdout().lock();
-    terminal_overlay::repaint(parser, &mut stdout)?;
-    stdout.flush()?;
     // Anything still queued at the handoff belonged to the host panel, even
-    // after a failed launch. Do this after replaying the guest's input modes.
+    // after a failed launch.
     if unsafe { libc::tcflush(0, libc::TCIFLUSH) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }

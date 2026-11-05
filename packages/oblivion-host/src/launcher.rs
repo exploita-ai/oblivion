@@ -349,38 +349,41 @@ fn new_password(label: &str) -> control::Result<Zeroizing<Vec<u8>>> {
 }
 
 fn attach_agent(id: &str, agent: &str, argv: &[String]) -> control::Result<i32> {
+    let viewport = (unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 }).then(size);
     let launch = agent::Launch {
         agent: agent.to_owned(),
         argv: argv.to_vec(),
         managed: None,
-        terminal: if unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 } {
-            Some(size())
-        } else {
-            None
-        },
+        terminal: viewport.map(oblivion_cli::terminal_overlay::guest_size),
     };
-    attach_command(id, agent::Command::Agent(&launch))
+    attach_command(id, agent::Command::Agent(&launch), viewport)
 }
 
 fn attach_workspace(id: &str) -> control::Result<i32> {
     if unsafe { libc::isatty(0) != 1 || libc::isatty(1) != 1 } {
         return Err("Workspace requires an interactive terminal".into());
     }
-    attach_command(id, agent::Command::Workspace { terminal: size() })
+    let viewport = size();
+    let terminal = oblivion_cli::terminal_overlay::guest_size(viewport);
+    attach_command(id, agent::Command::Workspace { terminal }, Some(viewport))
 }
 
-fn attach_command(id: &str, command: agent::Command<'_>) -> control::Result<i32> {
+fn attach_command(id: &str, command: agent::Command<'_>, viewport: Option<agent::Size>) -> control::Result<i32> {
     let (mut stream, lease, client) = control::attach_client("agent-attach", id)?;
-    let tty = unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 };
-    let mut saved = unsafe { std::mem::zeroed() };
-    if tty && unsafe { libc::tcgetattr(0, &mut saved) } != 0 {
-        return Err("Cannot read terminal settings".into());
-    }
+    let tty = viewport.is_some();
+    let name = match &command {
+        agent::Command::Agent(launch) => &launch.agent,
+        agent::Command::Workspace { .. } => "workspace",
+    };
     let activity = if tty {
         Some(oblivion_host::activity::Reporter::current_safe(id)?)
     } else {
         None
     };
+    let mut saved = unsafe { std::mem::zeroed() };
+    if tty && unsafe { libc::tcgetattr(0, &mut saved) } != 0 {
+        return Err("Cannot read terminal settings".into());
+    }
     command.write(&mut stream)?;
     if tty {
         let mut raw = saved;
@@ -402,7 +405,7 @@ fn attach_command(id: &str, command: agent::Command<'_>) -> control::Result<i32>
         .iter()
         .map(|value| unsafe { libc::signal(*value, signal as *const () as libc::sighandler_t) })
         .collect();
-    let result = native_overlay::bridge(&mut stream, tty, id, saved, activity);
+    let result = native_overlay::bridge(&mut stream, viewport, id, name, saved, activity);
     for (value, handler) in signals.iter().zip(handlers) {
         unsafe {
             libc::signal(*value, handler);
