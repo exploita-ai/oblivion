@@ -64,7 +64,7 @@ fn run() -> control::Result<i32> {
             return Ok(0);
         }
         command::Command::Version => {
-            println!("oblivion {}", env!("CARGO_PKG_VERSION"));
+            println!("oblivion {}", command::PRODUCT_VERSION);
             return Ok(0);
         }
         // Reports only address the already-open private control connection.

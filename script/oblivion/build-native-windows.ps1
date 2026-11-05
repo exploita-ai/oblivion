@@ -89,7 +89,7 @@ $Parent = [IO.Path]::GetDirectoryName($Output)
 [void][IO.Directory]::CreateDirectory($Parent)
 $Work = Join-Path $Parent ('.windows-build-' + [guid]::NewGuid().ToString('N'))
 New-PrivateDirectory $Work
-$Variables = @('OBLIVION_DESKTOP_SOURCE_SHA256', 'OBLIVION_DESKTOP_PLATFORM', 'CARGO_TARGET_DIR', 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER')
+$Variables = @('OBLIVION_DESKTOP_VERSION', 'OBLIVION_DESKTOP_SOURCE_SHA256', 'OBLIVION_DESKTOP_PLATFORM', 'CARGO_TARGET_DIR', 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER')
 $Saved = @{}
 foreach ($Name in $Variables) { $Saved[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process') }
 Push-Location -LiteralPath $Repository
@@ -103,6 +103,7 @@ try {
         $Paired = (Invoke-Native -Executable $Python -Arguments @('-B', $Builder, 'prepare', '--runtime', $Runtime, '--platform', $Platform, '--output', $Prepared) -Capture) -join ''
         if ($Paired -ne $Source) { throw 'The runtime candidate does not match the current native source inventory.' }
     }
+    $env:OBLIVION_DESKTOP_VERSION = $Version
     $env:OBLIVION_DESKTOP_SOURCE_SHA256 = $Source
     $env:OBLIVION_DESKTOP_PLATFORM = $Platform
     $env:CARGO_TARGET_DIR = Join-Path $Work 'cargo-target'

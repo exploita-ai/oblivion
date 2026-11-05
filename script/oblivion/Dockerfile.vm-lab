@@ -597,7 +597,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libarchive-tool
     && cp /workspace-inputs/* / \
     && case "$TARGETARCH" in amd64) platform=linux-x86_64;; arm64) platform=linux-arm64;; *) exit 1;; esac \
     && identity=$(python3 -B /script/oblivion/bundle-native.py prepare --runtime /runtime-output --platform "$platform" --output /prepared) \
-    && OBLIVION_DESKTOP_SOURCE_SHA256="$identity" OBLIVION_DESKTOP_PLATFORM="$platform" cargo build --locked --release --bin oblivion \
+    && OBLIVION_DESKTOP_VERSION="$OBLIVION_DESKTOP_VERSION" OBLIVION_DESKTOP_SOURCE_SHA256="$identity" OBLIVION_DESKTOP_PLATFORM="$platform" cargo build --locked --release --bin oblivion \
     && cargo build --manifest-path /native-helper/Cargo.toml --locked --release \
     && python3 -B /script/oblivion/bundle-native.py assemble --prepared /prepared --platform "$platform" --product-version "$OBLIVION_DESKTOP_VERSION" --cli /build/target/release/oblivion --helper /native-helper/target/release/oblivion-vm --manager /native-manager/oblivion-manager --manager-assets /native-manager/assets --output /desktop
 

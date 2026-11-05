@@ -40,7 +40,7 @@ pub fn run() -> Result<i32> {
             return Ok(0);
         }
         Command::Version => {
-            println!("oblivion {}", env!("CARGO_PKG_VERSION"));
+            println!("oblivion {}", command::PRODUCT_VERSION);
             return Ok(0);
         }
         Command::Files(Files::Copy(command))

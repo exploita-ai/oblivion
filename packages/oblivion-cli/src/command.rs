@@ -6,6 +6,11 @@ use crate::{
     safe, settings, shell, storage,
 };
 
+pub const PRODUCT_VERSION: &str = match option_env!("OBLIVION_DESKTOP_VERSION") {
+    Some(version) if !version.is_empty() => version,
+    _ => env!("CARGO_PKG_VERSION"),
+};
+
 // Run/proxy options may own credentials. Deliberately no Debug implementation.
 pub enum Command<F, S> {
     Manager,

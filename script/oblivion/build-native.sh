@@ -22,7 +22,7 @@ mkdir -p "$(dirname "$output")"
 work=$(mktemp -d "$(dirname "$output")/.desktop-build.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 source_id=$(python3 -B script/oblivion/bundle-native.py prepare --runtime "$runtime" --platform "$platform" --output "$work/bundle")
-OBLIVION_DESKTOP_SOURCE_SHA256="$source_id" OBLIVION_DESKTOP_PLATFORM="$platform" CARGO_TARGET_DIR="$work/host-target" \
+OBLIVION_DESKTOP_VERSION="$version" OBLIVION_DESKTOP_SOURCE_SHA256="$source_id" OBLIVION_DESKTOP_PLATFORM="$platform" CARGO_TARGET_DIR="$work/host-target" \
     cargo build --manifest-path packages/oblivion-host/Cargo.toml --locked --offline --release --bin oblivion
 if [ "$platform" = darwin-arm64 ]; then
     sh packages/oblivion-native/build.sh

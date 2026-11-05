@@ -54,7 +54,7 @@ fn actual_windows_executable_serves_shared_help_and_version_without_installation
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).unwrap().trim(),
-        format!("oblivion {}", env!("CARGO_PKG_VERSION"))
+        format!("oblivion {}", oblivion_cli::command::PRODUCT_VERSION)
     );
 }
 
