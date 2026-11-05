@@ -1,10 +1,10 @@
 #![cfg(unix)]
 
+// Keep subprocess tests in endpoint.rs. A fork can briefly retain another
+// test's directory lock until the child execs, even with close-on-exec.
 mod support;
 
-use oblivion_transfer::media_export::{
-    Authority, Rejection, Request, Response, State, Status, execute,
-};
+use oblivion_transfer::media_export::{Authority, Request, Response, State, Status, execute};
 use oblivion_transfer::{ExportMode, Limits, Selection, receive_external};
 use std::fs;
 use std::io::Cursor;
@@ -285,56 +285,4 @@ fn interrupted_discard_keeps_manifest_until_payload_cleanup_is_complete() {
     };
     execute(&target.0, &request, Authority::Discard, || Ok(())).unwrap();
     assert!(!pending.exists());
-}
-
-#[test]
-fn compiled_inspection_endpoint_rejects_mutation_with_a_bounded_reply() {
-    use oblivion_transfer::channel::Channel;
-    use oblivion_transfer::endpoint::{read_message, write_message};
-    use std::fs::File;
-    use std::os::fd::{AsRawFd, OwnedFd};
-    use std::os::unix::net::UnixStream;
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-    use std::time::Duration;
-
-    let target = Tree::new();
-    let pending = stage(&target.0, ID);
-    let request = Request::Discard {
-        id: ID.into(),
-        review_sha256: status(&target.0, ID).review_sha256.unwrap(),
-    };
-    let (local, peer) = UnixStream::pair().unwrap();
-    let fd = peer.as_raw_fd();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_oblivion-copy"));
-    command
-        .arg("live-media-inspect")
-        .arg(&target.0)
-        .arg("5000")
-        .env_clear()
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    unsafe {
-        command.pre_exec(move || {
-            if libc::dup2(fd, 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let mut child = command.spawn().unwrap();
-    drop(peer);
-    let mut local = Channel::new(File::from(OwnedFd::from(local)), Duration::from_secs(4)).unwrap();
-    write_message(&mut local, &request).unwrap();
-    let response: Response = read_message(&mut local, 1024).unwrap();
-    assert!(matches!(
-        response,
-        Response::Rejected {
-            reason: Rejection::NotAuthorized
-        }
-    ));
-    assert!(response.validate(&request).is_err());
-    assert!(child.wait().unwrap().success());
-    assert_eq!(fs::read(pending.join("files/z")).unwrap(), b"reviewed");
 }

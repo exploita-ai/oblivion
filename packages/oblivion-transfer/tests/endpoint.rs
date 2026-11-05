@@ -37,6 +37,33 @@ fn framing_distinguishes_a_guest_failure_from_an_invalid_length() {
 }
 
 #[test]
+fn compiled_inspection_endpoint_rejects_mutation_with_a_bounded_reply() {
+    use oblivion_transfer::media_export::{Rejection, Request, Response};
+
+    let target = Tree::new();
+    let files = target.0.join(format!(".Oblivion-{ID}.pending/files"));
+    fs::create_dir_all(&files).unwrap();
+    let document = files.join(NAME);
+    fs::write(&document, CONTENT).unwrap();
+    let request = Request::Discard {
+        id: ID.into(),
+        review_sha256: "0".repeat(64),
+    };
+    let mut endpoint = Endpoint::start("live-media-inspect", &target, 5000);
+    write_message(&mut endpoint.channel, &request).unwrap();
+    let response: Response = read_message(&mut endpoint.channel, 1024).unwrap();
+    assert!(matches!(
+        response,
+        Response::Rejected {
+            reason: Rejection::NotAuthorized
+        }
+    ));
+    assert!(response.validate(&request).is_err());
+    endpoint.finish(true);
+    assert_eq!(fs::read(document).unwrap(), CONTENT);
+}
+
+#[test]
 fn unavailable_directory_replies_and_keeps_the_document_channel_usable() {
     use oblivion_transfer::browser::{Request, Response};
     use oblivion_transfer::endpoint::SourceRequest;
