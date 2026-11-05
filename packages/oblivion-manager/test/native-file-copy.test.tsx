@@ -70,7 +70,7 @@ async function fixture() {
       const selected = entries.length === 1 ? "project" : "selection"
       const mapping_sha256 = new Bun.CryptoHasher("sha256").update(JSON.stringify([selected, entries.map((entry) => [entry.input_index, entry.alias, entry.covered_by])])).digest("hex")
       emit({ event: "mapping", identity: request().identity, selected, start: 0, total: entries.length, entries, mapping_sha256 })
-      emit({ event: "review", identity: request().identity, direction: "import", name: request().name, summary: { manifest_sha256: digest, mapping_sha256, entries: 6, files: 3, directories: entries.length === 1 ? 3 : 2, bytes: 12 } })
+      emit({ event: "review", identity: request().identity, direction: request().direction, name: request().name, summary: { manifest_sha256: digest, mapping_sha256, entries: 6, files: 3, directories: entries.length === 1 ? 3 : 2, bytes: 12 } })
     },
     progress(bytes: number, phase: "copying" | "finalizing" = "copying") { emit({ event: "progress", identity: request().identity, phase, bytes, total_bytes: 12 }) },
     publish() { published = true },
@@ -154,6 +154,54 @@ test("USB selection waits for browser detachment before preparing the reviewed i
     expect(state.requests[0]?.sources).toEqual(["notes.md"])
     expect(state.approvals).toHaveLength(0)
   } finally { released.resolve(); await app.dispose(); await rm(state.root, { recursive: true }) }
+})
+
+test("USB export reviews the Safe selection and displays the verified removal receipt", async () => {
+  const state = await fixture()
+  const device = { id: "a".repeat(64), name: "sdb1", bytes: 1024 ** 3, read_only: false }
+  const runtime = {
+    ...state.runtime,
+    async query(args: string[]) {
+      if (args[0] === "runtime") return { version: 1, devices: [device] }
+      if (args[0] === "files" && args[1] === "list") {
+        const inside = args.includes("workspace")
+        return { path: inside ? "workspace" : "", next_cursor: null, entries: inside
+          ? [{ name: "report.md", path: "workspace/report.md", kind: "file", bytes: 12 }]
+          : [{ name: "workspace", path: "workspace", kind: "directory", bytes: 0 }] }
+      }
+      return state.runtime.query(args)
+    },
+    usb: { open() { throw new Error("Export must browse only Safe files") }, async close() {} },
+  }
+  const app = await testRender(() => <NativeFiles safe={safe} name="Research" opening={opening} transfers={state.transfers} runtime={runtime} run={state.run} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await app.renderOnce()
+    for (let index = 0; index < 3; index++) await app.mockInput.pressArrow("down")
+    await app.mockInput.pressEnter()
+    await visible(app, "workspace/")
+    await app.mockInput.pressEnter()
+    await visible(app, "report.md")
+    await app.mockInput.pressArrow("down")
+    await app.mockInput.pressKey(" ")
+    await visible(app, "1 selected")
+    await app.mockInput.pressKey("c")
+    await visible(app, "sdb1")
+    await app.mockInput.pressEnter()
+    await visible(app, "Preparing recursive copy review")
+    const request = state.requests[0]!
+    expect(request.args).toContain(device.id)
+    expect(request.args).not.toContain("--destination")
+    expect(request.sources).toEqual(["workspace/report.md"])
+    expect(request.name).toBe(`Oblivion-${request.identity.operation_id}`)
+    state.review([{ input_index: 0, alias: "report.md", covered_by: null }])
+    await visible(app, "Write to USB")
+    expect(state.approvals).toHaveLength(0)
+    await app.mockInput.pressEnter()
+    await state.approved
+    state.finish()
+    await visible(app, "USB export verified and device released.")
+    expect(state.queries).toHaveLength(0)
+  } finally { await app.dispose(); await rm(state.root, { recursive: true }) }
 })
 
 test.each([[80, 24], [160, 50]])("recursive manifest approval and actual progress remain in the rendered Files page at %ix%i", async (width, height) => {

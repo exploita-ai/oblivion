@@ -83,6 +83,7 @@ pub fn parse(args: &[String]) -> Result<CopyCommand> {
                 .into(),
         );
     }
+    let usb_export = operation == "export" && device.is_some();
     if operation == "import"
         && (!paths.is_empty()
             || sources.is_empty()
@@ -92,10 +93,12 @@ pub fn parse(args: &[String]) -> Result<CopyCommand> {
             && (!paths.is_empty()
                 || selected.is_empty()
                 || !sources.is_empty()
-                || device.is_some()
-                || destination.is_none())
+                || device.is_some() == destination.is_some())
     {
-        return Err("Use files import --safe SAFE --source PATH [--source PATH...], or files export --safe SAFE --path workspace/PATH [--path imports/PATH...] --destination DIRECTORY".into());
+        return Err("Use files import --safe SAFE --source PATH, or files export --safe SAFE --path workspace/PATH with either --destination DIRECTORY or --usb ID".into());
+    }
+    if usb_export && (confirmed || name.is_some()) {
+        return Err("USB export requires manifest approval and uses its own operation folder. Omit --yes and --name.".into());
     }
     for value in operation_id.iter().chain(expected_opening.iter()) {
         if !valid_id(value) {
@@ -114,7 +117,7 @@ pub fn parse(args: &[String]) -> Result<CopyCommand> {
     if paths.iter().map(String::len).sum::<usize>() > selection::MAX_SELECTION_BYTES {
         return Err("selection_byte_limit".into());
     }
-    if paths.len() > 1 && name.is_none() {
+    if paths.len() > 1 && name.is_none() && !usb_export {
         return Err("Choose a collection name with --name when selecting multiple paths".into());
     }
     if let Some(name) = &name {
@@ -136,7 +139,7 @@ pub fn parse(args: &[String]) -> Result<CopyCommand> {
                     }
                     .validate()?;
                 }
-                CopyInput::Media { device, sources }
+                CopyInput::MediaImport { device, sources }
             }
             None => CopyInput::Upload(sources),
         }
@@ -148,9 +151,15 @@ pub fn parse(args: &[String]) -> Result<CopyCommand> {
         {
             return Err("Export paths must be under workspace or imports".into());
         }
-        CopyInput::Download {
-            selected,
-            destination: destination.ok_or("Missing destination directory")?,
+        match device {
+            Some(device) => {
+                validate_device(&device)?;
+                CopyInput::MediaExport { device, selected }
+            }
+            None => CopyInput::Download {
+                selected,
+                destination: destination.ok_or("Missing destination directory")?,
+            },
         }
     };
     Ok(CopyCommand {
@@ -178,7 +187,7 @@ pub struct CopyCommand {
 
 impl CopyCommand {
     pub fn needs_live_media(&self) -> bool {
-        matches!(&self.selection, CopyInput::Media { .. })
+        matches!(&self.selection, CopyInput::MediaImport { .. } | CopyInput::MediaExport { .. })
     }
 }
 
@@ -224,7 +233,8 @@ fn validate_device(device: &str) -> Result<()> {
 
 pub enum CopyInput {
     Upload(Vec<String>),
-    Media { device: String, sources: Vec<String> },
+    MediaImport { device: String, sources: Vec<String> },
+    MediaExport { device: String, selected: Vec<String> },
     Download {
         selected: Vec<String>,
         destination: String,

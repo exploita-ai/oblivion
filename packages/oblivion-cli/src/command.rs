@@ -194,6 +194,7 @@ Files
   On Live, add --usb ID and use paths relative to the selected USB.
   oblivion files export --safe SAFE --path workspace/PATH [--path imports/PATH...]
                        --destination DIR [--name NAME]
+  On Live, --usb ID exports to a new operation folder after explicit review.
   Multiple selections require --name NAME and publish one collection.
   Copy commands review before copying; --yes approves an unattended copy.
   oblivion files transfers --safe SAFE [--destination DIR] [--cursor ID] --json

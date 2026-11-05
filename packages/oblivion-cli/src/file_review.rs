@@ -6,13 +6,19 @@ use oblivion_transfer::selection::Plan;
 use std::io::{self, Write};
 use std::path::Path;
 
+pub enum Destination<'a> {
+    Workspace,
+    Computer(&'a Path),
+    Usb(&'a str),
+}
+
 pub fn write(
     output: &mut impl Write,
     context: &Context,
     summary: &Summary,
     plan: &Plan,
     sources: &[String],
-    destination: Option<&Path>,
+    destination: Destination<'_>,
 ) -> io::Result<()> {
     writeln!(
         output,
@@ -37,7 +43,12 @@ pub fn write(
             )?;
             continue;
         }
-        let target = if plan.mappings.len() == 1 {
+        let target = if matches!(destination, Destination::Usb(_)) {
+            let path = plan.manifest_path(mapping.input_index).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid_file_mapping")
+            })?;
+            format!("{}/files/{path}", context.name)
+        } else if plan.mappings.len() == 1 {
             context.name.clone()
         } else {
             format!(
@@ -56,14 +67,18 @@ pub fn write(
         )?;
     }
     match destination {
-        Some(path) => {
+        Destination::Computer(path) => {
             writeln!(output, "To this computer · {:?}", path.join(&context.name))?;
             writeln!(
                 output,
                 "Exported files use the destination filesystem's protection."
             )?;
         }
-        None => writeln!(output, "To the Safe · workspace/{:?}", context.name)?,
+        Destination::Workspace => writeln!(output, "To the Safe · workspace/{:?}", context.name)?,
+        Destination::Usb(id) => {
+            writeln!(output, "To USB {id} · /{}/files", context.name)?;
+            writeln!(output, "Approval opens this device for writing. The exported files are readable outside the Safe.")?;
+        }
     }
     writeln!(
         output,

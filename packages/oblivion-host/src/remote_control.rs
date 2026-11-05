@@ -129,11 +129,27 @@ fn connect(
     if secret.len() > operation.native_secret_limit() {
         return Err("secret_too_large".into());
     }
+    let stream = connect_peer(path, remaining(deadline)?)?;
+    let request = Request {
+        operation,
+        session: session.map(str::to_owned),
+        secret_len: secret.len() as u32,
+        slot: crate::scope::current(),
+        expected_session: expected.map(str::to_owned),
+    };
+    let mut channel = Channel::new(&stream, remaining(deadline)?);
+    control_client::write_request(&mut channel, &request, secret, Framing::Native)
+        .map_err(control_client::Error::into_boxed)?;
+    Ok(stream)
+}
+
+/// Authenticate the local runtime socket before a caller sends any data.
+pub fn connect_peer(path: &Path, budget: Duration) -> Result<UnixStream> {
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.file_type().is_socket() || metadata.permissions().mode() & 0o077 != 0 {
         return Err("untrusted_runtime_socket".into());
     }
-    let stream = connect_socket(path, remaining(deadline)?)?;
+    let stream = connect_socket(path, budget)?;
     #[cfg(target_os = "macos")]
     unsafe {
         let mut uid = 0;
@@ -158,16 +174,6 @@ fn connect(
             return Err("untrusted_runtime_peer".into());
         }
     }
-    let request = Request {
-        operation,
-        session: session.map(str::to_owned),
-        secret_len: secret.len() as u32,
-        slot: crate::scope::current(),
-        expected_session: expected.map(str::to_owned),
-    };
-    let mut channel = Channel::new(&stream, remaining(deadline)?);
-    control_client::write_request(&mut channel, &request, secret, Framing::Native)
-        .map_err(control_client::Error::into_boxed)?;
     Ok(stream)
 }
 

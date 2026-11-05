@@ -27,7 +27,7 @@ pub fn run(runtime: &mut Runtime, command: CopyCommand) -> Result<i32> {
     // Lexical resolution does not follow a reparse point or contact a network
     // share. The Windows endpoint admits only local, handle-pinned drive paths.
     let selection = match command.selection {
-        CopyInput::Media { .. } => return Err("USB transfers are available only on Oblivion Live".into()),
+        CopyInput::MediaImport { .. } | CopyInput::MediaExport { .. } => return Err("USB transfers are available only on Oblivion Live".into()),
         CopyInput::Upload(paths) => Selection::Upload(
             paths
                 .iter()
@@ -307,8 +307,8 @@ fn approve(
         Selection::Download { selected, .. } => selected.clone(),
     };
     let destination = match selection {
-        Selection::Upload(_) => None,
-        Selection::Download { destination, .. } => Some(destination.as_path()),
+        Selection::Upload(_) => file_review::Destination::Workspace,
+        Selection::Download { destination, .. } => file_review::Destination::Computer(destination),
     };
     file_review::write(
         &mut std::io::stderr(),

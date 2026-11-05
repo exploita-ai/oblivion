@@ -28,7 +28,7 @@ export const fileInventory = z.object({
     && (value.skipped > 0 || value.next_cursor === value.entries.at(-1)?.operation_id)))
 
 // Paths stay only in this manager's memory, never in a desktop profile or log.
-export type FileReference = { id: string; safe: string; opening: string; kind: "import" | "export"; name: string; destination: string }
+export type FileReference = { id: string; safe: string; opening: string; kind: "import" | "export"; name: string; destination: string; usbExport?: { receipt?: z.infer<typeof fileReceipt> } }
 export type FileTransfer = FileReference & { sources: string[] }
 export type FileOutcome = z.infer<typeof fileOutcome>
 export type FileInventory = z.infer<typeof fileInventory>

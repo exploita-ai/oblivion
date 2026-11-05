@@ -23,6 +23,8 @@ const directory = z.object({
   next_cursor: z.string().nullable(), skipped: z.number().optional(),
 })
 
+type UsbTransfer = { kind: "import"; device: LiveDevice; opening: string; browser: UsbBrowser } | { kind: "export"; device?: LiveDevice }
+
 export function NativeFiles(props: { safe: string; name: string; opening?: string; blocked?: string; transfers?: ReturnType<typeof createFileTransfers>; runtime: NativeRuntime; run: (args: string[]) => Promise<boolean>; back: () => void }) {
   const transfers = props.transfers ?? createFileTransfers()
   const [page, setPage] = createSignal<"menu" | "source" | "guest" | "usb-devices" | "usb-source" | "destination" | "name" | "transfer" | "records" | "record-destination" | "outcome" | "recover" | "discard">("menu")
@@ -47,7 +49,8 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
   const [copyMappings, setCopyMappings] = createSignal<FileMappingEntry[]>([])
   const [copied, setCopied] = createSignal(0)
   const [devices, setDevices] = createSignal<LiveDevice[]>([])
-  const [usb, setUsb] = createSignal<{ device: LiveDevice; opening: string; browser: UsbBrowser }>()
+  const [usb, setUsb] = createSignal<UsbTransfer>()
+  const usbImport = createMemo(() => { const media = usb(); return media?.kind === "import" ? media : undefined })
   let running: RunningFileCopy | undefined
   let decision: { requested: boolean } | undefined
   let copyEpoch = 0
@@ -63,6 +66,11 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
   const discardable = () => !!current() && !props.blocked && ["ready", "incomplete"].includes(observed()?.state ?? "") && observed()?.can_discard
 
   async function read(entry: FileReference) {
+    if (entry.usbExport) {
+      const receipt = entry.usbExport.receipt ?? null
+      return fileOutcome.parse({ operation_id: entry.id, safe_id: entry.safe, opening: entry.opening, source_opening: receipt ? entry.opening : null,
+        state: receipt ? "published" : "unknown", receipt, can_recover: false, can_discard: false })
+    }
     const expected = generation()
     const state = await props.runtime.status()
     const opened = state.idle_lock.safes.find((safe) => safe.opening.safe_id === entry.safe && !safe.closing)?.opening
@@ -137,6 +145,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
   async function inspect(entry: FileReference, location: "recent" | "inventory" = "recent") {
     if (working()) return
     setReference({ entry, location }); setObserved(undefined); setConfirmation(undefined); setNotice(""); setPage("outcome")
+    if (entry.usbExport) { await refresh(); return }
     try {
       if (!await props.run(["safe", "open", props.safe])) { setNotice("Open this Safe to inspect the recorded outcome. No copy will be retried automatically."); return }
       await refresh()
@@ -150,6 +159,11 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       const finished = (await copy.done).finished
       usbUnconfirmed = fromUsb && (!finished || finished.outcome === "interrupted")
       if (!approval.requested && finished && finished.outcome !== "completed") beforeApproval = finished.outcome
+      if (entry.usbExport && finished?.outcome === "completed" && finished.receipt) {
+        const updated = { ...entry, usbExport: { receipt: finished.receipt } }
+        transfers.remember(updated)
+        if (!stopped && epoch === copyEpoch && current()?.id === entry.id) setReference({ entry: updated, location: "recent" })
+      }
     }
     catch {
       try { await copy.cancel() }
@@ -192,19 +206,26 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       if (!state.app_open || !state.idle_lock.host || state.idle_lock.host.closing || !opened) { setNotice("The Safe is no longer available. Reopen it before copying."); return }
       if (props.opening && props.opening !== opened.nonce) { setNotice("The Safe opening changed. Refresh Files and review the copy again."); return }
       const media = usb()
-      if (media && media.opening !== opened.nonce) { setNotice("The Safe opening changed. Select the USB files again."); return }
-      const entry: FileTransfer = { id: crypto.randomUUID().replaceAll("-", ""), safe, opening: opened.nonce, kind: operation(), name: name(), sources: sources(), destination: operation() === "import" ? `workspace/${name()}` : destination() }
+      if (media?.kind === "import" && media.opening !== opened.nonce) { setNotice("The Safe opening changed. Select the USB files again."); return }
+      if (media?.kind === "export" && !media.device) return
+      const id = crypto.randomUUID().replaceAll("-", "")
+      const usbExport = media?.kind === "export" ? media.device : undefined
+      const publishedName = usbExport ? `Oblivion-${id}` : name()
+      const entry: FileTransfer = { id, safe, opening: opened.nonce, kind: operation(), name: publishedName, sources: sources(),
+        destination: usbExport ? `USB ${usbExport.name} · /${publishedName}/files` : operation() === "import" ? `workspace/${publishedName}` : destination(),
+        ...(usbExport ? { usbExport: {} } : {}),
+      }
       transfers.remember(entry)
       setReference({ entry, location: "recent" }); setObserved(undefined); setCopyReview(undefined); setCopyMappings([]); setCopied(0); setCopyStage("preparing"); setPage("transfer")
       const args = entry.kind === "import"
-        ? ["files", "import", "--safe", entry.safe, ...(media ? ["--usb", media.device.id] : []), ...entry.sources.flatMap((source) => ["--source", source]), "--name", name()]
-        : ["files", "export", "--safe", entry.safe, ...entry.sources.flatMap((source) => ["--path", source]), "--destination", entry.destination, "--name", name()]
+        ? ["files", "import", "--safe", entry.safe, ...(media?.kind === "import" ? ["--usb", media.device.id] : []), ...entry.sources.flatMap((source) => ["--source", source]), "--name", entry.name]
+        : ["files", "export", "--safe", entry.safe, ...entry.sources.flatMap((source) => ["--path", source]), ...(usbExport ? ["--usb", usbExport.id] : ["--destination", entry.destination, "--name", entry.name])]
       const epoch = ++copyEpoch
       const approval = { requested: false }
       decision = approval
       const copy = props.runtime.files.start({ args: [...args, "--operation", entry.id, "--opening", opened.nonce],
         identity: { operation_id: entry.id, safe_id: entry.safe, opening: entry.opening }, direction: entry.kind,
-        name: name(), sources: entry.sources,
+        name: entry.name, sources: entry.sources,
       }, (event) => {
         if (stopped || epoch !== copyEpoch) return
         if (event.event === "mapping") setCopyMappings((entries) => [...entries, ...event.entries])
@@ -271,6 +292,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
     if (page() === "transfer" && running) { void cancelCopy(); return }
     if (working() || copyStage()) return
     if (page() === "usb-source") { void endUsb(false); return }
+    if (page() === "usb-devices" && usb()?.kind === "export") { setPage("guest"); setSelected(0); return }
     if (page() === "menu") { props.back(); return }
     if (page() === "recover" || page() === "discard") { setConfirmation(undefined); setPage("outcome"); return }
     if (page() === "outcome") { setPage("records"); setSelected(0); return }
@@ -281,6 +303,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
 
   function continueSelection() {
     if (!sources().length) return
+    if (usb()?.kind === "export") { void refreshUsb(); return }
     setName(sources().length === 1 ? path.basename(sources()[0]!) : operation() === "import" ? "Imported files" : "Exported files")
     setPage(operation() === "import" || sources().length > 1 ? "name" : "destination")
   }
@@ -304,15 +327,26 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       const opening = state.idle_lock.safes.find((entry) => entry.opening.safe_id === props.safe && !entry.closing)?.opening.nonce
       if (stopped) return
       if (!state.app_open || !state.idle_lock.host || state.idle_lock.host.closing || !opening || props.opening && props.opening !== opening) throw new Error("The Safe is no longer open.")
-      setUsb({ device, opening, browser: props.runtime.usb.open(props.safe, device.id, opening) })
+      setUsb({ kind: "import", device, opening, browser: props.runtime.usb.open(props.safe, device.id, opening) })
       setOperation("import"); setSources([]); setPage("usb-source")
     } catch { if (!stopped) setNotice("The USB could not be opened for this Safe. Refresh media and retry.") }
     finally { if (!stopped) setWorking(false) }
   }
 
+  function chooseUsb(device: LiveDevice) {
+    if (working() || props.blocked) return
+    if (usb()?.kind === "export") {
+      if (device.read_only) return
+      setUsb({ kind: "export", device })
+      void beginCopy()
+      return
+    }
+    void openUsb(device)
+  }
+
   async function endUsb(keepSelection: boolean) {
     const media = usb()
-    if (!media || working()) return
+    if (media?.kind !== "import" || working()) return
     setWorking(true); setNotice("")
     try {
       await media.browser.close()
@@ -327,22 +361,37 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
     } finally { if (!stopped) setWorking(false) }
   }
 
+  function startExport(toUsb: boolean) {
+    void props.run(["safe", "open", props.safe]).then((ok) => {
+      if (!ok || stopped) return
+      setUsb(toUsb ? { kind: "export" } : undefined)
+      setOperation("export"); setSources([]); setPage("guest")
+    })
+  }
+
   const actions = () => [
     { name: "Import", description: "Choose local files or folders across directories. A verified copy is published into this Safe's writable workspace.", action: "Choose source", disabled: props.blocked, run: () => { setUsb(undefined); setOperation("import"); setSources([]); setPage("source") } },
     ...(props.runtime.usb ? [{ name: "Import from USB", description: "Open a separate USB device in an isolated transfer VM. Choose files to copy into this Safe's workspace.", action: "Choose USB", disabled: props.blocked, run: () => { setUsb(undefined); void refreshUsb() } }] : []),
-    { name: "Export", description: "Choose files or folders under workspace and imports, then a destination on this computer.", action: "Choose Safe files", disabled: props.blocked, run: () => { void props.run(["safe", "open", props.safe]).then((ok) => { if (ok) { setUsb(undefined); setOperation("export"); setSources([]); setPage("guest") } }) } },
+    { name: "Export", description: "Choose files or folders under workspace and imports, then a destination on this computer.", action: "Choose Safe files", disabled: props.blocked, run: () => startExport(false) },
+    ...(props.runtime.usb ? [{ name: "Export to USB", description: "Choose Safe files, then approve copying them to a separate USB drive.", action: "Choose Safe files", disabled: props.blocked, run: () => startExport(true) }] : []),
     { name: "Transfers and recovery", description: "Find receiver records after restarting this manager. Inspect current status before recovering or discarding; no copy is retried automatically.", action: "Inspect transfers", run: () => showTransfers() },
   ]
-  const label = () => observed()?.state === "published" ? "Copy completed and verified."
+  const label = () => observed()?.state === "published" ? current()?.usbExport ? "USB export verified and device released." : "Copy completed and verified."
     : observed()?.state === "ready" ? "Verified copy · publication unconfirmed"
     : observed()?.state === "incomplete" ? "Copy incomplete · inspect staging"
     : observed()?.state === "discarded" ? "Private staging discarded"
     : "Outcome unknown · inspect before another copy"
   const description = () => { const entry = current(); const device = page() === "transfer" ? usb()?.device : undefined; return entry ? `${entry.kind === "import" ? "Import" : "Export"} · ${props.name}${device ? ` · USB ${device.name}` : ""}\nOperation ${entry.id}` : "Choose a recorded operation." }
+  function mappedDestination(mapping: FileMappingEntry) {
+    if (mapping.covered_by !== null) return `Included in selection ${mapping.covered_by + 1}`
+    const entry = current()
+    if (entry?.usbExport) return `${entry.name}/files/${sources().length === 1 ? "" : "selection/"}${mapping.alias}`
+    return `${entry?.name ?? name()}${sources().length === 1 ? "" : `/${mapping.alias}`}`
+  }
 
   createEffect(on([generation, availability], () => {
     const media = usb()
-    if (page() === "usb-source" && media && (props.blocked || props.opening !== media.opening)) void endUsb(false)
+    if (page() === "usb-source" && media?.kind === "import" && (props.blocked || props.opening !== media.opening)) void endUsb(false)
     setObserved(undefined); setConfirmation(undefined)
     inventoryEpoch++; setInventory(undefined); setInventoryCursors([]); setInventoryDestination(undefined); setInventoryBusy(false); setInventoryNeedsOpen(false); setRecordsScope("import")
     if (reference()?.location === "inventory") { setReference(undefined); setSelected(0); if (["outcome", "recover", "discard", "record-destination"].includes(page())) setPage("records") }
@@ -360,7 +409,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
     })
   }, { defer: true }))
   createEffect(() => { if (reference()?.location === "recent" && !details()) { setObserved(undefined); setConfirmation(undefined); setReference(undefined); setPage("records"); if (running) void cancelCopy() } })
-  onCleanup(() => { stopped = true; copyEpoch++; inventoryEpoch++; void running?.cancel().catch(() => {}); void usb()?.browser.close().catch(() => {}) })
+  onCleanup(() => { stopped = true; copyEpoch++; inventoryEpoch++; void running?.cancel().catch(() => {}); const media = usb(); if (media?.kind === "import") void media.browser.close().catch(() => {}) })
   useKeyboard((key) => {
     if (key.defaultPrevented) return
     if (page() === "transfer" && key.name === "escape") { key.preventDefault(); void cancelCopy(); return }
@@ -386,7 +435,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       if (key.name === "pageup" && inventoryCursors().length) { key.preventDefault(); void listTransfers(kind, inventoryCursors().slice(0, -1)); return }
     }
     if (page() !== "outcome") return
-    if (key.name === "r") { key.preventDefault(); void refresh() }
+    if (key.name === "r" && !current()?.usbExport) { key.preventDefault(); void refresh() }
     if (key.name === "c" && recoverable()) { key.preventDefault(); void prepare("recover") }
     if (key.name === "d" && discardable()) { key.preventDefault(); void prepare("discard") }
   })
@@ -396,9 +445,9 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       items={actions()} selected={selected()} change={setSelected} focused disabled={working()} choose={(index) => { const action = actions()[index]; if (!action?.disabled) action?.run() }} back={props.back} />
       <text fg={theme.text.muted}>Agents running in another terminal keep working. Files are shared by agents in this Safe.</text>
     </Show>
-    <Show when={page() === "usb-devices"}><Menu title="Choose USB device" description={`Import into ${props.name} · The device will open in read-only mode.`}
-      items={devices().map((device) => ({ name: device.name, badge: capacity(device.bytes), description: `Copy files from ${device.name} into the Safe workspace.`, action: "Browse files", disabled: props.blocked, run: () => {} }))}
-      selected={selected()} change={setSelected} focused disabled={working()} choose={(index) => { const device = devices()[index]; if (device) void openUsb(device) }} back={back}
+    <Show when={page() === "usb-devices"}><Menu title="Choose USB device" description={usb()?.kind === "export" ? `Export from ${props.name} · Writing starts after manifest approval.` : `Import into ${props.name} · The device will open in read-only mode.`}
+      items={devices().map((device) => ({ name: device.name, badge: capacity(device.bytes), description: usb()?.kind === "export" ? `Review the selected Safe files before writing to ${device.name}.` : `Copy files from ${device.name} into the Safe workspace.`, action: usb()?.kind === "export" ? "Review export" : "Browse files", disabled: props.blocked || (usb()?.kind === "export" && device.read_only ? "Read-only device" : undefined), run: () => {} }))}
+      selected={selected()} change={setSelected} focused disabled={working()} choose={(index) => { const device = devices()[index]; if (device) chooseUsb(device) }} back={back}
       toolbar={[{ title: "Refresh", key: "R", disabled: working(), run: () => { void refreshUsb() } }, { title: "Back", key: "Esc", run: back }]}
       empty={working() ? "Inspecting USB devices…" : "No available devices. Connect a separate USB drive and refresh."} />
     </Show>
@@ -430,15 +479,15 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       <scrollbox flexGrow={1} minHeight={0}><box flexDirection="column" gap={1}>
         <text fg={observed()?.state === "published" ? theme.feedback.success : theme.feedback.warning}>{label()}</text>
         <Show when={details()}>{(entry) => <text fg={theme.text.muted}>{`From · ${entry().sources.join("\n")}`}</text>}</Show>
-        <text fg={theme.text.muted}>{`Name · ${current()?.name}\nTo · ${current()?.kind === "export" ? path.join(current()!.destination, current()!.name) : current()?.destination}`}</text>
+        <text fg={theme.text.muted}>{`Name · ${current()?.name}\nTo · ${current()?.kind === "export" && !current()?.usbExport ? path.join(current()!.destination, current()!.name) : current()?.destination}`}</text>
         <Show when={observed()?.receipt}>{(receipt) => <text fg={theme.text.muted}>{`Manifest entries · ${receipt().entries} · ${receipt().bytes.toLocaleString("en-US")} B\nSHA-256 ${receipt().manifest_sha256}`}</text>}</Show>
-        <Show when={observed()?.state === "published"}><text fg={theme.text.muted}>Recorded publication receipt. Later changes to destination files are not checked.</text></Show>
+        <Show when={observed()?.state === "published"}><text fg={theme.text.muted}>{current()?.usbExport ? "USB receipt from this manager run. The device's current contents have not been rechecked." : "Recorded publication receipt. Later changes to destination files are not checked."}</text></Show>
         <Show when={observed()?.source_opening && observed()?.source_opening !== observed()?.opening}><text fg={theme.feedback.info}>This copy belongs to an earlier opening. Its status was checked against the current Safe opening.</text></Show>
-        <Show when={!observed() || observed()?.state === "unknown"}><text fg={theme.text.muted}>The copy may have reached its destination. Check recorded status and the destination before creating another operation.</text></Show>
+        <Show when={!observed() || observed()?.state === "unknown"}><text fg={theme.text.muted}>{current()?.usbExport ? "The copy may have reached the USB. Check removal status and the operation folder before trying again." : "The copy may have reached its destination. Check recorded status and the destination before creating another operation."}</text></Show>
         <Show when={props.blocked}><text fg={theme.feedback.warning}>{props.blocked}</text></Show>
       </box></scrollbox>
       <ActionBar focused disabled={working()} actions={[
-        { title: "Refresh status", key: "R", run: () => { void refresh() } },
+        ...(current()?.usbExport ? [] : [{ title: "Refresh status", key: "R", run: () => { void refresh() } }]),
         ...(recoverable() ? [{ title: "Recover verified copy", key: "C", run: () => { void prepare("recover") } }] : []),
         ...(discardable() ? [{ title: "Discard staging", key: "D", run: () => { void prepare("discard") } }] : []),
         { title: "Back", key: "Esc", run: back },
@@ -453,33 +502,32 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       setDestination(value); void beginCopy()
     }} /></Show>
     <Show when={page() === "guest"}><GuestChooser safe={props.safe} runtime={props.runtime} back={back} selection={{ paths: sources(), change: setSources, continue: continueSelection }} /></Show>
-    <Show when={page() === "usb-source" && !working() && usb()} keyed>{(media) => <GuestChooser safe={props.safe} runtime={props.runtime} media={media} back={back} selection={{ paths: sources(), change: setSources, continue: () => { void endUsb(true) } }} />}</Show>
-    <Show when={page() === "usb-source" && working()}><BusyModal text="Disconnecting USB device" /></Show>
-    <Show when={page() === "name"}><FormView form={{ title: sources().length > 1 ? "Name the collection" : "Name the imported copy", description: `${sources().length > 1 ? "One folder will contain all selected items. Destination names and overlaps are reviewed next.\n" : ""}${usb() ? `USB ${usb()!.device.name}` : operation() === "import" ? "Source on this computer" : "Source in the Safe"} · ${sources().join("\n")}`, fields: [{ id: "name", label: operation() === "import" ? "Workspace name" : "Export folder name", value: name(), validate: (value) => !value || unsafePathText.test(value) || value.includes("/") || value.includes("\\") || value === "." || value === ".." || Buffer.byteLength(value) > 255 ? "Choose a single file or folder name." : undefined }], submit: operation() === "import" ? "Review copy" : "Choose destination", run: async () => {} }} cancel={back} submit={(values) => { setName(values.name); if (operation() === "export") { setPage("destination"); return }; void beginCopy() }} /></Show>
+    <Show when={page() === "usb-source" && !working() && usbImport()} keyed>{(media) => <GuestChooser safe={props.safe} runtime={props.runtime} media={media} back={back} selection={{ paths: sources(), change: setSources, continue: () => { void endUsb(true) } }} />}</Show>
+    <Show when={page() === "name"}><FormView form={{ title: sources().length > 1 ? "Name the collection" : "Name the imported copy", description: `${sources().length > 1 ? "One folder will contain all selected items. Destination names and overlaps are reviewed next.\n" : ""}${usbImport() ? `USB ${usbImport()?.device.name}` : operation() === "import" ? "Source on this computer" : "Source in the Safe"} · ${sources().join("\n")}`, fields: [{ id: "name", label: operation() === "import" ? "Workspace name" : "Export folder name", value: name(), validate: (value) => !value || unsafePathText.test(value) || value.includes("/") || value.includes("\\") || value === "." || value === ".." || Buffer.byteLength(value) > 255 ? "Choose a single file or folder name." : undefined }], submit: operation() === "import" ? "Review copy" : "Choose destination", run: async () => {} }} cancel={back} submit={(values) => { setName(values.name); if (operation() === "export") { setPage("destination"); return }; void beginCopy() }} /></Show>
     <Show when={page() === "transfer"}><PageHeader title={copyStage() === "review" ? operation() === "import" ? "Confirm import" : "Confirm export" : copyStage() === "copying" ? "Copying files" : copyStage() === "finalizing" ? "Finalizing copy" : copyStage() === "cancelling" ? "Cancelling copy" : "Preparing copy"} description={description()} />
       <Show when={copyStage() === "copying" || copyStage() === "finalizing"}><text flexShrink={0} fg={theme.feedback.info}>{`${copied().toLocaleString("en-US")} B / ${copyReview()?.summary.bytes.toLocaleString("en-US") ?? "?"} B transferred`}</text></Show>
       <Show when={copyStage() === "finalizing"}><text flexShrink={0} fg={theme.text.muted}>All payload bytes were sent. Verification and publication are still in progress.</text></Show>
       <scrollbox ref={(value: ScrollBoxRenderable) => { reviewScroll = value }} flexGrow={1} minHeight={0}><box flexDirection="column" gap={1}>
         <text fg={theme.text.muted}>{`From · ${sources().length === 1 ? details()?.sources[0] : `${sources().length} selected items`}\nTo · ${current()?.destination}`}</text>
         <Show when={copyReview() && copyStage() === "review"}><text fg={theme.text.base}><b>Destination names · PageUp / PageDown to scroll</b></text>
-          <For each={copyMappings()}>{(mapping) => <text fg={mapping.covered_by === null ? theme.text.base : theme.text.muted}>{`${mapping.input_index + 1}. ${details()?.sources[mapping.input_index]}\n   → ${mapping.covered_by === null ? `${name()}${sources().length === 1 ? "" : `/${mapping.alias}`}` : `Included in selection ${mapping.covered_by + 1}`}`}</text>}</For>
+          <For each={copyMappings()}>{(mapping) => <text fg={mapping.covered_by === null ? theme.text.base : theme.text.muted}>{`${mapping.input_index + 1}. ${details()?.sources[mapping.input_index]}\n   → ${mappedDestination(mapping)}`}</text>}</For>
         </Show>
         <Show when={copyReview()}>{(review) => <>
           <text fg={theme.text.base}>{`${review().summary.files.toLocaleString("en-US")} selected files · ${review().summary.directories.toLocaleString("en-US")} selected folders\n${review().summary.bytes.toLocaleString("en-US")} B total · ${review().summary.entries.toLocaleString("en-US")} manifest entries`}</text>
           <text fg={theme.text.muted}>{`Manifest SHA-256\n${review().summary.manifest_sha256}`}</text>
         </>}</Show>
         <Show when={copyStage() === "review"}><text fg={theme.feedback.info}>These counts cover the recursive selection. File contents are not transferred until you approve this manifest.</text></Show>
-        <Show when={copyStage() === "review" && current()?.kind === "export"}><text fg={theme.text.muted}>Exported copies use the destination filesystem's protection.</text></Show>
+        <Show when={copyStage() === "review" && current()?.kind === "export"}><text fg={theme.text.muted}>{current()?.usbExport ? "Approval opens this USB for writing. Exported files are readable outside the Safe." : "Exported copies use the destination filesystem's protection."}</text></Show>
         <Show when={copyStage() === "cancelling" || copyStage() === "reconciling"}><text fg={theme.feedback.warning}>Waiting for the owned copy process and checking its recorded outcome. A destination may already have been published.</text></Show>
       </box></scrollbox>
       <ActionBar focused disabled={working() || ["cancelling", "reconciling"].includes(copyStage() ?? "")} actions={[
-        ...(copyStage() === "review" ? [{ title: "Approve copy", key: "Enter", run: () => { void approveCopy() } }] : []),
+        ...(copyStage() === "review" ? [{ title: current()?.usbExport ? "Write to USB" : "Approve copy", key: "Enter", run: () => { void approveCopy() } }] : []),
         { title: "Cancel copy", key: "Esc", run: () => { void cancelCopy() } },
       ]} />
     </Show>
     <Show when={props.blocked && page() !== "outcome"}><text flexShrink={0} fg={theme.feedback.warning}>{props.blocked}</text></Show>
     <Show when={notice()}><text flexShrink={0} fg={theme.feedback.warning}>{notice()}</text></Show>
-    <Show when={working() || inventoryBusy() && page() === "records"}><BusyModal text={inventoryBusy() ? "Reading receiver records" : page() === "outcome" ? "Checking copy outcome" : "Checking Safe opening"} /></Show>
+    <Show when={working() || inventoryBusy() && page() === "records"}><BusyModal text={inventoryBusy() ? "Reading receiver records" : page() === "outcome" ? "Checking copy outcome" : page() === "usb-source" ? "Disconnecting USB device" : page() === "usb-devices" ? "Preparing USB selection" : "Checking Safe opening"} /></Show>
     <Show when={copyStage() === "preparing"}><BusyModal text="Preparing recursive copy review" cancellable cancel={() => { void cancelCopy() }} /></Show>
   </box>
 }

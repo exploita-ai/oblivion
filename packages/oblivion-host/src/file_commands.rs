@@ -9,7 +9,7 @@ use oblivion_transfer::native_files::{
     Action, Context, Direction, Request, Status, TransfersPage, TransfersQuery,
 };
 use oblivion_transfer::selection::{self, Plan};
-use oblivion_transfer::stream::{PreparedDownload, PreparedMediaImport, PreparedUpload};
+use oblivion_transfer::stream::{PreparedDownload, PreparedMediaExport, PreparedMediaImport, PreparedUpload};
 use oblivion_transfer::{stream, Receipt};
 use serde_json::json;
 use std::fs::File;
@@ -114,9 +114,10 @@ pub fn run(command: CopyCommand) -> control::Result<i32> {
         events_output,
         confirmed,
     } = command;
-    let exporting = matches!(&selection, CopyInput::Download { .. });
+    let exporting = matches!(&selection, CopyInput::Download { .. } | CopyInput::MediaExport { .. });
     let selection = match selection {
-        CopyInput::Media { device, sources } => CopySelection::Media { device, sources },
+        CopyInput::MediaImport { device, sources } => CopySelection::MediaImport { device, sources },
+        CopyInput::MediaExport { device, selected } => CopySelection::MediaExport { device, selected },
         CopyInput::Upload(sources) => {
             let sources = sources
                 .iter()
@@ -142,7 +143,6 @@ pub fn run(command: CopyCommand) -> control::Result<i32> {
             destination: Path::new(&destination).canonicalize()?,
         },
     };
-    let destination_name = selection.name(name.as_deref())?;
     let mut controller = control::Client::new();
     let target = files::target(&mut controller, &safe)?;
     let opening = files::opening(&mut controller, &target, expected_opening.as_deref())?;
@@ -154,6 +154,11 @@ pub fn run(command: CopyCommand) -> control::Result<i32> {
             File::open("/dev/urandom")?.read_exact(&mut random)?;
             random.iter().map(|byte| format!("{byte:02x}")).collect()
         }
+    };
+    let destination_name = if matches!(&selection, CopySelection::MediaExport { .. }) {
+        format!("Oblivion-{operation_id}")
+    } else {
+        selection.name(name.as_deref())?
     };
     let context = Context {
         id: operation_id,
@@ -167,7 +172,10 @@ pub fn run(command: CopyCommand) -> control::Result<i32> {
         name: destination_name,
     };
     context.validate()?;
-    eprintln!(
+    if matches!(&selection, CopySelection::MediaExport { .. }) {
+        eprintln!("File operation {}. The destination folder on USB is /{}/files.", context.id, context.name);
+    } else {
+        eprintln!(
         "File operation {}. Inspect with oblivion files status --safe {} --operation {}{}",
         context.id,
         id,
@@ -177,7 +185,8 @@ pub fn run(command: CopyCommand) -> control::Result<i32> {
         } else {
             ""
         }
-    );
+        );
+    }
     if !events_output && !confirmed && !std::io::stdin().is_terminal() {
         return Err("A file copy needs review in a terminal, --yes for an explicit unattended copy, or --events for the manager".into());
     }
@@ -188,7 +197,8 @@ pub fn run(command: CopyCommand) -> control::Result<i32> {
 
 enum CopySelection {
     Upload(Vec<PathBuf>),
-    Media { device: String, sources: Vec<String> },
+    MediaImport { device: String, sources: Vec<String> },
+    MediaExport { device: String, selected: Vec<String> },
     Download {
         selected: Vec<String>,
         destination: PathBuf,
@@ -201,7 +211,7 @@ impl CopySelection {
             Self::Upload(sources) if sources.len() == 1 => {
                 sources[0].file_name().and_then(|name| name.to_str())
             }
-            Self::Media { sources, .. } if sources.len() == 1 => sources[0].rsplit('/').next(),
+            Self::MediaImport { sources, .. } if sources.len() == 1 => sources[0].rsplit('/').next(),
             Self::Download { selected, .. } if selected.len() == 1 => {
                 selected[0].rsplit('/').next()
             }
@@ -220,7 +230,8 @@ impl CopySelection {
 
 enum PreparedCopy {
     Upload(PreparedUpload),
-    Media(PreparedMediaImport<Channel>),
+    MediaImport(PreparedMediaImport<Channel>),
+    MediaExport(PreparedMediaExport<Channel>),
     Download(PreparedDownload<Channel>),
 }
 
@@ -228,14 +239,16 @@ impl PreparedCopy {
     fn plan(&self) -> &Plan {
         match self {
             Self::Upload(prepared) => prepared.plan(),
-            Self::Media(prepared) => prepared.plan(),
+            Self::MediaImport(prepared) => prepared.plan(),
+            Self::MediaExport(prepared) => prepared.plan(),
             Self::Download(prepared) => prepared.plan(),
         }
     }
     fn summary(&self) -> std::io::Result<Summary> {
         match self {
             Self::Upload(prepared) => prepared.summary(),
-            Self::Media(prepared) => prepared.summary(),
+            Self::MediaImport(prepared) => prepared.summary(),
+            Self::MediaExport(prepared) => prepared.summary(),
             Self::Download(prepared) => prepared.summary(),
         }
     }
@@ -270,6 +283,7 @@ fn copy(
     // Dropping its private lease is the last-resort revocation on process death.
     let mut attachment = None;
     let mut media = None;
+    let mut media_started = false;
     let result = (|| -> control::Result<Copied> {
         let prepared = match &selection {
             CopySelection::Upload(sources) => PreparedCopy::Upload(PreparedUpload::prepare(
@@ -281,14 +295,26 @@ fn copy(
                         .map_or(Ok(()), super::file_events::Control::check)
                 },
             )?),
-            CopySelection::Media { device, sources } => {
-                let source = super::live_media_commands::Source::open(&opening, device)?;
+            CopySelection::MediaImport { device, sources } => {
+                media_started = true;
+                let watch = events.as_ref().map(super::file_events::Control::watch).transpose()?;
+                let source = super::live_media_commands::Attachment::open(&opening, device, oblivion_wire::live_media::Direction::Import,
+                    watch.as_ref().map(OwnedFd::try_clone).transpose()?)?;
                 let mut channel = source.channel(Duration::from_secs(15 * 60))?;
                 media = Some(source);
-                if let Some(events) = &events {
-                    channel.watch(events.watch()?);
+                if let Some(watch) = watch {
+                    channel.watch(watch);
                 }
-                PreparedCopy::Media(PreparedMediaImport::prepare(channel, sources, context.clone())?)
+                PreparedCopy::MediaImport(PreparedMediaImport::prepare(channel, sources, context.clone())?)
+            }
+            CopySelection::MediaExport { selected, .. } => {
+                let channel = file_channel(
+                    &opening,
+                    &json!({"operation":"export"}),
+                    events.as_ref().map(super::file_events::Control::watch).transpose()?,
+                    &mut attachment,
+                )?;
+                PreparedCopy::MediaExport(PreparedMediaExport::prepare(channel, selected, context.clone())?)
             }
             CopySelection::Download {
                 selected,
@@ -326,6 +352,9 @@ fn copy(
             .as_ref()
             .map(super::file_events::Control::watch)
             .transpose()?;
+        if let Some(events) = &events {
+            events.check()?;
+        }
         let mut last_progress = None;
         let mut observer = |phase, bytes| {
             if let Some(events) = &mut events {
@@ -333,7 +362,7 @@ fn copy(
             }
             console_progress(phase, bytes, summary.bytes, &mut last_progress)
         };
-        let import = || {
+        let mut import = |watch| {
             // Only a reviewed manifest can acquire the import destination.
             let request = Request::Import {
                 id: context.id.clone(),
@@ -344,15 +373,28 @@ fn copy(
             file_channel(&opening, &request, watch, &mut attachment)
         };
         let receipt = match prepared {
-            PreparedCopy::Upload(prepared) => prepared.send(&mut import()?, &digest, &mut observer)?,
-            PreparedCopy::Media(prepared) => prepared.send(&mut import()?, &digest, &mut observer)?,
+            PreparedCopy::Upload(prepared) => prepared.send(&mut import(watch)?, &digest, &mut observer)?,
+            PreparedCopy::MediaImport(prepared) => prepared.send(&mut import(watch)?, &digest, &mut observer)?,
+            PreparedCopy::MediaExport(prepared) => {
+                let CopySelection::MediaExport { device, .. } = &selection else { unreachable!() };
+                // The privileged writable attachment starts only after the
+                // digest reviewed above was approved for this exact selection.
+                media_started = true;
+                let target = super::live_media_commands::Attachment::open(&opening, device, oblivion_wire::live_media::Direction::Export,
+                    watch.as_ref().map(OwnedFd::try_clone).transpose()?)?;
+                let mut channel = target.channel(Duration::from_secs(15 * 60))?;
+                media = Some(target);
+                if let Some(watch) = watch {
+                    channel.watch(watch);
+                }
+                prepared.send(&mut channel, &digest, &mut observer)?
+            }
             PreparedCopy::Download(prepared) => prepared.receive(&digest, &mut observer)?,
         };
         Ok(Copied::Complete(receipt))
     })();
-    let media_cleanup = media.map(super::live_media_commands::Source::finish).transpose();
-    let media_confirmed = !matches!(&selection, CopySelection::Media { .. })
-        || media_cleanup.as_ref().is_ok_and(Option::is_some);
+    let media_cleanup = media.map(super::live_media_commands::Attachment::finish).transpose();
+    let media_confirmed = !media_started || media_cleanup.as_ref().is_ok_and(Option::is_some);
     let result = media_cleanup.and(result);
     let released = if let Some((lease, client)) = attachment {
         let result = control::release_agent(&client, &opening.safe_id);
@@ -392,8 +434,13 @@ fn copy(
         });
     }
     eprintln!();
-    released.map_err(|error| format!("File operation {} cleanup could not be confirmed ({error}). Inspect its status before retrying.", context.id))?;
-    match result.map_err(|error| format!("File operation {} outcome could not be confirmed ({error}). Inspect its status; do not recopy automatically.", context.id))? {
+    let recovery = if matches!(&selection, CopySelection::MediaExport { .. }) {
+        "Check the USB operation folder and removal status before retrying."
+    } else {
+        "Inspect the receiver's recorded status before retrying."
+    };
+    released.map_err(|error| format!("File operation {} cleanup could not be confirmed ({error}). {recovery}", context.id))?;
+    match result.map_err(|error| format!("File operation {} outcome could not be confirmed ({error}). {recovery}", context.id))? {
         Copied::Complete(receipt) => { println!("{}", serde_json::to_string(&receipt)?); Ok(0) },
         Copied::Cancelled => { eprintln!("Cancelled before copying."); Ok(130) },
     }
@@ -432,13 +479,14 @@ fn review(
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
-        CopySelection::Media { sources, .. } => sources.clone(),
+        CopySelection::MediaImport { sources, .. } => sources.clone(),
+        CopySelection::MediaExport { selected, .. } => selected.clone(),
         CopySelection::Download { selected, .. } => selected.clone(),
     };
     let destination = match selection {
-        CopySelection::Download { destination, .. } => Some(destination.as_path()),
-        CopySelection::Upload(_) => None,
-        CopySelection::Media { .. } => None,
+        CopySelection::Download { destination, .. } => oblivion_cli::file_review::Destination::Computer(destination),
+        CopySelection::MediaExport { device, .. } => oblivion_cli::file_review::Destination::Usb(device),
+        CopySelection::Upload(_) | CopySelection::MediaImport { .. } => oblivion_cli::file_review::Destination::Workspace,
     };
     oblivion_cli::file_review::write(
         &mut std::io::stderr(),

@@ -56,12 +56,19 @@ fn usb_transfer_grammar_accepts_only_a_device_identity_and_relative_sources() {
         Command::Files(Files::MediaBrowse(command)) if command.device == device && command.opening == opening));
     let parse_copy = |values: &[&str]| oblivion_cli::file_copy::parse(&args(values));
     assert!(matches!(parse_copy(&["import", "--safe", "GB", "--usb", &device, "--source", "notes/report.md"]).unwrap().selection,
-        oblivion_cli::file_copy::CopyInput::Media { device: id, sources } if id == device && sources == ["notes/report.md"]));
+        oblivion_cli::file_copy::CopyInput::MediaImport { device: id, sources } if id == device && sources == ["notes/report.md"]));
     for path in ["/etc/passwd", "../secret", ""] {
         assert!(parse_copy(&["import", "--safe", "GB", "--usb", &device, "--source", path]).is_err());
     }
     assert!(parse_copy(&["import", "--safe", "GB", "--usb", "/dev/sdb1", "--source", "file"]).is_err());
     assert!(parse_copy(&["export", "--safe", "GB", "--usb", &device, "--path", "workspace/file", "--destination", "/tmp"]).is_err());
+    assert!(matches!(parse_copy(&["export", "--safe", "GB", "--usb", &device, "--path", "workspace/file", "--path", "imports/notes"]).unwrap().selection,
+        oblivion_cli::file_copy::CopyInput::MediaExport { device: id, selected } if id == device && selected == ["workspace/file", "imports/notes"]));
+    for option in [vec!["--yes"], vec!["--name", "Folder"]] {
+        let mut command = vec!["export", "--safe", "GB", "--usb", &device, "--path", "workspace/file"];
+        command.extend(option);
+        assert!(parse_copy(&command).is_err());
+    }
 }
 
 #[test]
