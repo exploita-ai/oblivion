@@ -234,11 +234,12 @@ these source boundaries. Actual disk growth and cold-restart acceptance remain o
 
 Files inspection and recovery now use the portable frontend for list, transfers,
 status, recover and discard. The Unix adapter supplies private file channels and
-the local receiver filesystem; copy source selection, approval and payload
-streaming remain in that adapter. Both paths reuse the same Safe lookup and fresh
+the local receiver filesystem; copy syntax, approval and payload streaming are shared; platform adapters own
+filesystem and transport handles. Both paths reuse the same Safe lookup and fresh
 opening check. Invalid inspection syntax fails before runtime startup. Portable
 tests, a real Unix controller-socket fixture and the existing copy checks pass;
-this does not provide Windows filesystem endpoints or installed transfer acceptance.
+Windows filesystem endpoints are now connected in source; installed transfer
+acceptance remains open.
 
 Windows now has an experimental HCS helper core with direct kernel/initrd
 boot, owned VM handles, private VirtioSerial token provisioning, local named-pipe
@@ -256,7 +257,7 @@ automatic Hyper-V DHCP fallback. HCN responses must confirm the requested
 identity and addresses. Creation precedes the VM, and cleanup requires its
 confirmed stop and observed network-resource absence. HCN calls are synchronous;
 service hangs, exact flags, coexistence and recovery still require Windows tests.
-The Windows installed entrypoint and initial setup are now connected in source; local payload endpoints, a normal-user privilege broker, software lifecycle and grant/network-recovery integration remain unfinished.
+The Windows installed entrypoint, initial setup and local Files payload endpoints are now connected in source; a normal-user privilege broker, software lifecycle and grant/network-recovery integration remain unfinished.
 Pipe peer/ACL behavior
 with the actual HCS worker, boot, inner KVM and the installed lifecycle remain
 Windows acceptance gates. See the [Windows backend](WINDOWS.md).
@@ -265,8 +266,8 @@ Safe tasks, family password changes and personal-backup recovery now also use th
 portable frontend. Their DTOs have one Wire owner, with controller-specific slot
 aliases where required. Real Unix fixtures cover offline task review/start,
 family preview, backup reconciliation after a lost reply and explicit discard.
-Malformed grammar fails before runtime startup. Copy streaming remains in the
-Unix adapter; these commands do not provide Windows filesystem endpoints.
+Malformed grammar fails before runtime startup. Copy streaming now uses one portable payload exchange with native filesystem
+endpoints; Windows fixture execution and installed transfer acceptance remain open.
 
 The Windows same-user named-pipe client now implements the shared controller
 adapter and native Runtime hooks. It authenticates the server SID, supports
@@ -328,8 +329,9 @@ manager with pinned installed assets. Status polling and human-activity reports
 read bounded private metadata and use the existing pipe without hashing the ISO
 or implicitly starting a stopped runtime. Windows Files reads guest pages and
 receiver outcomes through opening-bound attachments, releasing before pipe close.
-Local payload copies, Share, backup file streams and software update/removal are
-still explicitly unavailable there and fail before installation discovery/boot.
+Local Files payload copies are now connected to the shared protocol and consent
+flow. Share, backup file streams and software update/removal remain explicitly
+unavailable there and fail before installation discovery/boot.
 
 Windows setup now records Pending before bundle publication, configuration or
 VHDX creation. Bundle validation checks real inventory, hashes, file identities
@@ -377,3 +379,28 @@ session ID/title recovery through its API and SQLite after a server restart.
 This covers native metadata, not provider/tool conversations, real scope/PID1
 behavior, encrypted Safe reboot, SIGKILL/OOM or forced-cancel execution recovery.
 No new image was built for this increment.
+
+Windows Files now has local source and destination authorities and actual CLI
+copy orchestration, including the manager's existing event/approval channel.
+The common parser, human review, consent state machine, manifest, receipt and
+receiver journal have one implementation. Sources stay pinned; the destination
+uses same-volume private staging and exclusive handle-based publication. Native
+Windows names are checked before review. Recovery uses the same inventory and
+status/recover/discard commands, with a platform-tagged volume/file identity.
+Inspection never creates the receive lock or receiver records.
+
+The cancellable data pipe retains a separate zero-access kernel lease until
+explicit controller release; cancelling I/O is not treated as cleanup success.
+Import opens no guest receiver before approval. Offer, approval and payload
+boundaries now flush before awaiting the peer, with actual buffered Unix
+socket regressions. Windows filesystem, event-pipe and copy-orchestration fixtures
+are compiled for MSVC and registered in Windows CI; they have not been executed
+on this Mac. This does not qualify HCS boot, installed transfer persistence,
+Windows durability or the unfinished Share/backup/software-lifecycle endpoints.
+
+Focused Unix verification passed 25 transfer cases, six copy-parser cases and
+ten real launcher/event cases. They include buffered import/export, interrupted
+publication, receiver inventory and preservation of user edits during recovery.
+The canonical root `bun run check` passed. MSVC checks include the actual
+Windows entrypoint, native backend fixtures and Files command fixtures; those
+cross-compiles are kept separate from Windows execution and VM acceptance.

@@ -37,11 +37,11 @@ jobs:
       - name: Verify the common desktop bundle manifest
         working-directory: packages/oblivion-bundle
         run: cargo test --locked
-      - name: Compile and exercise portable Files validation and framing
+      - name: Exercise Files validation, consent and native Windows filesystem endpoints
         working-directory: packages/oblivion-transfer
         run: |
           cargo check --locked --lib --target x86_64-pc-windows-msvc
-          cargo test --locked --lib
+          cargo test --locked --lib --test file_consent --test windows_source --test windows_destination
       - name: Compile and exercise shared frontend commands, run and proxy grammar
         working-directory: packages/oblivion-cli
         run: |

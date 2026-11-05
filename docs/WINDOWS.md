@@ -4,8 +4,8 @@ Implementation checkpoint: 5 November 2026. **The Windows product is not complet
 or qualified.** An experimental HCS helper core and owned HCN ICS network are
 implemented. A same-user authenticated named-pipe client and shared CLI adapter
 are now present. The installed command entrypoint, bundle verification and
-one-shot per-user setup are connected in source; ordinary-user privilege setup,
-local file payload endpoints, update/removal and crash recovery remain open.
+one-shot per-user setup and local Files payload endpoints are connected in source;
+ordinary-user privilege setup, update/removal and crash recovery remain open.
 The manager has a Windows x64 build target; its PE
 execution and complete installed path still need qualification. This is a proposal for phase 8 of the
 [roadmap](oblivion1.0-roadmap.md), rather than instructions for an available product.
@@ -101,9 +101,42 @@ keeping the verified bundle and runtime lease alive until the child exits.
 `runtime start` explicitly makes the runtime resident. Status polls and activity
 reports read only bounded private metadata and address existing control pipes;
 they do not hash the ISO or boot a stopped runtime. Files browsing and guest
-transfer status/recovery use private, opening-scoped messages. Local import/export
-payloads, Share, backup file streams, software update/removal and the Live storage
-selector remain explicitly unavailable on Windows.
+transfer status/recovery use private, opening-scoped messages. Local Files import
+and export now use the same manifest, reviewed approval, payload protocol and
+receiver journal as Unix. Share, backup file streams, software update/removal and
+the Live storage selector remain explicitly unavailable on Windows.
+
+## Local Files copies
+
+`files import --safe GB --source .\project` and `files export --safe GB --path
+workspace/project --destination .\output` now connect the Windows filesystem
+endpoints to the installed CLI. Repeated selectors use one named collection.
+The console shows the prepared manifest before confirmation; unattended copies
+require `--yes`. The manager uses the shared `--events` approval flow, whose
+cancel/EOF revokes hashing and copy I/O. Import never contacts the guest receiver
+before approval. Export pins the selected local destination before review and
+creates its private staging only after approval.
+
+Local paths must resolve to a local drive. Component-by-component handle access
+rejects reparse points and hard links; files stay pinned through review and
+streaming. The receiver checks Windows reserved names, alternate streams,
+trailing-dot/space aliases and case-insensitive collisions before review instead
+of renaming them silently. Publication never replaces an existing destination.
+Windows recovery records bind volume GUID, volume serial and 128-bit file ID;
+Unix uses its own filesystem identity in the same current-format record.
+No beta-format reader or host path is added to the manifest/event channel.
+
+The copy owns a quiet pipe lease independently of its cancellable data stream.
+It releases the exact controller client before dropping that lease, even after
+I/O cancellation. A missing final receipt, release error or lost output is an
+interrupted/uncertain outcome to inspect, not permission to repeat the copy.
+`files transfers/status/recover/discard --destination DIRECTORY` reuse the same
+receiver inventory and journal without creating records during inspection.
+
+Native filesystem, named-pipe, consent and actual copy-orchestration fixtures
+are registered in Windows CI. Local MSVC compilation on the Mac is not evidence
+that they passed on Windows, that directory synchronization works on every
+filesystem, or that an installed Hyper-V transfer has been qualified.
 
 The executable smoke tests exercise help, version and pre-startup rejection on
 Windows without starting a VM. The actual installed lifecycle and HCS permissions
@@ -311,76 +344,32 @@ of an air gap or of zero plaintext managed by Windows itself.
 
 ## One CLI implementation, platform adapters
 
-The existing CLI cannot simply cross-compile by adding a Hyper-V executable.
-`launcher.rs` imports Unix process/FD APIs and uses POSIX signals and termios;
-`channel.rs`/`remote_control.rs` require Unix sockets; `native_runtime.rs` and
-`desktop_bundle.rs` depend on Unix filesystem ownership and locks. The desktop
-bundle platform table still omits Windows.
+`oblivion-cli` owns the top-level grammar and shared orchestration for agent
+launch, storage, Safe administration, network/proxy commands, tasks, family
+passwords, backup recovery and Files metadata. Both actual executables consume
+that code. `oblivion-wire` owns private controller/agent framing and DTOs;
+`oblivion-transfer` owns copy consent, manifests, receipts and receiver outcomes.
+Linux controller services remain in the Linux package, rather than being linked
+into each desktop executable.
 
-The manager builder now uses a target descriptor shared with launcher discovery.
-It selects `oblivion-manager.exe`, the sibling `oblivion.exe`, and the pinned
-OpenTUI Windows x64 DLL, while retaining the same manager entrypoint. The default
-target follows the actual builder host. The file picker receives an explicit
-parent path from its local/native or guest/POSIX caller, so it no longer rewrites
-Windows drive and UNC paths as guest paths. CI includes Windows target/picker
-fixtures and compilation of the frontend/DLL. These sources and test definitions
-do not establish an installed Windows runtime or a working Hyper-V backend.
+Windows adapters supply the console, private named pipes, filesystem handles,
+installation discovery and supervised HCS runtime. Files import/export uses
+these concrete authorities and the shared exchange. Agent arguments remain
+opaque arrays; no PowerShell command string is constructed. The three official
+agent binaries remain the pinned Linux binaries inside each Safe.
 
-The first shared boundaries are implemented and consumed by the existing
-launcher. `oblivion-cli` owns one run-option and proxy grammar, preserving opaque
-native arguments and returning a typed private-password request without doing
-terminal I/O. `oblivion-wire` owns bounded private controller/agent framing.
-`oblivion-transfer` separates manifests, payload verification, directory metadata,
-copy messages and Share selection rules from Unix filesystem endpoints. All
-three portable libraries compile for the Windows MSVC target; CI runs their
-portable tests on Windows. This does not provide a complete Windows launcher, trusted
-file handle implementation, ACL checks or a Hyper-V backend.
+The manager target descriptor selects `oblivion-manager.exe`, `oblivion.exe`
+and the pinned OpenTUI x64 DLL. It is shared by the builder and installed
+launcher discovery. Local pickers receive native parent paths; guest pickers
+retain POSIX paths. The source-bound bundle validator supports Windows assets
+without depending on Unix ownership APIs. Compilation and fixture definitions
+do not qualify the installed manager or Hyper-V path.
 
-The actual `status --json`, `safes` and `close NAME` frontend is now shared in
-`oblivion-cli`: one controller-state projection, Safe lookup, command parser and
-executor. The existing Unix launcher calls it through its authenticated adapter.
-Both Unix control paths consume the shared wire codec, retaining their distinct
-local/native framing, deadlines and attachment ownership. The shared code
-preserves raw JSON status and binds close requests to the observed slot and Safe
-ID. This is a migrated frontend slice, rather than a second Windows command
-implementation; the remaining orchestration and OS adapters are still open.
-
-Agent `run`, storage lifecycle and tmux `shell --safe` now share their actual orchestration
-as well. Safe lookup, creation/reopening, mode checks, protected startup and idle
-cleanup use an injected controller and platform hooks; the existing Unix launcher
-consumes them directly. Private terminal prompts, confirmation, clock/wait,
-notifications and agent/Workspace attachment remain platform hooks. Run and shell
-syntax is checked before VM startup. Transport, policy and cleanup calls after an
-opening carry both the chosen slot and expected Safe ID. The portable code uses
-the same network-command DTOs as the Linux controller, without linking to its
-Unix services. Real Unix-socket fixtures cover the path; this is not a native
-Windows terminal adapter or Hyper-V implementation.
-
-Archive Init/Unlock/Ephemeral/Lock and network/proxy commands now have one shared
-parser and executor too. First-run setup calls the same Init and Unlock rather
-than an OS-specific initializer. The Unix adapter supplies only private entry and
-confirmation. The network frontend keeps every Safe mutation and final status
-bound to its observed slot/ID; saved proxy listing decodes bounded public metadata.
-Malformed command arguments are rejected before VM startup or password entry. These source
-paths and Unix-socket fixtures do not implement the Windows OS adapters below.
-
-Remaining split, without a second command implementation:
-
-1. Move the remaining command orchestration, including Files import/export, family passwords,
-   saved tasks, Share and backup, into the portable frontend boundary.
-   Keep Linux controller services and storage code in the Linux host package,
-   rather than linking them into every desktop executable.
-2. Connect the shared CLI, wire and transfer boundaries to Windows transports
-   and filesystem endpoints. Keep one command grammar and protocol rather than
-   adding platform-specific copies or compatibility readers.
-3. Supply concrete terminal, private IPC, filesystem-identity and runtime-backend
-   adapters for Unix and Windows. Preserve opaque argument arrays; never feed
-   agent arguments into a PowerShell command string. The three agent binaries
-   remain the existing pinned Linux binaries inside the Safe.
-4. Qualify the owned HCN network and complete provisioned VHDX data, explicit
-   failed-stop/grant recovery and the installer, using the same runtime lifetime
-   contract. Compile and qualify a native OpenTUI manager
-   artifact as well; a CLI-only substitute would not satisfy bare `oblivion`.
+Remaining work is the Windows Share/backup streaming endpoints, a normal-user
+privilege broker, update/removal and explicit reconciliation of owned HCS,
+network and ACL grants after uncertain shutdown or interrupted setup. The full
+installed path must then pass the acceptance gates below. There is no second
+Windows command grammar, beta compatibility reader or automatic emulation fallback.
 
 For a launcher attached to an existing Windows Terminal, use its console/VT
 interface and forward the guest PTY. Raw keyboard input requires explicit console
