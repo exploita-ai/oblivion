@@ -190,3 +190,58 @@ test("recent copy metadata remains bounded and clears when its manager owner loc
   transfers.clear()
   expect(transfers.entries()).toHaveLength(0)
 })
+
+test("USB recovery requires a fresh read-only review and explicit publication", async () => {
+  const state = await fixture()
+  const device = "7".repeat(64)
+  const review = "e".repeat(64)
+  const calls: string[][] = []
+  let available = true
+  const runtime = { ...state.runtime,
+    query: (args: string[]) => args[0] === "runtime"
+      ? Promise.resolve({ version: 1, devices: [{ id: device, name: "sdb1", bytes: 800_000_000, read_only: false }] })
+      : state.runtime.query(args),
+    usb: {
+      open: () => { throw new Error("USB browsing should not be used for recovery") },
+      close: async () => {},
+      async operate(args: string[]) {
+        calls.push(args)
+        if (args[0] === "transfers") return { result: "inventory", operations: [operation], next_cursor: null }
+        if (!available) throw new Error("USB disconnected")
+        return { result: "status", status: { operation_id: operation, receipt,
+          state: args[0] === "recover" ? "published" : "ready", review_sha256: args[0] === "recover" ? null : review } }
+      },
+    },
+  }
+  const app = await testRender(() => <NativeFiles safe={safe} name="Research" opening={opening} runtime={runtime} run={state.run} back={() => {}} />,
+    { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await app.renderOnce()
+    await app.mockInput.pressArrow("down")
+    await app.mockInput.pressArrow("down")
+    await app.mockInput.pressArrow("down")
+    await app.mockInput.pressArrow("down")
+    await app.mockInput.pressEnter()
+    await visible(app, "File transfers")
+    await app.mockInput.pressKey("u")
+    await visible(app, "sdb1")
+    await app.mockInput.pressEnter()
+    await visible(app, `Oblivion-${operation}`)
+    await app.mockInput.pressEnter()
+    await visible(app, "Publish verified copy")
+    available = false
+    await app.mockInput.pressKey("r")
+    await visible(app, "Outcome unconfirmed")
+    expect(app.captureCharFrame()).not.toContain("Publish verified copy")
+    available = true
+    await app.mockInput.pressKey("r")
+    await visible(app, "Publish verified copy")
+    await app.mockInput.pressKey("c")
+    await visible(app, "Publish verified USB staging?")
+    expect(calls.map((args) => args[0])).toEqual(["transfers", "status", "status", "status"])
+    await app.mockInput.pressEnter()
+    await visible(app, "Published and verified against the USB manifest")
+    expect(calls.at(-1)).toEqual(["recover", "--operation", operation, "--confirmed-state", review,
+      "--safe", safe, "--opening", opening, "--usb", device])
+  } finally { await app.dispose() }
+})

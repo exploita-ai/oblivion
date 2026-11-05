@@ -13,6 +13,7 @@ import { FilePicker } from "./vendor/termcn/file-picker"
 import { theme } from "./theme"
 import { capacity, type NativeRuntime } from "./native-control"
 import { liveMedia, type LiveDevice, type UsbBrowser } from "./native-usb"
+import { NativeUsbTransfers } from "./native-usb-transfers"
 import { createFileTransfers, fileInventory, fileOutcome, type FileInventory, type FileOutcome, type FileReference, type FileTransfer } from "./native-file-transfers"
 import type { FileMappingEntry, FileReview, RunningFileCopy } from "./native-file-events"
 import { SelectionBasket, selectionError, type FileSelection } from "./file-selection"
@@ -27,7 +28,7 @@ type UsbTransfer = { kind: "import"; device: LiveDevice; opening: string; browse
 
 export function NativeFiles(props: { safe: string; name: string; opening?: string; blocked?: string; transfers?: ReturnType<typeof createFileTransfers>; runtime: NativeRuntime; run: (args: string[]) => Promise<boolean>; back: () => void }) {
   const transfers = props.transfers ?? createFileTransfers()
-  const [page, setPage] = createSignal<"menu" | "source" | "guest" | "usb-devices" | "usb-source" | "destination" | "name" | "transfer" | "records" | "record-destination" | "outcome" | "recover" | "discard">("menu")
+  const [page, setPage] = createSignal<"menu" | "source" | "guest" | "usb-devices" | "usb-source" | "usb-operations" | "destination" | "name" | "transfer" | "records" | "record-destination" | "outcome" | "recover" | "discard">("menu")
   const [selected, setSelected] = createSignal(0)
   const [operation, setOperation] = createSignal<"import" | "export">("import")
   const [sources, setSources] = createSignal<string[]>([])
@@ -50,6 +51,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
   const [copied, setCopied] = createSignal(0)
   const [devices, setDevices] = createSignal<LiveDevice[]>([])
   const [usb, setUsb] = createSignal<UsbTransfer>()
+  const [usbInspection, setUsbInspection] = createSignal<{ returnPage: "records" | "outcome"; operation?: string; expectedManifest?: string }>()
   const usbImport = createMemo(() => { const media = usb(); return media?.kind === "import" ? media : undefined })
   let running: RunningFileCopy | undefined
   let decision: { requested: boolean } | undefined
@@ -110,6 +112,12 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
   function showTransfers(kind: "import" | "export" = "import") { setPage("records"); void listTransfers(kind) }
   function showRecent() { inventoryEpoch++; setInventoryBusy(false); setInventory(undefined); setInventoryCursors([]); setInventoryNeedsOpen(false); setNotice(""); setSelected(0); setRecordsScope("recent"); setPage("records") }
   function chooseExportReceiver() { inventoryEpoch++; setInventoryBusy(false); setInventory(undefined); setInventoryNeedsOpen(false); setNotice(""); setPage("record-destination") }
+  function inspectUsb(entry?: FileReference) {
+    if (!props.runtime.usb || props.blocked || working() || copyStage()) return
+    setNotice("")
+    setUsbInspection({ returnPage: entry ? "outcome" : "records", operation: entry?.id, expectedManifest: entry?.usbExport?.receipt?.manifest_sha256 })
+    setPage("usb-operations")
+  }
   async function openInventorySafe() {
     if (working()) return
     const expected = generation()
@@ -425,6 +433,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
     if (page() === "records") {
       if (key.name === "i") { key.preventDefault(); showTransfers(); return }
       if (key.name === "e") { key.preventDefault(); chooseExportReceiver(); return }
+      if (key.name === "u" && props.runtime.usb) { key.preventDefault(); inspectUsb(); return }
       if (key.name === "m") { key.preventDefault(); showRecent(); return }
       if (key.name === "o" && inventoryNeedsOpen()) { key.preventDefault(); void openInventorySafe(); return }
       if (recordsScope() === "recent") return
@@ -435,6 +444,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       if (key.name === "pageup" && inventoryCursors().length) { key.preventDefault(); void listTransfers(kind, inventoryCursors().slice(0, -1)); return }
     }
     if (page() !== "outcome") return
+    if (key.name === "u" && current()?.usbExport && props.runtime.usb) { key.preventDefault(); inspectUsb(current()); return }
     if (key.name === "r" && !current()?.usbExport) { key.preventDefault(); void refresh() }
     if (key.name === "c" && recoverable()) { key.preventDefault(); void prepare("recover") }
     if (key.name === "d" && discardable()) { key.preventDefault(); void prepare("discard") }
@@ -461,6 +471,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       toolbar={[
         { title: "In this Safe", key: "I", run: () => showTransfers() },
         { title: "Choose export folder", key: "E", run: chooseExportReceiver },
+        ...(props.runtime.usb ? [{ title: "USB exports", key: "U", run: () => inspectUsb() }] : []),
         { title: `Recent in RAM (${records().length})`, key: "M", run: showRecent },
         ...(recordsScope() !== "recent" ? [
           { title: "Refresh", key: "R", run: () => { void listTransfers(recordsScope() === "export" ? "export" : "import") } },
@@ -474,6 +485,9 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
         : inventory()?.next_cursor ? "No records for this Safe on this page. Continue to the next page." : "No receiver records in this location."} />
       <Show when={inventory()?.skipped}><text flexShrink={0} fg={theme.feedback.info}>{inventory()!.skipped} receiver records skipped on this page.</text></Show>
     </Show>
+    <Show when={page() === "usb-operations" && usbInspection()} keyed>{(inspection) => <NativeUsbTransfers
+      safe={props.safe} name={props.name} opening={props.opening} blocked={props.blocked} operation={inspection.operation} expectedManifest={inspection.expectedManifest}
+      runtime={props.runtime} run={props.run} back={() => { setUsbInspection(undefined); setPage(inspection.returnPage) }} />}</Show>
     <Show when={page() === "record-destination"}><LocalChooser directoryOnly title="Find exported transfers" back={back} choose={(value) => { setInventoryDestination(value); showTransfers("export") }} /></Show>
     <Show when={page() === "outcome"}><PageHeader title="Copy outcome" description={description()} />
       <scrollbox flexGrow={1} minHeight={0}><box flexDirection="column" gap={1}>
@@ -488,6 +502,7 @@ export function NativeFiles(props: { safe: string; name: string; opening?: strin
       </box></scrollbox>
       <ActionBar focused disabled={working()} actions={[
         ...(current()?.usbExport ? [] : [{ title: "Refresh status", key: "R", run: () => { void refresh() } }]),
+        ...(current()?.usbExport && props.runtime.usb ? [{ title: "Inspect USB", key: "U", run: () => inspectUsb(current()) }] : []),
         ...(recoverable() ? [{ title: "Recover verified copy", key: "C", run: () => { void prepare("recover") } }] : []),
         ...(discardable() ? [{ title: "Discard staging", key: "D", run: () => { void prepare("discard") } }] : []),
         { title: "Back", key: "Esc", run: back },

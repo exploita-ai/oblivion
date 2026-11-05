@@ -120,9 +120,17 @@ new operation folder, verifies hashes, records the manifest and receipt, and
 publishes without overwriting an existing export. The guest confirms unmount
 and flush on a private control port. The controller checks the stopped worker
 and absent mapper before the runtime syncs the original descriptor and ejects
-the QEMU device. Confirmed receipts are visible during the manager run. Reading
-and recovering interrupted USB operations from the drive, and physical export
-acceptance across the supported filesystems, remain open.
+the QEMU device. Confirmed receipts are visible during the manager run.
+
+The Live manager and CLI can now rediscover USB export operation IDs after a
+restart by selecting the device again. Inventory and status use the isolated
+read-only guest. Status verifies the marker, manifest and payload that are
+present on the selected drive. Recovery can publish fully verified staging
+without opening a source copy. Discard is limited to the reviewed staging.
+Each change gets a separate writable lease for its specific purpose and
+requires fresh review verification before mutation and detach proof before
+reporting success. Unverifiable records stay untouched. Physical export and
+recovery acceptance across ext4, FAT and exFAT remain open.
 
 The ARM64 outer Live now selects QEMU from Debian backports, records its package
 version and executable hash, and verifies that evidence before ISO packing.

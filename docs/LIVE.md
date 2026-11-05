@@ -68,8 +68,29 @@ Wait for the verified removal message before disconnecting the drive.
 The CLI accepts `oblivion files export --safe SAFE --path workspace/FILE
 --usb ID` and shows the same review. The 1.0 source targets ext4, FAT and
 exFAT. FAT has a per-file size limit. The current manager retains confirmed
-USB receipts for this run. Reading and recovering interrupted USB operations
-from the drive and acceptance on a physical Live boot remain open.
+USB receipts for this run.
+
+After interruption or a manager restart, open **Files → Transfers and
+recovery → USB exports** and select the connected device again. A recent USB
+operation also offers **Inspect USB**. Inspection opens the drive read-only,
+lists operation IDs, and checks the selected operation's current contents
+against the manifest on that drive. If staging verifies in full, **Publish
+verified copy** completes the same export without copying the Safe files
+again. **Discard staging** removes only reviewed staging. Each change requires
+confirmation, a fresh check in the isolated writer, and verified device
+removal. Files already published are left in place.
+
+With the Safe open, the equivalent commands are `oblivion files transfers
+--safe SAFE --usb DEVICE` and `oblivion files status --safe SAFE --usb DEVICE
+--operation ID`. Replace `status` with `recover` or `discard` to review and
+confirm a change in the terminal. Find the current device ID with
+`oblivion runtime live-media --json`.
+
+Verification checks the files against the selected USB's own manifest. If the
+record cannot be verified, leave it untouched. Inspection of ext4 does not
+replay the journal, so an interrupted write can leave an outcome unconfirmed.
+Acceptance on physical ext4, FAT and exFAT devices, unplug and power loss
+remain open.
 
 To switch between persistent and RAM-only storage, lock Oblivion and choose
 **Change storage mode** on its welcome screen. The action is available only

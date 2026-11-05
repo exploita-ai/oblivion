@@ -127,6 +127,7 @@ test("USB selection waits for browser detachment before preparing the reviewed i
           close() { requested.resolve(); return released.promise },
         }
       },
+      async operate() { throw new Error("Import must not open USB export records") },
       async close() {},
     },
   }
@@ -171,7 +172,11 @@ test("USB export reviews the Safe selection and displays the verified removal re
       }
       return state.runtime.query(args)
     },
-    usb: { open() { throw new Error("Export must browse only Safe files") }, async close() {} },
+    usb: {
+      open() { throw new Error("Export must browse only Safe files") },
+      async operate() { throw new Error("Export must not open USB export records") },
+      async close() {},
+    },
   }
   const app = await testRender(() => <NativeFiles safe={safe} name="Research" opening={opening} transfers={state.transfers} runtime={runtime} run={state.run} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
   try {

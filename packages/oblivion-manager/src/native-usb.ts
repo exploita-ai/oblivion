@@ -16,11 +16,18 @@ export type UsbBrowser = {
   close: () => Promise<void>
 }
 
-export function createNativeUsbClient(launcher: string) {
+export type NativeUsbClient = {
+  open: (safe: string, device: string, opening: string) => UsbBrowser
+  operate: (args: string[], signal: AbortSignal) => Promise<unknown>
+  close: () => Promise<void>
+}
+
+export function createNativeUsbClient(launcher: string): NativeUsbClient {
   let active: UsbBrowser | undefined
+  let operation: { cancel: () => void; exited: Promise<number> } | undefined
   return {
     open(safe: string, device: string, opening: string): UsbBrowser {
-      if (active) throw new Error("A USB browser is already open.")
+      if (active || operation) throw new Error("A USB attachment is already open.")
       const child = Bun.spawn([launcher, "files", "usb-browse", "--safe", safe, "--usb", device, "--opening", opening], {
         stdin: "pipe", stdout: "pipe", stderr: "ignore",
       })
@@ -73,8 +80,27 @@ export function createNativeUsbClient(launcher: string) {
       })
       return browser
     },
-    async close() { await active?.close() },
+    async operate(args, signal) {
+      if (active || operation || signal.aborted) throw new Error("A USB attachment is unavailable.")
+      const child = Bun.spawn([launcher, "files", ...args, "--json"], { stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: 40 * 60_000 })
+      const cancel = () => { if (child.exitCode === null) child.kill("SIGTERM") }
+      const running = { cancel, exited: child.exited }
+      operation = running
+      signal.addEventListener("abort", cancel, { once: true })
+      if (signal.aborted) cancel()
+      try {
+        const [text, code] = await Promise.all([new Response(child.stdout).text(), child.exited])
+        if (signal.aborted || code !== 0 || Buffer.byteLength(text) > 8192) throw new Error("The USB operation was not confirmed.")
+        return JSON.parse(text) as unknown
+      } finally {
+        signal.removeEventListener("abort", cancel)
+        if (operation === running) operation = undefined
+      }
+    },
+    async close() {
+      const running = operation
+      running?.cancel()
+      await Promise.all([active?.close(), running?.exited])
+    },
   }
 }
-
-export type NativeUsbClient = ReturnType<typeof createNativeUsbClient>
