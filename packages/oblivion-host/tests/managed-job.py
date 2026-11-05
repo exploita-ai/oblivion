@@ -24,6 +24,11 @@ def record(state="queued"):
 
 
 class Managed(unittest.TestCase):
+    def test_fixed_managed_opencode_entry_keeps_the_private_backend_in_its_service_cgroup(self):
+        self.assertEqual(job.HEADLESS["opencode2"], ["/usr/lib/oblivion/guest/opencode-exec.sh", "run", "--standalone", "--format", "json"])
+        for agent in ("codex", "claude"):
+            self.assertEqual(job.HEADLESS[agent][:2], ["/usr/lib/oblivion/guest/agent.sh", agent])
+
     def setUp(self):
         job.CANCELLED.clear()
         self.fixture = tempfile.TemporaryDirectory(prefix="oblivion-jobs-")

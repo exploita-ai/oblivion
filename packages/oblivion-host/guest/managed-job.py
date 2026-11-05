@@ -19,9 +19,11 @@ RECORD_LIMIT = 16
 CANCELLED = threading.Event()
 VERSIONS = {"codex": "0.159.2", "claude": "2.1.302", "opencode2": "2.0.1"}
 HEADLESS = {
-    "codex": ["exec", "--json", "--skip-git-repo-check", "--color", "never", "-"],
-    "claude": ["--print", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"],
-    "opencode2": ["run", "--standalone", "--format", "json"],
+    "codex": ["/usr/lib/oblivion/guest/agent.sh", "codex", "exec", "--json", "--skip-git-repo-check", "--color", "never", "-"],
+    "claude": ["/usr/lib/oblivion/guest/agent.sh", "claude", "--print", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"],
+    # This exclusive native backend stays in the managed service's cgroup.
+    # Unlike a user's elected service, it must not outlive job cancellation.
+    "opencode2": ["/usr/lib/oblivion/guest/opencode-exec.sh", "run", "--standalone", "--format", "json"],
 }
 STATES = {"queued", "running", "completed", "failed", "cancelled"}
 REASONS = {"needs-auth", "needs-input", "timeout", "output-limit", "interrupted", "agent-exit", "startup-failed", "cleanup-required"}
@@ -319,7 +321,7 @@ def run(target, record, *, vault, deadline_seconds):
             raise ValueError("unsupported_native_agent")
         source = os.open("task.txt", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=target)
         try:
-            process = subprocess.Popen(["/usr/lib/oblivion/guest/agent.sh", agent, *HEADLESS[agent]],
+            process = subprocess.Popen(HEADLESS[agent],
                 cwd=vault / "workspace", env=environment, stdin=source, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         finally:
             os.close(source)

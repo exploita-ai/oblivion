@@ -12,6 +12,11 @@ if [ ! -x "/usr/lib/oblivion/agents/bin/$agent" ]; then
     printf 'The requested official agent is not installed in this Safe image.\n' >&2
     exit 127
 fi
+if [ "$agent" = opencode2 ]; then
+    # Native elected backends and their restarts belong to the Safe, not the
+    # first attachment. No native option is inspected or rewritten here.
+    exec /usr/bin/sudo -n -E /usr/lib/oblivion/guest/opencode-scope.sh "$@"
+fi
 . "/usr/lib/oblivion/guest/agent-profiles/$agent.sh"
 # The native process owns its own history. No wrapper rewrites or mirrors it.
 exec "/usr/lib/oblivion/agents/bin/$agent" "$@"
