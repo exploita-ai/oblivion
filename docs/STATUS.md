@@ -98,6 +98,18 @@ or held volumes. Device IDs describe the current boot and observed device
 generation. Passing the selected device to the controller and using it in
 Files remain open. See [Live controls](LIVE.md).
 
+The read-only USB path now has separate source components for device access,
+Safe authorization and file selection. The Live broker exclusively opens the
+selected block device and checks its identity, capacity and generation before
+passing one descriptor. The controller reservation is bound to the current Safe
+opening, and its private channel is revoked on close, lock, expiry or owner
+exit. The QEMU adapter retains the descriptor until it confirms removal or
+the controller VM exits. The transfer guest can browse the read-only source
+and prepare a selection using the existing manifest and receipt protocol.
+The installed Live still exposes only inventory. Broker activation, the
+reservation-to-hotplug connection, Files publication and physical USB acceptance
+remain open.
+
 The ARM64 outer Live now selects QEMU from Debian backports, records its package
 version and executable hash, and verifies that evidence before ISO packing.
 The native Linux helper requires QEMU 10.1 or newer on ARM64 before it can claim
