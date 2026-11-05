@@ -393,6 +393,30 @@ impl Directory {
             expected.matches(&file)? && destination.same_device(&file)?,
             "publication_changed",
         )?;
+        self.rename_file_exclusive(&file, destination, to)
+    }
+
+    pub fn move_file_exclusive(
+        &self,
+        from: &str,
+        destination: &Self,
+        to: &str,
+        expected: &File,
+    ) -> io::Result<()> {
+        component(to)?;
+        let file = self.child(
+            from,
+            FILE_READ_ATTRIBUTES | DELETE,
+            FILE_OPEN,
+            FILE_NON_DIRECTORY_FILE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            false,
+        )?;
+        require(same_file(&file, expected)?, "publication_changed")?;
+        self.rename_file_exclusive(&file, destination, to)
+    }
+
+    fn rename_file_exclusive(&self, file: &File, destination: &Self, to: &str) -> io::Result<()> {
         let name = to.encode_utf16().collect::<Vec<_>>();
         let bytes = size_of::<FILE_RENAME_INFO>() + name.len() * 2;
         let mut buffer = vec![0usize; bytes.div_ceil(size_of::<usize>())];
@@ -545,6 +569,41 @@ impl Directory {
         )?;
         mark_delete(&file)
     }
+
+    pub fn remove_file(&self, name: &str, expected: &File) -> io::Result<()> {
+        let file = self.child(
+            name,
+            FILE_READ_ATTRIBUTES | DELETE,
+            FILE_OPEN,
+            FILE_NON_DIRECTORY_FILE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            false,
+        )?;
+        require(same_file(&file, expected)?, "publication_changed")?;
+        mark_delete(&file)
+    }
+}
+
+fn same_file(left: &File, right: &File) -> io::Result<bool> {
+    let mut identities = [FILE_ID_INFO::default(); 2];
+    for (file, identity) in [left, right].into_iter().zip(&mut identities) {
+        information(file)?;
+        if unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileIdInfo,
+                (identity as *mut FILE_ID_INFO).cast(),
+                size_of::<FILE_ID_INFO>() as u32,
+            )
+        } == 0
+        {
+            return Err(os_error());
+        }
+    }
+    Ok(
+        identities[0].VolumeSerialNumber == identities[1].VolumeSerialNumber
+            && identities[0].FileId.Identifier == identities[1].FileId.Identifier,
+    )
 }
 
 fn mark_delete(file: &File) -> io::Result<()> {

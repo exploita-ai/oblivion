@@ -2,12 +2,11 @@
 use crate::directory::Directory;
 use crate::selection::{self, Input, Plan};
 use crate::{
-    ENCRYPTED_VOLUME_NAME, END, Entry, Limits, MAX_ENTRIES, Manifest, Receipt, copy_hash, invalid,
+    END, Entry, Limits, MAX_ENTRIES, Manifest, Receipt, copy_hash, invalid,
     require, validate_id, validate_path,
 };
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -60,43 +59,10 @@ impl Selection {
     /// A trusted controller delegates one closed, read-only LUKS2 file. The
     /// signature is not authentication or a check of its encrypted filesystem.
     /// No directory or peer-selected filesystem path is accepted here.
-    pub fn encrypted_volume(mut file: File, maximum: u64) -> io::Result<Self> {
-        let metadata = file.metadata()?;
-        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
-        require(
-            flags >= 0 && flags & libc::O_ACCMODE == libc::O_RDONLY,
-            "source_not_read_only",
-        )?;
-        require(
-            metadata.is_file() && metadata.nlink() == 1,
-            "unsupported_source",
-        )?;
-        require(
-            metadata.len() >= 32 * 1024 * 1024 && metadata.len() <= maximum,
-            "byte_limit",
-        )?;
-        file.rewind()?;
-        let mut magic = [0; 8];
-        file.read_exact(&mut magic)?;
-        require(
-            &magic == b"LUKS\xba\xbe\x00\x02",
-            "invalid_encrypted_volume",
-        )?;
-        file.rewind()?;
-        let sha256 = copy_hash(&mut file, &mut io::sink(), metadata.len())?;
-        require(file.metadata()?.len() == metadata.len(), "source_changed")?;
+    pub fn encrypted_volume(file: File, maximum: u64) -> io::Result<Self> {
+        let (manifest, file) = crate::backup::Source::from_file(file, maximum)?.into_parts();
         Ok(Self {
-            manifest: Manifest::new(
-                vec![Entry::File {
-                    path: ENCRYPTED_VOLUME_NAME.into(),
-                    size: metadata.len(),
-                    sha256,
-                }],
-                Limits {
-                    entries: 1,
-                    bytes: maximum,
-                },
-            )?,
+            manifest,
             files: Sources::Volume(file),
         })
     }
@@ -341,32 +307,35 @@ impl Selection {
     /// Writes the already offered files; a changed source aborts before END.
     /// The caller owns transport deadlines, cancellation and the final receipt.
     pub fn send_data(&mut self, writer: &mut impl Write) -> io::Result<()> {
+        if let Sources::Volume(file) = &mut self.files {
+            return crate::backup::write_volume(file, &self.manifest, writer);
+        }
+        let Sources::Mapped { roots, files } = &self.files else {
+            unreachable!()
+        };
         let mut index = 0;
         for entry in self.manifest.entries() {
             if let Entry::File { size, sha256, .. } = entry {
-                let mut file = match &self.files {
-                    Sources::Volume(file) => file.try_clone()?,
-                    Sources::Mapped { roots, files } => {
-                        let source = files.get(index).ok_or_else(|| invalid("source_changed"))?;
-                        let root = roots
-                            .get(source.root)
-                            .ok_or_else(|| invalid("source_changed"))?;
-                        let mut components = source.path.split('/').collect::<Vec<_>>();
-                        let name = components.pop().ok_or_else(|| invalid("invalid_path"))?;
-                        let parent = components
-                            .into_iter()
-                            .try_fold(root.clone()?, |parent, name| parent.directory(name))?;
-                        let file = parent.source(name)?;
-                        let metadata = file.metadata()?;
-                        require(
-                            metadata.is_file()
-                                && metadata.nlink() == 1
-                                && metadata.dev() == source.device
-                                && metadata.ino() == source.inode,
-                            "source_changed",
-                        )?;
-                        file
-                    }
+                let mut file = {
+                    let source = files.get(index).ok_or_else(|| invalid("source_changed"))?;
+                    let root = roots
+                        .get(source.root)
+                        .ok_or_else(|| invalid("source_changed"))?;
+                    let mut components = source.path.split('/').collect::<Vec<_>>();
+                    let name = components.pop().ok_or_else(|| invalid("invalid_path"))?;
+                    let parent = components
+                        .into_iter()
+                        .try_fold(root.clone()?, |parent, name| parent.directory(name))?;
+                    let file = parent.source(name)?;
+                    let metadata = file.metadata()?;
+                    require(
+                        metadata.is_file()
+                            && metadata.nlink() == 1
+                            && metadata.dev() == source.device
+                            && metadata.ino() == source.inode,
+                        "source_changed",
+                    )?;
+                    file
                 };
                 file.rewind()?;
                 require(file.metadata()?.len() == *size, "source_changed")?;

@@ -182,6 +182,26 @@ impl Directory {
     ) -> io::Result<()> {
         let file = self.source(from)?;
         require(expected.matches(&file)?, "publication_changed")?;
+        self.rename_exclusive(from, destination, to)
+    }
+
+    pub fn move_file_exclusive(
+        &self,
+        from: &str,
+        destination: &Self,
+        to: &str,
+        expected: &File,
+    ) -> io::Result<()> {
+        let file = self.source(from)?.metadata()?;
+        let expected = expected.metadata()?;
+        require(
+            file.is_file() && file.dev() == expected.dev() && file.ino() == expected.ino(),
+            "publication_changed",
+        )?;
+        self.rename_exclusive(from, destination, to)
+    }
+
+    fn rename_exclusive(&self, from: &str, destination: &Self, to: &str) -> io::Result<()> {
         let from = component(from)?;
         let to = component(to)?;
         #[cfg(target_os = "linux")]
@@ -276,6 +296,16 @@ impl Directory {
             directory.unlink(&child, 0)?;
         }
         self.unlink(name, libc::AT_REMOVEDIR)
+    }
+
+    pub fn remove_file(&self, name: &str, expected: &File) -> io::Result<()> {
+        let file = self.source(name)?.metadata()?;
+        let expected = expected.metadata()?;
+        require(
+            file.is_file() && file.dev() == expected.dev() && file.ino() == expected.ino(),
+            "publication_changed",
+        )?;
+        self.unlink(name, 0)
     }
 
     fn unlink(&self, name: &str, flags: i32) -> io::Result<()> {

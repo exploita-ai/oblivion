@@ -1,4 +1,5 @@
 use oblivion_transfer::channel::Channel;
+use oblivion_transfer::copy_protocol::Transport;
 use oblivion_transfer::{ENCRYPTED_VOLUME_NAME, Entry, Limits, Manifest, Receipt, Selection, endpoint, stream};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -58,6 +59,28 @@ fn channel(socket: UnixStream) -> Channel {
     Channel::new(File::from(OwnedFd::from(socket)), BUDGET).unwrap()
 }
 
+struct Buffered {
+    inner: Channel,
+    pending: Vec<u8>,
+}
+impl Read for Buffered {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        if !self.pending.is_empty() { return Err(io::Error::other("write_not_flushed")) }
+        self.inner.read(bytes)
+    }
+}
+impl Write for Buffered {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> { self.pending.extend_from_slice(bytes); Ok(bytes.len()) }
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.write_all(&self.pending)?;
+        self.pending.clear();
+        self.inner.flush()
+    }
+}
+impl Transport for Buffered {
+    fn check(&mut self) -> io::Result<()> { self.inner.check() }
+}
+
 fn same_bytes(source: &Path, destination: &Path) {
     let mut source = File::open(source).unwrap();
     let mut destination = File::open(destination).unwrap();
@@ -103,7 +126,7 @@ fn personal_export_records_completion_before_final_ack_and_copies_exact_cipherte
     let sender = std::thread::spawn(move || endpoint::send_open_file_completed(&mut channel(sender), input, BYTES,
         |receipt| hold_completion(receipt, observed, held)));
     let receiver = std::thread::spawn(move || {
-        done.send(stream::download_open_file(&mut channel(receiver), destination, BYTES, ID)).unwrap();
+        done.send(stream::download_open_file(&mut Buffered { inner: channel(receiver), pending: Vec::new() }, destination, BYTES, ID)).unwrap();
     });
     let completed = receipt(&callback.recv_timeout(BUDGET).unwrap(), &expected_sha);
     // The receiver has verified SHA, END and fsync and is waiting for copied.

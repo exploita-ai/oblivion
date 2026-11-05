@@ -1,6 +1,8 @@
 //! Shared copy manifests, bounded wire messages and payload verification.
 //! Filesystem and channel authority are supplied only by platform endpoints.
 pub mod browser;
+#[cfg(any(unix, windows))]
+pub mod backup;
 #[cfg(unix)]
 pub mod channel;
 pub mod copy_protocol;

@@ -4,7 +4,6 @@
 use crate::Selection;
 #[cfg(unix)]
 use crate::channel::Channel;
-#[cfg(unix)]
 use crate::copy_protocol;
 use crate::copy_protocol::{Payload, Transport, verify_receipt};
 use crate::directory::Directory;
@@ -14,7 +13,6 @@ use crate::endpoint::{Approval, OfferRequest, SelectionOffer, read_message, writ
 use crate::file_identity::FileIdentity;
 use crate::native_file_events::{Phase, Summary};
 use crate::native_files::{Context, Direction};
-#[cfg(unix)]
 use crate::validate_id;
 use crate::{Limits, Manifest, Receipt, invalid, require, validate_path};
 #[path = "stream_operations.rs"]
@@ -25,8 +23,6 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::io::Write;
 use std::io::{self, Read};
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -95,8 +91,11 @@ impl PreparedUpload {
 
 /// Personal ciphertext backups already own their reviewed Selection. They
 /// share this exact source protocol without introducing native Files state.
-#[cfg(unix)]
-pub fn send(channel: &mut Channel, selection: &mut Selection, id: &str) -> io::Result<Receipt> {
+pub fn send<T: Transport, S: copy_protocol::Source>(
+    channel: &mut T,
+    selection: &mut S,
+    id: &str,
+) -> io::Result<Receipt> {
     let digest = selection.manifest().sha256();
     copy_protocol::send(channel, selection, id, &digest, &mut |_, _| Ok(()))
 }
@@ -270,33 +269,19 @@ fn receive_payload(
 
 /// A personal backup receiver owns one empty local file. The peer can offer
 /// only the fixed LUKS2 payload, never a local path or an archive to extract.
-#[cfg(unix)]
-pub fn download_open_file(
-    channel: &mut Channel,
+pub fn download_open_file<T: Transport>(
+    channel: &mut T,
     mut file: std::fs::File,
     maximum: u64,
     id: &str,
 ) -> io::Result<Receipt> {
     use std::io::Seek;
-    use std::os::fd::AsRawFd;
     validate_id(id)?;
     require(
         (32 * 1024 * 1024..=crate::MAX_ENCRYPTED_VOLUME_BYTES).contains(&maximum),
         "invalid_backup_limit",
     )?;
-    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
-    let metadata = file.metadata()?;
-    require(
-        flags >= 0
-            && flags & libc::O_ACCMODE != libc::O_RDONLY
-            && flags & libc::O_APPEND == 0
-            && metadata.is_file()
-            && metadata.nlink() == 1
-            && metadata.len() == 0
-            && metadata.uid() == unsafe { libc::getuid() }
-            && metadata.mode() & 0o077 == 0,
-        "unsafe_backup_destination",
-    )?;
+    crate::backup::destination_file(&file, true)?;
     let limits = Limits {
         entries: 1,
         bytes: maximum,
@@ -309,6 +294,7 @@ pub fn download_open_file(
             paths: vec![crate::ENCRYPTED_VOLUME_NAME.into()],
         },
     )?;
+    channel.flush()?;
     let manifest = Manifest::read(channel, limits)?;
     let [crate::Entry::File { path, size, sha256 }] = manifest.entries() else {
         return Err(invalid("invalid_backup_selection"));
@@ -324,6 +310,7 @@ pub fn download_open_file(
             manifest_sha256: manifest.sha256(),
         },
     )?;
+    channel.flush()?;
     file.rewind()?;
     let mut magic = [0; 8];
     channel.read_exact(&mut magic)?;
@@ -348,6 +335,7 @@ pub fn download_open_file(
         bytes: *size,
     };
     write_message(channel, &receipt)?;
+    channel.flush()?;
     let mut copied = [0; 7];
     channel.read_exact(&mut copied)?;
     require(&copied == b"copied\n", "source_not_completed")?;
