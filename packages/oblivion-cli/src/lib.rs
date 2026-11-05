@@ -20,6 +20,7 @@ pub mod network;
 pub mod proxy_profiles;
 pub mod safe;
 pub mod settings;
+pub mod share;
 #[cfg(windows)]
 pub mod windows;
 #[cfg(windows)]

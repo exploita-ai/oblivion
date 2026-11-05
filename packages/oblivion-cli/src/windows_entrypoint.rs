@@ -5,7 +5,7 @@ use crate::controller::{self, Result};
 use crate::windows::{Client, Runtime};
 use crate::{
     activity, backup, child_task, family_password, file_copy, files, network, proxy,
-    proxy_profiles, run, safe, settings, shell, storage, windows_file_copy,
+    proxy_profiles, run, safe, settings, share, shell, storage, windows_file_copy,
 };
 use oblivion_native_windows::bundle::VerifiedBundle;
 use oblivion_native_windows::installation::{self, Installed, Root};
@@ -13,7 +13,6 @@ use oblivion_native_windows::security::Identity;
 use oblivion_native_windows::supervisor;
 use oblivion_wire::idle::Activity;
 use oblivion_wire::slot::Slot;
-use std::convert::Infallible;
 use std::io::{IsTerminal, Read};
 use std::path::Path;
 use std::sync::Arc;
@@ -32,7 +31,7 @@ pub fn run() -> Result<i32> {
                 .map_err(|_| "Arguments must use valid UTF-8")
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let command = command::parse(&args, file_copy::parse, |_| unavailable_share())?;
+    let command = command::parse(&args, file_copy::parse, share::parse)?;
     // Reject unavailable endpoints and missing review before discovering or
     // booting a runtime. Files uses native local endpoints after this admission.
     match &command {
@@ -92,7 +91,7 @@ pub fn run() -> Result<i32> {
 }
 
 fn execute(
-    command: Command<file_copy::CopyCommand, Infallible>,
+    command: Command<file_copy::CopyCommand, share::Command>,
     installed: &Installed,
     runtime: &mut Runtime,
 ) -> Result<i32> {
@@ -151,7 +150,12 @@ fn execute(
             &mut std::io::stderr().lock(),
         ),
         Command::Files(Files::Copy(command)) => windows_file_copy::run(runtime, command),
-        Command::Share(never) => match never {},
+        Command::Share(command) => share::run(
+            runtime,
+            command,
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        ),
         _ => Err("Command was not handled by the platform adapter".into()),
     }
 }
@@ -249,10 +253,6 @@ fn source_id() -> Result<&'static str> {
         .ok_or_else(|| {
             "Build a current source-bound desktop bundle before using the Windows runtime".into()
         })
-}
-
-fn unavailable_share() -> Result<Infallible> {
-    Err("windows_share_endpoint_not_implemented".into())
 }
 
 fn interactive() -> bool {

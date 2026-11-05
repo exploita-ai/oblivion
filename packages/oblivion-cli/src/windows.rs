@@ -9,9 +9,9 @@ use oblivion_wire::control::{Operation, Request};
 use oblivion_wire::idle;
 use oblivion_wire::slot::Slot;
 use std::io::{self, Read, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
@@ -95,6 +95,170 @@ pub struct FileAttachment {
 }
 
 pub struct FileStream(client::Channel);
+
+/// Share's source data and its export authorization are separate connections.
+/// The source watches only a passive signal, never another source's payload.
+pub struct ShareStream {
+    stream: FileStream,
+    export: Option<Arc<Mutex<ExportSignal>>>,
+}
+
+pub struct ShareAttachment {
+    stream: ShareStream,
+    client_id: String,
+    lease: Option<client::Lease>,
+}
+
+pub struct ExportLease {
+    runtime_id: String,
+    signal: Arc<Mutex<ExportSignal>>,
+    lease: Option<client::Lease>,
+}
+
+struct ExportSignal {
+    channel: client::Channel,
+    revoked: bool,
+}
+
+impl ExportSignal {
+    fn check(&mut self) -> io::Result<()> {
+        if self.revoked {
+            return Err(export_revoked());
+        }
+        match self.channel.try_read(&mut [0]) {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
+            result => {
+                self.revoked = true;
+                self.channel.close()?;
+                // No byte is part of the passive lease protocol. EOF, data,
+                // cancellation and expiry all remove source authority.
+                result.map_err(|_| export_revoked())?;
+                Err(export_revoked())
+            }
+        }
+    }
+}
+
+fn export_revoked() -> io::Error {
+    io::Error::new(io::ErrorKind::ConnectionAborted, "share_export_revoked")
+}
+
+impl crate::share::io::Lease for ExportLease {
+    fn check(&mut self) -> io::Result<()> {
+        self.signal.lock().map_err(|_| export_revoked())?.check()
+    }
+    fn close(&mut self) -> io::Result<()> {
+        let result = match self.signal.lock() {
+            Ok(mut signal) => {
+                signal.revoked = true;
+                signal.channel.close()
+            }
+            Err(_) => Err(export_revoked()),
+        };
+        drop(self.lease.take());
+        result
+    }
+}
+
+impl Drop for ExportLease {
+    fn drop(&mut self) {
+        // Watchers must not keep the authorization pipe alive after its owner
+        // disappears. This is local close only; End policy remains in Core.
+        let _ = crate::share::io::Lease::close(self);
+    }
+}
+
+impl crate::share::io::Attachment for ShareAttachment {
+    type Stream = ShareStream;
+    fn stream(&mut self) -> &mut ShareStream {
+        &mut self.stream
+    }
+    fn client_id(&self) -> &str {
+        &self.client_id
+    }
+    fn close(&mut self) -> io::Result<()> {
+        let result = self.stream.stream.0.close();
+        drop(self.lease.take());
+        result
+    }
+}
+
+impl ShareStream {
+    fn check_authority(&mut self) -> io::Result<()> {
+        if let Some(export) = &self.export {
+            let checked = export
+                .lock()
+                .map_err(|_| export_revoked())
+                .and_then(|mut signal| signal.check());
+            if let Err(error) = checked {
+                self.stream.0.close()?;
+                return Err(error);
+            }
+        }
+        self.stream.0.check()
+    }
+}
+
+impl Read for ShareStream {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if self.export.is_none() {
+            return self.stream.read(output);
+        }
+        loop {
+            self.check_authority()?;
+            match self.stream.0.try_read(output) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    self.stream.0.wait_readable()?
+                }
+                result => {
+                    self.check_authority()?;
+                    return result;
+                }
+            }
+        }
+    }
+}
+impl Write for ShareStream {
+    fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+        if self.export.is_none() {
+            return self.stream.write(input);
+        }
+        loop {
+            self.check_authority()?;
+            match self.stream.0.try_write(input) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    self.stream.0.wait_writable()?
+                }
+                result => {
+                    self.check_authority()?;
+                    return result;
+                }
+            }
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        if self.export.is_none() {
+            return self.stream.flush();
+        }
+        loop {
+            self.check_authority()?;
+            match self.stream.0.try_flush() {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    self.stream.0.wait_writable()?
+                }
+                result => {
+                    self.check_authority()?;
+                    return result;
+                }
+            }
+        }
+    }
+}
+impl oblivion_transfer::copy_protocol::Transport for ShareStream {
+    fn check(&mut self) -> io::Result<()> {
+        self.check_authority()
+    }
+}
 
 /// Backup authority ends with this pipe, unlike an agent/FileAttachment. The
 /// controller reconciles its own worker receipt after EOF; closing is no proof
@@ -444,6 +608,110 @@ impl Controller for Runtime {
 
     fn request(&mut self, call: Call<'_, Slot>) -> Result<String> {
         self.client.request(call)
+    }
+}
+
+impl crate::share::io::Native for Runtime {
+    type Attachment = ShareAttachment;
+    type ExportLease = ExportLease;
+
+    fn lease_share_export(&mut self, export: &str) -> Result<ExportLease> {
+        if !oblivion_wire::control::valid_id(export) {
+            return Err("invalid_share_export".into());
+        }
+        if self.client.cancelled.load(Ordering::Acquire) {
+            return Err("controller_cancelled".into());
+        }
+        let (mut channel, attached) = self.client.transport.attach(
+            header(&Call {
+                operation: Operation::ShareExportLease,
+                slot: Some(Slot::ZERO),
+                session: Some(export),
+                expected_session: None,
+                secret: &[],
+            })?,
+            &[],
+            Arc::clone(&self.client.cancelled),
+            Instant::now() + Operation::ShareExportLease.response_budget(),
+        )?;
+        if attached != export {
+            channel.close()?;
+            return Err("invalid_share_export_lease".into());
+        }
+        let lease = channel.retain_lease()?;
+        channel.set_deadline(Instant::now() + Duration::from_secs(3600))?;
+        Ok(ExportLease {
+            runtime_id: self.runtime_id.clone(),
+            signal: Arc::new(Mutex::new(ExportSignal {
+                channel,
+                revoked: false,
+            })),
+            lease: Some(lease),
+        })
+    }
+
+    fn attach_share_source(
+        &mut self,
+        opening: &idle::Opening<Slot>,
+        lease: &mut ExportLease,
+    ) -> Result<ShareAttachment> {
+        if lease.runtime_id != self.runtime_id {
+            return Err("invalid_share_export_lease".into());
+        }
+        crate::share::io::Lease::check(lease)?;
+        self.share_attachment(
+            Operation::ShareAttach,
+            opening,
+            Some(Arc::clone(&lease.signal)),
+        )
+    }
+
+    fn attach_share_import(&mut self, opening: &idle::Opening<Slot>) -> Result<ShareAttachment> {
+        self.share_attachment(Operation::ShareImportAttach, opening, None)
+    }
+
+    fn cleanup(&mut self, call: Call<'_, Slot>) -> Result<String> {
+        Client::new(&self.runtime_id)?.request(call)
+    }
+}
+
+impl Runtime {
+    fn share_attachment(
+        &mut self,
+        operation: Operation,
+        opening: &idle::Opening<Slot>,
+        export: Option<Arc<Mutex<ExportSignal>>>,
+    ) -> Result<ShareAttachment> {
+        if !oblivion_wire::control::valid_id(&opening.safe_id)
+            || !oblivion_wire::control::valid_id(&opening.nonce)
+        {
+            return Err("invalid_share_opening".into());
+        }
+        if self.client.cancelled.load(Ordering::Acquire) {
+            return Err("controller_cancelled".into());
+        }
+        let (mut channel, client_id) = self.client.transport.attach(
+            header(&Call {
+                operation,
+                slot: Some(opening.slot),
+                session: None,
+                expected_session: Some(&opening.safe_id),
+                secret: &[],
+            })?,
+            &[],
+            Arc::clone(&self.client.cancelled),
+            Instant::now() + operation.response_budget(),
+        )?;
+        let lease = channel.retain_lease()?;
+        channel.set_deadline(Instant::now() + Duration::from_secs(3600))?;
+        Ok(ShareAttachment {
+            stream: ShareStream {
+                stream: FileStream(channel),
+                export,
+            },
+            client_id,
+            lease: Some(lease),
+        })
     }
 }
 

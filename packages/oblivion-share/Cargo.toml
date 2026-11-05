@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 age = { version = "=0.12.1", default-features = false }
 oblivion-transfer = { path = "../oblivion-transfer" }
+oblivion-wire = { path = "../oblivion-wire" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "=0.10.9"

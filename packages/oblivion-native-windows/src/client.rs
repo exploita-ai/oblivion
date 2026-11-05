@@ -297,6 +297,16 @@ impl Channel {
         self.check()
     }
 
+    /// One owned I/O wait slice (at most 100 ms), so an adapter can also check
+    /// an independent authorization signal without a background I/O owner.
+    pub fn wait_readable(&mut self) -> io::Result<()> {
+        self.wait(true)
+    }
+
+    pub fn wait_writable(&mut self) -> io::Result<()> {
+        self.wait(false)
+    }
+
     fn failed<T>(&mut self, error: io::Error) -> io::Result<T> {
         self.close()?;
         Err(error)

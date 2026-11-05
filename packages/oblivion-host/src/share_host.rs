@@ -10,16 +10,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-#[derive(Serialize)]
-pub(crate) struct Metadata {
-    pub opening: Opening,
-    pub title: String,
-    pub created_by_agent: bool,
-    pub requested_agent: Option<String>,
-    pub parent_not_included: bool,
-    pub policy: &'static str,
-    pub required_proxy: Option<String>,
-}
+pub(crate) type Metadata = oblivion_share::control::SourceMetadata<scope::Slot>;
 
 pub(crate) fn require_closed_target(requested: &str, expected: &str, current: Option<&str>) -> Result<()> {
     require(requested == expected && current.is_none(), "session_changed")

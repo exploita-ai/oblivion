@@ -1,949 +1,163 @@
-mod import;
-
-use oblivion_host::{control, scope};
-use oblivion_share::{Manifest, Package, Policy, Provenance, Safe, SecretString, Source};
+//! Unix stream ownership for the shared Share engine. The native launcher and
+//! Windows entrypoint consume the same parser, review and container workflow.
+use oblivion_cli::controller::{Call, Controller};
+use oblivion_cli::share::io::{Attachment, Lease, Native};
+use oblivion_host::{autolock::Opening, control, scope};
 use oblivion_transfer::channel::Channel;
-use oblivion_transfer::endpoint::{read_message, write_message};
-use oblivion_transfer::{Entry, Receipt};
-use serde::Deserialize;
-use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read};
-use std::os::fd::OwnedFd;
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs::File;
+use std::io;
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Metadata {
-    opening: oblivion_host::autolock::Opening,
-    title: String,
-    created_by_agent: bool,
-    requested_agent: Option<oblivion_share::Agent>,
-    parent_not_included: bool,
-    policy: Policy,
-    required_proxy: Option<String>,
+pub fn run(command: oblivion_cli::share::Command) -> control::Result<i32> {
+    oblivion_cli::share::run(
+        &mut super::UnixRuntime::new(),
+        command,
+        &mut io::stdout(),
+        &mut io::stderr(),
+    )
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Review {
-    version: u8,
-    request_id: String,
-    manifest: Vec<Entry>,
-    manifest_sha256: String,
-    plan_sha256: String,
-    bytes: u64,
-    chats: Vec<String>,
-    omitted: BTreeMap<String, u64>,
-    warnings: Vec<Warning>,
-    warning_count: u64,
-    scan: Scan,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Warning {
-    reason: String,
-    path: Option<String>,
-    chat_id: Option<String>,
-    included: bool,
-    default_excluded: Option<bool>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Scan {
-    files_bytes: u64,
-    history_bytes: u64,
-    limit_per_kind: u64,
-    best_effort: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExportStarted {
-    export_id: String,
-    sources: Vec<ExportSource>,
-    settings: Option<oblivion_share::Settings>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExportSource {
-    id: String,
-    parent: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-struct ExportOpen<'a> {
-    export_id: &'a str,
-    password: Option<&'a str>,
-}
-
-#[derive(Clone, serde::Serialize)]
-struct Selection {
-    paths: Vec<String>,
-    chat_ids: Option<Vec<String>>,
-    exclude_paths: Vec<String>,
-    exclude_chats: Vec<String>,
-    include_sensitive_paths: Vec<String>,
-    include_sensitive_chats: Vec<String>,
-}
-
-#[derive(Clone)]
-struct Approved {
-    source: String,
-    package_id: String,
-    request_id: String,
-    plan_sha256: String,
-}
-
-/// Share has one syntax owner. Validation does not open files, prompt for
-/// secrets or contact a controller; the native engine consumes the typed action.
-pub struct Command(Action);
-
-enum Action {
-    Export {
-        selector: Selector,
-        output: String,
-        selection: Selection,
-    },
-    Import {
-        file: String,
-        settings: bool,
-    },
-    Imports {
-        json: bool,
-    },
-    Discard {
-        transaction: String,
-    },
-}
-
-enum Selector {
-    Safe(String),
-    Branch(String),
-    All,
-}
-
-pub fn parse(args: &[String]) -> control::Result<Command> {
-    match args.first().map(String::as_str) {
-        Some("import") => {
-            let mut file = None;
-            let mut settings = false;
-            for value in &args[1..] {
-                match value.as_str() {
-                    "--apply-settings" if !settings => settings = true,
-                    value if !value.starts_with('-') && file.is_none() => file = Some(value.to_owned()),
-                    _ => return Err("Use share import FILE [--apply-settings]".into()),
-                }
-            }
-            return Ok(Command(Action::Import {
-                file: file.ok_or("Choose an encrypted Share file")?, settings,
-            }));
-        }
-        Some("imports") => {
-            if args.len() != 1 && args[1..] != ["--json"] {
-                return Err("Use share imports [--json]".into());
-            }
-            return Ok(Command(Action::Imports { json: args.len() == 2 }));
-        }
-        Some("discard") => {
-            if args.len() != 2 {
-                return Err("Use share discard TRANSACTION".into());
-            }
-            oblivion_share::manifest::validate_id(&args[1])?;
-            return Ok(Command(Action::Discard { transaction: args[1].clone() }));
-        }
-        Some("export") => {}
-        _ => return Err("Use share export --safe SAFE FILE, share export --branch SAFE FILE, share export --all FILE or share import FILE".into()),
-    }
-    let mut selector = None;
-    let mut output = None;
-    let mut selection = Selection {
-        paths: vec![],
-        chat_ids: None,
-        exclude_paths: vec![],
-        exclude_chats: vec![],
-        include_sensitive_paths: vec![],
-        include_sensitive_chats: vec![],
-    };
-    let mut values = args.iter().skip(1);
-    while let Some(value) = values.next() {
-        match value.as_str() {
-            "--safe" | "--branch" if selector.is_none() => {
-                let name = values.next().ok_or("Missing Safe name")?.clone();
-                selector = Some(if value == "--safe" {
-                    Selector::Safe(name)
-                } else {
-                    Selector::Branch(name)
-                });
-            }
-            "--all" if selector.is_none() => selector = Some(Selector::All),
-            "--path" => selection
-                .paths
-                .push(values.next().ok_or("Missing guest path")?.clone()),
-            "--chat" => selection
-                .chat_ids
-                .get_or_insert_with(Vec::new)
-                .push(values.next().ok_or("Missing chat ID")?.clone()),
-            "--no-chats" if selection.chat_ids.is_none() => selection.chat_ids = Some(Vec::new()),
-            "--exclude" => selection
-                .exclude_paths
-                .push(values.next().ok_or("Missing excluded path")?.clone()),
-            "--exclude-chat" => selection
-                .exclude_chats
-                .push(values.next().ok_or("Missing excluded chat ID")?.clone()),
-            "--include-sensitive" => selection.include_sensitive_paths.push(
-                values
-                    .next()
-                    .ok_or("Missing reviewed sensitive path")?
-                    .clone(),
-            ),
-            "--include-sensitive-chat" => selection.include_sensitive_chats.push(
-                values
-                    .next()
-                    .ok_or("Missing reviewed sensitive chat ID")?
-                    .clone(),
-            ),
-            value if !value.starts_with('-') && output.is_none() => output = Some(value.to_owned()),
-            _ => return Err("Unknown or duplicate Share option".into()),
-        }
-    }
-    let selector = selector.ok_or("Choose --safe NAME, --branch NAME or --all")?;
-    if !matches!(&selector, Selector::Safe(_))
-        && selection
-            .chat_ids
-            .as_ref()
-            .is_some_and(|ids| !ids.is_empty())
-    {
-        return Err("Use --chat with a single --safe export. --exclude-chat applies to branches and all Safes.".into());
-    }
-    if selection.paths.is_empty() {
-        selection
-            .paths
-            .extend(["workspace".into(), "imports".into()]);
-    }
-    for path in selection
-        .paths
-        .iter()
-        .chain(&selection.exclude_paths)
-        .chain(&selection.include_sensitive_paths)
-    {
-        validate_path(path)?;
-    }
-    for chat in selection
-        .chat_ids
-        .iter()
-        .flatten()
-        .chain(&selection.exclude_chats)
-        .chain(&selection.include_sensitive_chats)
-    {
-        validate_chat(chat)?;
-    }
-    Ok(Command(Action::Export {
-        selector,
-        output: output.ok_or("Choose an output Share file")?,
-        selection,
-    }))
-}
-
-pub fn run(command: Command) -> control::Result<i32> {
-    let (selector, output, selection) = match command.0 {
-        Action::Import { file, settings } => return import::run(&file, settings),
-        Action::Imports { json } => return import::status(json),
-        Action::Discard { transaction } => return import::discard(&transaction),
-        Action::Export {
-            selector,
-            output,
-            selection,
-        } => (selector, output, selection),
-    };
-    let output = std::path::absolute(output)?;
-    let parent = output
-        .parent()
-        .ok_or("Choose an output directory")?
-        .canonicalize()?;
-    let output = parent.join(output.file_name().ok_or("Choose an output filename")?);
-    if output.try_exists()? {
-        return Err("The output file already exists. Choose another filename.".into());
-    }
-    let state = crate::status()?;
-    if state.app_mode != crate::AppMode::Persistent {
-        return Err("Unlock writable encrypted storage before sharing Safes".into());
-    }
-    let selector = match selector {
-        Selector::Safe(name) => {
-            json!({"kind":"safe","safe_id":state.find_safe(&name)?.ok_or("Safe not found")?})
-        }
-        Selector::Branch(name) => {
-            json!({"kind":"branch","safe_id":state.find_safe(&name)?.ok_or("Safe not found")?})
-        }
-        Selector::All => json!({"kind":"all"}),
-    };
-    let started: ExportStarted = serde_json::from_str(&control::request(
-        "share-export-begin",
-        None,
-        &serde_json::to_vec(&selector)?,
-    )?)?;
-    oblivion_share::manifest::validate_id(&started.export_id)?;
-    let attached = control::attach_export(&started.export_id);
-    let (signal, lease, _client) = match attached {
-        Ok(attached) => attached,
-        Err(error) => {
-            control::request(
-                "share-export-end",
-                None,
-                &serde_json::to_vec(&json!({"export_id":started.export_id}))?,
-            )?;
-            return Err(error);
-        }
-    };
-    let mut sources = BatchSource {
-        export_id: started.export_id,
-        signal,
-        lease,
-        selection,
-        approved: vec![],
-        current: None,
-        ended: false,
-    };
-    let result = (|| -> control::Result<i32> {
-        if started.sources.is_empty() || started.sources.len() > oblivion_share::manifest::MAX_SAFES
-        {
-            return Err("Invalid Share source set".into());
-        }
-        let mut ids = BTreeMap::new();
-        for source in &started.sources {
-            oblivion_share::manifest::validate_id(&source.id)?;
-            if ids.insert(source.id.as_str(), random_id()?).is_some() {
-                return Err("Duplicate Share source".into());
-            }
-        }
-        let mut package = Package {
-            format: "oblivion-share".into(),
-            version: 1,
-            id: random_id()?,
-            safes: vec![],
-            settings: started.settings,
-        };
-        for (index, source) in started.sources.iter().enumerate() {
-            eprintln!("Reviewing Safe {} of {}…", index + 1, started.sources.len());
-            let metadata = sources.open_source(&source.id, true)?;
-            let request = random_id()?;
-            let (review, manifest) = sources.plan(&request)?;
-            show_review(&metadata.title, &review, &manifest)?;
-            let parent = source
-                .parent
-                .as_deref()
-                .and_then(|parent| ids.get(parent))
-                .cloned();
-            let safe = Safe {
-                id: ids
-                    .get(source.id.as_str())
-                    .ok_or("Share source missing")?
-                    .clone(),
-                title: metadata.title,
-                parent: parent.clone(),
-                provenance: Some(Provenance {
-                    created_by_agent: metadata.created_by_agent,
-                    requested_agent: metadata.requested_agent,
-                    parent_not_included: parent.is_none()
-                        && (source.parent.is_some() || metadata.parent_not_included),
-                }),
-                policy: metadata.policy,
-                required_proxy: metadata.required_proxy,
-                contents_sha256: review.manifest_sha256.clone(),
-                entries: manifest.entries().len(),
-                bytes: review.bytes,
-            };
-            sources.approved.push(Approved {
-                source: source.id.clone(),
-                package_id: safe.id.clone(),
-                request_id: request.clone(),
-                plan_sha256: review.plan_sha256.clone(),
-            });
-            package.safes.push(safe);
-            sources.cancel_plan(&request)?;
-            sources.close_source()?;
-        }
-        package.validate()?;
-        eprintln!(
-            "Share {} Safe(s). Provider credential stores and OS customizations are excluded. Content scanning is best effort.",
-            package.safes.len()
-        );
-        if let Some(settings) = &package.settings {
-            eprintln!(
-                "Included app settings: Safe lock {} min, Oblivion lock {} min (0 means disabled).",
-                settings.safe_idle_minutes, settings.host_idle_minutes
-            );
-        }
-        eprintln!(
-            "Use --exclude PATH or --exclude-chat UUID to omit more content before confirming a new export."
-        );
-        if !crate::init_commands::confirm("SHARE")? {
-            return Ok(130);
-        }
-        let passphrase = SecretString::from(String::from_utf8(
-            crate::new_password("Separate Share password")?.to_vec(),
-        )?);
-        let pending = parent.join(format!(".oblivion-share-{}.pending", package.id));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&pending)?;
-        let exported = (|| -> control::Result<()> {
-            oblivion_share::encrypt(&mut file, passphrase, &package, &mut sources)?;
-            file.sync_all()?;
-            sources.end()?;
-            std::fs::hard_link(&pending, &output)?;
-            File::open(&parent)?.sync_all()?;
-            Ok(())
-        })();
-        let cleanup = std::fs::remove_file(&pending);
-        exported?;
-        cleanup?;
-        eprintln!("Encrypted Share saved to {}", output.display());
-        Ok(0)
-    })();
-    let cleanup = sources.end();
-    cleanup?;
-    result
-}
-
-struct Attachment {
-    channel: Channel,
-    lease: std::os::unix::net::UnixStream,
+pub struct ShareAttachment {
+    channel: Option<Channel>,
+    lease: Option<UnixStream>,
     client: String,
-    opening: oblivion_host::autolock::Opening,
+}
+impl Attachment for ShareAttachment {
+    type Stream = Channel;
+    fn stream(&mut self) -> &mut Channel {
+        self.channel.as_mut().expect("open Share attachment")
+    }
+    fn client_id(&self) -> &str {
+        &self.client
+    }
+    fn close(&mut self) -> io::Result<()> {
+        drop(self.channel.take());
+        drop(self.lease.take());
+        Ok(())
+    }
 }
 
-struct BatchSource {
-    export_id: String,
-    signal: std::os::unix::net::UnixStream,
-    lease: std::os::unix::net::UnixStream,
-    selection: Selection,
-    approved: Vec<Approved>,
-    current: Option<Attachment>,
-    ended: bool,
+pub struct ExportLease {
+    signal: Option<UnixStream>,
+    lease: Option<UnixStream>,
 }
-
-impl BatchSource {
-    fn open_source(&mut self, id: &str, prompt: bool) -> control::Result<Metadata> {
-        if self.current.is_some() {
-            return Err("A Share source is already open".into());
+impl Lease for ExportLease {
+    fn check(&mut self) -> io::Result<()> {
+        let mut watched = libc::pollfd {
+            fd: self
+                .signal
+                .as_ref()
+                .ok_or_else(|| io::Error::other("share_export_revoked"))?
+                .as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut watched, 1, 0) };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
         }
-        let slot = crate::free_slot(&crate::status()?)?;
-        scope::within(slot, || {
-            let payload = serde_json::to_vec(&ExportOpen {
-                export_id: &self.export_id,
-                password: None,
-            })?;
-            let opened = control::request_for(id, "share-export-source-open", Some(id), &payload);
-            let output = match opened {
-                Err(error) if error.to_string() == "share_password_required" && prompt => {
-                    let password =
-                        crate::password(&format!("Password for Safe {}", &id[..8]), false)?;
-                    let payload = zeroize::Zeroizing::new(serde_json::to_vec(&ExportOpen {
-                        export_id: &self.export_id,
-                        password: Some(std::str::from_utf8(&password)?),
-                    })?);
-                    control::request_for(id, "share-export-source-open", Some(id), &payload)?
-                }
-                result => result?,
-            };
-            let metadata: Metadata = serde_json::from_str(&output)?;
-            if metadata.opening.safe_id != id || metadata.opening.slot != slot {
-                return Err("Share opening changed".into());
-            }
-            oblivion_share::manifest::validate_id(&metadata.opening.nonce)?;
-            let (connection, lease, client) = match control::attach_client("share-attach", id) {
-                Ok(attached) => attached,
-                Err(error) => {
-                    control::request_for(
-                        id,
-                        "share-export-cancel",
-                        None,
-                        &serde_json::to_vec(&metadata.opening)?,
-                    )?;
-                    return Err(error);
-                }
-            };
-            let mut channel = Channel::new(
-                File::from(OwnedFd::from(connection)),
-                Duration::from_secs(3600),
-            )?;
-            channel.watch(OwnedFd::from(self.signal.try_clone()?));
-            let mut ready = [0; 6];
-            channel.read_exact(&mut ready)?;
-            if &ready != b"OBSH1\n" {
-                return Err("Share guest is not ready".into());
-            }
-            self.current = Some(Attachment {
-                channel,
-                lease,
-                client,
-                opening: metadata.opening.clone(),
-            });
-            Ok(metadata)
-        })
-    }
-
-    fn plan(&mut self, request: &str) -> control::Result<(Review, Manifest)> {
-        let current = self.current.as_mut().ok_or("Share source missing")?;
-        write_message(
-            &mut current.channel,
-            &json!({"version":1,"operation":"plan","request_id":request,
-            "paths":self.selection.paths,"chat_ids":self.selection.chat_ids,"exclude_paths":self.selection.exclude_paths,
-            "exclude_chats":self.selection.exclude_chats,"include_sensitive_paths":self.selection.include_sensitive_paths,"include_sensitive_chats":self.selection.include_sensitive_chats}),
-        )?;
-        let mut review: Review = read_message(&mut current.channel, 10 * 1024 * 1024)?;
-        let manifest = validate_review(&mut review, request)?;
-        Ok((review, manifest))
-    }
-
-    fn cancel_plan(&mut self, request: &str) -> control::Result<()> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Cancelled {
-            version: u8,
-            request_id: String,
-            ok: bool,
-            cancelled: bool,
-        }
-        let current = self.current.as_mut().ok_or("Share source missing")?;
-        write_message(
-            &mut current.channel,
-            &json!({"version":1,"operation":"cancel","request_id":request}),
-        )?;
-        let reply: Cancelled = read_message(&mut current.channel, 1024)?;
-        if reply.version != 1 || reply.request_id != request || !reply.ok || !reply.cancelled {
-            return Err("Share cancellation was not acknowledged".into());
+        if watched.revents != 0 {
+            return Err(io::Error::other("share_export_revoked"));
         }
         Ok(())
     }
-
-    fn close_source(&mut self) -> control::Result<()> {
-        if let Some(current) = self.current.take() {
-            let result = scope::within(current.opening.slot, || {
-                control::request_for(
-                    &current.opening.safe_id,
-                    "share-release",
-                    Some(&current.client),
-                    &[],
-                )
-            });
-            drop(current.channel);
-            drop(current.lease);
-            result?;
+    fn close(&mut self) -> io::Result<()> {
+        // Shutdown also revokes descriptors copied into the source watches.
+        if let Some(signal) = self.signal.take() {
+            let _ = signal.shutdown(std::net::Shutdown::Both);
         }
+        drop(self.lease.take());
         Ok(())
     }
+}
 
-    fn end(&mut self) -> control::Result<()> {
-        if self.ended {
-            return Ok(());
-        }
-        let result = control::request(
-            "share-export-end",
-            None,
-            &serde_json::to_vec(&json!({"export_id":self.export_id}))?,
-        );
-        self.current = None;
-        if result.is_ok() {
-            self.ended = true;
-        }
-        // Retain the lease until End acknowledgement. EOF is a second bounded
-        // revocation path, never authority to open a different source.
-        let _keep_alive = &self.lease;
-        result.map(|_| ())
+impl Drop for ExportLease {
+    fn drop(&mut self) {
+        // A source watch owns a cloned descriptor. Closing only this object's
+        // originals would leave that authorization connection alive.
+        let _ = Lease::close(self);
     }
 }
 
-impl Source for BatchSource {
-    fn open<'a>(&'a mut self, safe: &Safe) -> io::Result<Box<dyn Read + 'a>> {
-        let result = (|| -> control::Result<()> {
-            let approved = self
-                .approved
-                .iter()
-                .find(|entry| entry.package_id == safe.id)
-                .ok_or("Unreviewed Share source")?
-                .clone();
-            let metadata = self.open_source(&approved.source, false)?;
-            eprintln!("Sharing {}…", metadata.title);
-            let (review, manifest) = self.plan(&approved.request_id)?;
-            if review.plan_sha256 != approved.plan_sha256
-                || review.manifest_sha256 != safe.contents_sha256
-                || review.bytes != safe.bytes
-                || manifest.entries().len() != safe.entries
-            {
-                self.cancel_plan(&approved.request_id)?;
-                return Err(
-                    "Share source changed after review. No output will be published.".into(),
-                );
-            }
-            let channel = &mut self.current.as_mut().ok_or("Share source missing")?.channel;
-            write_message(
-                channel,
-                &json!({"version":1,"operation":"confirm","request_id":approved.request_id,"plan_sha256":approved.plan_sha256}),
-            )?;
-            Ok(())
-        })();
-        result.map_err(|error| io::Error::other(error.to_string()))?;
-        Ok(Box::new(
-            &mut self
-                .current
-                .as_mut()
-                .ok_or_else(|| io::Error::other("share_source_missing"))?
-                .channel,
-        ))
-    }
-    fn complete(&mut self, safe: &Safe, manifest: &Manifest) -> io::Result<()> {
-        let result = (|| -> control::Result<()> {
-            let approved = self
-                .approved
-                .iter()
-                .find(|entry| entry.package_id == safe.id)
-                .ok_or("Unreviewed Share source")?;
-            let channel = &mut self.current.as_mut().ok_or("Share source missing")?.channel;
-            write_message(
-                channel,
-                &Receipt {
-                    id: approved.request_id.clone(),
-                    manifest_sha256: manifest.sha256(),
-                    entries: manifest.entries().len(),
-                    bytes: manifest.bytes(),
-                },
-            )?;
-            let mut ack = [0; 7];
-            channel.read_exact(&mut ack)?;
-            if &ack != b"copied\n" {
-                return Err("Share receipt unconfirmed".into());
-            }
-            self.close_source()
-        })();
-        result.map_err(|error| io::Error::other(error.to_string()))
-    }
-}
+impl Native for super::UnixRuntime {
+    type Attachment = ShareAttachment;
+    type ExportLease = ExportLease;
 
-fn show_review(title: &str, review: &Review, manifest: &Manifest) -> control::Result<()> {
-    eprintln!(
-        "{title} · {} entries · {} bytes · {} conversations",
-        manifest.entries().len(),
-        review.bytes,
-        review.chats.len()
-    );
-    for entry in manifest.entries() {
-        eprintln!(
-            "  {}{}",
-            entry.path(),
-            if matches!(entry, Entry::Directory { .. }) {
-                "/"
-            } else {
-                ""
-            }
-        );
-    }
-    for (kind, count) in &review.omitted {
-        eprintln!("  Omitted {kind}: {count}");
-    }
-    for warning in &review.warnings {
-        eprintln!(
-            "  {}: {} · {}",
-            if warning.reason == "native_history_dependency_included" {
-                "Required saved context from a parent conversation"
-            } else {
-                warning.reason.as_str()
-            },
-            warning
-                .path
-                .as_deref()
-                .or(warning.chat_id.as_deref())
-                .unwrap_or("selection"),
-            if warning.included {
-                "included"
-            } else {
-                "excluded"
-            }
-        );
-    }
-    if review.warning_count > review.warnings.len() as u64 {
-        return Err("Too many Share warnings to review; narrow the selection".into());
-    }
-    Ok(())
-}
-
-fn validate_review(review: &mut Review, request: &str) -> io::Result<Manifest> {
-    let hash = |value: &str| {
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    };
-    if review.version != 1
-        || review.request_id != request
-        || !hash(&review.plan_sha256)
-        || review.chats.len() > 2048
-        || review.chats.iter().collect::<BTreeSet<_>>().len() != review.chats.len()
-        || review.warnings.len() > 512
-        || review.warning_count < review.warnings.len() as u64
-        || review.omitted.len() > 64
-        || !review.scan.best_effort
-        || review.scan.limit_per_kind != 16 * 1024 * 1024
-        || review.scan.files_bytes > review.scan.limit_per_kind
-        || review.scan.history_bytes > review.scan.limit_per_kind
-    {
-        return Err(io::Error::other("invalid_share_review"));
-    }
-    for chat in &review.chats {
-        validate_chat(chat)?;
-    }
-    for kind in review.omitted.keys() {
-        if kind.len() > 64
-            || kind.is_empty()
-            || !kind
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-        {
-            return Err(io::Error::other("invalid_share_review"));
-        }
-    }
-    for warning in &review.warnings {
-        if !matches!(
-            warning.reason.as_str(),
-            "credential_store_excluded"
-                | "invalid_name_excluded"
-                | "unsupported_entry_excluded"
-                | "potential_secret"
-                | "partial_content_scan"
-                | "native_history_dependency_included"
-        ) || warning.path.is_some() == warning.chat_id.is_some()
-            || warning.default_excluded.is_some_and(|value| !value)
-            || warning.reason == "native_history_dependency_included"
-                && (warning.chat_id.is_none()
-                    || !warning.included
-                    || warning.default_excluded.is_some())
-        {
-            return Err(io::Error::other("invalid_share_warning"));
-        }
-        if let Some(path) = &warning.path {
-            validate_path(path)?;
-        }
-        if let Some(chat) = &warning.chat_id {
-            validate_chat(chat)?;
-        }
-    }
-    let manifest = Manifest::new(
-        std::mem::take(&mut review.manifest),
-        oblivion_transfer::share::LIMITS,
-    )?;
-    oblivion_transfer::share::validate_manifest(&manifest)?;
-    if manifest.sha256() != review.manifest_sha256 || manifest.bytes() != review.bytes {
-        return Err(io::Error::other("share_review_changed"));
-    }
-    Ok(manifest)
-}
-
-fn validate_path(value: &str) -> io::Result<()> {
-    oblivion_transfer::browser::Request {
-        path: value.into(),
-        after: None,
-        limit: 1,
-    }
-    .validate()?;
-    if !matches!(value.split('/').next(), Some("workspace" | "imports")) {
-        return Err(io::Error::other("share_root_not_allowed"));
-    }
-    Ok(())
-}
-
-fn validate_chat(value: &str) -> io::Result<()> {
-    if value.len() != 36
-        || !value.bytes().enumerate().all(|(index, byte)| {
-            if [8, 13, 18, 23].contains(&index) {
-                byte == b'-'
-            } else {
-                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
-            }
+    fn lease_share_export(&mut self, export: &str) -> control::Result<ExportLease> {
+        let (signal, lease, _) =
+            scope::within(Default::default(), || control::attach_export(export))?;
+        Ok(ExportLease {
+            signal: Some(signal),
+            lease: Some(lease),
         })
-    {
-        return Err(io::Error::other("invalid_portable_chat_identity"));
     }
-    Ok(())
+    fn attach_share_source(
+        &mut self,
+        opening: &Opening,
+        lease: &mut ExportLease,
+    ) -> control::Result<ShareAttachment> {
+        lease.check()?;
+        let mut attachment = attach("share-attach", opening)?;
+        attachment.stream().watch(OwnedFd::from(
+            lease
+                .signal
+                .as_ref()
+                .ok_or("share_export_revoked")?
+                .try_clone()?,
+        ));
+        Ok(attachment)
+    }
+    fn attach_share_import(&mut self, opening: &Opening) -> control::Result<ShareAttachment> {
+        attach("share-import-attach", opening)
+    }
+    fn cleanup(&mut self, call: Call<'_, scope::Slot>) -> control::Result<String> {
+        control::Client::new().request(call)
+    }
 }
 
-fn random_id() -> io::Result<String> {
-    let mut bytes = [0; 16];
-    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+fn attach(operation: &str, opening: &Opening) -> control::Result<ShareAttachment> {
+    scope::within(opening.slot, || {
+        let (connection, lease, client) = control::attach_client(operation, &opening.safe_id)?;
+        let channel = Channel::new(
+            File::from(OwnedFd::from(connection)),
+            Duration::from_secs(3600),
+        )?;
+        Ok(ShareAttachment {
+            channel: Some(channel),
+            lease: Some(lease),
+            client,
+        })
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::ExportLease;
+    use oblivion_transfer::channel::Channel;
+    use std::fs::File;
+    use std::io::Read;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
 
     #[test]
-    fn review_accepts_the_real_guest_plan_and_keeps_secret_candidates_out() {
-        let root =
-            std::env::temp_dir().join(format!("oblivion-share-review-{}", random_id().unwrap()));
-        std::fs::create_dir(&root).unwrap();
-        let output = std::process::Command::new("python3").args(["-I", "-B", "-c", r#"
-import json,pathlib,sys
-repo,vault=map(pathlib.Path,sys.argv[1:])
-sys.path[:0]=[str(repo/'guest'),str(repo.parent/'oblivion-history')]
-from share_plan import Plan
-(vault/'workspace'/'project').mkdir(parents=True)
-(vault/'imports').mkdir()
-(vault/'workspace'/'project'/'caffè.txt').write_text('public synthetic fixture')
-(vault/'workspace'/'project'/'.env').write_text('PUBLIC_TEST_ONLY=not-a-real-secret')
-request={'version':1,'operation':'plan','request_id':'1'*32,'paths':['workspace','imports'],'chat_ids':[],
-'exclude_paths':[],'exclude_chats':[],'include_sensitive_paths':[],'include_sensitive_chats':[]}
-plan=Plan(vault,request)
-try: print(json.dumps(plan.public,ensure_ascii=False))
-finally: plan.close()
-"#]).arg(env!("CARGO_MANIFEST_DIR")).arg(&root).output().unwrap();
-        let result = (|| {
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let mut review: Review = serde_json::from_slice(&output.stdout).unwrap();
-            let manifest = validate_review(&mut review, &"1".repeat(32)).unwrap();
-            assert!(
-                manifest
-                    .entries()
-                    .iter()
-                    .any(|entry| entry.path() == "workspace/project/caffè.txt")
-            );
-            assert!(
-                !manifest
-                    .entries()
-                    .iter()
-                    .any(|entry| entry.path().ends_with("/.env"))
-            );
-            assert!(review.warnings.iter().any(|warning| warning.path.as_deref()
-                == Some("workspace/project/.env")
-                && !warning.included));
-            let mut escaped: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            escaped["warnings"][0]["path"] = json!("workspace/../outside");
-            assert!(
-                validate_review(
-                    &mut serde_json::from_value(escaped).unwrap(),
-                    &"1".repeat(32)
-                )
-                .is_err()
-            );
-            let mut dependency: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            dependency["warnings"][0] = json!({
-                "reason": "native_history_dependency_included",
-                "chat_id": "11111111-1111-4111-8111-111111111111",
-                "included": true,
-            });
-            assert!(
-                validate_review(
-                    &mut serde_json::from_value(dependency.clone()).unwrap(),
-                    &"1".repeat(32)
-                )
-                .is_ok()
-            );
-            for invalid in [
-                json!({"included": false}),
-                json!({"default_excluded": true}),
-                json!({"chat_id": null, "path": "workspace/project"}),
-            ] {
-                let mut value = dependency.clone();
-                value["warnings"][0]
-                    .as_object_mut()
-                    .unwrap()
-                    .extend(invalid.as_object().unwrap().clone());
-                assert!(
-                    validate_review(&mut serde_json::from_value(value).unwrap(), &"1".repeat(32))
-                        .is_err()
-                );
-            }
-        })();
-        std::fs::remove_dir_all(&root).unwrap();
-        result
-    }
-}
-
-#[cfg(test)]
-mod grammar_tests {
-    use super::{Action, Selector, parse};
-
-    #[test]
-    fn share_parser_preserves_review_selection_without_opening_files() {
-        let args = [
-            "export",
-            "--safe",
-            "GB",
-            "missing/output",
-            "--path",
-            "workspace/project",
-            "--exclude",
-            "workspace/project/.env",
-            "--no-chats",
-        ]
-        .map(str::to_owned);
-        let command = parse(&args).unwrap();
-        let Action::Export {
-            selector,
-            output,
-            selection,
-        } = command.0
-        else {
-            panic!("expected export")
+    fn dropping_export_owner_revokes_source_watches_that_retain_signal_descriptors() {
+        let (signal, mut peer) = UnixStream::pair().unwrap();
+        let watch = OwnedFd::from(signal.try_clone().unwrap());
+        let lease = ExportLease {
+            lease: Some(signal.try_clone().unwrap()),
+            signal: Some(signal),
         };
-        assert!(matches!(selector, Selector::Safe(name) if name == "GB"));
-        assert_eq!(output, "missing/output");
-        assert_eq!(selection.paths, ["workspace/project"]);
-        assert_eq!(selection.exclude_paths, ["workspace/project/.env"]);
-        assert_eq!(selection.chat_ids, Some(vec![]));
-        let command = parse(&["export", "--all", "missing/output"].map(str::to_owned)).unwrap();
-        let Action::Export {
-            selector,
-            selection,
-            ..
-        } = command.0
-        else {
-            panic!("expected all")
-        };
-        assert!(matches!(selector, Selector::All));
-        assert_eq!(selection.paths, ["workspace", "imports"]);
-    }
-
-    #[test]
-    fn import_and_recovery_grammar_is_typed_before_any_file_or_controller_access() {
-        let command =
-            parse(&["import", "missing/file", "--apply-settings"].map(str::to_owned)).unwrap();
-        assert!(
-            matches!(command.0, Action::Import { file, settings: true } if file == "missing/file")
-        );
-        assert!(matches!(
-            parse(&["imports", "--json"].map(str::to_owned)).unwrap().0,
-            Action::Imports { json: true }
-        ));
-        let transaction = "a".repeat(32);
-        assert!(
-            matches!(parse(&["discard".into(), transaction.clone()]).unwrap().0, Action::Discard { transaction: id } if id == transaction)
-        );
-        for values in [
-            vec!["import"],
-            vec!["import", "file", "--apply-settings", "--apply-settings"],
-            vec!["imports", "unexpected"],
-            vec!["discard", "PRIVATE_CANARY"],
-            vec!["export", "--safe", "GB"],
-            vec!["export", "--all", "file", "--path", "workspace/../outside"],
-        ] {
-            let error = parse(&values.into_iter().map(str::to_owned).collect::<Vec<_>>())
-                .err()
-                .unwrap();
-            assert!(!error.to_string().contains("PRIVATE_CANARY"));
-        }
+        let (data, _source) = UnixStream::pair().unwrap();
+        let mut channel =
+            Channel::new(File::from(OwnedFd::from(data)), Duration::from_secs(2)).unwrap();
+        channel.watch(watch);
+        assert!(channel.check().is_ok());
+        drop(lease);
+        assert!(channel.check().is_err());
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
     }
 }

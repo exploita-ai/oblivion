@@ -1,7 +1,7 @@
 use oblivion_cli::command;
 #[cfg(test)]
-use oblivion_cli::controller::AgentSafeState;
-use oblivion_cli::controller::{self, AppMode, State};
+use oblivion_cli::controller::{AgentSafeState, State};
+use oblivion_cli::controller;
 use oblivion_host::{agent, control, scope};
 #[cfg(test)]
 use serde_json::json;
@@ -48,12 +48,6 @@ fn main() {
     }
 }
 
-type Status = State<scope::Slot>;
-
-fn status() -> control::Result<Status> {
-    controller::status(&mut control::Client::new())
-}
-
 fn run() -> control::Result<i32> {
     control::protect()?;
     let args = std::env::args_os()
@@ -63,7 +57,7 @@ fn run() -> control::Result<i32> {
                 .map_err(|_| "Arguments must use valid UTF-8")
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let command = command::parse(&args, oblivion_cli::file_copy::parse, share_commands::parse)?;
+    let command = command::parse(&args, oblivion_cli::file_copy::parse, oblivion_cli::share::parse)?;
     match &command {
         command::Command::Help => {
             print!("{}", command::HELP);
@@ -248,10 +242,6 @@ impl oblivion_cli::run::Runtime for UnixRuntime {
     fn attach_workspace(&mut self, slot: scope::Slot, id: &str) -> control::Result<i32> {
         scope::within(slot, || attach_workspace(id))
     }
-}
-
-fn free_slot(state: &Status) -> control::Result<scope::Slot> {
-    oblivion_cli::run::free_slot(&UnixRuntime::new(), state)
 }
 
 fn password(label: &str, confirm: bool) -> control::Result<Zeroizing<Vec<u8>>> {
@@ -480,7 +470,7 @@ mod tests {
 
     #[test]
     fn closed_ram_children_resolve_to_their_existing_identity() {
-        let mut state: Status = serde_json::from_value(json!({
+        let mut state: State<scope::Slot> = serde_json::from_value(json!({
             "app_open":true,"app_mode":"ram-only","general_present":false,
             "general_incomplete":false,"general_bytes":8589934592_u64,"recovery_required":false,
             "sessions":[],"session_titles":{},"open_sessions":[],

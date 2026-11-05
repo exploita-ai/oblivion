@@ -2,6 +2,7 @@
 //! the guest endpoints: this crate never discovers profiles or opens a path.
 
 pub mod container;
+pub mod control;
 pub mod manifest;
 
 pub use age::secrecy::SecretString;

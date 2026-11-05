@@ -1139,8 +1139,8 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
     if matches!(request.operation, Operation::ShareExportBegin) {
         require(request.expected_session.is_none(), "invalid_share_request")?;
         let _lock = lock_named("storage.lock")?;
-        let selection: crate::share_export::Selection = serde_json::from_slice(&secret).map_err(|_| Error("invalid_share_request"))?;
-        let settings = if matches!(&selection, crate::share_export::Selection::All) {
+        let selection: crate::share_export::ExportSelection = serde_json::from_slice(&secret).map_err(|_| Error("invalid_share_request"))?;
+        let settings = if matches!(&selection, crate::share_export::ExportSelection::All) {
             idle.observe(crate::storage::idle_snapshot()?)?;
             let preferences = idle.status()?.state.preferences;
             Some(oblivion_share::Settings { safe_idle_minutes: preferences.safe_minutes, host_idle_minutes: preferences.host_minutes })
@@ -1162,7 +1162,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
     }
     if matches!(request.operation, Operation::ShareExportEnd) {
         require(request.expected_session.is_none(), "invalid_share_request")?;
-        let identity: crate::share_export::Identity = serde_json::from_slice(&secret).map_err(|_| Error("invalid_share_request"))?;
+        let identity: crate::share_export::ExportIdentity = serde_json::from_slice(&secret).map_err(|_| Error("invalid_share_request"))?;
         cleanup_export(config, families, crate::share_export::registry().end(Some(&identity.export_id))?)?;
         return Ok(Response { ok: true, output: String::new(), error: None, console: None, lease: None });
     }
@@ -1593,7 +1593,7 @@ mod family_tests {
         let registry = crate::share_export::registry();
         let export = "a".repeat(32);
         let host = "b".repeat(32);
-        registry.begin(export.clone(), host.clone(), vec![crate::share_export::Source {
+        registry.begin(export.clone(), host.clone(), vec![crate::share_export::ExportSource {
             id: SAFE.into(), parent: None,
         }]).unwrap_or_else(|error| panic!("{}", error.0));
         registry.lease(&export, &host).unwrap_or_else(|error| panic!("{}", error.0));

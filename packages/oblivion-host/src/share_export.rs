@@ -1,48 +1,13 @@
 //! One controller-owned, export-only authorization. No passwords or transcripts.
 use crate::storage::{Error, Result, require};
 use oblivion_host::{autolock::Opening, family::Capability};
-use serde::{Deserialize, Serialize};
+pub use oblivion_share::control::{ExportIdentity, ExportOpen, ExportSelection, ExportSource, ExportStarted};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 pub const LIFETIME: Duration = Duration::from_secs(3600);
-
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum Selection {
-    Safe { safe_id: String },
-    Branch { safe_id: String },
-    All,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Source {
-    pub id: String,
-    pub parent: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct Started {
-    pub export_id: String,
-    pub sources: Vec<Source>,
-    pub settings: Option<oblivion_share::Settings>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Identity {
-    pub export_id: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Open {
-    pub export_id: String,
-    pub password: Option<Zeroizing<String>>,
-}
 
 struct Export {
     id: String,
@@ -71,11 +36,11 @@ mod tests {
                 id.clone(),
                 host.clone(),
                 vec![
-                    Source {
+                    ExportSource {
                         id: first.clone(),
                         parent: None,
                     },
-                    Source {
+                    ExportSource {
                         id: second.clone(),
                         parent: Some(first.clone()),
                     },
@@ -221,7 +186,7 @@ pub fn registry() -> &'static Registry {
 }
 
 impl Registry {
-    pub fn begin(&self, id: String, host: String, sources: Vec<Source>) -> Result<Started> {
+    pub fn begin(&self, id: String, host: String, sources: Vec<ExportSource>) -> Result<ExportStarted> {
         crate::storage::validate_id(&id)?;
         crate::storage::validate_id(&host)?;
         require(
@@ -262,7 +227,7 @@ impl Registry {
             created: Instant::now(),
             leased: false,
         });
-        Ok(Started {
+        Ok(ExportStarted {
             export_id: id,
             sources,
             settings: None,

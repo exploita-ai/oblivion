@@ -974,6 +974,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom",
  "oblivion-native-windows",
+ "oblivion-share",
  "oblivion-transfer",
  "oblivion-transport",
  "oblivion-wire",
@@ -1027,6 +1028,7 @@ version = "0.1.0"
 dependencies = [
  "age",
  "oblivion-transfer",
+ "oblivion-wire",
  "serde",
  "serde_json",
  "sha2 0.10.9",

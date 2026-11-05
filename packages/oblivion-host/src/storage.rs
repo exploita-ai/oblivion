@@ -1052,7 +1052,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         }
         "share-export-source-open" => {
             require(crate::ipc::family_channel_available(), "trusted_share_channel_required")?;
-            let request: crate::share_export::Open = serde_json::from_reader(std::io::stdin().take(4097))
+            let request: crate::share_export::ExportOpen = serde_json::from_reader(std::io::stdin().take(4097))
                 .map_err(|_| Error("invalid_share_request"))?;
             let metadata = config.open_export_share(&args[3], &request)?;
             println!("{}", serde_json::to_string(&metadata).map_err(|_| Error("encode_failed"))?);
@@ -2092,7 +2092,7 @@ fn share_proxy_requirement(transport: Option<&egress::Profile>, unresolved: Opti
 }
 
 impl Config {
-    fn open_export_share(&self, id: &str, request: &crate::share_export::Open) -> Result<crate::share_host::Metadata> {
+    fn open_export_share(&self, id: &str, request: &crate::share_export::ExportOpen) -> Result<crate::share_host::Metadata> {
         self.open_share_using(id, || {
             self.admit_session(false)?;
             let path = persistent_safe_path(id)?;
@@ -2130,12 +2130,15 @@ impl Config {
         let origin = backup_origin(id)?;
         let (created_by_agent, requested_agent, parent_not_included, unresolved_proxy) = match &origin {
             oblivion_host::safe_origin::Origin::Local {} => (false, None, false, None),
-            oblivion_host::safe_origin::Origin::AgentCreated { record } => (true, Some(record.agent.clone()), true, None),
+            oblivion_host::safe_origin::Origin::AgentCreated { record } => (true, Some(match record.agent.as_str() {
+                "codex" => oblivion_share::Agent::Codex,
+                "claude" => oblivion_share::Agent::Claude,
+                "opencode2" => oblivion_share::Agent::Opencode2,
+                _ => return Err(Error("invalid_share_agent")),
+            }), true, None),
             oblivion_host::safe_origin::Origin::Shared { parent_id, provenance, required_proxy, .. } => (
                 provenance.as_ref().is_some_and(|origin| origin.created_by_agent),
-                provenance.as_ref().and_then(|origin| origin.requested_agent.as_ref()).map(|agent| match agent {
-                    oblivion_share::Agent::Codex => "codex", oblivion_share::Agent::Claude => "claude", oblivion_share::Agent::Opencode2 => "opencode2",
-                }.to_owned()),
+                provenance.as_ref().and_then(|origin| origin.requested_agent.clone()),
                 parent_id.is_some() || provenance.as_ref().is_some_and(|origin| origin.parent_not_included), required_proxy.as_deref(),
             ),
         };
@@ -2156,7 +2159,7 @@ impl Config {
             Ok(crate::share_host::Metadata {
                 opening: idle_opening()?.ok_or(Error("idle_opening_unknown"))?, title,
                 created_by_agent, requested_agent, parent_not_included,
-                policy: match access { Access::Offline => "offline", Access::Strict => "strict", Access::Open => "open-internet" },
+                policy: match access { Access::Offline => oblivion_share::Policy::Offline, Access::Strict => oblivion_share::Policy::Strict, Access::Open => oblivion_share::Policy::OpenInternet },
                 required_proxy,
             })
         })();
@@ -4318,15 +4321,15 @@ pub(crate) fn share_import_host() -> Result<Option<String>> {
 }
 
 /// The selected set comes from the encrypted controller catalog, not a guest.
-pub(crate) fn share_export_sources(selection: crate::share_export::Selection) -> Result<Vec<crate::share_export::Source>> {
+pub(crate) fn share_export_sources(selection: crate::share_export::ExportSelection) -> Result<Vec<crate::share_export::ExportSource>> {
     share_export_host()?;
     let all = sessions(".luks")?;
     let records = agent_safe_records()?;
     let parents = persistent_safe_parents()?;
     let selected = match selection {
-        crate::share_export::Selection::All => all.clone(),
-        crate::share_export::Selection::Safe { safe_id } => { validate_id(&safe_id)?; vec![safe_id] },
-        crate::share_export::Selection::Branch { safe_id } => {
+        crate::share_export::ExportSelection::All => all.clone(),
+        crate::share_export::ExportSelection::Safe { safe_id } => { validate_id(&safe_id)?; vec![safe_id] },
+        crate::share_export::ExportSelection::Branch { safe_id } => {
             validate_id(&safe_id)?;
             require(all.contains(&safe_id), "safe_not_found")?;
             let mut selected = vec![safe_id.clone()];
@@ -4349,7 +4352,7 @@ pub(crate) fn share_export_sources(selection: crate::share_export::Selection) ->
         require_branch_open(&records, id)?;
         trusted_file(&persistent_safe_path(id)?)?;
     }
-    Ok(selected.iter().map(|id| crate::share_export::Source {
+    Ok(selected.iter().map(|id| crate::share_export::ExportSource {
         id: id.clone(), parent: parents.iter().find(|entry| &entry.0 == id)
             .map(|entry| entry.1.clone()).filter(|parent| selected.contains(parent)),
     }).collect())

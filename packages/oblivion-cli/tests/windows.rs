@@ -597,6 +597,295 @@ const COPY_OPENING: &str = "cccccccccccccccccccccccccccccccc";
 const COPY_CLIENT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
+#[test]
+fn share_source_revocation_interrupts_pending_io_but_keeps_release_authority() {
+    use oblivion_cli::controller::Call;
+    use oblivion_cli::share::io::{Attachment, Lease, Native};
+    use oblivion_share::control::ExportIdentity;
+    use oblivion_wire::idle::Opening;
+    use std::sync::mpsc::sync_channel;
+    use std::time::{Duration, Instant};
+
+    let (id, mut signal) = listener();
+    let mut data = instance(&id, false);
+    let mut release = instance(&id, false);
+    let mut end = instance(&id, false);
+    let opening = Opening {
+        slot: 4.try_into().unwrap(),
+        safe_id: SAFE.into(),
+        nonce: COPY_OPENING.into(),
+    };
+    let expected = serde_json::to_value(&opening).unwrap();
+    let (pending, started) = sync_channel(0);
+    let server = std::thread::spawn(move || {
+        let request = connect(&mut signal);
+        assert_eq!(request["operation"], json!(Operation::ShareExportLease));
+        assert_eq!(request["slot"], 0);
+        assert_eq!(request["session"], COPY_OPERATION);
+        assert!(request["expected_session"].is_null());
+        assert_eq!(request["secret_len"], 0);
+        frame::write(
+            &mut signal,
+            &serde_json::to_vec(&json!({"ok":true,"output":COPY_OPERATION})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        let request = connect(&mut data);
+        assert_eq!(request["operation"], json!(Operation::ShareAttach));
+        assert_eq!(request["slot"], 4);
+        assert_eq!(request["expected_session"], SAFE);
+        assert!(request["session"].is_null());
+        assert_eq!(request["secret_len"], 0);
+        frame::write(
+            &mut data,
+            &serde_json::to_vec(&json!({"ok":true,"output":COPY_CLIENT})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        // The common Share engine owns this banner. It may arrive in the same
+        // byte-pipe buffer as the ACK, and must not disappear in the adapter.
+        data.write_all(b"OBSH1\n").unwrap();
+        started.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_ne!(unsafe { DisconnectNamedPipe(signal.as_raw_handle()) }, 0);
+        let request = connect(&mut release);
+        assert_eq!(request["operation"], json!(Operation::ShareRelease));
+        assert_eq!(request["slot"], 4);
+        assert_eq!(request["session"], COPY_CLIENT);
+        assert_eq!(request["expected_session"], SAFE);
+        let mut body = vec![0; request["secret_len"].as_u64().unwrap() as usize];
+        release.read_exact(&mut body).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), expected);
+        assert_ne!(
+            unsafe {
+                PeekNamedPipe(
+                    data.as_raw_handle(),
+                    null_mut(),
+                    0,
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                )
+            },
+            0,
+            "signal revocation must not substitute EOF for ShareRelease"
+        );
+        frame::write(
+            &mut release,
+            &serde_json::to_vec(&json!({"ok":true,"output":""})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        disconnect(&mut data);
+        disconnect(&mut release);
+        let request = connect(&mut end);
+        assert_eq!(request["operation"], json!(Operation::ShareExportEnd));
+        assert_eq!(request["slot"], 0);
+        assert!(request["session"].is_null());
+        assert!(request["expected_session"].is_null());
+        let mut body = vec![0; request["secret_len"].as_u64().unwrap() as usize];
+        end.read_exact(&mut body).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({"export_id":COPY_OPERATION})
+        );
+        frame::write(
+            &mut end,
+            &serde_json::to_vec(&json!({"ok":true,"output":""})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        disconnect(&mut end);
+    });
+    let mut runtime = oblivion_cli::windows::Runtime::new(&id).unwrap();
+    let mut lease = runtime.lease_share_export(COPY_OPERATION).unwrap();
+    let mut attachment = runtime.attach_share_source(&opening, &mut lease).unwrap();
+    assert_eq!(attachment.client_id(), COPY_CLIENT);
+    let mut banner = [0; 6];
+    attachment.stream().read_exact(&mut banner).unwrap();
+    assert_eq!(&banner, b"OBSH1\n");
+    pending.send(()).unwrap();
+    let started = Instant::now();
+    assert!(attachment.stream().read(&mut [0]).is_err());
+    assert!(started.elapsed() < Duration::from_secs(3));
+    runtime.cancellation().cancel();
+    runtime
+        .cleanup(Call {
+            operation: Operation::ShareRelease,
+            slot: Some(opening.slot),
+            session: Some(attachment.client_id()),
+            expected_session: Some(&opening.safe_id),
+            secret: &serde_json::to_vec(&opening).unwrap(),
+        })
+        .unwrap();
+    attachment.close().unwrap();
+    runtime
+        .cleanup(Call {
+            operation: Operation::ShareExportEnd,
+            slot: Some(oblivion_wire::slot::Slot::ZERO),
+            session: None,
+            expected_session: None,
+            secret: &serde_json::to_vec(&ExportIdentity {
+                export_id: COPY_OPERATION.into(),
+            })
+            .unwrap(),
+        })
+        .unwrap();
+    lease.close().unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn dropping_share_export_lease_revokes_watchers_without_a_background_owner() {
+    use oblivion_cli::share::io::{Attachment, Native};
+    use oblivion_wire::idle::Opening;
+
+    let (id, mut signal) = listener();
+    let mut data = instance(&id, false);
+    let server = std::thread::spawn(move || {
+        assert_eq!(
+            connect(&mut signal)["operation"],
+            json!(Operation::ShareExportLease)
+        );
+        frame::write(
+            &mut signal,
+            &serde_json::to_vec(&json!({"ok":true,"output":COPY_OPERATION})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        assert_eq!(
+            connect(&mut data)["operation"],
+            json!(Operation::ShareAttach)
+        );
+        frame::write(
+            &mut data,
+            &serde_json::to_vec(&json!({"ok":true,"output":COPY_CLIENT})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        disconnect(&mut signal);
+        disconnect(&mut data);
+    });
+    let mut runtime = oblivion_cli::windows::Runtime::new(&id).unwrap();
+    let mut lease = runtime.lease_share_export(COPY_OPERATION).unwrap();
+    let mut attachment = runtime
+        .attach_share_source(
+            &Opening {
+                slot: 4.try_into().unwrap(),
+                safe_id: SAFE.into(),
+                nonce: COPY_OPENING.into(),
+            },
+            &mut lease,
+        )
+        .unwrap();
+    drop(lease);
+    assert!(attachment.stream().read(&mut [0]).is_err());
+    attachment.close().unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn share_import_finish_is_independent_of_cancel_and_precedes_data_lease_close() {
+    use oblivion_cli::controller::Call;
+    use oblivion_cli::share::io::{Attachment, Native};
+    use oblivion_share::control::Finish;
+    use oblivion_wire::idle::Opening;
+    use std::time::Duration;
+
+    let (id, mut data) = listener();
+    let mut finish = instance(&id, false);
+    let opening = Opening {
+        slot: 4.try_into().unwrap(),
+        safe_id: SAFE.into(),
+        nonce: COPY_OPENING.into(),
+    };
+    let body = serde_json::to_vec(&Finish {
+        transaction: COPY_OPERATION.into(),
+        nonce: COPY_OPENING.into(),
+        package_id: SAFE.into(),
+        receipt: oblivion_transfer::Receipt {
+            id: COPY_OPERATION.into(),
+            manifest_sha256: ABC_SHA256.into(),
+            entries: 1,
+            bytes: 3,
+        },
+    })
+    .unwrap();
+    let expected = body.clone();
+    let server = std::thread::spawn(move || {
+        let request = connect(&mut data);
+        assert_eq!(request["operation"], json!(Operation::ShareImportAttach));
+        assert_eq!(request["slot"], 4);
+        assert_eq!(request["expected_session"], SAFE);
+        assert!(request["session"].is_null());
+        assert_eq!(request["secret_len"], 0);
+        frame::write(
+            &mut data,
+            &serde_json::to_vec(&json!({"ok":true,"output":COPY_CLIENT})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        data.write_all(b"OBSH1\n").unwrap();
+        let request = connect(&mut finish);
+        assert_eq!(request["operation"], json!(Operation::ShareImportFinish));
+        assert_eq!(request["slot"], 4);
+        assert_eq!(request["expected_session"], SAFE);
+        assert_eq!(request["session"], COPY_CLIENT);
+        let mut body = vec![0; request["secret_len"].as_u64().unwrap() as usize];
+        finish.read_exact(&mut body).unwrap();
+        assert_eq!(body, expected);
+        assert_ne!(
+            unsafe {
+                PeekNamedPipe(
+                    data.as_raw_handle(),
+                    null_mut(),
+                    0,
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                )
+            },
+            0
+        );
+        // Denial remains an error; local close is never a commit receipt.
+        frame::write(
+            &mut finish,
+            &serde_json::to_vec(&json!({"ok":false,"output":"","error":"finish_refused"})).unwrap(),
+            1..=RESPONSE_LIMIT,
+        )
+        .unwrap();
+        disconnect(&mut data);
+        disconnect(&mut finish);
+    });
+    let mut runtime = oblivion_cli::windows::Runtime::new(&id).unwrap();
+    let mut attachment = runtime.attach_share_import(&opening).unwrap();
+    let mut banner = [0; 6];
+    attachment.stream().read_exact(&mut banner).unwrap();
+    assert_eq!(&banner, b"OBSH1\n");
+    let cancellation = runtime.cancellation();
+    let cancel = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        cancellation.cancel();
+    });
+    assert!(attachment.stream().read(&mut [0]).is_err());
+    cancel.join().unwrap();
+    assert_eq!(
+        runtime
+            .cleanup(Call {
+                operation: Operation::ShareImportFinish,
+                slot: Some(opening.slot),
+                session: Some(attachment.client_id()),
+                expected_session: Some(&opening.safe_id),
+                secret: &body,
+            })
+            .unwrap_err()
+            .to_string(),
+        "finish_refused"
+    );
+    attachment.close().unwrap();
+    server.join().unwrap();
+}
+
 fn copy_preflight(pipe: &mut File) {
     let mut status: Value = serde_json::from_str(&state(4)).unwrap();
     status["idle_lock"] = json!({"preferences":{"version":1,"safe_minutes":15,"host_minutes":30},
