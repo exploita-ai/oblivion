@@ -733,24 +733,7 @@ pub(crate) fn validate_name(name: &str) -> io::Result<()> {
 fn component(name: &str) -> io::Result<()> {
     crate::native_files::validate_name(name)?;
     require(
-        name.encode_utf16().count() <= 255
-            && !name.ends_with(['.', ' '])
-            && !name.chars().any(|character| {
-                matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\\')
-            }),
-        "unsupported_windows_name",
-    )?;
-    let stem = name.split('.').next().unwrap_or("").to_uppercase();
-    require(
-        !matches!(
-            stem.as_str(),
-            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-        ) && !["COM", "LPT"].iter().any(|prefix| {
-            stem.strip_prefix(prefix).is_some_and(|suffix| {
-                suffix.chars().count() == 1
-                    && matches!(suffix.chars().next(), Some('1'..='9' | '¹' | '²' | '³'))
-            })
-        }),
+        crate::selection::portable_name(name),
         "unsupported_windows_name",
     )
 }

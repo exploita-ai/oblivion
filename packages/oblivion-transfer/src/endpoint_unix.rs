@@ -258,15 +258,35 @@ pub fn recover(channel: &mut Channel, root: &Path, published: &Path) -> io::Resu
 }
 
 pub fn export(channel: &mut Channel, root: &Path, mode: crate::ExportMode) -> io::Result<()> {
+    export_with_limit(channel, root, mode, u64::MAX)
+}
+
+pub fn export_live_media(
+    channel: &mut Channel,
+    root: &Path,
+    mode: crate::ExportMode,
+) -> io::Result<()> {
+    export_with_limit(channel, root, mode, crate::MAX_DOCUMENT_BYTES)
+}
+
+fn export_with_limit(
+    channel: &mut Channel,
+    root: &Path,
+    mode: crate::ExportMode,
+    maximum: u64,
+) -> io::Result<()> {
     let request: ReceiveRequest = read_message(channel, 1024)?;
     validate_id(&request.approval.id)?;
+    require(request.limits.bytes <= maximum, "transfer_limit")?;
     let manifest = Manifest::read(channel, request.limits)?;
     require(
         manifest.sha256() == request.approval.manifest_sha256,
         "offer_not_approved",
     )?;
+    let export =
+        crate::filesystem::ExternalExport::prepare(&manifest, root, &request.approval.id, mode)?;
     channel.write_all(b"receive\n")?;
-    let receipt = crate::receive_external(channel, &manifest, root, &request.approval.id, mode)?;
+    let receipt = export.receive(channel, |channel| channel.check())?;
     write_message(channel, &receipt)
 }
 

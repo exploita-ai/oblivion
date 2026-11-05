@@ -201,7 +201,12 @@ impl Directory {
         self.rename_exclusive(from, destination, to)
     }
 
-    fn rename_exclusive(&self, from: &str, destination: &Self, to: &str) -> io::Result<()> {
+    pub(crate) fn rename_exclusive(
+        &self,
+        from: &str,
+        destination: &Self,
+        to: &str,
+    ) -> io::Result<()> {
         let from = component(from)?;
         let to = component(to)?;
         #[cfg(target_os = "linux")]

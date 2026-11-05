@@ -15,6 +15,24 @@ fn main() {
 fn execute() -> Result<(), Box<dyn std::error::Error>> {
     runtime::harden()?;
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let [role, root, budget, mode] = args.as_slice() {
+        if role == "live-media-export" && Path::new(root).is_absolute() {
+            let budget = budget.parse::<u64>()?;
+            if !(1..=3_600_000).contains(&budget) {
+                return Err("invalid_deadline".into());
+            }
+            let mode = match mode.as_str() {
+                "posix" => oblivion_transfer::ExportMode::Posix,
+                "fat32" => oblivion_transfer::ExportMode::Fat32,
+                "exfat" => oblivion_transfer::ExportMode::Portable,
+                _ => return Err("invalid_export_mode".into()),
+            };
+            let mut channel = Channel::new(runtime::inherited(3)?, Duration::from_millis(budget))?;
+            channel.watch(runtime::inherited(4)?.into());
+            endpoint::export_live_media(&mut channel, Path::new(root), mode)?;
+            return Ok(());
+        }
+    }
     if args.first().is_some_and(|role| role == "native-files") {
         if args.len() != 4 || !Path::new(&args[1]).is_absolute() || !Path::new(&args[2]).is_absolute() { return Err("invalid_arguments".into()); }
         let budget: u64 = args[3].parse()?;

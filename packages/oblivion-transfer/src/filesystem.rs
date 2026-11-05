@@ -5,6 +5,7 @@ use crate::{
     END, Entry, Limits, MAX_ENTRIES, Manifest, Receipt, copy_hash, invalid,
     require, validate_id, validate_path,
 };
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -459,8 +460,10 @@ pub(crate) fn receive_at(
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ExportMode {
     Posix,
-    /// FAT/exFAT permissions come from the isolated guest's mount options.
+    /// exFAT permissions come from the isolated guest's mount options.
     Portable,
+    /// FAT also limits each individual file to 2^32 - 1 bytes.
+    Fat32,
 }
 
 /// Plaintext export into a new, exclusive directory on the authorized medium.
@@ -471,63 +474,137 @@ pub fn receive_external(
     id: &str,
     mode: ExportMode,
 ) -> io::Result<Receipt> {
-    validate_id(id)?;
-    if mode == ExportMode::Portable {
-        for entry in manifest.entries() {
-            for name in entry.path().split('/') {
-                require(
-                    !name.ends_with(['.', ' '])
-                        && !name
-                            .chars()
-                            .any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*')),
-                    "unsupported_export_name",
-                )?;
+    ExternalExport::prepare(manifest, root, id, mode)?.receive(reader, |_| Ok(()))
+}
+
+/// The isolated guest pins and validates its selected filesystem before
+/// acknowledging that it can receive the approved manifest.
+pub(crate) struct ExternalExport<'a> {
+    root: Directory,
+    manifest: &'a Manifest,
+    id: &'a str,
+    mode: ExportMode,
+    name: String,
+    pending: String,
+}
+
+impl<'a> ExternalExport<'a> {
+    pub fn prepare(
+        manifest: &'a Manifest,
+        root: &Path,
+        id: &'a str,
+        mode: ExportMode,
+    ) -> io::Result<Self> {
+        validate_id(id)?;
+        if mode != ExportMode::Posix {
+            validate_portable_export(manifest, mode)?;
+        }
+        let root = Directory::open(root)?;
+        let name = format!("Oblivion-{id}");
+        let pending = format!(".{name}.pending");
+        for candidate in [&name, &pending] {
+            match root.source(candidate) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error),
+                Ok(_) => return Err(io::ErrorKind::AlreadyExists.into()),
             }
         }
+        Ok(Self {
+            root,
+            manifest,
+            id,
+            mode,
+            name,
+            pending,
+        })
     }
-    let root = Directory::open(root)?;
-    let name = format!("Oblivion-{id}");
-    let transaction = root.create_directory(&name)?;
-    if let Err(error) = receive_transaction(reader, manifest, &transaction) {
-        root.remove_directory(&name)?;
-        root.sync()?;
-        return Err(error);
-    }
-    let files = transaction.directory("files")?;
-    // FAT/exFAT synthesize permissions at mount; chmod is not a portable
-    // operation there. POSIX media must be readable by users outside Oblivion.
-    if mode == ExportMode::Posix {
-        for entry in manifest.entries() {
-            let mut parent = files.clone()?;
-            let mut components = entry.path().split('/').peekable();
-            while let Some(component) = components.next() {
-                if components.peek().is_some() {
-                    parent = parent.directory(component)?;
-                    continue;
+
+    pub fn receive<R: Read>(
+        self,
+        reader: &mut R,
+        check: impl Fn(&mut R) -> io::Result<()>,
+    ) -> io::Result<Receipt> {
+        check(reader)?;
+        let transaction = self.root.create_directory(&self.pending)?;
+        let receipt = Receipt {
+            id: self.id.to_owned(),
+            manifest_sha256: self.manifest.sha256(),
+            entries: self.manifest.entries().len(),
+            bytes: self.manifest.bytes(),
+        };
+        let result = (|| {
+            self.root.sync()?;
+            receive_transaction(reader, self.manifest, &transaction)?;
+            let files = transaction.directory("files")?;
+            // FAT/exFAT use mount-synthesized modes. POSIX exports are readable
+            // by the user's other machine after unplugging the medium.
+            if self.mode == ExportMode::Posix {
+                for entry in self.manifest.entries() {
+                    check(reader)?;
+                    let mut parent = files.clone()?;
+                    let mut components = entry.path().split('/').peekable();
+                    while let Some(component) = components.next() {
+                        if components.peek().is_some() {
+                            parent = parent.directory(component)?;
+                            continue;
+                        }
+                        let file = parent.source(component)?;
+                        file.set_permissions(std::fs::Permissions::from_mode(
+                            if matches!(entry, Entry::Directory { .. }) {
+                                0o755
+                            } else {
+                                0o644
+                            },
+                        ))?;
+                        file.sync_all()?;
+                    }
                 }
-                let file = parent.source(component)?;
-                file.set_permissions(std::fs::Permissions::from_mode(
-                    if matches!(entry, Entry::Directory { .. }) {
-                        0o755
-                    } else {
-                        0o644
-                    },
-                ))?;
-                file.sync_all()?;
+                files.mode(0o755)?;
+                transaction.mode(0o755)?;
             }
+            files.sync()?;
+            let mut manifest_file = transaction.create_file("manifest.bin")?;
+            self.manifest.write(&mut manifest_file)?;
+            manifest_file.sync_all()?;
+            let mut receipt_file = transaction.create_file("receipt.json")?;
+            serde_json::to_writer(&mut receipt_file, &receipt)
+                .map_err(|_| invalid("invalid_receipt"))?;
+            receipt_file.sync_all()?;
+            transaction.sync()?;
+            check(reader)?;
+            self.root
+                .rename_exclusive(&self.pending, &self.root, &self.name)
+        })();
+        if let Err(error) = result {
+            self.root.remove_directory(&self.pending)?;
+            self.root.sync()?;
+            return Err(error);
         }
-        files.mode(0o755)?;
-        transaction.mode(0o755)?;
+        // A failure after the atomic rename is an uncertain outcome. The
+        // receiver must never discard a visible publication on that basis.
+        self.root.sync()?;
+        Ok(receipt)
     }
-    files.sync()?;
-    transaction.sync()?;
-    root.sync()?;
-    Ok(Receipt {
-        id: id.to_owned(),
-        manifest_sha256: manifest.sha256(),
-        entries: manifest.entries().len(),
-        bytes: manifest.bytes(),
-    })
+}
+
+fn validate_portable_export(manifest: &Manifest, mode: ExportMode) -> io::Result<()> {
+    let mut paths = BTreeSet::new();
+    for entry in manifest.entries() {
+        for name in entry.path().split('/') {
+            require(selection::portable_name(name), "unsupported_export_name")?;
+        }
+        require(
+            paths.insert(selection::collision_key(entry.path())),
+            "export_name_collision",
+        )?;
+        if let Entry::File { size, .. } = entry {
+            require(
+                mode != ExportMode::Fat32 || *size <= u64::from(u32::MAX),
+                "fat32_file_too_large",
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Explicit local release after receive has verified and synced the whole

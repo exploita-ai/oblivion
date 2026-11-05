@@ -138,29 +138,108 @@ impl<S: Transport> PreparedMediaImport<S> {
         approved_digest: &str,
         observer: &mut dyn FnMut(Phase, u64) -> io::Result<()>,
     ) -> io::Result<Receipt> {
-        self.source.check()?;
-        let receipt = copy_protocol::send(
-            destination,
-            &mut MediaPayload {
-                source: &mut self.source,
-                manifest: &self.manifest,
-                approval: Approval {
-                    id: self.context.id.clone(),
-                    manifest_sha256: approved_digest.into(),
-                },
-            },
+        send_relay(
+            &mut self.source,
+            &self.manifest,
             &self.context.id,
+            destination,
             approved_digest,
             observer,
-        )?;
-        self.source.check()?;
-        write_message(&mut self.source, &receipt)?;
-        self.source.flush()?;
-        let mut completed = [0; 7];
-        self.source.read_exact(&mut completed)?;
-        require(&completed == b"copied\n", "source_not_completed")?;
-        Ok(receipt)
+        )
     }
+}
+
+/// A Safe Documents offer retained through review. Preparing this copy does
+/// not open a destination device or send approval to the Safe.
+#[cfg(unix)]
+pub struct PreparedMediaExport<S: Transport> {
+    source: S,
+    manifest: Manifest,
+    context: Context,
+    plan: Plan,
+}
+
+#[cfg(unix)]
+impl<S: Transport> PreparedMediaExport<S> {
+    pub fn prepare(mut source: S, selected: &[String], context: Context) -> io::Result<Self> {
+        context.validate()?;
+        require(
+            context.direction == Direction::Export
+                && context.name == format!("Oblivion-{}", context.id),
+            "invalid_file_destination",
+        )?;
+        selection::validate_paths(selected)?;
+        require_document_paths(selected)?;
+        let (manifest, plan) =
+            request_selection(&mut source, selected, &context.id, selection_plan)?;
+        let prepared = Self {
+            source,
+            manifest,
+            context,
+            plan,
+        };
+        prepared.summary()?;
+        Ok(prepared)
+    }
+
+    pub fn summary(&self) -> io::Result<Summary> {
+        Summary::from_manifest(&self.manifest, &self.plan)
+    }
+
+    pub fn plan(&self) -> &Plan {
+        &self.plan
+    }
+
+    /// The caller supplies the isolated writable guest only after approval.
+    /// Receipt and source completion do not prove unmount or physical eject.
+    pub fn send<T: Transport>(
+        mut self,
+        destination: &mut T,
+        approved_digest: &str,
+        observer: &mut dyn FnMut(Phase, u64) -> io::Result<()>,
+    ) -> io::Result<Receipt> {
+        send_relay(
+            &mut self.source,
+            &self.manifest,
+            &self.context.id,
+            destination,
+            approved_digest,
+            observer,
+        )
+    }
+}
+
+#[cfg(unix)]
+fn send_relay(
+    source: &mut impl Transport,
+    manifest: &Manifest,
+    id: &str,
+    destination: &mut impl Transport,
+    approved_digest: &str,
+    observer: &mut dyn FnMut(Phase, u64) -> io::Result<()>,
+) -> io::Result<Receipt> {
+    source.check()?;
+    let receipt = copy_protocol::send(
+        destination,
+        &mut MediaPayload {
+            source,
+            manifest,
+            approval: Approval {
+                id: id.into(),
+                manifest_sha256: approved_digest.into(),
+            },
+        },
+        id,
+        approved_digest,
+        observer,
+    )?;
+    source.check()?;
+    write_message(source, &receipt)?;
+    source.flush()?;
+    let mut completed = [0; 7];
+    source.read_exact(&mut completed)?;
+    require(&completed == b"copied\n", "source_not_completed")?;
+    Ok(receipt)
 }
 
 #[cfg(unix)]
@@ -251,13 +330,7 @@ impl<T: Transport> PreparedDownload<T> {
             "invalid_file_destination",
         )?;
         selection::validate_paths(selected)?;
-        for path in selected {
-            validate_path(path)?;
-            require(
-                matches!(path.split('/').next(), Some("workspace" | "imports")),
-                "invalid_document_selection",
-            )?;
-        }
+        require_document_paths(selected)?;
         let target = Directory::open(target)?;
         target.require_controlled()?;
         target.identity()?;
@@ -677,6 +750,11 @@ fn request_selection(
 /// Both the native receiver and the media relay verify the source's path-free
 /// plan against the exact requested document selection before approving bytes.
 pub(crate) fn selection_plan(selected: &[String], offer: &SelectionOffer) -> io::Result<Plan> {
+    require_document_paths(selected)?;
+    plan_from_offer(selected, offer, Plan::new)
+}
+
+fn require_document_paths(selected: &[String]) -> io::Result<()> {
     for path in selected {
         validate_path(path)?;
         require(
@@ -684,7 +762,7 @@ pub(crate) fn selection_plan(selected: &[String], offer: &SelectionOffer) -> io:
             "invalid_document_selection",
         )?;
     }
-    plan_from_offer(selected, offer, Plan::new)
+    Ok(())
 }
 
 fn plan_from_offer(

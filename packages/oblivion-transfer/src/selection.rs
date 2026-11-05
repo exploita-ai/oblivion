@@ -282,10 +282,30 @@ fn descendant(path: &str, parent: &str) -> bool {
         .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-fn collision_key(alias: &str) -> String {
+pub(crate) fn collision_key(alias: &str) -> String {
     ComposingNormalizer::new_nfc()
         .normalize(&CaseMapper::new().fold_string(alias))
         .into_owned()
+}
+
+/// A component representable on a portable FAT-family volume and in Win32.
+pub(crate) fn portable_name(name: &str) -> bool {
+    if name.encode_utf16().count() > 255
+        || name.ends_with(['.', ' '])
+        || name.contains(['<', '>', ':', '"', '|', '?', '*', '\\'])
+    {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or("").to_uppercase();
+    !matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) && !["COM", "LPT"].iter().any(|prefix| {
+        stem.strip_prefix(prefix).is_some_and(|suffix| {
+            suffix.chars().count() == 1
+                && matches!(suffix.chars().next(), Some('1'..='9' | '¹' | '²' | '³'))
+        })
+    })
 }
 
 #[cfg(test)]

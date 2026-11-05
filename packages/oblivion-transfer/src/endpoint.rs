@@ -8,9 +8,9 @@ use std::io::{self, Read, Write};
 mod unix;
 #[cfg(unix)]
 pub use unix::{
-    accept, documents, export, import, media_source, receive_open_file, receive_open_file_completed,
-    receive_open_file_receipt, recover, send, send_encrypted, send_open_file,
-    send_open_file_completed, send_open_file_receipt,
+    accept, documents, export, export_live_media, import, media_source, receive_open_file,
+    receive_open_file_completed, receive_open_file_receipt, recover, send, send_encrypted,
+    send_open_file, send_open_file_completed, send_open_file_receipt,
 };
 
 #[derive(Deserialize, Serialize)]
