@@ -337,6 +337,7 @@ fn storage_selection_is_derived_from_the_typed_command_only() {
         parse(&["unlock", "--read-only"]).unwrap().live_storage(),
         Some(false)
     );
+    assert_eq!(parse(&["repair-backing"]).unwrap().live_storage(), None);
     assert_eq!(parse(&["ephemeral"]).unwrap().live_storage(), Some(true));
     assert_eq!(
         parse(&["run", "--ephemeral", "claude"])

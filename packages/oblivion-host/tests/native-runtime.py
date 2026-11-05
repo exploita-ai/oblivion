@@ -149,6 +149,12 @@ class NativeRuntime(unittest.TestCase):
                     (block / "size").write_text(str((1 if invalid == "small" else 2048) * 1024**3 // 512))
                 with self.assertRaises(RuntimeError):
                     prepare.select_disk("hcs-hyperv", IDENTITY, tree.root)
+                if invalid == "readonly":
+                    selected, _ = prepare.select_disk("hcs-hyperv", IDENTITY, tree.root, allow_readonly=True)
+                    self.assertEqual(selected.resolve(), block.resolve())
+                else:
+                    with self.assertRaises(RuntimeError):
+                        prepare.select_disk("hcs-hyperv", IDENTITY, tree.root, allow_readonly=True)
 
     def test_existing_virtio_profiles_keep_vdb_selection(self):
         with tempfile.TemporaryDirectory() as directory:

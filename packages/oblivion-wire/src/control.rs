@@ -57,6 +57,7 @@ pub enum Operation {
     Browse,
     Diagnostics,
     DiscardGeneralPending,
+    RepairBacking,
     DiscardSessionPending,
     Unlock,
     UnlockReadOnly,
@@ -101,7 +102,7 @@ impl Operation {
 
     pub const fn response_budget(self) -> std::time::Duration {
         std::time::Duration::from_secs(match self {
-            Self::SessionStorage => 1800,
+            Self::SessionStorage | Self::RepairBacking => 1800,
             Self::Egress | Self::ProxyProfiles | Self::StartAgent | Self::OpenChildDocuments
                 | Self::BackupExportBegin | Self::BackupImportFinish | Self::FamilyPasswordChange
                 | Self::FamilyPasswordRecover => 210,

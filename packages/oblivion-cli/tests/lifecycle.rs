@@ -61,6 +61,14 @@ fn lifecycle_grammar_is_complete_and_rejects_invalid_flags_before_runtime() {
         command(&["unlock", "--read-only"]),
         Command::Unlock { read_only: true }
     );
+    assert_eq!(
+        command(&["repair-backing"]),
+        Command::RepairBacking { confirmed: false }
+    );
+    assert_eq!(
+        command(&["repair-backing", "--confirmed"]),
+        Command::RepairBacking { confirmed: true }
+    );
     assert_eq!(command(&["ephemeral"]), Command::Ephemeral);
     assert_eq!(command(&["lock"]), Command::Lock);
     for values in [
@@ -75,6 +83,7 @@ fn lifecycle_grammar_is_complete_and_rejects_invalid_flags_before_runtime() {
         vec!["init", "extra"],
         vec!["unlock", "--read-only", "extra"],
         vec!["unlock", "--password", "secret"],
+        vec!["repair-backing", "--confirmed", "--confirmed"],
         vec!["ephemeral", "--yes"],
         vec!["lock", "extra"],
     ] {
@@ -374,4 +383,76 @@ fn ephemeral_refuses_live_mode_changes_and_global_lock_needs_no_unlock() {
     global(&runtime);
     assert!(runtime.events.is_empty());
     assert!(runtime.sent[0].body.is_empty());
+}
+
+#[test]
+fn dirty_backing_admission_reserves_encrypted_storage_and_keeps_ephemeral_available() {
+    let mut dirty = absent();
+    dirty["backing_recovery_required"] = json!(true);
+    for args in [
+        vec!["init"],
+        vec!["init", "--reset-incomplete"],
+        vec!["unlock"],
+        vec!["unlock", "--read-only"],
+    ] {
+        let mut runtime = Runtime::new(vec![status(&dirty)]);
+        assert_eq!(
+            storage::execute(&mut runtime, command(&args))
+                .unwrap_err()
+                .to_string(),
+            "Repair the storage backing first. Run oblivion repair-backing."
+        );
+        runtime.finished();
+        assert!(runtime.events.is_empty());
+    }
+    let mut runtime = Runtime::new(vec![status(&dirty), response(Operation::EnterRam, "")]);
+    storage::execute(&mut runtime, command(&["ephemeral"])).unwrap();
+    runtime.finished();
+    assert!(runtime.events.is_empty());
+    global(&runtime);
+}
+
+#[test]
+fn backing_repair_requires_locked_dirty_storage_and_reviewed_consent() {
+    let mut dirty = absent();
+    dirty["backing_recovery_required"] = json!(true);
+    let mut runtime = Runtime::new(vec![status(&dirty)]);
+    assert_eq!(
+        storage::execute(&mut runtime, command(&["repair-backing"]))
+            .unwrap_err()
+            .to_string(),
+        "Storage backing repair cancelled."
+    );
+    runtime.finished();
+    assert_eq!(runtime.events, ["backing-review", "confirm:REPAIR"]);
+
+    let mut ram = state("ram-only");
+    ram["backing_recovery_required"] = json!(true);
+    let mut recovering = dirty.clone();
+    recovering["recovery_required"] = json!(true);
+    for (value, message) in [
+        (ram, "Lock Oblivion before repairing the storage backing."),
+        (
+            recovering,
+            "Complete runtime recovery before repairing the storage backing.",
+        ),
+        (absent(), "The storage backing does not require repair."),
+    ] {
+        let mut runtime = Runtime::new(vec![status(&value)]);
+        assert_eq!(
+            storage::execute(&mut runtime, command(&["repair-backing", "--confirmed"]))
+                .unwrap_err()
+                .to_string(),
+            message
+        );
+        runtime.finished();
+        assert!(runtime.events.is_empty());
+    }
+
+    let mut runtime = Runtime::new(vec![status(&dirty), response(Operation::RepairBacking, "")]);
+    storage::execute(&mut runtime, command(&["repair-backing", "--confirmed"])).unwrap();
+    runtime.finished();
+    global(&runtime);
+    assert_eq!(runtime.events, ["backing-review", "backing-repaired"]);
+    assert!(runtime.sent[1].body.is_empty());
 }

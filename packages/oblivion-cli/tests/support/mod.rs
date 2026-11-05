@@ -118,6 +118,8 @@ impl run::Runtime for Runtime {
             run::Notice::StorageCreated => "storage-created".into(),
             run::Notice::IncompleteStorageReview => "storage-review".into(),
             run::Notice::IncompleteStorageDiscarded => "storage-discarded".into(),
+            run::Notice::BackingRepairReview => "backing-review".into(),
+            run::Notice::BackingRepaired => "backing-repaired".into(),
         });
         if self
             .reject_notice

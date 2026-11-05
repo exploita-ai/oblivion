@@ -20,6 +20,8 @@ pub enum Notice<'a> {
     StorageCreated,
     IncompleteStorageReview,
     IncompleteStorageDiscarded,
+    BackingRepairReview,
+    BackingRepaired,
 }
 
 impl Notice<'_> {
@@ -49,6 +51,13 @@ impl Notice<'_> {
                 output,
                 "Incomplete setup removed. Run oblivion init to create encrypted storage."
             )?,
+            Self::BackingRepairReview => writeln!(
+                output,
+                "Repair the runtime storage filesystem. Repair can replay its journal and change filesystem metadata."
+            )?,
+            Self::BackingRepaired => {
+                writeln!(output, "Storage backing repaired. Oblivion remains locked.")?
+            }
         }
         Ok(())
     }

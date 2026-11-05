@@ -184,6 +184,8 @@ impl run::Runtime for RunTerminal {
             run::Notice::StorageCreated => "storage-created".into(),
             run::Notice::IncompleteStorageReview => "review-incomplete".into(),
             run::Notice::IncompleteStorageDiscarded => "discarded-incomplete".into(),
+            run::Notice::BackingRepairReview => "backing-review".into(),
+            run::Notice::BackingRepaired => "backing-repaired".into(),
         });
         Ok(())
     }

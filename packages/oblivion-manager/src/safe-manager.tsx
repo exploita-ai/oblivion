@@ -11,7 +11,7 @@ import { NativeNetwork, NativeNetworkIndicator, NativeSystem, scopedNetworkObser
 import { NativeFiles } from "./native-files"
 import { createFileTransfers } from "./native-file-transfers"
 import { NativeIdle } from "./native-idle"
-import { NativeStorage, storageUnavailable } from "./native-storage"
+import { NativeStorage, storageUnavailable, type StorageReview } from "./native-storage"
 import { NativeShare, type ShareSelection } from "./native-share"
 import { NativeImports } from "./native-imports"
 import { requestedAgentName, SafeInspector } from "./safe-inspector"
@@ -41,7 +41,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
   const [area, setArea] = createSignal<"list" | "actions">("list")
   const [page, setPage] = createSignal<"safes" | "name" | "agents" | "lock" | "settings" | "system" | "network" | "files" | "rename" | "grow" | "idle" | "storage" | "share" | "imports" | "backups" | "password" | "inspect" | "task">(props.overlay?.page ?? "safes")
   const [sharing, setSharing] = createSignal<ShareSelection>()
-  const [storageReview, setStorageReview] = createSignal<{ bytes: number; reset: boolean }>()
+  const [storageReview, setStorageReview] = createSignal<StorageReview>()
   const [context, setContext] = createSignal<string | undefined>(props.overlay?.safe)
   const [observed, setObserved] = createSignal<NetworkObservation>()
   const [now, setNow] = createSignal(performance.now())
@@ -153,6 +153,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
         : agentStartup() === "gateway-failed" ? "The protected connection could not start. The Safe stayed offline."
         : agentStartup() === "gateway-timeout" ? "The protected connection timed out. The Safe stayed offline."
         : agentStartup() === "ephemeral-storage-full" ? "RAM-only storage is full. Close an unused RAM-only Safe and retry."
+        : args[0] === "repair-backing" ? "Storage backing repair could not be confirmed."
         : `The command ended with status ${code}.`)
       else if (message) setNotice(message)
       return code
@@ -266,8 +267,20 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
 
   function reviewStorage(reset: boolean) {
     if (storageUnavailable(state())) return
-    setStorageReview({ bytes: state()!.general_bytes, reset })
+    setStorageReview(reset ? { mode: "reset" } : { mode: "create", bytes: state()!.general_bytes })
     setPage("storage")
+  }
+
+  function submitStorage(review: StorageReview) {
+    if (review.mode === "repair") {
+      void execute(["repair-backing", "--confirmed"], "Storage backing repaired. Oblivion remains locked.")
+      return
+    }
+    if (review.mode === "reset") {
+      void execute(["init", "--reset-incomplete", "--confirmed-reset"], "Incomplete setup removed. Review storage to create a new archive.")
+      return
+    }
+    void execute(["init"], "Storage created. Unlock Oblivion to begin.")
   }
 
   async function leave() {
@@ -333,7 +346,13 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
       run: () => { void execute(["run", ...(target() ? ["--safe", target()!] : safeName() ? ["--name", safeName()!] : []), ...(ephemeral() ? ["--ephemeral"] : []), agent.id]) },
     }))
     if (!state()?.app_open) return [
-      ...(props.liveStorage === "ephemeral" ? [] : [{
+      ...(props.liveStorage === "ephemeral" ? [] : state()?.backing_recovery_required ? [{
+        name: "Repair storage backing", badge: "Recovery required",
+        description: "The runtime storage filesystem needs repair before encrypted storage can open.",
+        action: "Review repair",
+        disabled: state()?.recovery_required ? "Complete runtime recovery before repairing the storage backing." : undefined,
+        run: () => { setStorageReview({ mode: "repair" }); setPage("storage") },
+      }] : [{
         name: state()?.general_present ? "Unlock Oblivion" : state()?.general_incomplete ? "Reset incomplete storage setup" : "Create encrypted storage",
         badge: state()?.general_present ? "Saved encrypted" : state()?.general_incomplete ? "Setup incomplete" : "First-time setup",
         description: storageUnavailable(state()) ?? (state()?.general_incomplete ? "Review and reset only the unfinished app archive before creating encrypted storage." : "Keep Safes, files and agent logins in encrypted storage. Each Safe has its own password and isolated virtual machine."),
@@ -446,7 +465,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
         selection={selection.operation === "import" ? selection : selection.scope === "all" ? { ...selection, count: state()?.sessions.length ?? 0, closed: !active().length }
           : { ...selection, closed: !active().some((safe) => safe.id === selection.safe), branch: selection.branch ? { count: branchMembers(selection.safe).length, closed: !active().some((safe) => branchMembers(selection.safe).includes(safe.id!)) } : undefined }}
         run={(args) => execute(args, undefined, false)} back={() => section("safes")} />}</Show>
-      <Show when={page() === "storage" && storageReview()} keyed>{(review) => <NativeStorage bytes={review.bytes} reset={review.reset} back={() => { setPage("safes"); setSelected(0) }} submit={() => { void execute(["init", ...(review.reset ? ["--reset-incomplete", "--confirmed-reset"] : [])], review.reset ? "Incomplete setup removed. Review storage to create a new archive." : "Storage created. Unlock Oblivion to begin.") }} />}</Show>
+      <Show when={page() === "storage" && storageReview()} keyed>{(review) => <NativeStorage review={review} back={() => { setPage("safes"); setSelected(0) }} submit={() => submitStorage(review)} />}</Show>
       <Show when={page() === "idle" && state()}><NativeIdle state={state()!} back={() => section("settings")} save={(safe, host) => {
         if (hostClosing()) { setNotice("Automatic lock is already closing Oblivion. Wait for teardown to finish."); return }
         void execute(["settings", "idle", "--safe-minutes", String(safe), "--host-minutes", String(host)], "Automatic lock updated.", false)

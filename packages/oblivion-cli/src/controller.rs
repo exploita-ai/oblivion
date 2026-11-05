@@ -32,6 +32,8 @@ pub struct State<S> {
     pub general_incomplete: bool,
     pub general_bytes: u64,
     pub recovery_required: bool,
+    #[serde(default)]
+    pub backing_recovery_required: bool,
     pub sessions: Vec<String>,
     pub session_titles: BTreeMap<String, String>,
     pub open_sessions: Vec<Opened<S>>,

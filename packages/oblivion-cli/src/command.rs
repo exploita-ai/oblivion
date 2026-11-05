@@ -202,6 +202,7 @@ Safe management
 
 const DESKTOP_HELP: &str = "
 Desktop runtime
+  oblivion repair-backing          Review and repair the runtime storage filesystem
   oblivion runtime install-bundle BUNDLE
   oblivion runtime install BUNDLE
   oblivion runtime update BUNDLE
@@ -214,12 +215,14 @@ Desktop runtime
 
 const PACKAGED_HELP: &str = "
 Desktop runtime (APT)
+  oblivion repair-backing          Review and repair the runtime storage filesystem
   oblivion runtime start|stop|recover
   Manage the system package through APT.
 ";
 
 const WINDOWS_HELP: &str = "
 Desktop runtime
+  oblivion repair-backing          Review and repair the runtime storage filesystem
   oblivion runtime install-bundle BUNDLE
   oblivion runtime update BUNDLE
   oblivion runtime start|stop|recover

@@ -24,6 +24,7 @@ export const nativeStatus = z.object({
   general_open: z.boolean(),
   general_readonly: z.boolean(),
   recovery_required: z.boolean(),
+  backing_recovery_required: z.boolean().default(false),
   family_password_pending: z.array(z.string().regex(/^[a-f0-9]{32}$/)).max(32768),
   sessions: z.array(z.string().regex(/^[a-f0-9]{32}$/)),
   safe_parents: z.array(z.object({ id: z.string().regex(/^[a-f0-9]{32}$/), parent: z.string().regex(/^[a-f0-9]{32}$/) })),
@@ -180,7 +181,7 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
     idle_lock: { preferences: { version: 1, safe_minutes: 15, host_minutes: 30 }, storage: "defaults", writable: false, host: null, safes: [], last_error: null },
     general_present: true, general_open: false, general_readonly: false,
     general_incomplete: false, general_bytes: 8 * 1024 ** 3,
-    recovery_required: false, family_password_pending: [], sessions: ids,
+    recovery_required: false, backing_recovery_required: false, family_password_pending: [], sessions: ids,
     safe_parents: [],
     agent_safes: [],
     session_titles: { [ids[0]]: "Research", [ids[1]]: "Development" },
@@ -263,6 +264,11 @@ export function nativePreview(exit: () => void, initial: Partial<NativeStatus> =
         if (args[2] === "retry" && previous?.state === "cancelled" && previous.attempts < 16) tasks.set(args[3], { attempts: previous.attempts + 1, request: (previous.attempts + 1).toString(16).padStart(32, "0"), state: "running" })
         if (args[2] === "cancel" && previous) tasks.set(args[3], { ...previous, state: "cancelled" })
       }
+      if (args[0] === "repair-backing") {
+        if (args[1] !== "--confirmed" || current.app_open || current.recovery_required || !current.backing_recovery_required) return 1
+        current = { ...current, backing_recovery_required: false }
+      }
+      if (current.backing_recovery_required && ["init", "unlock"].includes(args[0])) return 1
       if (args[0] === "init") current = { ...current, general_present: !args.includes("--reset-incomplete"), general_incomplete: false }
       if (args[0] === "unlock" || args[0] === "ephemeral") current = { ...current, app_open: true, app_mode: args[0] === "ephemeral" ? "ram-only" : args[1] === "--read-only" ? "read-only" : "persistent", general_open: args[0] !== "ephemeral", general_readonly: args[0] === "unlock" && args[1] === "--read-only", idle_lock: { ...current.idle_lock, writable: args[0] === "unlock" && args[1] !== "--read-only", host: { nonce: "c".repeat(32), remaining_seconds: 1800, closing: false } } }
       if (args[0] === "lock") current = { ...current, app_open: false, app_mode: "locked", general_open: false, general_readonly: false, open_sessions: [], idle_lock: { ...current.idle_lock, writable: false, host: null, safes: [] } }

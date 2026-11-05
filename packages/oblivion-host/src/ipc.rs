@@ -1041,6 +1041,8 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         || request.session.is_none() && request.expected_session.is_none(), "invalid_family_password_request")?;
     require(!matches!(request.operation, Operation::EnterRam)
         || request.expected_session.is_none() && request.slot.index() == 0, "invalid_ram_request")?;
+    require(!matches!(request.operation, Operation::RepairBacking)
+        || request.expected_session.is_none() && request.slot.index() == 0, "invalid_backing_request")?;
     require(!matches!(request.operation, Operation::CloseIdle) || request.expected_session.is_some(), "expected_session_required")?;
     require(!matches!(request.operation, Operation::BackupExportBegin)
         || request.session.is_some() && request.session == request.expected_session, "expected_session_required")?;
@@ -1371,6 +1373,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         Operation::Browse => "browse",
         Operation::Diagnostics => "diagnostics",
         Operation::DiscardGeneralPending => "discard-general-pending",
+        Operation::RepairBacking => "repair-backing",
         Operation::DiscardSessionPending => "discard-session-pending",
         Operation::Unlock => "unlock",
         Operation::UnlockReadOnly => "unlock-read-only",

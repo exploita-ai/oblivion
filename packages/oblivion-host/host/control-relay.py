@@ -210,7 +210,7 @@ def serve_client(remote, token, controller=CONTROL):
             local.sendall(local_header)
             local.sendall(secret)
             secret[:] = bytes(len(secret))
-            timeout = 1800 if operation == "session-storage" else 210 if operation in ("egress", "proxy-profiles", "start-agent", "open-child-documents", "backup-export-begin", "backup-import-finish", "family-password-change", "family-password-recover") else 120
+            timeout = 1800 if operation in ("session-storage", "repair-backing") else 210 if operation in ("egress", "proxy-profiles", "start-agent", "open-child-documents", "backup-export-begin", "backup-import-finish", "family-password-change", "family-password-recover") else 120
             local.settimeout(timeout)
             remote.settimeout(timeout)
             if operation in ("agent-attach", "file-attach", "live-media-reserve", "live-media-attach", "share-attach", "share-import-attach", "share-export-lease", "backup-attach"):

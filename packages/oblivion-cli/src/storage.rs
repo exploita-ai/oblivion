@@ -13,6 +13,9 @@ pub enum Command {
     Unlock {
         read_only: bool,
     },
+    RepairBacking {
+        confirmed: bool,
+    },
     Ephemeral,
     Lock,
 }
@@ -47,6 +50,13 @@ impl Command {
                 Ok(Some(Self::Unlock { read_only: true }))
             }
             Some("unlock") => Err("Use oblivion unlock [--read-only]".into()),
+            Some("repair-backing") if args.len() == 1 => {
+                Ok(Some(Self::RepairBacking { confirmed: false }))
+            }
+            Some("repair-backing") if args.len() == 2 && args[1] == "--confirmed" => {
+                Ok(Some(Self::RepairBacking { confirmed: true }))
+            }
+            Some("repair-backing") => Err("Use oblivion repair-backing [--confirmed]".into()),
             Some("ephemeral") if args.len() == 1 => Ok(Some(Self::Ephemeral)),
             Some("ephemeral") => Err("Use oblivion ephemeral".into()),
             Some("lock") if args.len() == 1 => Ok(Some(Self::Lock)),
@@ -68,6 +78,11 @@ pub fn execute<R: Runtime>(runtime: &mut R, command: Command) -> Result<i32> {
             let current = controller::status(runtime)?;
             if current.app_open {
                 return Err("Lock Oblivion before creating or resetting encrypted storage.".into());
+            }
+            if current.backing_recovery_required {
+                return Err(
+                    "Repair the storage backing first. Run oblivion repair-backing.".into(),
+                );
             }
             if current.general_present {
                 return Err("Encrypted storage already exists. Run oblivion unlock.".into());
@@ -103,6 +118,11 @@ pub fn execute<R: Runtime>(runtime: &mut R, command: Command) -> Result<i32> {
                 }
                 return Ok(0);
             }
+            if current.backing_recovery_required {
+                return Err(
+                    "Repair the storage backing first. Run oblivion repair-backing.".into(),
+                );
+            }
             if !current.general_present {
                 return Err("Encrypted storage is missing. Run oblivion init.".into());
             }
@@ -116,6 +136,26 @@ pub fn execute<R: Runtime>(runtime: &mut R, command: Command) -> Result<i32> {
                 },
                 &secret,
             )?;
+        }
+        Command::RepairBacking { confirmed } => {
+            let current = controller::status(runtime)?;
+            if current.app_open || current.app_mode != AppMode::Locked {
+                return Err("Lock Oblivion before repairing the storage backing.".into());
+            }
+            if current.recovery_required {
+                return Err(
+                    "Complete runtime recovery before repairing the storage backing.".into(),
+                );
+            }
+            if !current.backing_recovery_required {
+                return Err("The storage backing does not require repair.".into());
+            }
+            runtime.notice(Notice::BackingRepairReview)?;
+            if !confirmed && !runtime.confirm("REPAIR")? {
+                return Err("Storage backing repair cancelled.".into());
+            }
+            global(runtime, Operation::RepairBacking, &[])?;
+            runtime.notice(Notice::BackingRepaired)?;
         }
         Command::Ephemeral => {
             let current = controller::status(runtime)?;

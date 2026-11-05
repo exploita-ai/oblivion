@@ -644,6 +644,16 @@ struct Config {
     onion: Option<crate::onion_host::Config>,
     #[serde(default)]
     gateway_network: bool,
+    #[serde(default)]
+    backing_fence: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Backing {
+    Blank,
+    ReadOnly,
+    Writable,
+    RecoveryRequired,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -662,6 +672,7 @@ struct Status {
     session_slot_limit: u8,
     general_present: bool,
     general_incomplete: bool,
+    backing_recovery_required: bool,
     general_bytes: u64,
     general_open: bool,
     general_mounted: bool,
@@ -903,6 +914,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             | "start-agent"
             | "start-child-agent"
             | "discard-general-pending"
+            | "repair-backing"
             | "discard-session-pending"
             | "egress"
             | "proxy-profiles"
@@ -1310,20 +1322,8 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             Ok(())
         }
         "init-general" => config.initialize(&password(true)?),
-        "discard-general-pending" => {
-            require(
-                !config
-                    .general_image
-                    .try_exists()
-                    .map_err(|_| Error("image_check_failed"))?,
-                "general_already_exists",
-            )?;
-            require(
-                !mapping_open("oblivion-general")? && mount_mode()? == MountMode::Closed,
-                "volume_busy",
-            )?;
-            discard_pending(&config.pending_general())
-        }
+        "discard-general-pending" => config.discard_general_pending(),
+        "repair-backing" => config.repair_backing(),
         "discard-session-pending" => {
             validate_id(&args[3])?;
             require(
@@ -1334,12 +1334,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         }
         "enter-ram" => config.enter_ram(),
         "unlock" | "unlock-read-only" => {
-            config.unlock(&password(false)?, op == "unlock-read-only")?;
-            crate::idle_controller::clear_temporary()?;
-            clear_key_file("proxy-profiles.json")?;
-            clear_transport_selection()?;
-            clear_network_selection()?;
-            Ok(())
+            config.unlock(&password(false)?, op == "unlock-read-only")
         }
         "create" => config.create(&password(true)?, config.session_mib),
         "session-storage" => {
@@ -1411,6 +1406,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 config.close_all()?;
             }
             require(mount_mode()? == MountMode::Closed, "runtime_busy")?;
+            config.require_backing_fenced()?;
             run("/usr/bin/systemctl", &["poweroff", "--no-block"], None)
         }
         "pin-safe" => {
@@ -1805,6 +1801,16 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         "lock" | "recover" => config.close_all(),
         "status" => {
             let mode = mount_mode()?;
+            let backing = config.backing("backing-status");
+            let backing_recovery_required = matches!(backing, Ok(Some(Backing::RecoveryRequired)));
+            let backing_unavailable = match backing {
+                Ok(Some(Backing::Writable)) => mode != MountMode::ReadWrite,
+                Ok(Some(Backing::ReadOnly)) => mode == MountMode::ReadWrite,
+                Ok(Some(Backing::Blank | Backing::RecoveryRequired)) =>
+                    matches!(mode, MountMode::ReadOnly | MountMode::ReadWrite),
+                Ok(None) => false,
+                Err(_) => true,
+            };
             let status = Status {
                 slot: scope::current(),
                 app_open: mode != MountMode::Closed,
@@ -1828,8 +1834,11 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 session_mode: session_info()?.map(|(_, mode)| mode),
                 active_session: session_info()?.map(|(id, _)| id),
                 safe_access: crate::safe_access_store::status(mode != MountMode::Closed)?,
-                general_present: config.general_image.try_exists().map_err(|_| Error("image_check_failed"))?,
-                general_incomplete: config.pending_general().try_exists().map_err(|_| Error("image_check_failed"))?,
+                general_present: !backing_recovery_required && !backing_unavailable
+                    && config.general_image.try_exists().map_err(|_| Error("image_check_failed"))?,
+                general_incomplete: !backing_recovery_required && !backing_unavailable
+                    && config.pending_general().try_exists().map_err(|_| Error("image_check_failed"))?,
+                backing_recovery_required,
                 general_bytes: config.general_mib * MIB,
                 general_open: mapping_open("oblivion-general")?,
                 general_mounted: matches!(mode, MountMode::ReadOnly | MountMode::ReadWrite),
@@ -1883,6 +1892,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 transfers_configured: config.import.is_some() || config.export.is_some(),
                 gateway_network: config.gateway_network,
                 recovery_required: recovery_required()?
+                    || backing_unavailable
                     || runtime_record("session-recovery-required").exists()
                     || session_info()?.is_some_and(|(_, mode)| mode == "starting"),
                 gateway_state: if config.gateway.is_some() {
@@ -2343,6 +2353,8 @@ impl Config {
         let config: Self =
             serde_json::from_reader(file).map_err(|_| Error("invalid_config"))?;
         require(config.general_image.is_absolute(), "invalid_image_path")?;
+        require(!config.backing_fence || (path == Path::new("/run/oblivion-runtime/controller.json")
+            && config.general_image == Path::new("/var/lib/oblivion/general.luks")), "invalid_backing_config")?;
         require(config.manager_uid > 0, "manager_must_not_be_root")?;
         require(
             config.general_mib >= 512 && config.general_mib <= 1024 * 1024,
@@ -2360,12 +2372,86 @@ impl Config {
         Ok(config)
     }
 
+    fn backing(&self, operation: &str) -> Result<Option<Backing>> {
+        if !self.backing_fence { return Ok(None); }
+        let output = Command::new("/usr/bin/python3")
+            .args(["-B", "/usr/lib/oblivion/host/runtime-prepare.py", operation])
+            .env_clear()
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|_| Error("backing_control_failed"))?;
+        require(output.status.success(), "backing_control_failed")?;
+        let state = match output.stdout.as_slice() {
+            b"blank\n" => Backing::Blank,
+            b"readonly\n" => Backing::ReadOnly,
+            b"writable\n" => Backing::Writable,
+            b"recovery-required\n" => Backing::RecoveryRequired,
+            _ => return Err(Error("invalid_backing_state")),
+        };
+        Ok(Some(state))
+    }
+
+    fn require_backing_fenced(&self) -> Result<()> {
+        require(self.backing("backing-status")? != Some(Backing::Writable), "backing_not_fenced")
+    }
+
+    fn require_backing_ready(&self) -> Result<()> {
+        match self.backing("backing-status")? {
+            Some(Backing::RecoveryRequired) => Err(Error("backing_recovery_required")),
+            Some(Backing::Writable) => Err(Error("backing_not_fenced")),
+            _ => Ok(()),
+        }
+    }
+
+    fn require_backing_idle(&self) -> Result<()> {
+        require(mount_mode()? == MountMode::Closed && !mapping_open("oblivion-general")?
+            && open_sessions()?.is_empty() && physical_safe_owners_stopped()?, "volume_busy")
+    }
+
+    fn promote_backing(&self) -> Result<()> {
+        if !self.backing_fence { return Ok(()); }
+        self.require_backing_idle()?;
+        require(self.backing("backing-writable")? == Some(Backing::Writable), "backing_not_writable")
+    }
+
+    fn fence_backing(&self) -> Result<Option<Backing>> {
+        if !self.backing_fence { return Ok(None); }
+        self.require_backing_idle()?;
+        let state = self.backing("backing-fence")?;
+        require(state != Some(Backing::Writable), "backing_not_fenced")?;
+        Ok(state)
+    }
+
+    fn backing_write(&self, write: impl FnOnce() -> Result<()>) -> Result<()> {
+        let result = self.promote_backing().and_then(|()| write());
+        let state = match self.fence_backing() {
+            Ok(state) => state,
+            Err(error) => {
+                mark_recovery()?;
+                return Err(error);
+            }
+        };
+        result?;
+        require(state != Some(Backing::RecoveryRequired), "backing_recovery_required")
+    }
+
+    fn repair_backing(&self) -> Result<()> {
+        require(self.backing_fence && scope::current().index() == 0, "backing_repair_unavailable")?;
+        self.require_backing_idle()?;
+        require(self.backing("backing-status")? == Some(Backing::RecoveryRequired), "backing_repair_not_required")?;
+        require(self.backing("backing-repair")? == Some(Backing::ReadOnly), "backing_recovery_required")
+    }
+
     fn initialize(&self, secret: &[u8]) -> Result<()> {
         require(
             mount_mode()? == MountMode::Closed
                 && !mapping_open("oblivion-general")? && !mapping_open("oblivion-session")?,
             "volume_busy",
         )?;
+        self.require_backing_ready()?;
         // Only a NEW regular file can be initialized. Physical devices and existing
         // files cannot be formatted through this interface, even with a bad password.
         require(
@@ -2375,26 +2461,36 @@ impl Config {
                 .map_err(|_| Error("image_check_failed"))?,
             "general_already_exists",
         )?;
-        let path = self.pending_general();
-        create_image(&path, self.general_mib)?;
-        self.format(&path, secret)?;
-        crypt_open(&path, "oblivion-general", secret, false)?;
-        let formatted = run(
-            "/usr/sbin/mkfs.ext4",
-            &[
-                "-q",
-                "-m",
-                "0",
-                "-E",
-                "lazy_itable_init=0,lazy_journal_init=0",
-                GENERAL,
-            ],
-            None,
-        );
-        let closed = crypt_close("oblivion-general");
-        formatted?;
-        closed?;
-        publish(&path, &self.general_image)
+        self.backing_write(|| {
+            let path = self.pending_general();
+            create_image(&path, self.general_mib)?;
+            self.format(&path, secret)?;
+            crypt_open(&path, "oblivion-general", secret, false)?;
+            let formatted = run(
+                "/usr/sbin/mkfs.ext4",
+                &[
+                    "-q",
+                    "-m",
+                    "0",
+                    "-E",
+                    "lazy_itable_init=0,lazy_journal_init=0",
+                    GENERAL,
+                ],
+                None,
+            );
+            let closed = crypt_close("oblivion-general");
+            formatted?;
+            closed?;
+            publish(&path, &self.general_image)
+        })
+    }
+
+    fn discard_general_pending(&self) -> Result<()> {
+        require(!mapping_open("oblivion-general")? && mount_mode()? == MountMode::Closed, "volume_busy")?;
+        self.require_backing_ready()?;
+        require(!self.general_image.try_exists().map_err(|_| Error("image_check_failed"))?, "general_already_exists")?;
+        trusted_file(&self.pending_general())?;
+        self.backing_write(|| discard_pending(&self.pending_general()))
     }
 
     fn pending_general(&self) -> PathBuf {
@@ -2408,9 +2504,35 @@ impl Config {
             !mapping_open("oblivion-general")? && mount_mode()? == MountMode::Closed,
             "general_already_open",
         )?;
+        self.require_backing_ready()?;
         trusted_file(&self.general_image)?;
-        crypt_open(&self.general_image, "oblivion-general", secret, readonly)?;
+        if self.backing_fence && !readonly {
+            // Authenticate against the fenced filesystem before any outer metadata can change.
+            run("/usr/sbin/cryptsetup", &["open", "--type", "luks2", "--test-passphrase",
+                "--disable-external-tokens", "--key-file", "-",
+                self.general_image.to_str().ok_or(Error("invalid_path"))?], Some(secret))
+                .map_err(|_| Error("volume_unlock_failed"))?;
+        }
+        let result = (|| {
+            if !readonly { self.promote_backing()?; }
+            self.mount_general(secret, readonly)?;
+            crate::idle_controller::clear_temporary()?;
+            clear_key_file("proxy-profiles.json")?;
+            clear_transport_selection()?;
+            clear_network_selection()
+        })();
+        if self.backing_fence && result.is_err() {
+            if let Err(error) = close_general().and_then(|()| self.fence_backing()) {
+                mark_recovery()?;
+                return Err(error);
+            }
+        }
+        result
+    }
+
+    fn mount_general(&self, secret: &[u8], readonly: bool) -> Result<()> {
         fs::create_dir_all(MOUNT).map_err(|_| Error("mount_directory_failed"))?;
+        crypt_open(&self.general_image, "oblivion-general", secret, readonly)?;
         let result = run(
             "/usr/bin/mount",
             &[
@@ -2449,6 +2571,7 @@ impl Config {
     fn enter_ram(&self) -> Result<()> {
         require(mount_mode()? == MountMode::Closed && !mapping_open("oblivion-general")?, "general_already_open")?;
         require(open_sessions()?.is_empty() && physical_safe_owners_stopped()?, "runtime_busy")?;
+        self.require_backing_fenced()?;
         self.admit_memory(0, RAM_PROFILE_RESERVE_MIB, RAM_PROFILE_RESERVE_MIB, "insufficient_ephemeral_memory")?;
         for index in 0..scope::LIMIT {
             scope::within(scope::Slot::try_from(index).map_err(Error)?, crate::ipc::release_family)?;
@@ -2584,6 +2707,7 @@ impl Config {
     }
 
     fn close_all(&self) -> Result<()> {
+        let was_writable = matches!(mount_mode(), Ok(MountMode::ReadWrite));
         let backups = crate::ipc::stop_backups();
         let mut failure = backups.as_ref().err().map(|error| Error(error.0));
         let mut checkpoint = true;
@@ -2597,10 +2721,14 @@ impl Config {
         if let Err(error) = discard_ephemeral_children() {
             // Corrupt provenance cannot keep a fully stopped archive open.
             // Preserve the recovery marker and return the metadata failure.
-            if physical_safe_owners_stopped()? { close_general()?; }
+            if physical_safe_owners_stopped()? {
+                close_general()?;
+                self.fence_backing()?;
+            }
             return Err(error);
         }
         close_general()?;
+        let backing = self.fence_backing()?;
         clear_key_file("proxy-profiles.json")?;
         crate::idle_controller::clear_temporary()?;
         scope::within(Default::default(), || -> Result<()> {
@@ -2611,6 +2739,7 @@ impl Config {
         if Path::new(RECOVERY).exists() {
             fs::remove_file(RECOVERY).map_err(|_| Error("recovery_clear_failed"))?;
         }
+        require(!was_writable || backing != Some(Backing::RecoveryRequired), "backing_recovery_required")?;
         require(checkpoint, "locked_without_tor_state")
     }
 
@@ -3765,7 +3894,7 @@ mod ram_only_tests {
         let config = Config {
             general_image: sentinel.into(), general_mib: 512, session_mib: 128, ephemeral_mib: 128,
             pbkdf_memory_kib: 65536, manager_uid: 1000, vm: None, gateway: None, import: None,
-            export: None, onion: None, gateway_network: false,
+            export: None, onion: None, gateway_network: false, backing_fence: false,
         };
         assert_eq!(config.initialize(b"not-a-persistent-password").err().map(|error| error.0), Some("volume_busy"));
         assert_eq!(config.create(b"not-a-persistent-password", 128).err().map(|error| error.0), Some("general_not_writable"));
@@ -3845,7 +3974,7 @@ mod agent_safe_tests {
             general_image: "/unused/general.luks".into(), general_mib: 512, session_mib: 128, ephemeral_mib: 128,
             // Below Argon2's allowed minimum, so cryptsetup fails after file allocation.
             pbkdf_memory_kib: 1, manager_uid: 1000, vm: None, gateway: None, import: None, export: None,
-            onion: None, gateway_network: false,
+            onion: None, gateway_network: false, backing_fence: false,
         };
         let vm = serde_json::from_str(r#"{
             "root":"/unused", "kernel":"/unused/kernel", "initrd":"/unused/initrd",
@@ -3907,7 +4036,7 @@ mod agent_safe_tests {
         file.set_len(child.mib * MIB).unwrap();
         let config = Config { general_image: "/unused/general.luks".into(), general_mib: 512, session_mib: 128, ephemeral_mib: 128,
             pbkdf_memory_kib: 65536, manager_uid: 1000, vm: None, gateway: None, import: None, export: None,
-            onion: None, gateway_network: false };
+            onion: None, gateway_network: false, backing_fence: false };
         let closed = config.reserved_mib(&[]).unwrap_or_else(|error| panic!("{}", error.0));
         assert_eq!(closed, RAM_PROFILE_RESERVE_MIB + 128);
         let slot = scope::Slot::try_from(1).unwrap();

@@ -106,7 +106,7 @@ class RuntimeDiskFd(unittest.TestCase):
         os.pwrite(self.fd, content, 0)
         original = self.replace_name()
         pinned = os.fstat(self.fd)
-        reader = prepare.readonly_disk(self.fd)
+        reader = prepare.reopen_disk(self.fd)
         os.close(self.fd)
         self.fd = reader
         self.assertEqual(fcntl.fcntl(reader, fcntl.F_GETFL) & os.O_ACCMODE, os.O_RDONLY)
@@ -121,6 +121,41 @@ class RuntimeDiskFd(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, '^runtime_disk_identity_mismatch$'):
                 prepare.format_check(self.fd, 'hcs-hyperv', self.identity, self.size, self.root / 'missing-authority')
             self.assertEqual(os.pread(self.fd, 4096, 0), first)
+
+    def test_desktop_provisioning_cannot_format_a_marker_without_the_pending_ticket(self):
+        marker = prepare.disk_marker(self.identity)
+        os.pwrite(self.fd, marker, 0)
+        with self.assertRaisesRegex(RuntimeError, '^runtime_disk_identity_mismatch$'):
+            prepare.format_check(self.fd, 'hcs-hyperv', self.identity, self.size,
+                                 self.root / 'missing-authority', require_authority=True)
+        self.assertEqual(os.pread(self.fd, len(marker), 0), marker)
+
+    def digest(self):
+        with self.path.open('rb') as image:
+            return hashlib.file_digest(image, 'sha256').digest()
+
+    def dirty(self):
+        subprocess.run(['/usr/sbin/debugfs', '-w', '-R', 'feature needs_recovery',
+                        f'/proc/self/fd/{self.fd}'], pass_fds=(self.fd,),
+                       check=True, capture_output=True)
+
+    @unittest.skipUnless(Path('/usr/sbin/debugfs').is_file(), 'Requires real ext4 debugfs')
+    def test_probe_distinguishes_authenticated_marker_clean_ext4_and_pending_journal(self):
+        self.assertEqual(prepare.probe_disk(self.fd, self.identity), 'unidentified')
+        os.pwrite(self.fd, prepare.disk_marker(self.identity), 0)
+        before = self.digest()
+        self.assertEqual(prepare.probe_disk(self.fd, self.identity), 'blank')
+        self.assertEqual(self.digest(), before)
+        prepare.make_filesystem(self.fd, self.identity)
+        before = self.digest()
+        self.assertEqual(prepare.probe_disk(self.fd, self.identity), 'readonly')
+        self.assertEqual(self.digest(), before)
+        self.dirty()
+        before = self.digest()
+        self.assertEqual(prepare.probe_disk(self.fd, self.identity), 'recovery-required')
+        with self.assertRaisesRegex(RuntimeError, '^runtime_disk_identity_mismatch$'):
+            prepare.probe_disk(self.fd, uuid.uuid4())
+        self.assertEqual(self.digest(), before)
 
     @unittest.skipUnless(Path('/usr/sbin/debugfs').is_file(), 'Requires real ext4 debugfs')
     def test_reissued_new_disk_bootstrap_consumes_authority_and_preserves_formatted_payload(self):
@@ -178,7 +213,7 @@ class RuntimeDiskFd(unittest.TestCase):
         prepare.format_check(self.fd, 'hcs-hyperv', self.identity, self.size, self.root / 'missing-authority')
         destination = self.root / 'mount'
         destination.mkdir()
-        reader = prepare.readonly_disk(self.fd)
+        reader = prepare.reopen_disk(self.fd)
         # Drop the parent's writer exactly as production does before mounting.
         os.close(self.fd)
         self.fd = reader
@@ -188,6 +223,82 @@ class RuntimeDiskFd(unittest.TestCase):
             self.assertEqual(self.path.read_bytes(), b'UNRELATED_DESTINATION_CANARY\n')
         finally:
             subprocess.run(['/usr/bin/umount', str(destination)], check=True, capture_output=True)
+
+    def loop_backing(self):
+        loop = subprocess.run(['/usr/sbin/losetup', '--find', '--show', '--nooverlap', str(self.path)],
+                              check=True, text=True, capture_output=True).stdout.strip()
+        self.addCleanup(subprocess.run, ['/usr/sbin/losetup', '--detach', loop], check=True, capture_output=True)
+        fd = os.open(loop, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        self.addCleanup(os.close, fd)
+        destination = self.root / 'mount'
+        destination.mkdir(mode=0o700)
+        backing = prepare.Backing(fd, self.identity, destination, self.root / 'backing-state')
+
+        def unmount():
+            if prepare.mount_mode(fd, destination) is not None:
+                backing.unmount()
+
+        self.addCleanup(unmount)
+        return backing, loop
+
+    @unittest.skipUnless(can_mount(), 'Mount acceptance requires CAP_SYS_ADMIN and loop-control')
+    def test_blank_then_explicit_writes_and_readonly_fence_keep_the_device_bytes(self):
+        os.pwrite(self.fd, prepare.disk_marker(self.identity), 0)
+        backing, loop = self.loop_backing()
+        before = self.digest()
+        self.assertEqual(backing.fence(), 'blank')
+        self.assertEqual(backing.status(), 'blank')
+        self.assertTrue(prepare.block_readonly(backing.fd))
+        self.assertIsNone(prepare.mount_mode(backing.fd, backing.destination))
+        self.assertEqual(self.digest(), before)
+        try:
+            writer = os.open(loop, os.O_RDWR)
+        except PermissionError:
+            pass
+        else:
+            try:
+                with self.assertRaises(OSError):
+                    os.pwrite(writer, b'DENIED_RAW_WRITE', 0)
+            finally:
+                os.close(writer)
+        self.assertEqual(self.digest(), before)
+        self.assertEqual(backing.change(repair=False), 'writable')
+        payload = backing.destination / 'payload'
+        payload.write_bytes(b'SYNTHETIC_PERSISTENT_PAYLOAD\n')
+        backing.record.unlink()
+        with self.assertRaises(FileNotFoundError):
+            backing.status()
+        self.assertEqual(backing.fence(), 'readonly')
+        self.assertTrue(prepare.block_readonly(backing.fd))
+        self.assertEqual(prepare.mount_mode(backing.fd, backing.destination), 'readonly')
+        mount = next(line for line in Path('/proc/self/mountinfo').read_text().splitlines()
+                     if line.split()[4] == str(backing.destination))
+        self.assertTrue({'noload', 'norecovery'} & set(mount.split()[-1].split(',')), mount)
+        before = self.digest()
+        self.assertEqual(payload.read_bytes(), b'SYNTHETIC_PERSISTENT_PAYLOAD\n')
+        self.assertEqual(backing.fence(), 'readonly')
+        self.assertEqual(backing.status(), 'readonly')
+        backing.unmount()
+        self.assertEqual(self.digest(), before)
+        self.assertEqual(backing.fence(), 'readonly')
+        self.assertEqual(self.digest(), before)
+
+    @unittest.skipUnless(can_mount() and Path('/usr/sbin/debugfs').is_file(),
+                         'Dirty mount acceptance requires CAP_SYS_ADMIN, loop-control and debugfs')
+    def test_dirty_backing_stays_unmounted_until_explicit_repair(self):
+        prepare.make_filesystem(self.fd, self.identity)
+        self.dirty()
+        backing, _ = self.loop_backing()
+        before = self.digest()
+        self.assertEqual(backing.fence(), 'recovery-required')
+        self.assertEqual(backing.change(repair=False), 'recovery-required')
+        self.assertTrue(prepare.block_readonly(backing.fd))
+        self.assertIsNone(prepare.mount_mode(backing.fd, backing.destination))
+        self.assertEqual(self.digest(), before)
+        self.assertEqual(backing.change(repair=True), 'readonly')
+        self.assertTrue(prepare.block_readonly(backing.fd))
+        self.assertNotEqual(self.digest(), before)
+        self.assertEqual(backing.status(), 'readonly')
 
 
 if __name__ == '__main__':

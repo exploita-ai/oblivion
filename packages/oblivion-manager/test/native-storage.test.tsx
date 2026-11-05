@@ -44,6 +44,60 @@ test("runtime recovery prevents archive preparation", async () => {
   } finally { await app.dispose() }
 })
 
+test.each([[80, 24], [160, 50]])("dirty backing repair requires explicit confirmation at %ix%i", async (width, height) => {
+  const fixture = nativePreview(() => {}, { backing_recovery_required: true })
+  const initial = await fixture.status()
+  const commands: string[][] = []
+  const app = await testRender(() => <SafeManager initial={initial} runtime={{ ...fixture, run: async (args) => { commands.push(args); return fixture.run(args) } }} />, { width, height, kittyKeyboard: true, exitOnCtrlC: false })
+  try {
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Repair storage backing")
+    expect(app.captureCharFrame()).toContain("Ephemeral mode")
+    expect(app.captureCharFrame()).not.toContain("Unlock Oblivion")
+    await app.mockInput.pressEnter()
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Confirm repair")
+    expect(app.captureCharFrame()).toContain("replay its journal")
+    await app.mockInput.pressEscape()
+    await app.renderOnce()
+    expect(commands).toHaveLength(0)
+    await app.mockInput.pressEnter()
+    await app.renderOnce()
+    await app.mockInput.pressEnter()
+    await app.renderOnce()
+    expect(commands).toEqual([["repair-backing", "--confirmed"]])
+    expect(app.captureCharFrame()).toContain("Unlock Oblivion")
+    expect((await fixture.status()).app_mode).toBe("locked")
+  } finally { await app.dispose() }
+})
+
+test("failed backing repair keeps encrypted storage quarantined and RAM-only mode available", async () => {
+  const fixture = nativePreview(() => {}, { general_present: false, backing_recovery_required: true })
+  const initial = await fixture.status()
+  const commands: string[][] = []
+  const app = await testRender(() => <SafeManager initial={initial} runtime={{ ...fixture, run: async (args) => {
+    commands.push(args)
+    return args[0] === "repair-backing" ? 1 : fixture.run(args)
+  } }} />, { width: 80, height: 24, kittyKeyboard: true, exitOnCtrlC: false })
+  try {
+    await app.renderOnce()
+    await app.mockInput.pressEnter()
+    await app.renderOnce()
+    await app.mockInput.pressEnter()
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Storage backing repair could not be confirmed")
+    expect(app.captureCharFrame()).toContain("Repair storage backing")
+    expect(app.captureCharFrame()).not.toContain("Create encrypted storage")
+    await app.mockInput.pressArrow("down")
+    await app.mockInput.pressEnter()
+    await app.renderOnce()
+    expect(commands).toEqual([["repair-backing", "--confirmed"], ["ephemeral"]])
+    expect(app.captureCharFrame()).toContain("Your Safes")
+    expect((await fixture.status()).app_mode).toBe("ram-only")
+    expect((await fixture.status()).backing_recovery_required).toBe(true)
+  } finally { await app.dispose() }
+})
+
 test("unfinished archive reset requires review and never automatically creates a replacement", async () => {
   const fixture = nativePreview(() => {}, { general_present: false, general_incomplete: true })
   const initial = await fixture.status()
