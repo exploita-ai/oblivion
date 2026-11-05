@@ -124,6 +124,10 @@ impl Overlay {
                 safe,
             ])
             .env("OBLIVION_LAUNCHER", &launcher);
+        // The parent is already raw. Keep queued bytes intact and request
+        // paste framing before OpenTUI takes over the foreground terminal.
+        std::io::stdout().write_all(b"\x1b[?2004h\x1b[?2026l\x1b[>0u\x1b[0m\x1b[r\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?25h")?;
+        std::io::stdout().flush()?;
         let mut handoff = oblivion_host::native_runtime::ManagerHandoff::prepare(&mut command)?;
         // The child claims the foreground before exec. A parent/child pipe gate
         // in pre_exec would deadlock Command::spawn's exec-error handshake.
@@ -139,14 +143,6 @@ impl Overlay {
                 libc::signal(libc::SIGTTOU, libc::SIG_DFL);
                 Ok(())
             });
-        }
-        // Neutralize guest modes before OpenTUI initializes. Its own terminal
-        // restore runs first; the parent's bounded VT snapshot follows once.
-        std::io::stdout().write_all(b"\x1b[?2026l\x1b[>0u\x1b[0m\x1b[r\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?25h")?;
-        std::io::stdout().flush()?;
-        if unsafe { libc::tcsetattr(0, libc::TCSANOW, &saved) } != 0 {
-            let _ = restore(group, &raw);
-            return Err(std::io::Error::last_os_error().into());
         }
         match command.spawn() {
             Ok(mut child) => {
@@ -414,6 +410,9 @@ pub fn bridge(
 }
 
 fn repaint(parser: &vt100::Parser<oblivion_host::terminal_screen::Replies>) -> control::Result<()> {
+    if unsafe { libc::tcgetpgrp(0) != libc::getpgrp() } {
+        return Err("Cannot return input to the agent while the terminal is in the background".into());
+    }
     let screen = parser.screen();
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(if screen.alternate_screen() {
@@ -428,6 +427,11 @@ fn repaint(parser: &vt100::Parser<oblivion_host::terminal_screen::Replies>) -> c
     stdout.write_all(screen.cursor_state_formatted().as_bytes())?;
     stdout.write_all(screen.attributes_formatted().as_bytes())?;
     stdout.flush()?;
+    // Anything still queued at the handoff belonged to the host panel, even
+    // after a failed launch. Do this after replaying the guest's input modes.
+    if unsafe { libc::tcflush(0, libc::TCIFLUSH) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
     Ok(())
 }
 

@@ -152,16 +152,23 @@ def waittty(fd, needle, timeout=8):
     out = b""
     until = time.monotonic() + timeout
     while needle not in out:
-        if not select.select([fd], [], [], max(0, until - time.monotonic()))[0]:
+        remaining = until - time.monotonic()
+        if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
             raise AssertionError(("missing tty marker", needle, out[-180:]))
-        out += os.read(fd, 262144)
+        chunk = os.read(fd, 262144)
+        if not chunk:
+            raise AssertionError(("tty closed before marker", needle, out[-180:]))
+        out += chunk
     return out
 
 
 def drain(fd):
     out = b""
     while select.select([fd], [], [], 0)[0]:
-        out += os.read(fd, 262144)
+        chunk = os.read(fd, 262144)
+        if not chunk:
+            break
+        out += chunk
     return out
 
 
@@ -186,7 +193,7 @@ def controller():
                     "preferences": {"version": 1, "safe_minutes": 15, "host_minutes": 30},
                     "host": {"nonce": "a" * 32, "remaining_seconds": 1800, "closing": False},
                     "safes": [{"opening": {"slot": 0, "safe_id": "12345678123442348234123456789abc", "nonce": "b" * 32}, "remaining_seconds": 900, "closing": False}],
-                    "last_error": None,
+                    "last_error": None, "storage": "saved-encrypted", "writable": True,
                 }})
             else:
                 assert header["operation"] == "activity"
@@ -259,7 +266,8 @@ try:
     waittty(master, b"AGENT_VISIBLE")
     assert activity_reports == []
     os.write(master, b"\x1b[20~")
-    waittty(master, b"HOST_OVERLAY_READY")
+    opened = waittty(master, b"HOST_OVERLAY_READY")
+    assert b"\x1b[?2004h" in opened, "paste must be framed before the overlay takes input"
     assert activity_received.wait(2), "human overlay key did not report activity"
     assert activity_reports[0] == {"host": "a" * 32, "safe": {"slot": 0, "safe_id": "12345678123442348234123456789abc", "nonce": "b" * 32}}
     # More than the socket buffers: completion requires the bridge to drain it.
@@ -275,7 +283,7 @@ try:
     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
     kind, payload = receive(peer)
     assert kind == 3 and payload == struct.pack(">HH", 30, 100), (kind, payload)
-    os.write(master, b"x")
+    os.write(master, b"xOVERLAY_QUEUED_INPUT")
     returned = waittty(master, b"AGENT_CONTINUED_OFFSCREEN")
     assert returned.count(b"AGENT_CONTINUED_OFFSCREEN") == 1
     kind, payload = receive(peer)
