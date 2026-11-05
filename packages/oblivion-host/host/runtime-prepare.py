@@ -84,14 +84,18 @@ def disk_marker(identity):
     return marker + bytes(4096 - len(marker))
 
 
-def initialize_blank_disk(fd, backend, identity, size, authority):
-    if backend != 'hcs-hyperv':
+def consume_authority(backend, identity, size, authority, required=False):
+    if required and backend != 'hcs-hyperv':
         raise RuntimeError('runtime_disk_identity_mismatch')
     try:
         authorization = os.open(authority, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except FileNotFoundError:
-        raise RuntimeError('runtime_disk_identity_mismatch') from None
+        if required:
+            raise RuntimeError('runtime_disk_identity_mismatch') from None
+        return False
     try:
+        if backend != 'hcs-hyperv':
+            raise RuntimeError('runtime_disk_identity_mismatch')
         info = os.fstat(authorization)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
                 or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600
@@ -101,21 +105,26 @@ def initialize_blank_disk(fd, backend, identity, size, authority):
         if (type(data) is not dict or type(data.get('bytes')) is not int
                 or data != {'kind': 'new-disk', 'runtime_id': identity.hex, 'bytes': size}):
             raise RuntimeError('invalid_runtime_data_authority')
-        # Creation authority came from the private host bootstrap, not a kernel
-        # flag or a disk name. The first block must still be genuinely blank.
-        if os.pread(fd, 4096, 0) != bytes(4096):
-            raise RuntimeError('runtime_disk_identity_mismatch')
         os.unlink(authority)
-        marker = disk_marker(identity)
-        written = 0
-        while written < len(marker):
-            count = os.pwrite(fd, marker[written:], written)
-            if count <= 0:
-                raise RuntimeError('runtime_disk_marker_write_failed')
-            written += count
-        os.fsync(fd)
+        return True
     finally:
         os.close(authorization)
+
+
+def initialize_blank_disk(fd, backend, identity, size, authority):
+    # Blank origin is attested by the host's SDK-created, privately pinned disk
+    # and durable pending ticket. This head check is not an all-device scan.
+    if os.pread(fd, 4096, 0) != bytes(4096):
+        raise RuntimeError('runtime_disk_identity_mismatch')
+    consume_authority(backend, identity, size, authority, required=True)
+    marker = disk_marker(identity)
+    written = 0
+    while written < len(marker):
+        count = os.pwrite(fd, marker[written:], written)
+        if count <= 0:
+            raise RuntimeError('runtime_disk_marker_write_failed')
+        written += count
+    os.fsync(fd)
 
 
 def format_check(fd, backend, identity, size, authority):
@@ -130,12 +139,17 @@ def format_check(fd, backend, identity, size, authority):
     if probe.returncode == 2:
         if os.pread(fd, 4096, 0) != disk_marker(identity):
             initialize_blank_disk(fd, backend, identity, size, authority)
+        else:
+            # Pending setup may authenticate again after the marker was made
+            # durable. Validate and consume that per-boot capability as well.
+            consume_authority(backend, identity, size, authority)
         run('/usr/sbin/mkfs.ext4', '-q', '-m', '0', '-L', 'OBLIVION-RUNTIME',
             '-U', str(identity), device, pass_fds=(fd,))
     elif probe.returncode == 0:
         values = dict(line.split('=', 1) for line in probe.stdout.decode().splitlines() if '=' in line)
         if values.get('TYPE') != 'ext4' or values.get('LABEL') != 'OBLIVION-RUNTIME' or values.get('UUID') != str(identity):
             raise RuntimeError('runtime_disk_identity_mismatch')
+        consume_authority(backend, identity, size, authority)
         checked = subprocess.run(['/usr/sbin/e2fsck', '-p', device],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL, check=False, pass_fds=(fd,))
