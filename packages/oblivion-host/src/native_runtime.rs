@@ -662,6 +662,14 @@ fn install_runtime(path: &Path, updating: bool, deploy: bool) -> Result<()> {
     }
     let root = directory()?;
     finish_atomic_tail(&root, &desktop, bundle.id())?;
+    let desktop = if deploy
+        && std::env::var_os("OBLIVION_RUNTIME_DIRECTORY").is_some()
+        && desktop.can_ignore_entry_for_deploy(&root)?
+    {
+        DesktopPaths { manage_entry: false, ..desktop }
+    } else {
+        desktop
+    };
     reserve_desktop(&root, &desktop)?;
     change_bundle(&root, &socket_directory()?, &bundle, updating, deploy)?;
     bind_desktop(&root, &desktop)?;
@@ -965,6 +973,24 @@ impl DesktopPaths {
 
     fn releases(&self) -> PathBuf {
         self.prefix.join("releases")
+    }
+
+    fn can_ignore_entry_for_deploy(&self, root: &Path) -> Result<bool> {
+        if !self.manage_entry {
+            return Ok(false);
+        }
+        let releases = self.prefix.canonicalize()?.join("releases");
+        // A boot-only deploy has no authority over another prefix's command.
+        // Keep command protection when its target could resolve into this prefix.
+        if !fs::read_link(&self.entry).is_ok_and(|target| {
+            target.is_absolute()
+                && !target.starts_with(self.releases())
+                && target.canonicalize().is_ok_and(|target| !target.starts_with(releases))
+        }) {
+            return Ok(false);
+        }
+        let previous = installed_settings(root)?;
+        Ok(previous.is_none() || desktop_owner(root, self, previous.as_ref(), true)?)
     }
 
     fn lock_installation(&self) -> Result<fs::File> {
@@ -2880,6 +2906,39 @@ mod tests {
         assert!(desktop_owner(&fixture.0, &desktop, Some(&current), false).unwrap());
         fs::remove_file(desktop.prefix.join("installation.json")).unwrap();
         assert!(reserve_desktop(&fixture.0, &desktop).is_err());
+    }
+
+    #[test]
+    fn runtime_deploy_allows_a_separate_prefix_without_losing_local_entry_protection() {
+        let (fixture, desktop, current, old_id) = installed_fixture();
+        let old_entry = desktop.releases().join(&old_id).join("bin/oblivion");
+        fs::remove_file(&desktop.entry).unwrap();
+        std::os::unix::fs::symlink(&old_entry, &desktop.entry).unwrap();
+
+        let separate = Fixture::new();
+        let separate_desktop = DesktopPaths {
+            prefix: separate.0.join("desktop"),
+            entry: desktop.entry.clone(),
+            manage_entry: true,
+            platform: desktop.platform,
+        };
+        private_directory(&separate_desktop.prefix).unwrap();
+        assert!(reserve_desktop(&separate.0, &separate_desktop).is_err());
+        assert!(!separate_desktop.prefix.join("installation.json").exists());
+
+        assert!(!separate_desktop.can_ignore_entry_for_deploy(&fixture.0).unwrap());
+        assert!(separate_desktop.can_ignore_entry_for_deploy(&separate.0).unwrap());
+        let separate_desktop = DesktopPaths {
+            manage_entry: false,
+            ..separate_desktop
+        };
+        reserve_desktop(&separate.0, &separate_desktop).unwrap();
+        assert_eq!(fs::read_link(&desktop.entry).unwrap(), old_entry);
+
+        assert!(!desktop.can_ignore_entry_for_deploy(&fixture.0).unwrap());
+        assert_eq!(desktop.entry_release().unwrap(), Some(old_id.clone()));
+        let plan = cleanup_plan(&fixture.0, &desktop, &current, false, None).unwrap();
+        assert!(!plan.release_ids.contains(&old_id));
     }
 
     #[test]
