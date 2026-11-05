@@ -103,3 +103,32 @@ test("a failed Live switch suspends automatic status until an explicit R", async
     expect(app.captureCharFrame()).toContain("Change storage mode")
   } finally { await app.dispose() }
 })
+
+test("Live System shows and refreshes USB media while storage is locked", async () => {
+  const fixture = nativePreview(() => {})
+  const initial = await fixture.status()
+  const calls: string[][] = []
+  const app = await testRender(() => <SafeManager initial={initial} liveStorage="persistent" runtime={{
+    ...fixture,
+    async query(args) {
+      calls.push(args)
+      return { version: 1, devices: calls.length === 1 ? [
+        { id: "a".repeat(64), name: "sdc1", bytes: 8 * 1024 ** 3, read_only: true },
+      ] : [] }
+    },
+    async run() { throw new Error("USB inspection must not run an action") },
+  }} />, { width: 80, height: 24, clock: new ManualClock(), kittyKeyboard: true })
+  try {
+    await app.renderOnce()
+    expect(calls).toEqual([])
+    await app.mockInput.pressKey("F3")
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("sdc1")
+    expect(app.captureCharFrame()).toContain("8.0 GiB · Read-only")
+    expect(app.captureCharFrame()).toContain("Refresh media")
+    await app.mockInput.pressKey("r")
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("No available USB media")
+    expect(calls).toEqual(Array.from({ length: 2 }, () => ["runtime", "live-media", "--json"]))
+  } finally { await app.dispose() }
+})

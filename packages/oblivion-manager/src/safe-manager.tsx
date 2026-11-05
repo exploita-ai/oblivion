@@ -127,7 +127,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
       } else if (!id || !next.open_sessions.some((opened) => opened.id === id)) setObserved(undefined)
     } catch {
       awaitingInitialRetry = !state()
-      if (!stopped) setError("The Oblivion runtime is unavailable. Press R to retry.")
+      if (!stopped) setError("The Oblivion runtime is unavailable. In Safes, press R to retry.")
     } finally {
       refreshInFlight = false
       if (!stopped) setBusy(false)
@@ -276,7 +276,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
     try {
       await props.runtime.chooseLiveStorage!()
     } catch {
-      setError("Live storage selection could not be prepared. Press R to inspect the runtime before retrying.")
+      setError("Live storage selection could not be prepared. In Safes, press R to inspect the runtime.")
     } finally {
       // A status request can start the runtime. After stopping, only an explicit
       // retry may do that; the successful path exits to the display's R prompt.
@@ -417,7 +417,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
       <text fg={theme.text.muted}>{props.overlay ? "Safe panel" : props.preview ? "Preview" : state()?.app_open ? state()?.app_mode === "ram-only" ? "Ephemeral mode" : state()?.app_mode === "read-only" ? "Read-only archive" : `${active().length} active Safe(s)` : "Privacy layer"}</text>
     </box>
     <box flexGrow={1} minHeight={0} flexDirection="column" paddingLeft={spacious() ? 5 : 2} paddingRight={spacious() ? 5 : 2} paddingTop={spacious() ? 2 : 1} paddingBottom={1}>
-      <Show when={page() === "system"}><NativeSystem state={state()} /></Show>
+      <Show when={page() === "system"}><NativeSystem state={state()} live={props.liveStorage ? props.runtime : undefined} /></Show>
       <Show when={page() === "inspect" && context() && state()}><SafeInspector state={state()!} id={context()!} blocked={openingBlocked(context()!)} task={() => { void reviewTask(context()!) }} launch={(agent) => { if (!openingBlocked(context()!)) void execute(["run", "--safe", context()!, agent]) }} choose={() => chooseAgent(context())} back={() => section("safes")} /></Show>
       <Show when={page() === "task" && context() && state()}><NativeTask runtime={props.runtime} state={state()!} safe={context()!} name={safeTitle()} policy={scopedNetworkObservation(observed(), context(), state(), now())?.safe_access.current} blocked={openingBlocked(context()!)} run={(args) => execute(args, undefined, false)} back={() => inspect(context()!)} /></Show>
       <Show when={page() === "imports"}><NativeImports runtime={props.runtime} writable={state()?.app_mode === "persistent" && !hostClosing()} run={(args) => execute(args, undefined, false)} back={() => section("settings")} /></Show>

@@ -1586,6 +1586,14 @@ pub fn choose_live_storage() -> Result<()> {
     Err("Storage-mode selection is available only on Debian Live".into())
 }
 
+pub fn live_media() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if mode()? == Mode::Live {
+        return live::media();
+    }
+    Err("USB media listing is available only on Oblivion Live".into())
+}
+
 pub fn start() -> Result<()> {
     ensure_as(lifecycle::Kind::Resident)
 }

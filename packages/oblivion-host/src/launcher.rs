@@ -127,6 +127,7 @@ fn run() -> control::Result<i32> {
                 RuntimeCommand::ChooseStorage => {
                     oblivion_host::native_runtime::choose_live_storage()?
                 }
+                RuntimeCommand::LiveMedia => oblivion_host::native_runtime::live_media()?,
                 RuntimeCommand::Recover => oblivion_host::native_runtime::recover()?,
                 RuntimeCommand::Stop => oblivion_host::native_runtime::stop()?,
                 RuntimeCommand::Gc => oblivion_host::native_runtime::gc()?,

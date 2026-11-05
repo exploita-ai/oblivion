@@ -111,7 +111,7 @@ COPY packages/oblivion-manager/package.json /oblivion-manager/package.json
 COPY packages/theme/src/ /theme/src/
 COPY packages/tui-kit/src/ /tui-kit/src/
 COPY package.json bun.lock LICENSE NOTICE /workspace-inputs/
-COPY script/oblivion/Dockerfile.vm-lab script/oblivion/hypervisor-kernel.py script/oblivion/hypervisor-qemu.py script/oblivion/controller-setup.sh script/oblivion/controller-pack.sh script/oblivion/live-setup.sh script/oblivion/live-pack.sh script/oblivion/live-storage.py script/oblivion/live-grub.cfg script/oblivion/live-controller.json script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/session-identities.sh script/oblivion/pack-vm-assets.sh script/oblivion/host-firewall.nft script/oblivion/install-agents.py script/oblivion/install-agents.json script/oblivion/session-node.json script/oblivion/install-session-node.py script/oblivion/session-packages.txt script/oblivion/session-analysis.lock script/oblivion/session-analysis-licenses.json script/oblivion/install-session-analysis.py script/oblivion/onionshare-source.json script/oblivion/onionshare-requirements.lock script/oblivion/onionshare-licenses.json script/oblivion/install-onionshare.py script/oblivion/install-vbox-clipboard.py script/oblivion/vbox-clipboard.json /runtime-inputs/
+COPY script/oblivion/Dockerfile.vm-lab script/oblivion/hypervisor-kernel.py script/oblivion/hypervisor-qemu.py script/oblivion/controller-setup.sh script/oblivion/controller-pack.sh script/oblivion/live-setup.sh script/oblivion/live-pack.sh script/oblivion/live-storage.py script/oblivion/live-media.py script/oblivion/live-grub.cfg script/oblivion/live-controller.json script/oblivion/vm-common-setup.sh script/oblivion/journald-forwarding.conf script/oblivion/session-identities.sh script/oblivion/pack-vm-assets.sh script/oblivion/host-firewall.nft script/oblivion/install-agents.py script/oblivion/install-agents.json script/oblivion/session-node.json script/oblivion/install-session-node.py script/oblivion/session-packages.txt script/oblivion/session-analysis.lock script/oblivion/session-analysis-licenses.json script/oblivion/install-session-analysis.py script/oblivion/onionshare-source.json script/oblivion/onionshare-requirements.lock script/oblivion/onionshare-licenses.json script/oblivion/install-onionshare.py script/oblivion/install-vbox-clipboard.py script/oblivion/vbox-clipboard.json /runtime-inputs/
 COPY script/oblivion/display/ /runtime-inputs/display/
 COPY script/oblivion/agent-notices/ /runtime-inputs/agent-notices/
 COPY script/oblivion/live-os/ /runtime-inputs/live-os/
@@ -638,10 +638,10 @@ COPY --from=clipboard-broker /out/usr/sbin/spice-vdagentd /usr/sbin/
 COPY --from=clipboard-broker /out/usr/share/doc/spice-vdagent/ /usr/share/doc/spice-vdagent/
 COPY --from=clipboard-broker /out/package.control /out/SHA256SUMS /usr/share/doc/spice-vdagent/
 COPY --from=vbox-clipboard /out/ /usr/lib/oblivion/virtualbox/
-COPY script/oblivion/live-storage.py /usr/lib/oblivion/live-storage.py
+COPY script/oblivion/live-storage.py script/oblivion/live-media.py /usr/lib/oblivion/
 COPY script/oblivion/live-os/ /usr/lib/oblivion/live-os/
 COPY script/oblivion/live-setup.sh /tmp/live-setup
-RUN chmod 0755 /usr/lib/oblivion/live-storage.py && sh /tmp/live-setup && rm /tmp/live-setup \
+RUN chmod 0755 /usr/lib/oblivion/live-storage.py /usr/lib/oblivion/live-media.py && sh /tmp/live-setup && rm /tmp/live-setup \
     && ln -s /usr/lib/oblivion/desktop/bin/oblivion /usr/bin/oblivion
 COPY script/oblivion/display/*.service script/oblivion/display/*.socket script/oblivion/display/manager.conf script/oblivion/display/foot.ini script/oblivion/display/start.sh script/oblivion/display/70-oblivion-clipboard.rules /usr/lib/oblivion/display/
 COPY script/oblivion/display/install.sh /tmp/display-setup

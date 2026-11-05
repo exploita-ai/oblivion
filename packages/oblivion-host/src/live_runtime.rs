@@ -63,6 +63,19 @@ fn storage(operation: &str, plan: Option<&str>) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
+pub(super) fn media() -> Result<()> {
+    let output = Command::new("/usr/lib/oblivion/live-media.py")
+        .arg("list")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()?;
+    if !output.status.success() || output.stdout.is_empty() || output.stdout.len() > 16 * 1024 {
+        return Err("USB media could not be inspected".into());
+    }
+    std::io::stdout().write_all(&output.stdout)?;
+    Ok(())
+}
+
 pub(super) fn prepare(root: &Path, path: &Path) -> Result<()> {
     if fs::read_to_string("/proc/swaps")?
         .lines()

@@ -51,6 +51,9 @@ pub fn run() -> Result<i32> {
         Command::Shell(_) if !interactive() => {
             return Err("Workspace requires an interactive terminal".into());
         }
+        Command::Runtime(RuntimeCommand::LiveMedia) => {
+            return Err("USB media listing is available only on Oblivion Live".into());
+        }
         Command::Runtime(command)
             if !matches!(
                 command,

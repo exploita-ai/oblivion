@@ -1,9 +1,11 @@
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
+import { z } from "zod"
+import { ActionBar } from "./action-bar"
 import { Menu } from "./menu"
 import { PageHeader } from "./page-header"
 import { FormView } from "./form"
-import { nativeStatus, type NativeRuntime, type NativeStatus } from "./native-control"
+import { capacity, nativeStatus, type NativeRuntime, type NativeStatus } from "./native-control"
 import { theme } from "./theme"
 
 export type NetworkObservation = { safe: string; state: NativeStatus; received: number }
@@ -129,16 +131,65 @@ export function NativeNetworkIndicator(props: { observation?: NetworkObservation
   </box>
 }
 
-export function NativeSystem(props: { state?: NativeStatus }) {
+export function NativeSystem(props: { state?: NativeStatus; live?: NativeRuntime }) {
   return <box flexGrow={1} minHeight={0} flexDirection="column" gap={1}>
-    <PageHeader title="System" description="Resources reported by the Debian runtime hosting your Safes." />
-    <For each={[
-      ["Operating system", props.state?.system?.os ?? "Unavailable"],
-      ["Architecture", props.state?.system?.architecture ?? "Unavailable"],
-      ["CPU", props.state?.system?.cpu ?? "Unavailable"],
-      ["CPU cores", String(props.state?.system?.cores ?? "Unavailable")],
-      ["Memory", props.state?.system ? `${Math.floor(props.state.system.memory_available / 1024 ** 2)} MiB available / ${Math.floor(props.state.system.memory_total / 1024 ** 2)} MiB` : "Unavailable"],
-      ["Encrypted storage", props.state?.available_bytes == null ? "Unavailable" : `${(props.state.available_bytes / 1024 ** 3).toFixed(1)} GiB available`],
-    ]}>{(row) => <box flexDirection="row" gap={2} flexShrink={0}><text width={19} fg={theme.text.muted}>{row[0]}</text><text fg={theme.text.base}>{row[1]}</text></box>}</For>
+    <PageHeader title="System" description={props.live ? "Resources reported by the Debian runtime and the Live host." : "Resources reported by the Debian runtime hosting your Safes."} />
+    <box flexDirection="column" flexShrink={0} gap={props.live ? 0 : 1}>
+      <For each={[
+        ["Operating system", props.state?.system?.os ?? "Unavailable"],
+        ["Architecture", props.state?.system?.architecture ?? "Unavailable"],
+        ["CPU", props.state?.system?.cpu ?? "Unavailable"],
+        ["CPU cores", String(props.state?.system?.cores ?? "Unavailable")],
+        ["Memory", props.state?.system ? `${Math.floor(props.state.system.memory_available / 1024 ** 2)} MiB available / ${Math.floor(props.state.system.memory_total / 1024 ** 2)} MiB` : "Unavailable"],
+        ["Encrypted storage", props.state?.available_bytes == null ? "Unavailable" : `${(props.state.available_bytes / 1024 ** 3).toFixed(1)} GiB available`],
+      ]}>{(row) => <box flexDirection="row" gap={2} flexShrink={0}><text width={19} fg={theme.text.muted}>{row[0]}</text><text fg={theme.text.base}>{row[1]}</text></box>}</For>
+    </box>
+    <Show when={props.live}>{(runtime) => <LiveMedia runtime={runtime()} />}</Show>
+  </box>
+}
+
+const liveMedia = z.object({
+  version: z.literal(1),
+  devices: z.array(z.object({
+    id: z.string().regex(/^[0-9a-f]{64}$/),
+    name: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+    bytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    read_only: z.boolean(),
+  })).max(64),
+})
+
+function LiveMedia(props: { runtime: NativeRuntime }) {
+  const [devices, setDevices] = createSignal<z.infer<typeof liveMedia>["devices"]>()
+  const [reading, setReading] = createSignal(false)
+  let stopped = false
+  async function refresh() {
+    if (reading()) return
+    setDevices(undefined)
+    setReading(true)
+    try {
+      const media = liveMedia.parse(await props.runtime.query(["runtime", "live-media", "--json"]))
+      if (!stopped) setDevices(media.devices)
+    } catch {
+      if (!stopped) setDevices(undefined)
+    } finally { if (!stopped) setReading(false) }
+  }
+  onMount(() => { void refresh() })
+  onCleanup(() => { stopped = true })
+  useKeyboard((key) => {
+    if (key.defaultPrevented || key.name !== "r") return
+    key.preventDefault()
+    void refresh()
+  })
+  return <box flexGrow={1} minHeight={0} flexDirection="column" gap={1}>
+    <text fg={theme.text.base}><b>Removable USB media</b></text>
+    <Show when={devices()?.length} fallback={<text fg={theme.text.muted}>{reading() ? "Inspecting USB media…" : devices() ? "No available USB media. Connect a separate drive and refresh." : "USB media inventory is unavailable."}</text>}>
+      <scrollbox flexGrow={1} minHeight={1} focused>
+        <For each={devices()}>{(device) => <box flexDirection="row" gap={2}>
+          <text width={19} fg={theme.text.muted}>{device.name}</text>
+          <text fg={theme.text.base}>{capacity(device.bytes)} · {device.read_only ? "Read-only" : "Writable"}</text>
+        </box>}</For>
+      </scrollbox>
+    </Show>
+    <ActionBar actions={[{ title: "Refresh media", key: "R", disabled: reading(), run: () => { void refresh() } }]} />
   </box>
 }

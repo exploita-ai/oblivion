@@ -26,6 +26,10 @@ fn entrypoints_and_runtime_grammar_are_shared_without_platform_effects() {
         parse(&["runtime", "start"]).unwrap(),
         Command::Runtime(RuntimeCommand::Start)
     ));
+    assert!(matches!(
+        parse(&["runtime", "live-media", "--json"]).unwrap(),
+        Command::Runtime(RuntimeCommand::LiveMedia)
+    ));
     assert!(
         matches!(parse(&["runtime", "install-bundle", "C:\\native bundle"]).unwrap(), Command::Runtime(RuntimeCommand::InstallBundle(path)) if path == "C:\\native bundle")
     );
@@ -38,6 +42,7 @@ fn entrypoints_and_runtime_grammar_are_shared_without_platform_effects() {
         vec!["runtime"],
         vec!["runtime", "start", "extra"],
         vec!["runtime", "install-bundle"],
+        vec!["runtime", "live-media", "/dev/sda"],
     ] {
         assert!(parse(&values).is_err());
     }

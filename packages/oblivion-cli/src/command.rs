@@ -47,6 +47,7 @@ pub enum RuntimeCommand {
     Start,
     Supervise(String),
     ChooseStorage,
+    LiveMedia,
     Recover,
     Stop,
     Gc,
@@ -118,7 +119,7 @@ impl<F, S> Command<F, S> {
 
 fn runtime(args: &[String]) -> Result<RuntimeCommand> {
     use RuntimeCommand::{
-        ChooseStorage, Deploy, Gc, Install, InstallBundle, Recover, Start, Stop, Supervise,
+        ChooseStorage, Deploy, Gc, Install, InstallBundle, LiveMedia, Recover, Start, Stop, Supervise,
         Uninstall, Update,
     };
     Ok(match args.first().map(String::as_str) {
@@ -129,6 +130,8 @@ fn runtime(args: &[String]) -> Result<RuntimeCommand> {
         Some("supervise") if args.len() == 2 => Supervise(args[1].clone()),
         Some("start") if args.len() == 1 => Start,
         Some("choose-storage") if args.len() == 1 => ChooseStorage,
+        Some("live-media") if args.len() == 2 && args[1] == "--json" => LiveMedia,
+        Some("live-media") => return Err("Use oblivion runtime live-media --json".into()),
         Some("recover") if args.len() == 1 => Recover,
         Some("stop") if args.len() == 1 => Stop,
         Some("gc") if args.len() == 1 => Gc,
@@ -177,6 +180,7 @@ Desktop runtime bundles
   oblivion runtime deploy BUNDLE
   oblivion runtime start|stop|recover
   oblivion runtime choose-storage  Choose Live backing after stopping its VM
+  oblivion runtime live-media --json  List available Live USB media
   oblivion runtime gc              Remove stopped, verified old software
   oblivion runtime uninstall       Remove desktop software; keep encrypted data
 
