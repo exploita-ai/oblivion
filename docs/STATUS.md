@@ -91,6 +91,13 @@ creation. Debian NetworkManager, keyboard and time-zone dialogs are reachable
 on fixed virtual consoles; OS preferences remain in the volatile Live overlay.
 No automatic NTP service was enabled. See [Live controls](LIVE.md).
 
+The outer Live launcher lists separate USB partitions and unpartitioned
+USB disks in System. Discovery runs without elevation and reads only system
+metadata. It excludes the entire boot device and disks with mounted, swap
+or held volumes. Device IDs describe the current boot and observed device
+generation. Passing the selected device to the controller and using it in
+Files remain open. See [Live controls](LIVE.md).
+
 The ARM64 outer Live now selects QEMU from Debian backports, records its package
 version and executable hash, and verifies that evidence before ISO packing.
 The native Linux helper requires QEMU 10.1 or newer on ARM64 before it can claim

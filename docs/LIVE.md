@@ -46,6 +46,14 @@ product decision.
 Changing virtual consoles does not close a Safe. Oblivion's existing inactivity
 locks continue to apply while its screen is in the background.
 
+Open **System** with **F3** to inspect removable USB media. The list shows
+available partitions and unpartitioned USB disks, their sizes and whether
+the kernel reports them as read-only. Connect or remove a drive, then press
+**R** to refresh. The boot drive and devices in use are excluded. The same
+inventory is available through `oblivion runtime live-media --json`. This
+screen only inspects devices. Connecting a selected device to the transfer VM
+and importing or exporting files from it are still open.
+
 To switch between persistent and RAM-only storage, lock Oblivion and choose
 **Change storage mode** on its welcome screen. The action is available only
 after active work is closed and no runtime recovery is pending. It stops the
