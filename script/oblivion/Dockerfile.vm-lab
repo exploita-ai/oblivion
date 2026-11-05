@@ -500,6 +500,7 @@ COPY script/oblivion/install-agents.py script/oblivion/install-agents.json /buil
 COPY script/oblivion/agent-notices/ /build/agents/agent-notices/
 RUN python3 /build/agents/install-agents.py "$TARGETARCH" / $OBLIVION_AGENTS --verify \
     && rm -rf /build/agents
+COPY packages/oblivion-host/guest/hostname packages/oblivion-host/guest/hosts /etc/
 
 # Direct-controller Debian packaging deliberately excludes Live OS configuration.
 FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS debian-runtime-source
