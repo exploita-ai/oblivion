@@ -407,6 +407,11 @@ pub(crate) fn data_file_identity(path: &str) -> Result<(u64, [u8; 16])> {
     Ok((id.volume, id.file))
 }
 
+pub(crate) fn data_handle_identity(file: &File, path: &str) -> Result<(u64, [u8; 16])> {
+    let (id, _) = inspect(file, path, false)?;
+    Ok((id.volume, id.file))
+}
+
 /// A pinned tree shares ancestor handles rather than opening the entire parent
 /// chain once for every bundle file. Leaf names are checked before path APIs.
 #[derive(Clone)]

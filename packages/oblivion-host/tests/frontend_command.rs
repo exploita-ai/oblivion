@@ -5,6 +5,11 @@ fn typed_top_level_and_platform_copy_grammar_fail_before_runtime_startup() {
             vec!["UNKNOWN_PRIVATE_CANARY"],
             "Unknown command. Run oblivion --help.",
         ),
+        (vec!["logs"], "Unknown command. Run oblivion --help."),
+        (
+            vec!["runtime", "atomic", "--yes"],
+            "Use oblivion runtime atomic for an interactive review",
+        ),
         (
             vec!["activity", "extra"],
             "Unknown command. Run oblivion --help.",
@@ -81,6 +86,6 @@ fn compiled_help_uses_the_same_portable_text_without_a_runtime() {
     assert!(output.stderr.is_empty());
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        oblivion_cli::command::HELP
+        oblivion_cli::command::help(oblivion_cli::command::HelpProfile::Desktop)
     );
 }

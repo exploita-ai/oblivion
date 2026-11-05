@@ -6,6 +6,7 @@ import { SafeManager } from "./safe-manager"
 import { createNativeFileClient } from "./native-file-process"
 import { createNativeFilePicker } from "./native-file-picker"
 import { createNativeUsbClient } from "./native-usb"
+import { launchNativeAgent, type AgentStartup } from "./native-agent"
 import { Startup } from "./startup"
 import { chooseLiveStorage, nativeLauncher, nativeOverlay, nativePreview, readNativeJson, readNativeStatus, reportNativeActivity, statusReader, type NativeRuntime } from "./native-control"
 
@@ -32,9 +33,12 @@ function runsWithoutTerminal(args: string[]) {
       && (args[4] === "--policy" || args[4] === "--tor"))
 }
 
-async function launch(args: string[]) {
+async function launch(args: string[], reportAgentStartup?: (stage: AgentStartup) => void) {
   if (runsWithoutTerminal(args)) {
     return Bun.spawn([nativeLauncher(), ...args], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exited
+  }
+  if (args[0] === "run" && reportAgentStartup && process.platform !== "win32") {
+    return launchNativeAgent(nativeLauncher(), args, renderer, reportAgentStartup)
   }
   await renderer.suspend()
   try {

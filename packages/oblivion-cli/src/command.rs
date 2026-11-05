@@ -53,6 +53,7 @@ pub enum RuntimeCommand {
     Stop,
     Gc,
     Uninstall,
+    Atomic,
 }
 
 pub fn parse<F, S>(
@@ -123,8 +124,8 @@ impl<F, S> Command<F, S> {
 
 fn runtime(args: &[String]) -> Result<RuntimeCommand> {
     use RuntimeCommand::{
-        ChooseStorage, Deploy, Gc, Install, InstallBundle, LiveMedia, Recover, Start, Stop, Supervise,
-        Uninstall, Update,
+        Atomic, ChooseStorage, Deploy, Gc, Install, InstallBundle, LiveMedia, Recover, Start, Stop,
+        Supervise, Uninstall, Update,
     };
     Ok(match args.first().map(String::as_str) {
         Some("install-bundle") if args.len() == 2 => InstallBundle(args[1].clone()),
@@ -140,16 +141,36 @@ fn runtime(args: &[String]) -> Result<RuntimeCommand> {
         Some("stop") if args.len() == 1 => Stop,
         Some("gc") if args.len() == 1 => Gc,
         Some("uninstall") if args.len() == 1 => Uninstall,
+        Some("atomic") if args.len() == 1 => Atomic,
+        Some("atomic") => return Err("Use oblivion runtime atomic for an interactive review".into()),
         _ => {
             return Err(
-                "Use oblivion runtime install-bundle BUNDLE, update BUNDLE, start, stop, recover, gc or uninstall"
+                "Unknown runtime command. Run oblivion --help for commands on this installation."
                     .into(),
             )
         }
     })
 }
 
-pub const HELP: &str = "Oblivion — isolated, encrypted workspaces for coding agents
+#[derive(Clone, Copy)]
+pub enum HelpProfile {
+    Desktop,
+    PackagedLinux,
+    Windows,
+    Live,
+}
+
+pub fn help(profile: HelpProfile) -> String {
+    let runtime = match profile {
+        HelpProfile::Desktop => DESKTOP_HELP,
+        HelpProfile::PackagedLinux => PACKAGED_HELP,
+        HelpProfile::Windows => WINDOWS_HELP,
+        HelpProfile::Live => LIVE_HELP,
+    };
+    format!("{OVERVIEW}{runtime}{COMMANDS}")
+}
+
+const OVERVIEW: &str = "Oblivion — isolated, encrypted workspaces for coding agents
 
   oblivion                         Open the manager
   oblivion init                    Create encrypted storage
@@ -176,25 +197,53 @@ Safe management
   oblivion safe task status SAFE [--json]
   oblivion safe task review SAFE [--json]
   oblivion safe task start|retry|cancel SAFE [--request ID] [--json]
+";
 
-Desktop runtime bundles
+const DESKTOP_HELP: &str = "
+Desktop runtime
   oblivion runtime install-bundle BUNDLE
   oblivion runtime install BUNDLE
   oblivion runtime update BUNDLE
   oblivion runtime deploy BUNDLE
   oblivion runtime start|stop|recover
-  oblivion runtime choose-storage  Choose Live backing after stopping its VM
-  oblivion runtime live-media --json  List available Live USB media
   oblivion runtime gc              Remove stopped, verified old software
   oblivion runtime uninstall       Remove desktop software; keep encrypted data
+  oblivion runtime atomic          Review and permanently remove this installation and its Safes
+";
 
+const PACKAGED_HELP: &str = "
+Desktop runtime (APT)
+  oblivion runtime start|stop|recover
+  Manage the system package through APT.
+";
+
+const WINDOWS_HELP: &str = "
+Desktop runtime
+  oblivion runtime install-bundle BUNDLE
+  oblivion runtime update BUNDLE
+  oblivion runtime start|stop|recover
+  oblivion runtime gc              Remove stopped, verified old software
+  oblivion runtime uninstall       Remove desktop software; keep encrypted data
+  oblivion runtime atomic          Review and permanently remove this installation and its Safes
+";
+
+const LIVE_HELP: &str = "
+Live runtime and USB transfers
+  oblivion runtime start|stop|recover
+  oblivion runtime choose-storage  Choose Live backing after stopping its VM
+  oblivion runtime live-media --json  List available Live USB media
+  Add --usb ID to files import and use source paths relative to the selected USB.
+  Add --usb ID to files export to write a new operation folder after review.
+  Use --usb ID with transfers, status, recover or discard to inspect or manage
+  USB export records. Recover and discard require reviewed consent.
+";
+
+const COMMANDS: &str = "
 Files
   oblivion files list --safe SAFE [workspace/PATH] --json
   oblivion files import --safe SAFE --source PATH [--source PATH...] [--name NAME]
-  On Live, add --usb ID and use paths relative to the selected USB.
   oblivion files export --safe SAFE --path workspace/PATH [--path imports/PATH...]
                        --destination DIR [--name NAME]
-  On Live, --usb ID exports to a new operation folder after explicit review.
   Multiple selections require --name NAME and publish one collection.
   Copy commands review before copying; --yes approves an unattended copy.
   oblivion files transfers --safe SAFE [--destination DIR] [--cursor ID] --json
@@ -202,8 +251,6 @@ Files
   oblivion files status --safe SAFE --operation ID [--destination DIR] --json
   oblivion files recover --safe SAFE --operation ID [--destination DIR]
   oblivion files discard --safe SAFE --operation ID [--destination DIR]
-  On Live, use --usb ID with transfers, status, recover or discard to inspect
-  and manage USB export records. Recover and discard require reviewed consent.
   Copy commands accept --operation ID; exports reconcile only inside DIR.
   Discard removes private incomplete staging, never published files.
 

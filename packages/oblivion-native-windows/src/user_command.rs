@@ -381,15 +381,16 @@ fn apply(registry: &mut impl Registry, scope: &Scope, desired: Option<&str>) -> 
 mod native {
     use super::{Change, PATH_LIMIT, RECORD_LIMIT, Registry, Scope, Value, apply, path_token};
     use crate::installation::Root;
+    use crate::security::Identity;
     use crate::{Error, Result};
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA};
     use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
     use windows_sys::Win32::System::Environment::ExpandEnvironmentStringsW;
     use windows_sys::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE,
-        RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegFlushKey, RegQueryValueExW,
-        RegSetValueExW,
+        HKEY, HKEY_CURRENT_USER, HKEY_USERS, KEY_QUERY_VALUE, KEY_SET_VALUE,
+        REG_OPTION_NON_VOLATILE, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegFlushKey,
+        RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
@@ -404,6 +405,17 @@ mod native {
         }
     }
     impl Key {
+        fn read_only(parent: HKEY, path: &str) -> Result<Option<Self>> {
+            let mut key = null_mut();
+            match unsafe {
+                RegOpenKeyExW(parent, wide(path).as_ptr(), 0, KEY_QUERY_VALUE, &mut key)
+            } {
+                0 => Ok(Some(Self(key))),
+                ERROR_FILE_NOT_FOUND => Ok(None),
+                _ => Err(Error("user_command_registry_unavailable")),
+            }
+        }
+
         fn open(parent: HKEY, path: &str) -> Result<Self> {
             let mut key = null_mut();
             if unsafe {
@@ -589,6 +601,19 @@ mod native {
         }
         Ok(change)
     }
+
+    /// An elevated installer can run as a different administrator. The
+    /// original caller must reconcile their own PATH before reinstalling.
+    pub(crate) fn require_retired_registration_cleared(client: &Identity) -> Result<()> {
+        let user = Key::read_only(HKEY_USERS, client.sid())?
+            .ok_or(Error("user_command_registry_unavailable"))?;
+        if let Some(key) = Key::read_only(user.0, r"Software\Oblivion\UserCommand")? {
+            if key.get("Registration", RECORD_LIMIT)?.is_some() {
+                return Err(Error("atomic_path_cleanup_pending"));
+            }
+        }
+        Ok(())
+    }
     fn notify() {
         // Windows applies this timeout per recipient. It does not update the
         // invoking terminal's inherited environment; callers say to reopen it.
@@ -695,6 +720,8 @@ mod native {
     }
 }
 
+#[cfg(windows)]
+pub(crate) use native::require_retired_registration_cleared;
 #[cfg(windows)]
 pub use native::{register, unregister};
 

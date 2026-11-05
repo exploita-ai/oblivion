@@ -56,6 +56,35 @@ test.each([[80, 24], [160, 50]])("native manager opens the chosen agent in the s
   } finally { await app.dispose() }
 })
 
+test("agent startup stays in a progress modal and reports the protected connection failure", async () => {
+  const fixture = nativePreview(() => {})
+  await fixture.run(["unlock"])
+  const initial = await fixture.status()
+  const launch = Promise.withResolvers<void>()
+  const refreshed = Promise.withResolvers<void>()
+  const app = await testRender(() => <SafeManager initial={initial} runtime={{ ...fixture, status: async () => {
+    refreshed.resolve()
+    return fixture.status()
+  }, run: async (_args, report) => {
+    report?.("connecting")
+    await launch.promise
+    report?.("gateway-timeout")
+    return 1
+  } }} />, { width: 80, height: 24, kittyKeyboard: true, exitOnCtrlC: false })
+  try {
+    await app.renderOnce()
+    await app.mockInput.pressEnter()
+    await app.mockInput.pressEnter()
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Waiting for the protected connection…")
+    launch.resolve()
+    await refreshed.promise
+    await app.renderOnce()
+    expect(app.captureCharFrame()).not.toContain("Waiting for the protected connection…")
+    expect(app.captureCharFrame()).toContain("The protected connection timed out. The Safe stayed offline.")
+  } finally { launch.resolve(); await app.dispose() }
+})
+
 test("welcome describes both modes and enters ephemeral mode through the CLI", async () => {
   const fixture = nativePreview(() => {})
   const commands: string[][] = []

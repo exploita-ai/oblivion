@@ -27,6 +27,10 @@ fn entrypoints_and_runtime_grammar_are_shared_without_platform_effects() {
         Command::Runtime(RuntimeCommand::Start)
     ));
     assert!(matches!(
+        parse(&["runtime", "atomic"]).unwrap(),
+        Command::Runtime(RuntimeCommand::Atomic)
+    ));
+    assert!(matches!(
         parse(&["runtime", "live-media", "--json"]).unwrap(),
         Command::Runtime(RuntimeCommand::LiveMedia)
     ));
@@ -41,10 +45,30 @@ fn entrypoints_and_runtime_grammar_are_shared_without_platform_effects() {
         vec!["activity", "extra"],
         vec!["runtime"],
         vec!["runtime", "start", "extra"],
+        vec!["runtime", "atomic", "--yes"],
         vec!["runtime", "install-bundle"],
         vec!["runtime", "live-media", "/dev/sda"],
     ] {
         assert!(parse(&values).is_err());
+    }
+}
+
+#[test]
+fn live_usb_help_does_not_leak_into_desktop_profiles() {
+    use command::HelpProfile;
+
+    let live = command::help(HelpProfile::Live);
+    for option in ["runtime choose-storage", "runtime live-media", "--usb ID"] {
+        assert!(live.contains(option), "{option}");
+        for profile in [HelpProfile::Desktop, HelpProfile::PackagedLinux, HelpProfile::Windows] {
+            assert!(!command::help(profile).contains(option), "{option}");
+        }
+    }
+    for profile in [HelpProfile::Desktop, HelpProfile::Windows] {
+        assert!(command::help(profile).contains("runtime atomic"));
+    }
+    for profile in [HelpProfile::PackagedLinux, HelpProfile::Live] {
+        assert!(!command::help(profile).contains("runtime atomic"));
     }
 }
 

@@ -48,7 +48,10 @@ fn invoke(args: &[&str]) -> Output {
 fn actual_windows_executable_serves_shared_help_and_version_without_installation() {
     let output = invoke(&["--help"]);
     assert!(output.status.success());
-    assert_eq!(output.stdout, oblivion_cli::command::HELP.as_bytes());
+    assert_eq!(
+        output.stdout,
+        oblivion_cli::command::help(oblivion_cli::command::HelpProfile::Windows).as_bytes()
+    );
     assert!(output.stderr.is_empty());
     let output = invoke(&["--version"]);
     assert!(output.status.success());
@@ -62,6 +65,10 @@ fn actual_windows_executable_serves_shared_help_and_version_without_installation
 fn syntax_and_unimplemented_endpoints_fail_before_hyperv_or_installation_discovery() {
     for (args, message) in [
         (vec!["unknown"], "Unknown command. Run oblivion --help."),
+        (
+            vec!["runtime", "atomic"],
+            "Runtime atomic requires an interactive terminal",
+        ),
         (vec!["run", "--safe"], "Missing Safe name"),
         (vec!["files", "list"], "Choose a Safe with --safe NAME"),
         (

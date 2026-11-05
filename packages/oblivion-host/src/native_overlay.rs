@@ -25,7 +25,7 @@ impl Overlay {
         }
         let mut raw = saved;
         unsafe { libc::cfmakeraw(&mut raw) };
-        let launcher = std::env::current_exe()?;
+        let launcher = oblivion_host::desktop_bundle::launcher_path()?;
         let manager = launcher
             .parent()
             .ok_or("executable_directory_missing")?

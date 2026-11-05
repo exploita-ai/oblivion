@@ -25,6 +25,11 @@ pub fn packaged_entry() -> Result<bool> {
     Ok(false)
 }
 
+pub fn launcher_path() -> std::io::Result<PathBuf> {
+    // macOS can report the user-facing symlink instead of the bundle binary.
+    std::env::current_exe()?.canonicalize()
+}
+
 pub(crate) fn platform() -> &'static str {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     return "darwin-arm64";
@@ -51,7 +56,7 @@ impl Bundle {
     }
 
     pub fn current() -> Result<Self> {
-        let executable = std::env::current_exe()?;
+        let executable = launcher_path()?;
         let root = executable
             .parent()
             .and_then(Path::parent)
@@ -62,7 +67,15 @@ impl Bundle {
     /// Collection verifies the same current manifest and full inventory, but an
     /// older release has its own source identity rather than this binary's.
     pub(crate) fn stored(root: &Path, identity: &str, expected_platform: &str) -> Result<Self> {
-        let bundle = Self::verified(root, None, expected_platform, true)?;
+        Self::stored_inventory(root, identity, expected_platform, false)
+    }
+
+    pub(crate) fn stored_for_removal(root: &Path, identity: &str, expected_platform: &str) -> Result<Self> {
+        Self::stored_inventory(root, identity, expected_platform, true)
+    }
+
+    fn stored_inventory(root: &Path, identity: &str, expected_platform: &str, allow_missing: bool) -> Result<Self> {
+        let bundle = Self::verify_inventory(root, None, expected_platform, true, allow_missing)?;
         if bundle.id() != identity {
             return Err("installed_desktop_release_changed".into());
         }
@@ -84,6 +97,16 @@ impl Bundle {
         source: Option<&str>,
         expected_platform: &str,
         runtime: bool,
+    ) -> Result<Self> {
+        Self::verify_inventory(root, source, expected_platform, runtime, false)
+    }
+
+    fn verify_inventory(
+        root: &Path,
+        source: Option<&str>,
+        expected_platform: &str,
+        runtime: bool,
+        allow_missing: bool,
     ) -> Result<Self> {
         if !root.is_absolute() {
             return Err("unsupported_desktop_bundle_platform".into());
@@ -157,7 +180,7 @@ impl Bundle {
                 discovered.insert(name.to_owned());
             }
         }
-        if discovered.len() != files.len() {
+        if !allow_missing && discovered.len() != files.len() {
             return Err("desktop_bundle_file_missing".into());
         }
         Ok(Self { root, manifest })
@@ -371,6 +394,26 @@ pub(crate) mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn resolves_the_launcher_when_invoked_through_a_symlink() {
+        const EXPECTED: &str = "OBLIVION_TEST_EXPECTED_LAUNCHER_PATH";
+        if let Some(expected) = std::env::var_os(EXPECTED) {
+            assert_eq!(launcher_path().unwrap(), PathBuf::from(expected));
+            return;
+        }
+        let fixture = Fixture::new();
+        let executable = launcher_path().unwrap();
+        let entry = fixture.root.join("launcher-link");
+        std::os::unix::fs::symlink(&executable, &entry).unwrap();
+        let result = std::process::Command::new(entry)
+            .args(["--exact", "desktop_bundle::tests::resolves_the_launcher_when_invoked_through_a_symlink"])
+            .env(EXPECTED, executable)
+            .output()
+            .unwrap();
+        assert!(result.status.success() && String::from_utf8_lossy(&result.stdout).contains("1 passed"),
+            "{}", String::from_utf8_lossy(&result.stdout));
     }
 
     #[test]

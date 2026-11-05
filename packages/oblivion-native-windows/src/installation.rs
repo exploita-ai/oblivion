@@ -8,6 +8,7 @@ use oblivion_bundle::Binding;
 use oblivion_wire::control::valid_id;
 use oblivion_wire::runtime_auth::Data;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 const RECORD_LIMIT: usize = 8192;
 
@@ -24,10 +25,36 @@ struct Record {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum Phase {
-    Pending { disk: PendingDisk },
-    Ready { data: FileIdentity },
-    Updating { data: FileIdentity, target: Binding },
-    Uninstalled { data: FileIdentity },
+    Pending {
+        disk: PendingDisk,
+    },
+    Ready {
+        data: FileIdentity,
+    },
+    Updating {
+        data: FileIdentity,
+        target: Binding,
+    },
+    Uninstalled {
+        data: FileIdentity,
+    },
+    Atomic {
+        data: FileIdentity,
+        stage: AtomicStage,
+    },
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum AtomicStage {
+    Preparing,
+    Deleting {
+        config: FileIdentity,
+        journal: FileIdentity,
+        resources: Option<FileIdentity>,
+        resource_lock: FileIdentity,
+    },
+    Complete,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -78,6 +105,33 @@ impl Record {
                 return Err(Error("invalid_installation_record"));
             }
         }
+        if let Phase::Atomic { data, stage } = &record.phase {
+            if data.file == [0; 16] {
+                return Err(Error("invalid_installation_record"));
+            }
+            if let AtomicStage::Deleting {
+                config,
+                journal,
+                resources,
+                resource_lock,
+            } = stage
+            {
+                let files = [
+                    Some(data),
+                    Some(config),
+                    Some(journal),
+                    resources.as_ref(),
+                    Some(resource_lock),
+                ];
+                for (index, file) in files.iter().enumerate() {
+                    if file.is_some_and(|file| {
+                        file.file == [0; 16] || files[..index].contains(&Some(file))
+                    }) {
+                        return Err(Error("invalid_installation_record"));
+                    }
+                }
+            }
+        }
         if let Phase::Pending { disk } = &record.phase {
             let data = match disk {
                 PendingDisk::Uncreated => None,
@@ -98,11 +152,58 @@ impl Record {
 
     fn data(&self) -> Option<&FileIdentity> {
         match &self.phase {
-            Phase::Pending { .. } => None,
+            Phase::Pending { .. } | Phase::Atomic { .. } => None,
             Phase::Ready { data } | Phase::Updating { data, .. } | Phase::Uninstalled { data } => {
                 Some(data)
             }
         }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AtomicReview {
+    pub runtime_id: String,
+    pub data_bytes: u64,
+    pub archive: String,
+    pub archive_present: bool,
+    pub bundle_id: String,
+    pub source_sha256: String,
+    pub review_id: String,
+}
+
+impl AtomicReview {
+    pub fn validate(&self) -> Result<()> {
+        if !crate::config::drive_file(&self.archive)
+            || !self.archive.ends_with("\\data.vhdx")
+            || !oblivion_bundle::hash(&self.bundle_id)
+            || !oblivion_bundle::hash(&self.source_sha256)
+            || !oblivion_bundle::hash(&self.review_id)
+        {
+            return Err(Error("invalid_atomic_review"));
+        }
+        Data::NewDisk {
+            runtime_id: self.runtime_id.clone(),
+            bytes: self.data_bytes,
+        }
+        .validate()
+        .map_err(|_| Error("invalid_atomic_review"))
+    }
+
+    fn from_record(record: &Record, archive: String, archive_present: bool) -> Result<Self> {
+        let binding = serde_json::to_vec(&(record, &archive, archive_present))
+            .map_err(|_| Error("invalid_atomic_review"))?;
+        let review = Self {
+            runtime_id: record.runtime_id.clone(),
+            data_bytes: record.data_bytes,
+            archive,
+            archive_present,
+            bundle_id: record.bundle.bundle_id.clone(),
+            source_sha256: record.bundle.source_sha256.clone(),
+            review_id: format!("{:x}", Sha256::digest(binding)),
+        };
+        review.validate()?;
+        Ok(review)
     }
 }
 
@@ -156,7 +257,10 @@ fn configuration(root: &str, runtime_id: &str) -> Result<RuntimeConfig> {
 
 #[cfg(windows)]
 mod native {
-    use super::{Cleanup, FileIdentity, PendingDisk, Phase, RECORD_LIMIT, Record, configuration};
+    use super::{
+        AtomicReview, AtomicStage, Cleanup, FileIdentity, PendingDisk, Phase, RECORD_LIMIT, Record,
+        configuration,
+    };
     use crate::bundle::VerifiedBundle;
     use crate::config::CONFIG_LIMIT;
     use crate::files::{self, Asset, CreationParent, Directory};
@@ -396,56 +500,76 @@ mod native {
         let _setup = setup_lock(root)?;
         let identity = root.storage.clone();
         let requested = incoming.binding()?;
-        let mut record = if exists(&root.file("installation.json")?)? {
-            let record = read_record(root, &identity)?;
-            if matches!(&record.phase, Phase::Uninstalled { .. }) {
-                // Reinstall only restores software around the recorded disk.
-                // It must never regain Pending's initialization authority.
-                return update_bundle(root, incoming, stop, deadline);
-            }
-            if !same_binding(&record.bundle, &requested)? || record.data_bytes != bytes {
-                return Err(Error("installation_resume_requires_matching_bundle"));
-            }
-            match record.phase {
-                Phase::Pending { .. } => record,
-                Phase::Ready { .. } => {
-                    let installed = discover(root)?;
-                    let _stopped = supervisor::stopped(
-                        &maintenance(root, &record, &record.bundle)?,
-                        Arc::clone(&stop),
-                        deadline,
-                    )?;
-                    if root.broker {
-                        crate::scm::quiesce(&root.client, Arc::clone(&stop), deadline)?;
-                        crate::scm::install(&root.client, Path::new(installed.helper()))?;
+        let previous = exists(&root.file("installation.json")?)?
+            .then(|| read_record(root, &identity))
+            .transpose()?;
+        let mut record = match previous {
+            Some(record)
+                if !matches!(
+                    &record.phase,
+                    Phase::Atomic {
+                        stage: AtomicStage::Complete,
+                        ..
                     }
-                    return Ok(installed);
+                ) =>
+            {
+                if matches!(&record.phase, Phase::Uninstalled { .. }) {
+                    // Reinstall only restores software around the recorded disk.
+                    // It must never regain Pending's initialization authority.
+                    return update_bundle(root, incoming, stop, deadline);
                 }
-                _ => return Err(Error("installation_already_present_or_pending")),
+                if !same_binding(&record.bundle, &requested)? || record.data_bytes != bytes {
+                    return Err(Error("installation_resume_requires_matching_bundle"));
+                }
+                match record.phase {
+                    Phase::Pending { .. } => record,
+                    Phase::Ready { .. } => {
+                        let installed = discover(root)?;
+                        let _stopped = supervisor::stopped(
+                            &maintenance(root, &record, &record.bundle)?,
+                            Arc::clone(&stop),
+                            deadline,
+                        )?;
+                        if root.broker {
+                            crate::scm::quiesce(&root.client, Arc::clone(&stop), deadline)?;
+                            crate::scm::install(&root.client, Path::new(installed.helper()))?;
+                        }
+                        return Ok(installed);
+                    }
+                    _ => return Err(Error("installation_already_present_or_pending")),
+                }
             }
-        } else {
-            empty_setup(root)?;
-            let runtime_id = random_id()?;
-            let config = configuration(
-                root.path()
-                    .to_str()
-                    .ok_or(Error("unsupported_installation_path"))?,
-                &runtime_id,
-            )?;
-            let config_bytes = serde_json::to_vec(&config)
-                .map_err(|_| Error("runtime_configuration_encode_failed"))?;
-            let record = Record {
-                version: 1,
-                runtime_id,
-                bundle: requested,
-                config_sha256: format!("{:x}", Sha256::digest(&config_bytes)),
-                data_bytes: bytes,
-                phase: Phase::Pending {
-                    disk: PendingDisk::Uncreated,
-                },
-            };
-            create_record(root, &record, &identity)?;
-            record
+            retired => {
+                empty_setup(root, retired.is_some())?;
+                if retired.is_some() && root.broker {
+                    crate::user_command::require_retired_registration_cleared(&root.client)?;
+                }
+                let runtime_id = random_id()?;
+                let config = configuration(
+                    root.path()
+                        .to_str()
+                        .ok_or(Error("unsupported_installation_path"))?,
+                    &runtime_id,
+                )?;
+                let config_bytes = serde_json::to_vec(&config)
+                    .map_err(|_| Error("runtime_configuration_encode_failed"))?;
+                let record = Record {
+                    version: 1,
+                    runtime_id,
+                    bundle: requested,
+                    config_sha256: format!("{:x}", Sha256::digest(&config_bytes)),
+                    data_bytes: bytes,
+                    phase: Phase::Pending {
+                        disk: PendingDisk::Uncreated,
+                    },
+                };
+                if let Some(previous) = retired {
+                    locked_registry(root, &previous, &identity)?.save(&record)?;
+                } else {
+                    create_record(root, &record, &identity)?;
+                }
+                record
+            }
         };
         let (mut registry, _) = registry(root, &identity)?;
         ensure_directory(&root.path.join("releases"), &identity)?;
@@ -512,7 +636,11 @@ mod native {
     }
 
     fn setup_lock(root: &Root) -> Result<SetupLock> {
-        let path = root.file("setup.lock")?;
+        exclusive_empty_lock(root, "setup.lock")
+    }
+
+    fn exclusive_empty_lock(root: &Root, leaf: &str) -> Result<SetupLock> {
+        let path = root.file(leaf)?;
         let parent = CreationParent::open(&path, &root.storage)?;
         let descriptor = root.storage.file_descriptor()?;
         let attributes = SECURITY_ATTRIBUTES {
@@ -560,7 +688,7 @@ mod native {
         })
     }
 
-    fn empty_setup(root: &Root) -> Result<()> {
+    fn empty_setup(root: &Root, retired: bool) -> Result<()> {
         let directory = Directory::open(
             root.path()
                 .to_str()
@@ -569,7 +697,7 @@ mod native {
             true,
         )?;
         for name in directory.names(256)? {
-            if name == "setup.lock" {
+            if name == "setup.lock" || retired && name == "installation.json" {
                 continue;
             }
             // A crash before the first atomic record publication can retain a
@@ -770,7 +898,7 @@ mod native {
         let data = record
             .data()
             .cloned()
-            .ok_or(Error("installation_pending"))?;
+            .ok_or_else(|| phase_error(&record.phase))?;
         verify_config(root, &record, &identity)?;
         verify_data(root, &data)?;
         let target = incoming.binding()?;
@@ -895,6 +1023,251 @@ mod native {
         cleanup(root, true, stop, deadline)
     }
 
+    pub fn atomic_review(root: &Root) -> Result<AtomicReview> {
+        let _root = root.guard()?;
+        let (registry, record) = registry(root, &root.storage)?;
+        let archive = atomic_archive(root, &registry.directory, &record)?;
+        AtomicReview::from_record(&record, root.file("data.vhdx")?, archive.is_some())
+    }
+
+    /// The elevated request names only the exact locally reviewed installation.
+    /// Preparation and completion both remain fenced by its durable record.
+    pub fn atomic(
+        root: &Root,
+        expected: &AtomicReview,
+        stop: Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Result<Cleanup> {
+        expected.validate()?;
+        let _root = root.guard()?;
+        let _setup = setup_lock(root)?;
+        let identity = &root.storage;
+        let mut record = read_record(root, identity)?;
+        if record.runtime_id != expected.runtime_id {
+            return Err(Error("atomic_review_changed"));
+        }
+        let data = match &record.phase {
+            Phase::Ready { data } | Phase::Uninstalled { data } | Phase::Atomic { data, .. } => {
+                data.clone()
+            }
+            _ => return Err(phase_error(&record.phase)),
+        };
+        let mut registry = locked_registry(root, &record, identity)?;
+        let archive = atomic_archive(root, &registry.directory, &record)?;
+        if AtomicReview::from_record(&record, root.file("data.vhdx")?, archive.is_some())?
+            != *expected
+        {
+            return Err(Error("atomic_review_changed"));
+        }
+        if matches!(
+            &record.phase,
+            Phase::Atomic {
+                stage: AtomicStage::Complete,
+                ..
+            }
+        ) {
+            return Ok(Cleanup {
+                software_removed: true,
+                ..Cleanup::default()
+            });
+        }
+
+        let mut report = Cleanup {
+            software_removed: true,
+            ..Cleanup::default()
+        };
+        if let Some(archive) = archive {
+            verify_config(root, &record, identity)?;
+            let _stopped = supervisor::stopped(
+                &maintenance(root, &record, &record.bundle)?,
+                Arc::clone(&stop),
+                deadline,
+            )?;
+            check(&stop, deadline)?;
+            if !matches!(&record.phase, Phase::Atomic { .. }) {
+                record.phase = Phase::Atomic {
+                    data: data.clone(),
+                    stage: AtomicStage::Preparing,
+                };
+                registry.save(&record)?;
+            }
+            if root.broker {
+                crate::scm::quiesce(&root.client, Arc::clone(&stop), deadline)?;
+                crate::scm::remove(&root.client)?;
+            }
+            let resource_guard = exclusive_empty_lock(root, "vm.json.resources.lock")?;
+            let (volume, file) = files::data_handle_identity(
+                &resource_guard._file,
+                &root.file("vm.json.resources.lock")?,
+            )?;
+            let resource_lock = FileIdentity { volume, file };
+            let resources = atomic_resources(root, &registry.directory, &record, &data)?;
+            let config = atomic_file_identity(root, "vm.json")?;
+            let journal = atomic_file_identity(root, "vm.json.supervision.json")?;
+            if let Phase::Atomic {
+                stage:
+                    AtomicStage::Deleting {
+                        config: expected_config,
+                        journal: expected_journal,
+                        resources: expected_resources,
+                        resource_lock: expected_lock,
+                    },
+                ..
+            } = &record.phase
+            {
+                if (&config, &journal, &resources, &resource_lock)
+                    != (
+                        expected_config,
+                        expected_journal,
+                        expected_resources,
+                        expected_lock,
+                    )
+                {
+                    return Err(Error("atomic_metadata_identity_changed"));
+                }
+            } else {
+                report = collect_software(root, &record, true, true, &stop, deadline)?;
+                if !report.software_removed {
+                    return Ok(report);
+                }
+                record.phase = Phase::Atomic {
+                    data: data.clone(),
+                    stage: AtomicStage::Deleting {
+                        config,
+                        journal,
+                        resources,
+                        resource_lock,
+                    },
+                };
+                registry.save(&record)?;
+            }
+            check(&stop, deadline)?;
+            archive.removal(identity)?.remove()?;
+            registry.directory.sync()?;
+        }
+
+        let Phase::Atomic {
+            stage:
+                AtomicStage::Deleting {
+                    config,
+                    journal,
+                    resources,
+                    resource_lock,
+                },
+            ..
+        } = &record.phase
+        else {
+            return Err(Error("atomic_recovery_required"));
+        };
+        // Deleting is durable evidence that the exact runtime was Stopped and
+        // its executable/service were removed. No new runtime can be admitted
+        // while this record is present, even if the old journal is gone.
+        for (name, expected) in [
+            ("vm.json", Some(config)),
+            ("vm.json.supervision.json", Some(journal)),
+            ("vm.json.resources.json", resources.as_ref()),
+            ("vm.json.resources.lock", Some(resource_lock)),
+        ] {
+            check(&stop, deadline)?;
+            if let Some(asset) = boot_asset(&registry.directory, name, identity)? {
+                if !expected
+                    .is_some_and(|expected| asset.identity() == (expected.volume, expected.file))
+                {
+                    return Err(Error("atomic_metadata_identity_changed"));
+                }
+                asset.removal(identity)?.remove()?;
+                registry.directory.sync()?;
+            }
+        }
+        for name in ["boot", "releases"] {
+            check(&stop, deadline)?;
+            if exists(&root.file(name)?)? {
+                registry
+                    .directory
+                    .child(name, identity, true)?
+                    .remove(identity)?;
+                registry.directory.sync()?;
+            }
+        }
+        record.phase = Phase::Atomic {
+            data,
+            stage: AtomicStage::Complete,
+        };
+        registry.save(&record)?;
+        Ok(report)
+    }
+
+    fn atomic_archive(
+        root: &Root,
+        directory: &Directory,
+        record: &Record,
+    ) -> Result<Option<Asset>> {
+        let (expected, may_be_absent, must_be_absent) = match &record.phase {
+            Phase::Ready { data }
+            | Phase::Uninstalled { data }
+            | Phase::Atomic {
+                data,
+                stage: AtomicStage::Preparing,
+            } => (data, false, false),
+            Phase::Atomic {
+                data,
+                stage: AtomicStage::Deleting { .. },
+            } => (data, true, false),
+            Phase::Atomic {
+                data,
+                stage: AtomicStage::Complete,
+            } => (data, true, true),
+            _ => return Err(phase_error(&record.phase)),
+        };
+        let archive = boot_asset(directory, "data.vhdx", &root.storage)?;
+        match &archive {
+            Some(asset)
+                if !must_be_absent && asset.identity() == (expected.volume, expected.file) =>
+            {
+                verify_config(root, record, &root.storage)?;
+            }
+            None if may_be_absent => {}
+            _ => return Err(Error("installed_data_identity_changed")),
+        }
+        Ok(archive)
+    }
+
+    fn atomic_file_identity(root: &Root, leaf: &str) -> Result<FileIdentity> {
+        let (volume, file) = files::data_file_identity(&root.file(leaf)?)?;
+        Ok(FileIdentity { volume, file })
+    }
+
+    fn atomic_resources(
+        root: &Root,
+        directory: &Directory,
+        record: &Record,
+        data: &FileIdentity,
+    ) -> Result<Option<FileIdentity>> {
+        let Some(asset) = boot_asset(directory, "vm.json.resources.json", &root.storage)? else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        asset
+            .reader()?
+            .take(16385)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Error("resource_record_unavailable"))?;
+        crate::resources::verify_retired_receipt(
+            &bytes,
+            &record.runtime_id,
+            &record.config_sha256,
+            root.client.sid(),
+            root.storage.sid(),
+            crate::resources::FileEvidence {
+                volume: data.volume,
+                file: data.file,
+                bytes: record.data_bytes,
+            },
+        )?;
+        let (volume, file) = asset.identity();
+        Ok(Some(FileIdentity { volume, file }))
+    }
+
     fn cleanup(
         root: &Root,
         uninstall: bool,
@@ -910,7 +1283,7 @@ mod native {
         let data = record
             .data()
             .cloned()
-            .ok_or(Error("installation_pending"))?;
+            .ok_or_else(|| phase_error(&record.phase))?;
         verify_config(root, &record, &identity)?;
         verify_data(root, &data)?;
         let _stopped = supervisor::stopped(
@@ -929,6 +1302,23 @@ mod native {
             record.phase = Phase::Uninstalled { data };
             registry.save(&record)?;
         }
+        let report = collect_software(root, &record, uninstall, false, &stop, deadline)?;
+        if root.broker && !uninstall && matches!(record.phase, Phase::Ready { .. }) {
+            let bundle = verified_bundle(root, &record, &identity)?;
+            crate::scm::install(&root.client, Path::new(bundle.helper()))?;
+        }
+        Ok(report)
+    }
+
+    fn collect_software(
+        root: &Root,
+        record: &Record,
+        uninstall: bool,
+        atomic: bool,
+        stop: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<Cleanup> {
+        let identity = &root.storage;
         let mut report = Cleanup::default();
         let executable =
             std::env::current_exe().map_err(|_| Error("current_executable_unavailable"))?;
@@ -937,9 +1327,9 @@ mod native {
             .ok_or(Error("current_executable_unavailable"))?;
         let executable =
             files::data_file_identity(executable.strip_prefix(r"\\?\").unwrap_or(executable))?;
-        let releases = Directory::open(&root.file("releases")?, &identity, true)?;
+        let releases = Directory::open(&root.file("releases")?, identity, true)?;
         for name in releases.names(256)? {
-            check(&stop, deadline)?;
+            check(stop, deadline)?;
             if !uninstall && name == record.bundle.bundle_id {
                 continue;
             }
@@ -948,13 +1338,30 @@ mod native {
                 continue;
             }
             let path = root.release(&name)?;
-            match VerifiedBundle::open(&path, None, &identity) {
+            if atomic {
+                let directory = Directory::open(&path, identity, false)?;
+                if directory.names(4096)?.is_empty() {
+                    directory.remove(identity)?;
+                    report.releases_removed += 1;
+                    continue;
+                }
+            }
+            let bundle = if atomic {
+                VerifiedBundle::open_for_atomic(&path, identity)
+            } else {
+                VerifiedBundle::open(&path, None, identity)
+            };
+            match bundle {
                 Ok(bundle) if bundle.id() == name && bundle.contains_file(executable) => {
                     // A mapped PE may reject deletion only after DELETE access
                     // was admitted. Preserve the complete invoking release.
                     report.in_use += 1;
                 }
-                Ok(bundle) if bundle.id() == name => match bundle.remove(&identity) {
+                Ok(bundle) if bundle.id() == name => match if atomic {
+                    bundle.remove_for_atomic(identity)
+                } else {
+                    bundle.remove(identity)
+                } {
                     Ok(()) => report.releases_removed += 1,
                     Err(Error("runtime_software_in_use")) => report.in_use += 1,
                     Err(_) => report.retained += 1,
@@ -964,16 +1371,16 @@ mod native {
         }
         releases.sync()?;
         if uninstall {
-            let boot = Directory::open(&root.file("boot")?, &identity, true)?;
+            let boot = Directory::open(&root.file("boot")?, identity, true)?;
             let mut removals = Vec::new();
             for expected in &record.bundle.boot {
-                check(&stop, deadline)?;
-                if let Some(asset) = boot_asset(&boot, boot_leaf(expected)?, &identity)? {
+                check(stop, deadline)?;
+                if let Some(asset) = boot_asset(&boot, boot_leaf(expected)?, identity)? {
                     if !matches_asset(&asset, expected)? {
                         report.retained += 1;
                         continue;
                     }
-                    match asset.removal(&identity) {
+                    match asset.removal(identity) {
                         Ok(removal) => removals.push(removal),
                         Err(Error("runtime_software_in_use")) => report.in_use += 1,
                         Err(_) => report.retained += 1,
@@ -1000,10 +1407,6 @@ mod native {
                 .count();
             report.software_removed = releases.names(256)?.is_empty() && remaining.is_empty();
         }
-        if root.broker && !uninstall && matches!(record.phase, Phase::Ready { .. }) {
-            let bundle = verified_bundle(root, &record, &identity)?;
-            crate::scm::install(&root.client, Path::new(bundle.helper()))?;
-        }
         Ok(report)
     }
 
@@ -1011,6 +1414,7 @@ mod native {
         match phase {
             Phase::Updating { .. } => Error("installation_update_requires_matching_bundle"),
             Phase::Uninstalled { .. } => Error("runtime_software_uninstalled"),
+            Phase::Atomic { .. } => Error("runtime_atomic_removal_pending"),
             _ => Error("installation_pending"),
         }
     }
@@ -1423,10 +1827,11 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::{
-            FileIdentity, PendingDisk, Phase, Record, Root, boot_asset, boot_leaf, collect,
+            AtomicReview, AtomicStage, FileIdentity, PendingDisk, Phase, Record, Root, atomic,
+            atomic_file_identity, atomic_review, boot_asset, boot_leaf, collect, collect_software,
             configuration, control_id, copy_boot, create_private, create_record, empty_setup,
             ensure_directory, maintenance, prepare_disk, random_id, read_record, registry,
-            setup_lock, uninstall, update_bundle,
+            setup_lock, uninstall, update_bundle, verified_bundle,
         };
         use crate::bundle::tests::Fixture;
         use crate::files::{self, Directory, Executable};
@@ -1496,7 +1901,7 @@ mod native {
             let mut interrupted = directory.create_file(&name, &identity).unwrap();
             interrupted.writer().write_all(b"{\"version\":").unwrap();
             interrupted.finish().unwrap();
-            empty_setup(root).unwrap();
+            empty_setup(root, false).unwrap();
             let record = pending(&area);
             create_record(root, &record, &identity).unwrap();
             assert_eq!(
@@ -1705,6 +2110,144 @@ mod native {
                 "generation":random_id().unwrap(),"phase":"stopped","resident":false,"boot":{"kind":"existing"}})).unwrap()).unwrap();
             journal.sync_all().unwrap();
             record
+        }
+
+        #[test]
+        fn atomic_keeps_the_disk_until_the_installed_executable_is_released() {
+            let area = Area::new();
+            let root = &area.0;
+            let source = Fixture::version("atomic");
+            let record = prepared(&area, &source);
+            let identity = &root.storage;
+            let data = record.data().unwrap();
+            let resource_lock =
+                create_private(&root.file("vm.json.resources.lock").unwrap(), identity).unwrap();
+            drop(resource_lock);
+            let mut receipt =
+                create_private(&root.file("vm.json.resources.json").unwrap(), identity).unwrap();
+            let evidence: Vec<_> = [1, 2, 3]
+                .into_iter()
+                .map(|value| crate::resources::FileEvidence {
+                    volume: 0,
+                    file: [value; 16],
+                    bytes: 1,
+                })
+                .chain([crate::resources::FileEvidence {
+                    volume: data.volume,
+                    file: data.file,
+                    bytes: record.data_bytes,
+                }])
+                .collect();
+            receipt.write_all(&serde_json::to_vec(&json!({"version":1,
+                "binding":{"runtime_id":record.runtime_id,"generation":random_id().unwrap(),
+                    "config_sha256":record.config_sha256,"source_sha256":record.bundle.source_sha256,
+                    "client_sid":root.client.sid(),"storage_sid":identity.sid()},
+                "files":evidence,"network":null,"clean":true})).unwrap()).unwrap();
+            drop(receipt);
+            let bundle = verified_bundle(root, &record, identity).unwrap();
+            let executable = Executable::open(bundle.helper(), identity).unwrap();
+            drop(bundle);
+            let review = atomic_review(root).unwrap();
+            let run = |review: &AtomicReview| {
+                atomic(
+                    root,
+                    review,
+                    Arc::new(AtomicBool::new(false)),
+                    Instant::now() + Duration::from_secs(5),
+                )
+            };
+            let partial = run(&review).unwrap();
+            assert_eq!(partial.in_use, 1);
+            assert!(!partial.software_removed);
+            assert!(root.path().join("data.vhdx").is_file());
+            assert!(matches!(
+                read_record(root, identity).unwrap().phase,
+                Phase::Atomic {
+                    stage: AtomicStage::Preparing,
+                    ..
+                }
+            ));
+            drop(executable);
+            assert_eq!(run(&review).err().unwrap().0, "atomic_review_changed");
+            assert!(run(&atomic_review(root).unwrap()).unwrap().software_removed);
+            assert!(!root.path().join("data.vhdx").exists());
+            assert!(!root.path().join("vm.json").exists());
+            assert!(!root.path().join("vm.json.supervision.json").exists());
+            assert!(!root.path().join("vm.json.resources.json").exists());
+            assert!(!root.path().join("vm.json.resources.lock").exists());
+            let retired = atomic_review(root).unwrap();
+            assert!(!retired.archive_present);
+            assert_eq!(retired.runtime_id, record.runtime_id);
+            assert!(run(&retired).unwrap().software_removed);
+            empty_setup(root, true).unwrap();
+        }
+
+        #[test]
+        fn atomic_resumes_after_disk_deletion_and_refuses_replaced_metadata() {
+            let area = Area::new();
+            let root = &area.0;
+            let source = Fixture::version("atomic-resume");
+            let mut record = prepared(&area, &source);
+            let identity = &root.storage;
+            let (mut registry, _) = registry(root, identity).unwrap();
+            let data = record.data().unwrap().clone();
+            let config = atomic_file_identity(root, "vm.json").unwrap();
+            let journal = atomic_file_identity(root, "vm.json.supervision.json").unwrap();
+            drop(create_private(&root.file("vm.json.resources.lock").unwrap(), identity).unwrap());
+            let resource_lock = atomic_file_identity(root, "vm.json.resources.lock").unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            assert!(
+                collect_software(root, &record, true, true, &stop, deadline)
+                    .unwrap()
+                    .software_removed
+            );
+            record.phase = Phase::Atomic {
+                data,
+                stage: AtomicStage::Deleting {
+                    config,
+                    journal,
+                    resources: None,
+                    resource_lock,
+                },
+            };
+            registry.save(&record).unwrap();
+            for name in ["data.vhdx", "vm.json"] {
+                registry
+                    .directory
+                    .asset(name, identity, true)
+                    .unwrap()
+                    .removal(identity)
+                    .unwrap()
+                    .remove()
+                    .unwrap();
+            }
+            drop(registry);
+
+            let journal = root.path().join("vm.json.supervision.json");
+            let retained = root.path().join("untouched-journal.json");
+            std::fs::rename(&journal, &retained).unwrap();
+            let mut replacement = create_private(journal.to_str().unwrap(), identity).unwrap();
+            replacement.write_all(b"Unrelated file").unwrap();
+            drop(replacement);
+            let review = atomic_review(root).unwrap();
+            assert!(!review.archive_present);
+            assert_eq!(
+                atomic(root, &review, Arc::clone(&stop), deadline)
+                    .err()
+                    .unwrap()
+                    .0,
+                "atomic_metadata_identity_changed"
+            );
+            assert_eq!(std::fs::read(&journal).unwrap(), b"Unrelated file");
+            std::fs::remove_file(&journal).unwrap();
+            std::fs::rename(retained, journal).unwrap();
+            assert!(
+                atomic(root, &review, stop, deadline)
+                    .unwrap()
+                    .software_removed
+            );
+            empty_setup(root, true).unwrap();
         }
 
         #[test]
@@ -1962,13 +2505,13 @@ mod native {
 }
 #[cfg(windows)]
 pub use native::{
-    Installed, Root, collect, control_binding, control_id, discover, install_bundle,
-    owned_settings, preflight, uninstall, update_bundle,
+    Installed, Root, atomic, atomic_review, collect, control_binding, control_id, discover,
+    install_bundle, owned_settings, preflight, uninstall, update_bundle,
 };
 
 #[cfg(test)]
 mod tests {
-    use super::{Phase, Record, configuration};
+    use super::{AtomicReview, Phase, Record, configuration};
     use serde_json::{Value, json};
     const ID: &str = "0123456789abcdef0123456789abcdef";
     #[test]
@@ -1993,6 +2536,28 @@ mod tests {
         .unwrap();
         json!({"version":1,"runtime_id":ID,"bundle":manifest.binding().unwrap(),
             "config_sha256":"3".repeat(64),"data_bytes":8_u64*1024*1024*1024,"phase":{"kind":"pending","disk":{"kind":"uncreated"}}})
+    }
+    #[test]
+    fn atomic_review_changes_with_the_disk_identity_and_presence() {
+        let mut value = record();
+        value["phase"] = json!({"kind":"ready","data":{"volume":4,"file":vec![1;16]}});
+        let archive = r"C:\Oblivion\data.vhdx";
+        let record = Record::decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let reviewed = AtomicReview::from_record(&record, archive.into(), true).unwrap();
+        assert_ne!(
+            reviewed.review_id,
+            AtomicReview::from_record(&record, archive.into(), false)
+                .unwrap()
+                .review_id
+        );
+        value["phase"]["data"]["file"] = json!(vec![2; 16]);
+        let replaced = Record::decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_ne!(
+            reviewed.review_id,
+            AtomicReview::from_record(&replaced, archive.into(), true)
+                .unwrap()
+                .review_id
+        );
     }
     #[test]
     fn pending_is_a_distinct_current_format_and_never_an_installed_ready_record() {

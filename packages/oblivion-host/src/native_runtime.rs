@@ -11,7 +11,7 @@ use crate::desktop_bundle::{self, Binding, Bundle};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -359,6 +359,91 @@ struct Uninstalled {
     runtime_id: String,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AtomicIntent {
+    version: u8,
+    settings: Settings,
+    entry: String,
+    releases: BTreeSet<String>,
+    disk_device: u64,
+    disk_inode: u64,
+    launcher_sha256: String,
+    data_committed: bool,
+}
+
+fn atomic_intent(root: &Path) -> Result<Option<AtomicIntent>> {
+    let Some(intent) = read_record::<AtomicIntent>(&root.join("atomic.json"))? else { return Ok(None) };
+    intent.settings.validate()?;
+    if intent.version != 1 || !hex(&intent.entry, 64) || !hex(&intent.launcher_sha256, 64)
+        || !intent.releases.contains(&intent.entry) || intent.releases.len() > 256
+        || intent.releases.iter().any(|id| !hex(id, 64))
+    {
+        return Err("invalid_atomic_intent".into());
+    }
+    Ok(Some(intent))
+}
+
+// If the final executable was unlinked before the receipt was cleared, the
+// matching installer can finish by removing only verified empty directories.
+fn finish_atomic_tail(root: &Path, desktop: &DesktopPaths, bundle: &str) -> Result<()> {
+    let Some(intent) = atomic_intent(root)? else { return Ok(()) };
+    if !intent.data_committed || bundle != intent.entry {
+        return Err("Complete the pending Atomic removal before installing Oblivion".into());
+    }
+    let installation = private_lock(&root.join("installation.lock"))?;
+    if !try_lock(&installation)? { return Err("runtime_installation_busy".into()); }
+    for path in [
+        intent.settings.disks[1].path.clone(), root.join("runtime.json"), root.join("uninstalled.json"),
+        root.join("vm.json"), desktop.prefix.join("installation.json"), desktop.entry.clone(),
+    ] {
+        if !matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
+            return Err("Complete the pending Atomic removal before installing Oblivion".into());
+        }
+    }
+    let releases = desktop.releases();
+    private_directory(&releases)?;
+    let release = releases.join(intent.entry);
+    for entry in fs::read_dir(&releases)? {
+        if entry?.path() != release {
+            return Err("Complete the pending Atomic removal before installing Oblivion".into());
+        }
+    }
+    if fs::symlink_metadata(&release).is_ok() {
+        verify_release_directory(&release)?;
+        let bin = release.join("bin");
+        let manifest = release.join("bundle.json");
+        let manifest = if fs::symlink_metadata(&manifest).is_ok() {
+            Bundle::stored_for_removal(&release, bundle, desktop.platform)?;
+            Some(Removal::file(manifest)?)
+        } else { None };
+        for entry in fs::read_dir(&release)? {
+            let path = entry?.path();
+            if path != bin && !manifest.as_ref().is_some_and(|manifest| manifest.path == path) {
+                return Err("Complete the pending Atomic removal before installing Oblivion".into());
+            }
+        }
+        if fs::symlink_metadata(&bin).is_ok() {
+            verify_release_directory(&bin)?;
+            fs::remove_dir(bin)?;
+        }
+        if let Some(manifest) = manifest { manifest.remove()?; }
+        fs::remove_dir(release)?;
+        fs::File::open(releases)?.sync_all()?;
+    }
+    Removal::file(root.join("atomic.json"))?.remove()?;
+    fs::File::open(root)?.sync_all()?;
+    Ok(())
+}
+
+fn verify_release_directory(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata.uid() != unsafe { libc::getuid() } || metadata.mode() & 0o022 != 0 {
+        return Err("unsafe_desktop_release_directory".into());
+    }
+    Ok(())
+}
+
 fn read_record<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     let file = match OpenOptions::new()
         .read(true)
@@ -458,7 +543,7 @@ fn private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 fn helper() -> Result<PathBuf> {
-    let path = std::env::current_exe()?
+    let path = desktop_bundle::launcher_path()?
         .parent()
         .ok_or("executable_directory_missing")?
         .join("oblivion-vm");
@@ -576,6 +661,7 @@ fn install_runtime(path: &Path, updating: bool, deploy: bool) -> Result<()> {
         return Err("desktop_installation_busy".into());
     }
     let root = directory()?;
+    finish_atomic_tail(&root, &desktop, bundle.id())?;
     reserve_desktop(&root, &desktop)?;
     change_bundle(&root, &socket_directory()?, &bundle, updating, deploy)?;
     bind_desktop(&root, &desktop)?;
@@ -629,6 +715,9 @@ fn change_bundle(
         return Err("runtime_installation_busy".into());
     }
     let config = root.join("runtime.json");
+    if atomic_intent(root)?.is_some() {
+        return Err("Complete the pending Atomic removal before installing Oblivion".into());
+    }
     let previous = installed_settings(root)?;
     let transaction = pending(root)?;
     if previous.is_some() && !updating {
@@ -646,8 +735,19 @@ fn change_bundle(
     let socket = previous
         .as_ref()
         .map(|value| value.control_socket.clone())
-        .or_else(|| transaction.map(|value| value.settings.control_socket))
-        .unwrap_or_else(|| sockets.join("runtime.sock"));
+        .or_else(|| transaction.map(|value| value.settings.control_socket));
+    let socket = match socket {
+        Some(socket) => socket,
+        None => {
+            let default = sockets.join("runtime.sock");
+            if sidecar(&default, ".startup.lock").try_exists()? {
+                // A retired installation may still have callers holding its old paths.
+                sockets.join(format!("runtime-{}.sock", &random_id()?[..12]))
+            } else {
+                default
+            }
+        }
+    };
     private_directory(socket.parent().ok_or("invalid_runtime_socket")?)?;
     let _stopped = stopped_locks(&socket)?.ok_or(RuntimeBusy)?;
     if commit_pending(root, bundle)? {
@@ -1007,6 +1107,7 @@ fn cleanup_plan(
     desktop: &DesktopPaths,
     settings: &Settings,
     uninstall: bool,
+    approved: Option<&BTreeSet<String>>,
 ) -> Result<Cleanup> {
     let active = boot_directory(root, &settings.kernel)?;
     if settings.kernel != active.join("kernel")
@@ -1020,7 +1121,9 @@ fn cleanup_plan(
         return Err("runtime_storage_identity_changed".into());
     }
     // This file is retained even when its original boot assets are obsolete.
-    Removal::file(settings.disks[1].path.clone())?;
+    if approved.is_none() {
+        Removal::file(settings.disks[1].path.clone())?;
+    }
     let mut protected_releases = BTreeSet::new();
     let mut protected_boot = BTreeSet::new();
     if !uninstall {
@@ -1029,7 +1132,7 @@ fn cleanup_plan(
         if let Some(identity) = desktop.entry_release()? {
             protected_releases.insert(identity);
         }
-        if let Ok(executable) = std::env::current_exe() {
+        if let Ok(executable) = desktop_bundle::launcher_path() {
             if let Some(release) = executable.parent().and_then(Path::parent) {
                 if release.parent() == Some(desktop.releases().as_path()) {
                     if let Some(identity) = release.file_name().and_then(|name| name.to_str()) {
@@ -1065,7 +1168,22 @@ fn cleanup_plan(
                 plan.retained += 1;
                 continue;
             }
-            let bundle = match Bundle::stored(&entry.path(), identity, desktop.platform) {
+            if approved.is_some_and(|approved| !approved.contains(identity)) {
+                plan.retained += 1;
+                continue;
+            }
+            if approved.is_some() && fs::read_dir(entry.path())?.next().is_none() {
+                verify_release_directory(&entry.path())?;
+                plan.directories.insert(entry.path());
+                plan.releases += 1;
+                plan.release_ids.insert(identity.to_owned());
+                continue;
+            }
+            let bundle = match if approved.is_some() {
+                Bundle::stored_for_removal(&entry.path(), identity, desktop.platform)
+            } else {
+                Bundle::stored(&entry.path(), identity, desktop.platform)
+            } {
                 Ok(bundle) => bundle,
                 _ => {
                     plan.retained += 1;
@@ -1076,10 +1194,14 @@ fn cleanup_plan(
                 let path = bundle.root.join(&file.path);
                 let mut parent = path.parent();
                 while let Some(directory) = parent.filter(|path| path.starts_with(&bundle.root)) {
-                    plan.directories.insert(directory.to_owned());
+                    if directory.try_exists()? {
+                        plan.directories.insert(directory.to_owned());
+                    }
                     parent = directory.parent();
                 }
-                plan.files.push(Removal::file(path)?);
+                if approved.is_none() || path.try_exists()? {
+                    plan.files.push(Removal::file(path)?);
+                }
             }
             plan.files
                 .push(Removal::file(bundle.root.join("bundle.json"))?);
@@ -1166,6 +1288,9 @@ fn collect_locked(root: &Path, desktop: &DesktopPaths, uninstall: bool) -> Resul
     if !try_lock(&installation)? {
         return Err("runtime_installation_busy".into());
     }
+    if atomic_intent(root)?.is_some() {
+        return Err("Complete the pending Atomic removal first".into());
+    }
     let settings = Settings::read(&root.join("runtime.json"))?;
     if !desktop_owner(root, desktop, Some(&settings), false)? {
         return Err("No current desktop installation record; use the matching development bundle installer before removing software".into());
@@ -1185,7 +1310,7 @@ fn collect_locked(root: &Path, desktop: &DesktopPaths, uninstall: bool) -> Resul
         return Err("Complete the matching bundle installation before uninstalling; the update journal was preserved".into());
     }
     let entry = desktop.entry_release()?;
-    let plan = cleanup_plan(root, desktop, &settings, uninstall)?;
+    let plan = cleanup_plan(root, desktop, &settings, uninstall, None)?;
     if uninstall {
         if entry
             .as_ref()
@@ -1238,6 +1363,263 @@ pub fn uninstall() -> Result<()> {
     collect(true)
 }
 
+/// Destroy only a verified standalone desktop installation, after review on
+/// the controlling terminal. Runtime and installation locks span the review.
+pub fn atomic() -> Result<()> {
+    require_desktop()?;
+    let desktop = DesktopPaths::current()?;
+    if !desktop.manage_entry || std::env::var_os("OBLIVION_RUNTIME_DIRECTORY").is_some() {
+        return Err("Atomic removal requires the standalone desktop installation".into());
+    }
+    #[cfg(target_os = "linux")]
+    if Path::new(desktop_bundle::PACKAGE_ROOT).join("bin/oblivion").try_exists()? {
+        return Err("Atomic removal is unavailable on hosts with the Debian package installed".into());
+    }
+    let root = directory()?.canonicalize()?;
+    let _desktop_lock = desktop.lock_installation()?;
+    let launcher = desktop_bundle::launcher_path()?;
+    let mut tty = OpenOptions::new().read(true).write(true).open("/dev/tty")
+        .map_err(|_| "Atomic removal requires an interactive terminal")?;
+    atomic_locked(&root, &desktop, &socket_directory()?, &launcher, |disk, releases, retained| {
+        writeln!(tty, "Permanently remove this Oblivion installation?")?;
+        writeln!(tty, "Encrypted Safes and settings: {disk:?}")?;
+        writeln!(tty, "Desktop software: {} ({releases} verified releases)", desktop.prefix.display())?;
+        writeln!(tty, "Local launcher: {}", desktop.entry.display())?;
+        writeln!(tty, "Runtime files: {}", root.display())?;
+        if retained != 0 {
+            writeln!(tty, "Unverified runtime entries kept: {retained}")?;
+        }
+        write!(tty, "Type ATOMIC to delete, or press Enter to cancel: ")?;
+        tty.flush()?;
+        let mut answer = Vec::new();
+        BufReader::new(&mut tty).take(64).read_until(b'\n', &mut answer)?;
+        Ok(matches!(answer.as_slice(), b"ATOMIC\n" | b"ATOMIC\r\n"))
+    })
+}
+
+fn atomic_locked(
+    root: &Path,
+    desktop: &DesktopPaths,
+    socket_root: &Path,
+    launcher: &Path,
+    confirm: impl FnOnce(&Path, usize, usize) -> Result<bool>,
+) -> Result<()> {
+    let installation = private_lock(&root.join("installation.lock"))?;
+    if !try_lock(&installation)? {
+        return Err("runtime_installation_busy".into());
+    }
+    let config = root.join("runtime.json");
+    let prior = atomic_intent(root)?;
+    let current = installed_settings(root)?;
+    let settings = current.as_ref().or_else(|| prior.as_ref().map(|intent| &intent.settings))
+        .ok_or("No complete verified desktop installation is available for removal")?;
+    let owned = desktop_owner(root, desktop, Some(settings), false)?;
+    if (!owned && prior.is_none()) || pending(root)?.is_some() {
+        return Err("No complete verified desktop installation is available for removal".into());
+    }
+    if let Some(intent) = &prior {
+        if serde_json::to_value(settings)? != serde_json::to_value(&intent.settings)? {
+            return Err("atomic_installation_changed".into());
+        }
+    }
+    if settings.control_socket.parent() != Some(socket_root) {
+        return Err("invalid_runtime_socket".into());
+    }
+    private_directory(socket_root)?;
+    let _stopped = stopped_locks(&settings.control_socket)?
+        .ok_or("Stop the protected runtime before Atomic removal")?;
+    let lifecycle = lifecycle::AtomicCleanup::prepare(settings)?;
+    let mut sockets = vec![settings.control_socket.clone()];
+    if backend() == "qemu-kvm" {
+        sockets.extend([".qmp", ".auth", ".media"].map(|suffix| sidecar(&settings.control_socket, suffix)));
+    }
+    let endpoints = disconnected_sockets(&sockets)?;
+
+    let entry = desktop.entry_release()?;
+    let release = prior.as_ref().map(|intent| &intent.entry).or(entry.as_ref())
+        .ok_or("No installed Oblivion command was found")?;
+    let release_path = desktop.releases().join(release);
+    let installed = release_path.join("bin/oblivion");
+    if entry.as_ref().is_some_and(|entry| entry != release) || launcher != installed.canonicalize()? {
+        return Err("Run Atomic removal from the installed Oblivion command".into());
+    }
+    let installed = Removal::file(installed)?;
+    let launcher_sha256 = desktop_bundle::digest(&installed.path)?;
+    if prior.as_ref().is_some_and(|intent| intent.launcher_sha256 != launcher_sha256) {
+        return Err("desktop_command_changed".into());
+    }
+    let mut plan = cleanup_plan(root, desktop, settings, true, prior.as_ref().map(|intent| &intent.releases))?;
+    if !plan.release_ids.contains(release) || fs::read_dir(desktop.releases())?.count() != plan.releases {
+        return Err("Unverified desktop release files must be reviewed before Atomic removal".into());
+    }
+    // Keep release manifests until their files and directories are gone. This
+    // lets a resumed removal authenticate every remaining listed file.
+    let mut manifests = Vec::new();
+    plan.files.retain(|file| file.path != installed.path);
+    let mut index = 0;
+    while index < plan.files.len() {
+        let file = &plan.files[index];
+        if file.path.file_name().is_some_and(|name| name == "bundle.json")
+            && file.path.parent().is_some_and(|parent| parent.parent() == Some(desktop.releases().as_path()))
+        {
+            let parent = file.path.parent().expect("verified manifest parent");
+            plan.directories.remove(parent);
+            manifests.push(plan.files.swap_remove(index));
+        } else {
+            index += 1;
+        }
+    }
+    plan.directories.remove(&release_path);
+    plan.directories.remove(&release_path.join("bin"));
+
+    let disk_path = &settings.disks[1].path;
+    let data = boot_directory(root, disk_path)?;
+    match fs::symlink_metadata(&data) {
+        Ok(_) => private_directory(&data)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && prior.is_some() => {}
+        Err(error) => return Err(error.into()),
+    }
+    let boot = data.join("boot.json");
+    let disk = if !matches!(fs::symlink_metadata(disk_path), Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
+        if prior.as_ref().is_some_and(|intent| intent.data_committed) {
+            return Err("runtime_storage_identity_changed".into());
+        }
+        let record = read_record::<BootRecord>(&boot)?.ok_or("runtime_storage_identity_changed")?;
+        record.bundle.validate()?;
+        if record.version != 1 || record.runtime_id != settings.runtime_id {
+            return Err("runtime_storage_identity_changed".into());
+        }
+        let disk = atomic_disk(disk_path, &settings.runtime_id)?;
+        if prior.as_ref().is_some_and(|intent| disk.device != intent.disk_device || disk.inode != intent.disk_inode) {
+            return Err("runtime_storage_identity_changed".into());
+        }
+        Some(disk)
+    } else if prior.is_some() {
+        None
+    } else {
+        return Err("runtime_storage_identity_changed".into());
+    };
+    let configuration = current.is_some().then(|| Removal::file(config)).transpose()?;
+    let owner = owned.then(|| Removal::file(desktop.prefix.join("installation.json"))).transpose()?;
+    let projection = root.join("vm.json");
+    let vm = read_record::<serde_json::Value>(&projection)?.map(|value| {
+        if value["runtime_id"].as_str() != Some(&settings.runtime_id)
+            || value["backend"].as_str() != Some(&settings.backend)
+        {
+            return Err("runtime_configuration_identity_changed".into());
+        }
+        Removal::file(projection)
+    }).transpose()?;
+    // Existing collection keeps the data directory even when its boot assets
+    // are obsolete. Remove its record only when all its other entries were reviewed.
+    let data_record = if boot.try_exists()? && fs::read_dir(&data)?.count()
+        == plan.files.iter().filter(|file| file.path.parent() == Some(&data)).count() + 1 + usize::from(disk.is_some())
+    {
+        let record = read_record::<BootRecord>(&boot)?.ok_or("runtime_storage_identity_changed")?;
+        if record.version != 1 || record.runtime_id != settings.runtime_id { return Err("runtime_storage_identity_changed".into()); }
+        record.bundle.validate()?;
+        Some(Removal::file(boot)?)
+    } else { None };
+    uninstalled(root, settings)?;
+    if !confirm(disk_path, plan.releases, plan.retained + lifecycle.retained())? {
+        eprintln!("Atomic removal cancelled.");
+        return Ok(());
+    }
+    if desktop.entry_release()? != entry {
+        return Err("desktop_command_changed".into());
+    }
+    let mut intent = if let Some(intent) = &prior {
+        intent.clone()
+    } else {
+        let disk = disk.as_ref().ok_or("runtime_storage_identity_changed")?;
+        let intent = AtomicIntent {
+            version: 1,
+            settings: settings.clone(),
+            entry: release.clone(),
+            releases: plan.release_ids.clone(),
+            disk_device: disk.device,
+            disk_inode: disk.inode,
+            launcher_sha256,
+            data_committed: false,
+        };
+        write_record(root, "atomic.json", &intent)?;
+        intent
+    };
+    let result = (|| -> Result<()> {
+        remove_disconnected_sockets(endpoints)?;
+        lifecycle.remove()?;
+        if let Some(vm) = vm { vm.remove()?; }
+        plan.remove()?;
+        let mut current_manifest = None;
+        for manifest in manifests {
+            if manifest.path.parent() == Some(&release_path) {
+                current_manifest = Some(manifest);
+                continue;
+            }
+            manifest.remove()?;
+            fs::remove_dir(manifest.path.parent().ok_or("invalid_cleanup_directory")?)?;
+        }
+        // The launcher and intent remain available if any software cleanup
+        // fails. Commit irreversible data removal only after it succeeds.
+        if let Some(disk) = disk {
+            disk.remove()?;
+            fs::File::open(&data)?.sync_all()?;
+        }
+        if !intent.data_committed {
+            intent.data_committed = true;
+            write_record(root, "atomic.json", &intent)?;
+        }
+        if let Some(record) = data_record {
+            record.remove()?;
+            fs::remove_dir(&data)?;
+        }
+        if let Some(configuration) = configuration { configuration.remove()?; }
+        clear_uninstalled(root, settings)?;
+        if let Some(owner) = owner { owner.remove()?; }
+        fs::File::open(&desktop.prefix)?.sync_all()?;
+        fs::File::open(root)?.sync_all()?;
+        if entry.is_some() {
+            if desktop.entry_release()? != entry { return Err("desktop_command_changed".into()); }
+            fs::remove_file(&desktop.entry)?;
+            fs::File::open(desktop.entry.parent().ok_or("invalid_cleanup_directory")?)?.sync_all()?;
+        }
+        installed.remove()?;
+        if let Some(manifest) = current_manifest { manifest.remove()?; }
+        fs::remove_dir(release_path.join("bin"))?;
+        fs::remove_dir(&release_path)?;
+        fs::File::open(desktop.releases())?.sync_all()?;
+        fs::remove_file(root.join("atomic.json"))?;
+        fs::File::open(root)?.sync_all()?;
+        Ok(())
+    })();
+    result.map_err(|error| format!("Atomic removal incomplete ({error}). If the launcher remains, retry {:?} runtime atomic.", installed.path))?;
+    eprintln!("Oblivion removed. Private coordination lock files and parent directories were kept.");
+    Ok(())
+}
+
+fn atomic_disk(path: &Path, runtime_id: &str) -> Result<Removal> {
+    let removal = Removal::file(path.to_owned())?;
+    let mut file = OpenOptions::new().read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)?;
+    let info = file.metadata()?;
+    if info.dev() != removal.device || info.ino() != removal.inode || info.mode() & 0o077 != 0 {
+        return Err("runtime_storage_identity_changed".into());
+    }
+    let mut header = [0; 4096];
+    file.read_exact(&mut header)?;
+    let marker = format!("OBLIVION-RUNTIME-1\n{runtime_id}\n");
+    let initial = header.strip_prefix(marker.as_bytes()).is_some_and(|tail| tail.iter().all(|byte| *byte == 0));
+    // The controller replaces the initialization marker with an ext4 volume
+    // whose label and UUID are bound to the same runtime identity.
+    let initialized = header[1080..1082] == [0x53, 0xef]
+        && &header[1144..1160] == b"OBLIVION-RUNTIME"
+        && header[1128..1144].iter().map(|byte| format!("{byte:02x}")).collect::<String>() == runtime_id;
+    if !initial && !initialized {
+        return Err("runtime_storage_identity_changed".into());
+    }
+    Ok(removal)
+}
+
 pub fn gc() -> Result<()> {
     collect(false)
 }
@@ -1266,6 +1648,7 @@ fn publish_bundle(
     desktop: &DesktopPaths,
     bundle: &Bundle,
 ) -> Result<PathBuf> {
+    finish_atomic_tail(root, desktop, bundle.id())?;
     reserve_desktop(root, desktop)?;
     let command_directory = if desktop.manage_entry {
         let directory = desktop.entry.parent().ok_or("invalid_desktop_command")?;
@@ -1537,6 +1920,9 @@ fn write_record(root: &Path, name: &str, value: &impl Serialize) -> Result<()> {
 
 fn prepare_connection() -> Result<Settings> {
     let root = directory()?;
+    if mode()? == Mode::Desktop && atomic_intent(&root)?.is_some() {
+        return Err("Complete the pending Atomic removal before starting Oblivion".into());
+    }
     let path = root.join("runtime.json");
     if !path.is_file() {
         return Err(if mode()? == Mode::Live { "The Live runtime has not been prepared. Run oblivion to choose its storage mode." } else { "Install the matching development desktop bundle before starting Oblivion" }.into());
@@ -1595,7 +1981,7 @@ pub fn live_media() -> Result<()> {
 }
 
 pub fn start() -> Result<()> {
-    ensure_as(lifecycle::Kind::Resident)
+    ensure_as(lifecycle::Kind::Resident, true)
 }
 
 /// Keep physical storage review on the trusted terminal, before the Live TUI.
@@ -1613,18 +1999,22 @@ pub fn prepare_manager() -> Result<()> {
         live::intro()?;
         return Ok(());
     }
-    ensure_as(lifecycle::Kind::Manager)
+    ensure_as(lifecycle::Kind::Manager, true)
 }
 
 pub fn ensure() -> Result<()> {
-    ensure_as(lifecycle::Kind::Command)
+    ensure_as(lifecycle::Kind::Command, true)
+}
+
+pub fn ensure_quiet() -> Result<()> {
+    ensure_as(lifecycle::Kind::Command, false)
 }
 
 pub fn ensure_status() -> Result<()> {
-    ensure_as(lifecycle::Kind::Observation)
+    ensure_as(lifecycle::Kind::Observation, true)
 }
 
-fn ensure_as(kind: lifecycle::Kind) -> Result<()> {
+fn ensure_as(kind: lifecycle::Kind, show_progress: bool) -> Result<()> {
     #[cfg(target_os = "linux")]
     if mode()? == Mode::Live {
         let root = directory()?;
@@ -1664,7 +2054,7 @@ fn ensure_as(kind: lifecycle::Kind) -> Result<()> {
     let startup_lock = private_lock(&sidecar(socket, ".startup.lock"))?;
     let mut owns_startup = false;
     let mut child: Option<std::process::Child> = None;
-    eprintln!("Preparing the protected runtime…");
+    if show_progress { eprintln!("Preparing the protected runtime…"); }
     loop {
         if !lifecycle::owner_alive(&settings)? { return Err("runtime_owner_lost".into()); }
         if let Some(child) = child.as_mut() {
@@ -1757,6 +2147,10 @@ pub fn recover() -> Result<()> {
 }
 
 fn recover_sockets(paths: &[PathBuf]) -> Result<()> {
+    remove_disconnected_sockets(disconnected_sockets(paths)?)
+}
+
+fn disconnected_sockets(paths: &[PathBuf]) -> Result<Vec<(PathBuf, u64, u64)>> {
     use std::os::unix::net::UnixStream;
     let mut disconnected = Vec::new();
     for path in paths {
@@ -1773,14 +2167,18 @@ fn recover_sockets(paths: &[PathBuf]) -> Result<()> {
         }
         match UnixStream::connect(path) {
             Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
-                disconnected.push((path, info.ino()))
+                disconnected.push((path.to_owned(), info.dev(), info.ino()))
             }
             _ => return Err("runtime_socket_still_active".into()),
         }
     }
-    for (path, inode) in disconnected {
-        let info = fs::symlink_metadata(path)?;
-        if info.ino() != inode || !info.file_type().is_socket() {
+    Ok(disconnected)
+}
+
+fn remove_disconnected_sockets(disconnected: Vec<(PathBuf, u64, u64)>) -> Result<()> {
+    for (path, device, inode) in disconnected {
+        let info = fs::symlink_metadata(&path)?;
+        if info.dev() != device || info.ino() != inode || !info.file_type().is_socket() {
             return Err("runtime_socket_changed".into());
         }
         fs::remove_file(path)?;
@@ -1820,15 +2218,37 @@ fn try_lock(file: &fs::File) -> Result<bool> {
 
 pub fn stop() -> Result<()> {
     let settings = prepare_connection()?;
+    // A replacement backend must not acquire this socket between the lock and shutdown RPCs.
+    let startup = private_lock(&sidecar(&settings.control_socket, ".startup.lock"))?;
+    if !try_lock(&startup)? {
+        return Err("Runtime startup or shutdown is in progress. Retry after it completes.".into());
+    }
     let generation = lifecycle::begin_stop(&settings)?;
-    let shutdown = (|| -> Result<()> {
-        control::request("lock", None, &[])?;
-        control::request("shutdown-runtime", None, &[])?;
-        Ok(())
-    })();
-    shutdown.map_err(|error| format!("Runtime stop could not be verified ({error}). Admission remains blocked; retry oblivion runtime stop, then oblivion runtime recover."))?;
-    lifecycle::stopped(&settings, &generation)?;
-    Ok(())
+    if lifecycle::stop_disconnected(&settings, &generation)? {
+        return Ok(());
+    }
+    let (error, locked) = match control::request("lock", None, &[]) {
+        Ok(_) => match control::request("shutdown-runtime", None, &[]) {
+            Ok(_) => return lifecycle::stopped(&settings, &generation),
+            Err(error) => (error, true),
+        },
+        Err(error) => (error, false),
+    };
+    let disconnected = error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+        matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused)
+            || locked && error.kind() == std::io::ErrorKind::UnexpectedEof
+    });
+    if disconnected {
+        // systemd may close the relay before the shutdown acknowledgement is sent.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if lifecycle::stop_disconnected(&settings, &generation)? {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    Err(format!("Runtime stop could not be verified ({error}). Admission remains blocked; retry oblivion runtime stop, then oblivion runtime recover.").into())
 }
 
 pub fn supervise(generation: &str) -> Result<()> {
@@ -1983,6 +2403,100 @@ mod tests {
         write_settings(&fixture.0, &current).unwrap();
         bind_desktop(&fixture.0, &desktop).unwrap();
         (fixture, desktop, current, old_id)
+    }
+
+    fn mark_atomic_disk(settings: &Settings) {
+        let mut disk = OpenOptions::new().write(true).truncate(true).open(&settings.disks[1].path).unwrap();
+        writeln!(disk, "OBLIVION-RUNTIME-1\n{}", settings.runtime_id).unwrap();
+        disk.set_len(4096).unwrap();
+    }
+
+    #[test]
+    fn atomic_resumes_partial_release_cleanup_before_data_deletion() {
+        let (fixture, desktop, settings, old) = installed_fixture();
+        mark_atomic_disk(&settings);
+        let launcher = desktop.entry.canonicalize().unwrap();
+        atomic_locked(&fixture.0, &desktop, &fixture.0, &launcher, |_, _, _| Ok(false)).unwrap();
+        assert!(settings.disks[1].path.exists() && launcher.exists());
+        assert!(!fixture.0.join("atomic.json").exists());
+
+        let other = desktop.releases().join(old).join("bin/user-file");
+        let result = atomic_locked(&fixture.0, &desktop, &fixture.0, &launcher, |_, _, _| {
+            fs::write(&other, b"unreviewed")?;
+            Ok(true)
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(&other).unwrap(), b"unreviewed");
+        assert!(settings.disks[1].path.exists() && launcher.exists());
+        assert!(atomic_intent(&fixture.0).unwrap().is_some());
+        assert!(atomic_locked(&fixture.0, &desktop, &fixture.0, &launcher, |_, _, _| Ok(true)).is_err());
+        assert!(settings.disks[1].path.exists());
+        fs::remove_file(other).unwrap();
+        atomic_locked(&fixture.0, &desktop, &fixture.0, &launcher, |_, _, _| Ok(true)).unwrap();
+        assert!(!settings.disks[1].path.exists() && !launcher.exists());
+        assert!(!fixture.0.join("atomic.json").exists());
+    }
+
+    #[test]
+    fn atomic_resumes_after_data_deletion_and_removes_owned_metadata() {
+        let (fixture, desktop, settings, _) = installed_fixture();
+        mark_atomic_disk(&settings);
+        let launcher = desktop.entry.canonicalize().unwrap();
+        let result = atomic_locked(&fixture.0, &desktop, &fixture.0, &launcher, |_, _, _| {
+            let owner = read_record::<DesktopOwner>(&desktop.prefix.join("installation.json"))?.unwrap();
+            write_record(&desktop.prefix, "installation.json", &owner)?;
+            Ok(true)
+        });
+        assert!(result.is_err());
+        assert!(!settings.disks[1].path.exists());
+        assert!(launcher.exists() && atomic_intent(&fixture.0).unwrap().is_some());
+        atomic_locked(&fixture.0, &desktop, &fixture.0, &launcher, |_, _, _| Ok(true)).unwrap();
+        assert!(!launcher.exists() && !desktop.prefix.join("installation.json").exists());
+        assert!(!fixture.0.join("atomic.json").exists());
+    }
+
+    #[test]
+    fn atomic_final_receipt_can_be_finished_only_by_matching_installer() {
+        let (fixture, desktop, settings, _) = installed_fixture();
+        mark_atomic_disk(&settings);
+        let launcher = desktop.entry.canonicalize().unwrap();
+        let entry = desktop.entry_release().unwrap().unwrap();
+        let result = atomic_locked(&fixture.0, &desktop, &fixture.0, &launcher, |_, _, _| {
+            let owner = read_record::<DesktopOwner>(&desktop.prefix.join("installation.json"))?.unwrap();
+            write_record(&desktop.prefix, "installation.json", &owner)?;
+            Ok(true)
+        });
+        assert!(result.is_err());
+        assert!(atomic_intent(&fixture.0).unwrap().unwrap().data_committed);
+        assert!(finish_atomic_tail(&fixture.0, &desktop, &entry).is_err());
+
+        // Simulate a process exiting immediately after its final executable
+        // unlink, before it removes the manifest, empty directories and receipt.
+        fs::remove_file(desktop.prefix.join("installation.json")).unwrap();
+        fs::remove_file(&desktop.entry).unwrap();
+        fs::remove_file(&launcher).unwrap();
+        assert!(finish_atomic_tail(&fixture.0, &desktop, &"f".repeat(64)).is_err());
+        finish_atomic_tail(&fixture.0, &desktop, &entry).unwrap();
+        assert!(!fixture.0.join("atomic.json").exists());
+        assert!(fs::read_dir(desktop.releases()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn atomic_rejects_data_directory_symlink_before_confirmation() {
+        let (fixture, desktop, settings, _) = installed_fixture();
+        mark_atomic_disk(&settings);
+        let launcher = desktop.entry.canonicalize().unwrap();
+        let data = settings.disks[1].path.parent().unwrap();
+        let outside = Fixture::new();
+        let moved = outside.0.join("data");
+        fs::rename(data, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, data).unwrap();
+        let result = atomic_locked(&fixture.0, &desktop, &fixture.0, &launcher, |_, _, _| {
+            panic!("unverified directory must be refused before prompting");
+        });
+        assert!(result.is_err());
+        assert!(moved.join("storage.raw").exists());
+        assert!(!fixture.0.join("atomic.json").exists());
     }
 
     #[test]
@@ -2148,7 +2662,7 @@ mod tests {
         private_directory(&changed).unwrap();
         fs::write(changed.join("personal-document"), b"keep").unwrap();
         let config = fs::read(fixture.0.join("runtime.json")).unwrap();
-        let plan = cleanup_plan(&fixture.0, &desktop, &current, false).unwrap();
+        let plan = cleanup_plan(&fixture.0, &desktop, &current, false, None).unwrap();
         assert_eq!((plan.releases, plan.boot_files, plan.retained), (1, 3, 2));
         plan.remove().unwrap();
         assert!(!desktop.releases().join(old_id).exists());
@@ -2188,7 +2702,7 @@ mod tests {
         )
         .unwrap();
         let journal = fs::read(fixture.0.join("update.pending.json")).unwrap();
-        let plan = cleanup_plan(&fixture.0, &desktop, &current, false).unwrap();
+        let plan = cleanup_plan(&fixture.0, &desktop, &current, false, None).unwrap();
         assert_eq!(plan.releases, 0);
         plan.remove().unwrap();
         assert_eq!(
@@ -2374,14 +2888,14 @@ mod tests {
         let old = current.disks[1].path.parent().unwrap().join("kernel");
         fs::set_permissions(&old, fs::Permissions::from_mode(0o600)).unwrap();
         fs::write(&old, b"changed old kernel").unwrap();
-        let plan = cleanup_plan(&fixture.0, &desktop, &current, false).unwrap();
+        let plan = cleanup_plan(&fixture.0, &desktop, &current, false, None).unwrap();
         assert_eq!(plan.retained, 1);
         assert_eq!(plan.boot_files, 0);
         let mut changed = current.clone();
         changed.initrd = old;
-        assert!(cleanup_plan(&fixture.0, &desktop, &changed, false).is_err());
+        assert!(cleanup_plan(&fixture.0, &desktop, &changed, false, None).is_err());
         fs::hard_link(&current.disks[1].path, fixture.0.join("raw-alias")).unwrap();
-        assert!(cleanup_plan(&fixture.0, &desktop, &current, false).is_err());
+        assert!(cleanup_plan(&fixture.0, &desktop, &current, false, None).is_err());
         assert!(desktop.entry.exists() && current.kernel.is_file());
     }
     #[test]

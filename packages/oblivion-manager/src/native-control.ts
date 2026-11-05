@@ -3,6 +3,7 @@ import { managerLauncherPath, systemManagerTarget } from "./manager-target"
 import type { FileOutcome } from "./native-file-transfers"
 import type { FileEvent, NativeFileClient, RunningFileCopy } from "./native-file-events"
 import type { NativeUsbClient } from "./native-usb"
+import type { AgentStartup } from "./native-agent"
 
 const opening = z.object({ slot: z.number().int().min(0).max(31), safe_id: z.string().regex(/^[a-f0-9]{32}$/), nonce: z.string().regex(/^[a-f0-9]{32}$/) })
 export const nativeActivity = z.object({ host: z.string().regex(/^[a-f0-9]{32}$/), safe: opening.nullable() })
@@ -57,7 +58,7 @@ export type NativeStatus = z.infer<typeof nativeStatus>
 export type NativeOverlay = { page: "files" | "network"; safe: string }
 export type NativeRuntime = {
   status: () => Promise<NativeStatus>
-  run: (args: string[]) => Promise<number>
+  run: (args: string[], reportAgentStartup?: (stage: AgentStartup) => void) => Promise<number>
   query: (args: string[]) => Promise<unknown>
   files: NativeFileClient
   usb?: NativeUsbClient

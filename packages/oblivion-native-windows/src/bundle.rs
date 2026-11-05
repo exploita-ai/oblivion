@@ -93,6 +93,24 @@ impl VerifiedBundle {
     }
 
     fn read(root: Directory, expected_source: Option<&str>, identity: &Identity) -> Result<Self> {
+        Self::read_inventory(root, expected_source, identity, false)
+    }
+
+    pub(crate) fn open_for_atomic(root: &str, identity: &Identity) -> Result<Self> {
+        Self::read_inventory(
+            Directory::open(root, identity, false)?,
+            None,
+            identity,
+            true,
+        )
+    }
+
+    fn read_inventory(
+        root: Directory,
+        expected_source: Option<&str>,
+        identity: &Identity,
+        allow_missing: bool,
+    ) -> Result<Self> {
         let manifest_file = root.asset("bundle.json", identity, false)?;
         if manifest_file.bytes() > MAX_MANIFEST as u64 {
             return Err(Error("desktop_bundle_manifest_limit"));
@@ -154,7 +172,7 @@ impl VerifiedBundle {
                 files.insert(relative, asset);
             }
         }
-        if !found_manifest || files.len() != manifest.files.len() {
+        if !found_manifest || !allow_missing && files.len() != manifest.files.len() {
             return Err(Error("desktop_bundle_file_missing"));
         }
         root.verify()?;
@@ -357,9 +375,24 @@ impl VerifiedBundle {
     /// Acquire every file's DELETE handle first, so a running executable keeps
     /// its whole release intact instead of producing an incomplete uninstall.
     pub(crate) fn remove(self, identity: &Identity) -> Result<()> {
+        self.remove_inventory(identity, false)
+    }
+
+    pub(crate) fn remove_for_atomic(self, identity: &Identity) -> Result<()> {
+        self.remove_inventory(identity, true)
+    }
+
+    fn remove_inventory(self, identity: &Identity, allow_missing: bool) -> Result<()> {
         let mut parents = BTreeMap::from([(String::new(), self.root.clone())]);
         for relative in directories(&self.manifest)? {
             let (parent, name) = split(&relative);
+            if allow_missing {
+                match std::fs::symlink_metadata(locate(self.root.path(), &relative)) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(_) => return Err(Error("runtime_release_unavailable")),
+                    Ok(_) => {}
+                }
+            }
             let child = parents
                 .get(parent)
                 .ok_or(Error("desktop_bundle_file_missing"))?
@@ -370,7 +403,7 @@ impl VerifiedBundle {
         for asset in self.files.into_values() {
             removals.push(asset.removal(identity)?);
         }
-        removals.push(self.manifest_file.removal(identity)?);
+        let manifest = self.manifest_file.removal(identity)?;
         for removal in removals {
             removal.remove()?;
         }
@@ -383,6 +416,7 @@ impl VerifiedBundle {
             }
             directory.remove(identity)?;
         }
+        manifest.remove()?;
         self.root.remove(identity)
     }
 }

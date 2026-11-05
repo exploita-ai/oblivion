@@ -1,7 +1,8 @@
 //! Native process intents are bound to one runtime generation. Backend signals
 //! are authorized only by the supervisor's unreaped Child, never these records.
 use super::{
-    Settings, identity, private_directory, private_lock, random_id, sidecar, try_lock, write_record,
+    Cleanup, Removal, Settings, identity, private_directory, private_lock, random_id, sidecar,
+    try_lock, write_record,
 };
 use crate::control::Result;
 use serde::{Deserialize, Serialize};
@@ -576,7 +577,7 @@ pub(super) fn launch(
         return Err("runtime_owner_recovery_required".into());
     }
     prepare()?;
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = Command::new(crate::desktop_bundle::launcher_path()?);
     command
         .args(["runtime", "supervise", &generation.id])
         .stdin(Stdio::null())
@@ -806,9 +807,34 @@ pub(super) fn begin_stop(settings: &Settings) -> Result<String> {
     let mut generation = registry.generation()?.ok_or(
         "Runtime is not owned. Run oblivion runtime recover to inspect disconnected state.",
     )?;
-    generation.phase = Phase::StopRequested;
-    registry.save(&generation)?;
+    if generation.phase != Phase::Stopping {
+        generation.phase = Phase::StopRequested;
+        registry.save(&generation)?;
+    }
     Ok(generation.id)
+}
+
+pub(super) fn stop_disconnected(settings: &Settings, generation_id: &str) -> Result<bool> {
+    let registry = Registry::new(settings)?;
+    let _lock = registry.lock()?;
+    let generation = registry.generation()?.ok_or("runtime_generation_missing")?;
+    if generation.id != generation_id {
+        return Err("runtime_generation_changed".into());
+    }
+    if generation.phase != Phase::Stopping || generation.supervisor.is_some() {
+        return Ok(false);
+    }
+    let helper = private_lock(&sidecar(&registry.socket, ".lock"))?;
+    if !try_lock(&helper)? {
+        return Ok(false);
+    }
+    match crate::remote_control::connect_peer(&registry.socket, Duration::from_millis(100)) {
+        Ok(_) => Ok(false),
+        Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused)
+        }) => Ok(true),
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) fn stopped(settings: &Settings, generation_id: &str) -> Result<()> {
@@ -859,6 +885,82 @@ pub(super) fn recovered(settings: &Settings) -> Result<()> {
         registry.save(&generation)?;
     }
     Ok(())
+}
+
+/// Atomic removal holds the startup and backend locks before taking this
+/// inventory. Keep the registry lock inode so old callers cannot split it.
+pub(super) struct AtomicCleanup {
+    _lock: Option<fs::File>,
+    plan: Cleanup,
+}
+
+impl AtomicCleanup {
+    pub(super) fn prepare(settings: &Settings) -> Result<Self> {
+        let path = sidecar(&settings.control_socket, ".lifecycle");
+        if !path.try_exists()? {
+            return Ok(Self { _lock: None, plan: Cleanup::default() });
+        }
+        let registry = Registry::new(settings)?;
+        let lock = registry.lock()?;
+        let mut plan = Cleanup::default();
+        if let Some(generation) = registry.generation()? {
+            if generation.supervisor.as_ref().map(identity::Identity::alive).transpose()?.unwrap_or(false) {
+                return Err("Stop the protected runtime before Atomic removal".into());
+            }
+            plan.files.push(Removal::file(path.join("generation.json"))?);
+        }
+        for (index, entry) in fs::read_dir(&path)?.enumerate() {
+            if index >= 256 { return Err("runtime_cleanup_inventory_limit".into()); }
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { plan.retained += 1; continue };
+            if matches!(name, "generation.json" | "lock") { continue; }
+            if (name != "managers" && !super::hex(name, 32)) || !entry.file_type()?.is_dir() {
+                plan.retained += 1;
+                continue;
+            }
+            private_directory(&entry.path())?;
+            let retained = plan.retained;
+            for (index, child) in fs::read_dir(entry.path())?.enumerate() {
+                if index >= 512 { return Err("runtime_cleanup_inventory_limit".into()); }
+                let child = child?;
+                if !child.file_name().to_str().is_some_and(|name| super::hex(name, 32)) {
+                    plan.retained += 1;
+                    continue;
+                }
+                if name == "managers" {
+                    let ticket: Ticket = read(&child.path())?;
+                    if ticket.version != 1 || ticket.runtime_id != settings.runtime_id {
+                        return Err("invalid_manager_owner".into());
+                    }
+                    if ticket.creator.alive()? || ticket.process.as_ref().map(identity::Identity::alive).transpose()?.unwrap_or(false) {
+                        return Err("Close the Oblivion manager before Atomic removal".into());
+                    }
+                } else {
+                    let owner: Owner = read(&child.path())?;
+                    if owner.version != 1 || owner.generation != name {
+                        return Err("invalid_runtime_owner".into());
+                    }
+                    if owner.alive()? {
+                        return Err("Close all Oblivion clients before Atomic removal".into());
+                    }
+                }
+                plan.files.push(Removal::file(child.path())?);
+            }
+            if retained == plan.retained {
+                plan.directories.insert(entry.path());
+            }
+        }
+        Ok(Self { _lock: Some(lock), plan })
+    }
+
+    pub(super) fn retained(&self) -> usize {
+        self.plan.retained
+    }
+
+    pub(super) fn remove(self) -> Result<()> {
+        self.plan.remove()
+    }
 }
 
 #[cfg(test)]
@@ -1162,6 +1264,37 @@ mod tests {
         stopped(&fixture.settings(), &generation).unwrap();
         supervisor.join().unwrap().unwrap();
         assert!(!fixture.registry.generation().unwrap().unwrap().resident);
+    }
+
+    #[test]
+    fn explicit_stop_confirms_only_the_disconnected_generation() {
+        let fixture = Fixture::new(Phase::Ready);
+        let settings = fixture.settings();
+        let generation_id = begin_stop(&settings).unwrap();
+        assert!(!stop_disconnected(&settings, &generation_id).unwrap());
+
+        {
+            let _lock = fixture.registry.lock().unwrap();
+            let mut generation = fixture.registry.generation().unwrap().unwrap();
+            generation.phase = Phase::Stopping;
+            generation.supervisor = None;
+            fixture.registry.save(&generation).unwrap();
+        }
+        let helper = private_lock(&sidecar(&fixture.registry.socket, ".lock")).unwrap();
+        assert!(try_lock(&helper).unwrap());
+        assert!(!stop_disconnected(&settings, &generation_id).unwrap());
+        drop(helper);
+
+        let listener = UnixListener::bind(&fixture.registry.socket).unwrap();
+        fs::set_permissions(&fixture.registry.socket, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!stop_disconnected(&settings, &generation_id).unwrap());
+        drop(listener);
+        // Parallel process fixtures can briefly retain close-on-exec descriptors
+        // between fork and exec even after this thread drops the listener.
+        fixture.wait_for(|| stop_disconnected(&settings, &generation_id).unwrap());
+        assert_eq!(begin_stop(&settings).unwrap(), generation_id);
+        assert!(fixture.phase() == Phase::Stopping);
+        assert!(stop_disconnected(&settings, "different-generation").is_err());
     }
 
     #[test]

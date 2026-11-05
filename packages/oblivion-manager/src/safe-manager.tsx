@@ -19,6 +19,7 @@ import { NativeTask } from "./native-task"
 import { NativeBackups } from "./native-backups"
 import { NativePassword } from "./native-password"
 import { conversationArgs } from "./native-conversation"
+import type { AgentStartup } from "./native-agent"
 
 const agents = [
   { id: "codex", name: "Codex", description: "Official Codex. First login: choose Sign in with Device Code for ChatGPT, then open its link outside the Safe. Its browser callback stays inside." },
@@ -35,6 +36,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
   const [notice, setNotice] = createSignal("")
   const [busy, setBusy] = createSignal(!props.initial && !props.initialError)
   const [attached, setAttached] = createSignal(false)
+  const [agentStartup, setAgentStartup] = createSignal<AgentStartup>()
   const [selected, setSelected] = createSignal(0)
   const [area, setArea] = createSignal<"list" | "actions">("list")
   const [page, setPage] = createSignal<"safes" | "name" | "agents" | "lock" | "settings" | "system" | "network" | "files" | "rename" | "grow" | "idle" | "storage" | "share" | "imports" | "backups" | "password" | "inspect" | "task">(props.overlay?.page ?? "safes")
@@ -140,15 +142,20 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
     setObserved(undefined)
     setError("")
     setNotice("")
+    if (args[0] === "run") setAgentStartup("opening")
     try {
-      const code = await props.runtime.run(args)
-      if (code !== 0) setNotice(`The command ended with status ${code}.`)
+      const code = await props.runtime.run(args, args[0] === "run" ? setAgentStartup : undefined)
+      if (code !== 0) setNotice(agentStartup() === "gateway-failed" ? "The protected connection could not start. The Safe stayed offline."
+        : agentStartup() === "gateway-timeout" ? "The protected connection timed out. The Safe stayed offline."
+        : agentStartup() === "ephemeral-storage-full" ? "RAM-only storage is full. Close an unused RAM-only Safe and retry."
+        : `The command ended with status ${code}.`)
       else if (message) setNotice(message)
       return code
     } catch {
       setNotice("The command could not be started. Check the Oblivion runtime.")
       return 1
     } finally {
+      setAgentStartup(undefined)
       setAttached(false)
       if (returnToSafes && !props.overlay) { setPage("safes"); setSelected(0) }
       await refresh()
@@ -470,6 +477,7 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
         { title: "Lock Oblivion", key: "Ctrl+Q", run: () => lock() },
       ] : [{ title: "Exit", key: "Esc", run: () => { void leave() } }]} disabled={attached() || busy()} />
     </box>
-    <Show when={busy()}><BusyModal text={props.overlay ? "Opening Safe panel" : "Opening Oblivion"} /></Show>
+    <Show when={busy() || agentStartup()}><BusyModal text={agentStartup() === "connecting" ? "Waiting for the protected connection…"
+      : agentStartup() ? "Opening Safe" : props.overlay ? "Opening Safe panel" : "Opening Oblivion"} /></Show>
   </box>
 }

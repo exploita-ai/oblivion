@@ -1,6 +1,7 @@
 //! One-shot native UAC setup. The ordinary caller owns the staged software and
 //! authorizes its user through the kernel pipe token, never a command-line SID.
 #![cfg(any(windows, test))]
+use crate::installation::AtomicReview;
 use crate::prerequisites;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,7 @@ pub enum Operation {
     Update {},
     Gc {},
     Uninstall {},
+    Atomic {},
 }
 
 impl Operation {
@@ -61,6 +63,48 @@ struct Approval {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct AtomicApproval {
+    review_id: String,
+    remove: bool,
+}
+
+impl AtomicApproval {
+    fn decode(bytes: &[u8], review_id: &str) -> Result<bool> {
+        let approval: Self = decode(bytes)?;
+        if approval.review_id != review_id || !oblivion_bundle::hash(&approval.review_id) {
+            return Err(Error("atomic_review_changed"));
+        }
+        Ok(approval.remove)
+    }
+}
+
+fn verify_atomic_completion(
+    approved: Option<&AtomicReview>,
+    runtime_id: &str,
+    review_id: &str,
+) -> Result<()> {
+    if !approved
+        .is_some_and(|review| review.runtime_id == runtime_id && review.review_id == review_id)
+    {
+        return Err(Error("atomic_review_changed"));
+    }
+    Ok(())
+}
+
+fn atomic_failure(code: &str) -> Error {
+    Error(match code {
+        "runtime_busy" => "runtime_busy",
+        "runtime_not_installed" => "runtime_not_installed",
+        "runtime_recovery_required" => "runtime_recovery_required",
+        "runtime_resources_require_recovery" => "runtime_resources_require_recovery",
+        "installed_runtime_source_mismatch" => "installed_runtime_source_mismatch",
+        "atomic_review_changed" => "atomic_review_changed",
+        _ => "setup_atomic_failed",
+    })
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Response {
     version: u8,
     manifest_sha256: String,
@@ -84,6 +128,14 @@ enum Event {
         runtime_id: String,
         cleanup: crate::installation::Cleanup,
     },
+    AtomicReview {
+        review: AtomicReview,
+    },
+    Atomic {
+        runtime_id: String,
+        review_id: String,
+        cleanup: crate::installation::Cleanup,
+    },
     Declined,
     Failed {
         code: String,
@@ -99,6 +151,16 @@ impl Response {
             | Event::Cleaned { runtime_id, .. } => {
                 oblivion_wire::control::valid_id(runtime_id)
                     && runtime_id.bytes().any(|byte| byte != b'0')
+            }
+            Event::AtomicReview { review } => review.validate().is_ok(),
+            Event::Atomic {
+                runtime_id,
+                review_id,
+                ..
+            } => {
+                oblivion_wire::control::valid_id(runtime_id)
+                    && runtime_id.bytes().any(|byte| byte != b'0')
+                    && oblivion_bundle::hash(review_id)
             }
             Event::Failed { code } => {
                 !code.is_empty()
@@ -121,6 +183,10 @@ impl Response {
                 | (
                     Operation::Gc {} | Operation::Uninstall {},
                     Event::Cleaned { .. }
+                )
+                | (
+                    Operation::Atomic {},
+                    Event::AtomicReview { .. } | Event::Atomic { .. } | Event::Declined
                 )
                 | (_, Event::Failed { .. })
         );
@@ -165,6 +231,10 @@ pub enum Outcome {
         runtime_id: String,
         cleanup: crate::installation::Cleanup,
     },
+    Atomic {
+        runtime_id: String,
+        cleanup: crate::installation::Cleanup,
+    },
     RebootRequired,
     Declined,
     Blocked {
@@ -175,7 +245,8 @@ pub enum Outcome {
 #[cfg(windows)]
 mod native {
     use super::{
-        Approval, Event, LIMIT, Operation, Outcome, Registration, Request, Response, decode,
+        Approval, AtomicApproval, AtomicReview, Event, LIMIT, Operation, Outcome, Registration,
+        Request, Response, atomic_failure, decode, verify_atomic_completion,
     };
     use crate::bundle::VerifiedBundle;
     use crate::client::Channel;
@@ -209,6 +280,13 @@ mod native {
 
     static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
+    enum Review<'a> {
+        EnableHyperv,
+        Atomic(&'a AtomicReview),
+    }
+
+    type Reviewer<'a> = dyn for<'review> FnMut(Review<'review>) -> Result<bool> + 'a;
+
     /// The original process remains unelevated. The callback is only the
     /// explicit review for enabling Hyper-V, before any VM or data creation.
     pub fn execute(
@@ -217,6 +295,46 @@ mod native {
         stop: Arc<AtomicBool>,
         deadline: Instant,
         review: &mut dyn FnMut() -> Result<bool>,
+    ) -> Result<Outcome> {
+        if matches!(operation, Operation::Atomic {}) {
+            return Err(Error("atomic_interactive_review_required"));
+        }
+        execute_reviewed(
+            bundle,
+            operation,
+            stop,
+            deadline,
+            &mut |request| match request {
+                Review::EnableHyperv => review(),
+                Review::Atomic(_) => Err(Error("unexpected_setup_review")),
+            },
+        )
+    }
+
+    pub fn execute_atomic(
+        bundle: VerifiedBundle,
+        stop: Arc<AtomicBool>,
+        deadline: Instant,
+        review: &mut dyn FnMut(&AtomicReview) -> Result<bool>,
+    ) -> Result<Outcome> {
+        execute_reviewed(
+            bundle,
+            Operation::Atomic {},
+            stop,
+            deadline,
+            &mut |request| match request {
+                Review::EnableHyperv => Err(Error("unexpected_setup_review")),
+                Review::Atomic(details) => review(details),
+            },
+        )
+    }
+
+    fn execute_reviewed(
+        bundle: VerifiedBundle,
+        operation: Operation,
+        stop: Arc<AtomicBool>,
+        deadline: Instant,
+        review: &mut Reviewer<'_>,
     ) -> Result<Outcome> {
         let _signals = Signals::new()?;
         let finished = AtomicBool::new(false);
@@ -244,7 +362,7 @@ mod native {
         operation: Operation,
         stop: Arc<AtomicBool>,
         deadline: Instant,
-        review: &mut dyn FnMut() -> Result<bool>,
+        review: &mut Reviewer<'_>,
     ) -> Result<Outcome> {
         operation.validate()?;
         let owner = Identity::current()?;
@@ -314,6 +432,7 @@ mod native {
             )?;
             let outcome = (|| {
                 let mut reviewed = false;
+                let mut authorized_atomic = None;
                 loop {
                     check(&stop, deadline)?;
                     let raw = frame::read(&mut channel, 1..=LIMIT)
@@ -324,7 +443,7 @@ mod native {
                             outcome: prerequisites::Outcome::EnableRequired,
                         } if !reviewed => {
                             reviewed = true;
-                            let approved = review()?;
+                            let approved = review(Review::EnableHyperv)?;
                             send(
                                 &mut channel,
                                 &Approval {
@@ -332,12 +451,50 @@ mod native {
                                 },
                             )?;
                         }
+                        Event::AtomicReview { review: details } if !reviewed => {
+                            reviewed = true;
+                            require_atomic_bundle(&details, &bundle_id, &source)?;
+                            let approved = review(Review::Atomic(&details))?;
+                            send(
+                                &mut channel,
+                                &AtomicApproval {
+                                    review_id: details.review_id.clone(),
+                                    remove: approved,
+                                },
+                            )?;
+                            authorized_atomic = approved.then_some(details);
+                        }
+                        Event::Atomic {
+                            runtime_id,
+                            review_id,
+                            cleanup,
+                        } => {
+                            verify_atomic_completion(
+                                authorized_atomic.as_ref(),
+                                &runtime_id,
+                                &review_id,
+                            )?;
+                            return Ok(Event::Atomic {
+                                runtime_id,
+                                review_id,
+                                cleanup,
+                            });
+                        }
                         event @ (Event::Requirements { .. }
                         | Event::Installed { .. }
                         | Event::Updated { .. }
                         | Event::Cleaned { .. }
                         | Event::Declined) => return Ok(event),
-                        Event::Failed { .. } => return Err(Error("setup_installation_failed")),
+                        Event::Failed { code } => {
+                            return Err(match (operation, code.as_str()) {
+                                (Operation::Atomic {}, code) => atomic_failure(code),
+                                (Operation::Install { .. }, "atomic_path_cleanup_pending") => {
+                                    Error("atomic_path_cleanup_pending")
+                                }
+                                _ => Error("setup_installation_failed"),
+                            });
+                        }
+                        Event::AtomicReview { .. } => return Err(Error("invalid_setup_response")),
                     }
                 }
             })();
@@ -352,8 +509,8 @@ mod native {
         if observed.is_err() {
             return Err(Error("setup_cleanup_incomplete"));
         }
-        // Source pins outlive the exact privileged helper, not just staging.
-        // In particular, uninstall cannot partly remove its invoking release.
+        // Keep source pins until the exact helper exits. Destructive
+        // maintenance must never partly remove its invoking release.
         drop(bundle);
         let cleanup = stage.remove(&owner);
         let outcome = result?;
@@ -367,7 +524,7 @@ mod native {
         operation: Operation,
         stop: Arc<AtomicBool>,
         deadline: Instant,
-        review: &mut dyn FnMut() -> Result<bool>,
+        review: &mut Reviewer<'_>,
     ) -> Result<Outcome> {
         let source = bundle.source().to_owned();
         let bundle_id = bundle.id().to_owned();
@@ -395,7 +552,7 @@ mod native {
         operation: Operation,
         stop: Arc<AtomicBool>,
         deadline: Instant,
-        review: &mut dyn FnMut() -> Result<bool>,
+        review: &mut Reviewer<'_>,
     ) -> Result<Event> {
         operation.validate()?;
         if matches!(operation, Operation::Install { .. }) {
@@ -437,7 +594,29 @@ mod native {
                     cleanup,
                 })
             }
+            Operation::Atomic {} => {
+                let details = installation::atomic_review(&root)?;
+                require_atomic_bundle(&details, bundle.id(), bundle.source())?;
+                if !review(Review::Atomic(&details))? {
+                    return Ok(Event::Declined);
+                }
+                check(&stop, deadline)?;
+                let cleanup = installation::atomic(&root, &details, stop, deadline)?;
+                Ok(Event::Atomic {
+                    runtime_id: details.runtime_id,
+                    review_id: details.review_id,
+                    cleanup,
+                })
+            }
         }
+    }
+
+    fn require_atomic_bundle(review: &AtomicReview, bundle_id: &str, source: &str) -> Result<()> {
+        review.validate()?;
+        if review.bundle_id != bundle_id || review.source_sha256 != source {
+            return Err(Error("installed_runtime_source_mismatch"));
+        }
+        Ok(())
     }
 
     fn finish(
@@ -490,6 +669,14 @@ mod native {
                 }),
                 _ => Err(Error("invalid_setup_response")),
             },
+            Event::Atomic {
+                runtime_id,
+                cleanup,
+                ..
+            } if matches!(operation, Operation::Atomic {}) => Ok(Outcome::Atomic {
+                runtime_id,
+                cleanup,
+            }),
             Event::Requirements {
                 outcome: prerequisites::Outcome::RebootRequired,
             } => Ok(Outcome::RebootRequired),
@@ -504,10 +691,10 @@ mod native {
     fn requirements(
         stop: &AtomicBool,
         deadline: Instant,
-        review: &mut dyn FnMut() -> Result<bool>,
+        review: &mut Reviewer<'_>,
     ) -> Result<prerequisites::Outcome> {
         let state = prerequisites::prepare(false, stop, deadline)?;
-        if state == prerequisites::Outcome::EnableRequired && review()? {
+        if state == prerequisites::Outcome::EnableRequired && review(Review::EnableHyperv)? {
             return prerequisites::prepare(true, stop, deadline);
         }
         Ok(state)
@@ -552,9 +739,17 @@ mod native {
             let worker_stop = Arc::clone(&stop);
             let worker_owner = owner.clone();
             let worker = scope.spawn(move || {
-                let mut review = || {
+                let mut review = |request: Review<'_>| {
+                    let event = match request {
+                        Review::EnableHyperv => Event::Requirements {
+                            outcome: prerequisites::Outcome::EnableRequired,
+                        },
+                        Review::Atomic(review) => Event::AtomicReview {
+                            review: review.clone(),
+                        },
+                    };
                     review_request
-                        .send(())
+                        .send(event)
                         .map_err(|_| Error("setup_client_disconnected"))?;
                     loop {
                         check(&worker_stop, deadline)?;
@@ -580,20 +775,21 @@ mod native {
                     if Instant::now() >= deadline {
                         stop.store(true, Ordering::Release);
                     }
-                    if connected && reviews.try_recv().is_ok() {
-                        response(
-                            &mut channel,
-                            &manifest,
-                            operation,
-                            Event::Requirements {
-                                outcome: prerequisites::Outcome::EnableRequired,
-                            },
-                        )?;
+                    if let Some(event) = connected.then(|| reviews.try_recv().ok()).flatten() {
+                        let review_id = match &event {
+                            Event::AtomicReview { review } => Some(review.review_id.clone()),
+                            _ => None,
+                        };
+                        response(&mut channel, &manifest, operation, event)?;
                         let raw = frame::read(&mut channel, 1..=LIMIT)
                             .map_err(|_| Error("invalid_setup_approval"))?;
                         channel.authenticate_setup(&owner)?;
+                        let approved = match review_id {
+                            Some(review_id) => AtomicApproval::decode(&raw, &review_id)?,
+                            None => decode::<Approval>(&raw)?.enable_hyperv,
+                        };
                         approve
-                            .send(decode::<Approval>(&raw)?.enable_hyperv)
+                            .send(approved)
                             .map_err(|_| Error("setup_worker_failed"))?;
                         continue;
                     }
@@ -805,11 +1001,14 @@ mod native {
 }
 
 #[cfg(windows)]
-pub use native::{execute, service};
+pub use native::{execute, execute_atomic, service};
 
 #[cfg(test)]
 mod tests {
-    use super::{Approval, Event, LIMIT, Operation, Request, Response, decode};
+    use super::{
+        Approval, AtomicApproval, Event, LIMIT, Operation, Request, Response, atomic_failure,
+        decode, verify_atomic_completion,
+    };
     use serde_json::json;
 
     #[test]
@@ -903,5 +1102,52 @@ mod tests {
             .is_err()
         );
         assert!(Request::decode(br#"{"version":1,"source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","operation":{"kind":"gc","bytes":17179869184}}"#).is_err());
+    }
+
+    #[test]
+    fn atomic_setup_requires_the_exact_review_before_accepting_completion() {
+        let manifest = "b".repeat(64);
+        let runtime_id = "1".repeat(32);
+        let review_id = "c".repeat(64);
+        let review = json!({
+            "version": 1, "manifest_sha256": manifest, "operation": {"kind":"atomic"},
+            "event": {"kind":"atomic-review", "review": {
+                "runtime_id": runtime_id, "review_id": review_id,
+                "archive": r"C:\ProgramData\Oblivion\test\data.vhdx", "archive_present": true,
+                "data_bytes": 17179869184_u64, "bundle_id": "d".repeat(64), "source_sha256": "e".repeat(64)
+            }}
+        });
+        let bytes = serde_json::to_vec(&review).unwrap();
+        let response = Response::decode(&bytes, &manifest, Operation::Atomic {}).unwrap();
+        let Event::AtomicReview { review: details } = response.event else {
+            panic!("expected review")
+        };
+        assert!(Response::decode(&bytes, &manifest, Operation::Uninstall {}).is_err());
+        let approved = serde_json::to_vec(&json!({"review_id": review_id, "remove":true})).unwrap();
+        assert!(AtomicApproval::decode(&approved, &review_id).unwrap());
+        assert!(AtomicApproval::decode(&approved, &"f".repeat(64)).is_err());
+        assert!(AtomicApproval::decode(br#"{"enable_hyperv":true}"#, &review_id).is_err());
+        let injected_path = serde_json::to_vec(
+            &json!({"review_id": review_id, "remove":true, "path":r"C:\Foreign"}),
+        )
+        .unwrap();
+        assert!(AtomicApproval::decode(&injected_path, &review_id).is_err());
+        assert!(verify_atomic_completion(None, &runtime_id, &review_id).is_err());
+        assert!(verify_atomic_completion(Some(&details), &runtime_id, &review_id).is_ok());
+        assert!(verify_atomic_completion(Some(&details), &"2".repeat(32), &review_id).is_err());
+        assert!(verify_atomic_completion(Some(&details), &runtime_id, &"f".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn atomic_failure_exposes_only_actionable_setup_codes() {
+        assert_eq!(atomic_failure("runtime_busy").0, "runtime_busy");
+        assert_eq!(
+            atomic_failure("installed_runtime_source_mismatch").0,
+            "installed_runtime_source_mismatch"
+        );
+        assert_eq!(
+            atomic_failure(r"secret C:\Foreign").0,
+            "setup_atomic_failed"
+        );
     }
 }

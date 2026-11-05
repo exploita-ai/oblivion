@@ -36,7 +36,7 @@ pub fn run() -> Result<i32> {
     // booting a runtime. Files uses native local endpoints after this admission.
     match &command {
         Command::Help => {
-            print!("{}", command::HELP);
+            print!("{}", command::help(command::HelpProfile::Windows));
             return Ok(0);
         }
         Command::Version => {
@@ -63,6 +63,9 @@ pub fn run() -> Result<i32> {
         Command::Runtime(RuntimeCommand::LiveMedia) => {
             return Err("USB media listing is available only on Oblivion Live".into());
         }
+        Command::Runtime(RuntimeCommand::Atomic) if !interactive() => {
+            return Err("Runtime atomic requires an interactive terminal".into());
+        }
         Command::Runtime(command)
             if !matches!(
                 command,
@@ -73,6 +76,7 @@ pub fn run() -> Result<i32> {
                     | RuntimeCommand::Recover
                     | RuntimeCommand::Gc
                     | RuntimeCommand::Uninstall
+                    | RuntimeCommand::Atomic
             ) =>
         {
             return Err("windows_runtime_operation_not_implemented".into());
@@ -182,7 +186,7 @@ fn runtime_command(command: RuntimeCommand) -> Result<i32> {
     let stop = Arc::new(AtomicBool::new(false));
     match command {
         RuntimeCommand::InstallBundle(path) => {
-            maintenance_outcome(oblivion_native_windows::setup::execute(
+            let outcome = oblivion_native_windows::setup::execute(
                 bundle_input(&path, Some(source_id()?))?,
                 oblivion_native_windows::setup::Operation::Install { bytes: DATA_BYTES },
                 stop,
@@ -194,7 +198,13 @@ fn runtime_command(command: RuntimeCommand) -> Result<i32> {
                     crate::windows_terminal::confirm("ENABLE", |_| {})
                         .map_err(|_| oblivion_native_windows::Error("setup_review_interrupted"))
                 },
-            )?)
+            );
+            match outcome {
+                Err(error) if error.0 == "atomic_path_cleanup_pending" => {
+                    Err("Retry runtime atomic from the matching bundle to finish removing the user PATH entry before reinstalling.".into())
+                }
+                result => maintenance_outcome(result?),
+            }
         }
         RuntimeCommand::Update(path) => {
             maintenance_outcome(oblivion_native_windows::setup::execute(
@@ -217,6 +227,26 @@ fn runtime_command(command: RuntimeCommand) -> Result<i32> {
                 stop,
                 Instant::now() + STARTUP,
                 &mut || Err(oblivion_native_windows::Error("unexpected_setup_review")),
+            )?)
+        }
+        RuntimeCommand::Atomic => {
+            maintenance_outcome(oblivion_native_windows::setup::execute_atomic(
+                VerifiedBundle::current_launcher(source_id()?)?,
+                stop,
+                Instant::now() + STARTUP,
+                &mut |review| {
+                    println!("Permanently remove Oblivion runtime {}?", review.runtime_id);
+                    if review.archive_present {
+                        println!(
+                            "Encrypted Safes and settings: {:?} ({} bytes)",
+                            review.archive, review.data_bytes
+                        );
+                    } else {
+                        println!("The encrypted archive has already been removed. Resume cleanup?");
+                    }
+                    crate::windows_terminal::confirm("ATOMIC", |_| {})
+                        .map_err(|_| oblivion_native_windows::Error("setup_review_interrupted"))
+                },
             )?)
         }
         RuntimeCommand::Start => {
@@ -295,6 +325,20 @@ fn maintenance_outcome(outcome: oblivion_native_windows::setup::Outcome) -> Resu
                 return Ok(2);
             }
             Ok(command)
+        }
+        Outcome::Atomic { runtime_id, cleanup } => {
+            println!("{}", serde_json::to_string(&cleanup)?);
+            if !cleanup.software_removed {
+                eprintln!(
+                    "Removal is incomplete. Close installed Oblivion programs and retry from a verified external copy of the matching bundle."
+                );
+                return Ok(2);
+            }
+            println!("Oblivion and its encrypted archive were removed.");
+            Ok(command_registration(
+                user_command::unregister(&runtime_id),
+                "Reopen your terminal to refresh its PATH.",
+            ))
         }
         Outcome::RebootRequired => {
             println!(

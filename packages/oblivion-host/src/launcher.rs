@@ -2,6 +2,7 @@ use oblivion_cli::command;
 #[cfg(test)]
 use oblivion_cli::controller::{AgentSafeState, State};
 use oblivion_cli::controller;
+use oblivion_host::activity::Reporter;
 use oblivion_host::{agent, control, scope};
 #[cfg(test)]
 use serde_json::json;
@@ -10,6 +11,7 @@ use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
@@ -21,12 +23,14 @@ mod file_events;
 mod idle_commands;
 mod init_commands;
 mod live_media_commands;
+mod manager_terminal;
 mod native_overlay;
 mod network_commands;
 mod proxy_commands;
 mod safe_commands;
 mod share_commands;
 mod shell_commands;
+use manager_terminal::ManagerTerminal;
 
 static SIGNAL: AtomicI32 = AtomicI32::new(0);
 extern "C" fn signal(value: i32) {
@@ -34,7 +38,11 @@ extern "C" fn signal(value: i32) {
 }
 
 fn main() {
-    let result = run();
+    let terminal = match ManagerTerminal::open() {
+        Ok(value) => value.map(Arc::new),
+        Err(_) => std::process::exit(1),
+    };
+    let result = run(terminal.as_ref());
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let result = {
         let cleanup = oblivion_host::native_runtime::release_owner();
@@ -43,13 +51,22 @@ fn main() {
     match result {
         Ok(code) => std::process::exit(code),
         Err(error) => {
-            eprintln!("Oblivion: {error}");
+            match (terminal.as_ref(), error.to_string().as_str()) {
+                (Some(terminal), "gateway_start_failed") => { let _ = terminal.event(b'F'); }
+                (Some(terminal), "gateway_not_ready") => { let _ = terminal.event(b'T'); }
+                (Some(terminal), "insufficient_ephemeral_storage") => { let _ = terminal.event(b'S'); }
+                (Some(_), _) => {}
+                (None, "gateway_start_failed") => eprintln!("Oblivion: The protected gateway failed to start. The Safe stayed offline."),
+                (None, "gateway_not_ready") => eprintln!("Oblivion: The protected connection timed out. The Safe stayed offline."),
+                (None, "insufficient_ephemeral_storage") => eprintln!("Oblivion: The controller has insufficient RAM-only storage for another Safe. Close an unused RAM-only Safe and retry."),
+                (None, _) => eprintln!("Oblivion: {error}"),
+            }
             std::process::exit(1);
         }
     }
 }
 
-fn run() -> control::Result<i32> {
+fn run(terminal: Option<&Arc<ManagerTerminal>>) -> control::Result<i32> {
     control::protect()?;
     let args = std::env::args_os()
         .skip(1)
@@ -70,7 +87,15 @@ fn run() -> control::Result<i32> {
     }
     match &command {
         command::Command::Help => {
-            print!("{}", command::HELP);
+            use oblivion_host::native_runtime::{Mode, mode};
+            let profile = match mode()? {
+                Mode::Live => command::HelpProfile::Live,
+                Mode::Desktop if oblivion_host::desktop_bundle::packaged_entry()? => {
+                    command::HelpProfile::PackagedLinux
+                }
+                Mode::Desktop => command::HelpProfile::Desktop,
+            };
+            print!("{}", command::help(profile));
             return Ok(0);
         }
         command::Command::Version => {
@@ -142,6 +167,7 @@ fn run() -> control::Result<i32> {
                 RuntimeCommand::Stop => oblivion_host::native_runtime::stop()?,
                 RuntimeCommand::Gc => oblivion_host::native_runtime::gc()?,
                 RuntimeCommand::Uninstall => oblivion_host::native_runtime::uninstall()?,
+                RuntimeCommand::Atomic => oblivion_host::native_runtime::atomic()?,
             }
             return Ok(0);
         }
@@ -152,12 +178,13 @@ fn run() -> control::Result<i32> {
             command::Command::Controller(controller::Command::StatusJson) => {
                 oblivion_host::native_runtime::ensure_status()?
             }
+            _ if terminal.is_some() => oblivion_host::native_runtime::ensure_quiet()?,
             _ => oblivion_host::native_runtime::ensure()?,
         }
     }
     match command {
         command::Command::Manager => {
-            let launcher = std::env::current_exe()?;
+            let launcher = oblivion_host::desktop_bundle::launcher_path()?;
             let manager = launcher
                 .parent()
                 .ok_or("executable_directory_missing")?
@@ -175,14 +202,14 @@ fn run() -> control::Result<i32> {
         command::Command::Storage(command) => {
             oblivion_cli::storage::execute(&mut UnixRuntime::new(), command)
         }
-        command::Command::Run(options) => oblivion_cli::run::execute(
-            &mut UnixRuntime::new(),
-            options.resolve_transport(resolve_proxy)?,
-            oblivion_cli::run::Context {
-                prefer_ephemeral: std::env::var("OBLIVION_LIVE_STORAGE").as_deref()
-                    == Ok("ephemeral"),
-            },
-        ),
+        command::Command::Run(options) => {
+            let mut runtime = UnixRuntime::new();
+            runtime.terminal = terminal.cloned();
+            let options = options.resolve_transport(|request| oblivion_cli::proxy::complete(request, &mut runtime))?;
+            oblivion_cli::run::execute(&mut runtime, options, oblivion_cli::run::Context {
+                prefer_ephemeral: std::env::var("OBLIVION_LIVE_STORAGE").as_deref() == Ok("ephemeral"),
+            })
+        }
         command::Command::Shell(command) => shell_commands::run(command),
         command::Command::Network(command) => network_commands::run(command),
         command::Command::Proxy(command) => proxy_commands::run(command),
@@ -220,6 +247,7 @@ fn proxy(url: &str) -> control::Result<oblivion_transport::Transport> {
     resolve_proxy(oblivion_cli::proxy::parse(url)?)
 }
 
+#[cfg(test)]
 fn resolve_proxy(
     request: oblivion_cli::proxy::Request,
 ) -> control::Result<oblivion_transport::Transport> {
@@ -228,12 +256,21 @@ fn resolve_proxy(
 
 pub(crate) struct UnixRuntime {
     client: control::Client,
+    terminal: Option<Arc<ManagerTerminal>>,
 }
 
 impl UnixRuntime {
     pub(crate) fn new() -> Self {
         Self {
             client: control::Client::new(),
+            terminal: None,
+        }
+    }
+
+    fn prompt<T>(&self, read: impl FnOnce() -> control::Result<T>) -> control::Result<T> {
+        match self.terminal.as_ref() {
+            Some(terminal) => terminal.prompt(read),
+            None => read(),
         }
     }
 }
@@ -253,13 +290,14 @@ impl oblivion_cli::run::Runtime for UnixRuntime {
             .collect()
     }
     fn password(&mut self, label: &'static str) -> control::Result<Zeroizing<Vec<u8>>> {
-        password(label, false)
+        let mut activity = Reporter::current_host()?;
+        self.prompt(|| read_password(label, false, &mut activity))
     }
     fn new_password(&mut self, label: &'static str) -> control::Result<Zeroizing<Vec<u8>>> {
-        new_password(label)
+        self.prompt(|| new_password(label))
     }
     fn confirm(&mut self, word: &'static str) -> control::Result<bool> {
-        init_commands::confirm(word)
+        self.prompt(|| init_commands::confirm(word))
     }
     fn now(&self) -> Instant {
         Instant::now()
@@ -272,6 +310,12 @@ impl oblivion_cli::run::Runtime for UnixRuntime {
         Ok(())
     }
     fn notice(&mut self, notice: oblivion_cli::run::Notice<'_>) -> control::Result<()> {
+        if let Some(terminal) = self.terminal.as_ref() {
+            if matches!(notice, oblivion_cli::run::Notice::WaitingForConnection) {
+                terminal.event(b'G')?;
+            }
+            return Ok(());
+        }
         notice.write(&mut std::io::stderr().lock())
     }
     fn attach(
@@ -281,15 +325,18 @@ impl oblivion_cli::run::Runtime for UnixRuntime {
         agent: &str,
         argv: &[String],
     ) -> control::Result<i32> {
-        scope::within(slot, || attach_agent(id, agent, argv))
+        scope::within(slot, || attach_agent(id, agent, argv, self.terminal.as_deref()))
     }
     fn attach_workspace(&mut self, slot: scope::Slot, id: &str) -> control::Result<i32> {
         scope::within(slot, || attach_workspace(id))
     }
 }
 
-fn password(label: &str, confirm: bool) -> control::Result<Zeroizing<Vec<u8>>> {
-    let mut activity = oblivion_host::activity::Reporter::current_host()?;
+fn read_password(
+    label: &str,
+    confirm: bool,
+    activity: &mut Option<Reporter>,
+) -> control::Result<Zeroizing<Vec<u8>>> {
     let mut tty = OpenOptions::new()
         .read(true)
         .write(true)
@@ -341,14 +388,15 @@ fn password(label: &str, confirm: bool) -> control::Result<Zeroizing<Vec<u8>>> {
     Ok(result)
 }
 fn new_password(label: &str) -> control::Result<Zeroizing<Vec<u8>>> {
-    let first = password(label, true)?;
-    if *first != *password("Confirm password", false)? {
+    let mut activity = Reporter::current_host()?;
+    let first = read_password(label, true, &mut activity)?;
+    if *first != *read_password("Confirm password", false, &mut activity)? {
         return Err("Passwords do not match".into());
     }
     Ok(first)
 }
 
-fn attach_agent(id: &str, agent: &str, argv: &[String]) -> control::Result<i32> {
+fn attach_agent(id: &str, agent: &str, argv: &[String], terminal: Option<&ManagerTerminal>) -> control::Result<i32> {
     let viewport = (unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 }).then(size);
     let launch = agent::Launch {
         agent: agent.to_owned(),
@@ -356,7 +404,7 @@ fn attach_agent(id: &str, agent: &str, argv: &[String]) -> control::Result<i32> 
         managed: None,
         terminal: viewport.map(oblivion_cli::terminal_overlay::guest_size),
     };
-    attach_command(id, agent::Command::Agent(&launch), viewport)
+    attach_command(id, agent::Command::Agent(&launch), viewport, terminal)
 }
 
 fn attach_workspace(id: &str) -> control::Result<i32> {
@@ -365,10 +413,10 @@ fn attach_workspace(id: &str) -> control::Result<i32> {
     }
     let viewport = size();
     let terminal = oblivion_cli::terminal_overlay::guest_size(viewport);
-    attach_command(id, agent::Command::Workspace { terminal }, Some(viewport))
+    attach_command(id, agent::Command::Workspace { terminal }, Some(viewport), None)
 }
 
-fn attach_command(id: &str, command: agent::Command<'_>, viewport: Option<agent::Size>) -> control::Result<i32> {
+fn attach_command(id: &str, command: agent::Command<'_>, viewport: Option<agent::Size>, terminal: Option<&ManagerTerminal>) -> control::Result<i32> {
     let (mut stream, lease, client) = control::attach_client("agent-attach", id)?;
     let tty = viewport.is_some();
     let name = match &command {
@@ -380,6 +428,7 @@ fn attach_command(id: &str, command: agent::Command<'_>, viewport: Option<agent:
     } else {
         None
     };
+    if let Some(terminal) = terminal { terminal.event(b'R')?; }
     let mut saved = unsafe { std::mem::zeroed() };
     if tty && unsafe { libc::tcgetattr(0, &mut saved) } != 0 {
         return Err("Cannot read terminal settings".into());

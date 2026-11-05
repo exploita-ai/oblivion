@@ -102,6 +102,29 @@ impl Record {
     }
 }
 
+#[cfg(any(windows, test))]
+pub(crate) fn verify_retired_receipt(
+    bytes: &[u8],
+    runtime: &str,
+    config_sha256: &str,
+    client: &str,
+    storage: &str,
+    data: FileEvidence,
+) -> Result<()> {
+    let record = Record::decode(bytes)?;
+    let binding = &record.binding;
+    if !record.clean
+        || binding.runtime_id != runtime
+        || binding.config_sha256 != config_sha256
+        || binding.client_sid != client
+        || binding.storage_sid != storage
+        || record.files.last() != Some(&data)
+    {
+        return Err(Error("runtime_resources_require_recovery"));
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 mod native {
     use super::{Binding, FileEvidence, LIMIT, Plan, Record};
@@ -638,5 +661,25 @@ mod tests {
         record.may_replace(&next).unwrap();
         next.client_sid = "S-1-5-21-1-2-3-1002".into();
         assert!(record.may_replace(&next).is_err());
+    }
+
+    #[test]
+    fn atomic_accepts_only_clean_receipts_for_the_reviewed_disk() {
+        let mut record = record();
+        let disk = *record.files.last().unwrap();
+        let verify = |record: &Record, disk| {
+            verify_retired_receipt(
+                &serde_json::to_vec(record).unwrap(),
+                &record.binding.runtime_id,
+                &record.binding.config_sha256,
+                &record.binding.client_sid,
+                &record.binding.storage_sid,
+                disk,
+            )
+        };
+        assert!(verify(&record, disk).is_err());
+        record.clean = true;
+        verify(&record, disk).unwrap();
+        assert!(verify(&record, record.files[0]).is_err());
     }
 }
