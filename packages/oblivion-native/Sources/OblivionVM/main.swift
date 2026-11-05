@@ -410,6 +410,10 @@ final class Runtime: NSObject, VZVirtualMachineDelegate {
 
 func main() throws {
     let args = Array(CommandLine.arguments.dropFirst())
+    if args == ["pick-files"] {
+        try MainActor.assumeIsolated { try pickFiles() }
+        return
+    }
     if args == ["capabilities"] {
         #if arch(arm64)
         let nested = VZGenericPlatformConfiguration.isNestedVirtualizationSupported
@@ -451,6 +455,9 @@ do {
     report(error.rawValue)
     Darwin.exit(1)
 } catch let error as RuntimeError {
+    report(error.rawValue)
+    Darwin.exit(1)
+} catch let error as FilePickerFailure {
     report(error.rawValue)
     Darwin.exit(1)
 } catch {
