@@ -166,7 +166,9 @@ def build(source, architecture, version, revision, dirty, output):
         (root / "DEBIAN/control").write_text(
             f"Package: {PACKAGE}\nVersion: {version}\nArchitecture: {architecture}\n"
             "Section: utils\nPriority: optional\nMaintainer: Oblivion development <development@example.invalid>\n"
-            f"Depends: {dependencies}\nConflicts: oblivion-stack\nInstalled-Size: {size}\n"
+            f"Depends: {dependencies}\n"
+            "Recommends: python3-gi, gir1.2-gtk-4.0 (>= 4.6)\n"
+            f"Conflicts: oblivion-stack\nInstalled-Size: {size}\n"
             "Homepage: https://github.com/exploita-ai/oblivion\n"
             "Description: Development launcher for the Oblivion desktop privacy runtime\n"
             " Runs the paired controller in a private headless QEMU/KVM virtual machine.\n",

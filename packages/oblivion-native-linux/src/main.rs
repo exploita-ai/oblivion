@@ -1,4 +1,6 @@
 use oblivion_native_linux::{Error, config::RuntimeConfig, kvm, lifetime::Lifetime, runtime};
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 
 fn main() {
@@ -14,6 +16,24 @@ fn main() {
         }
     }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    #[cfg(target_os = "linux")]
+    if args.len() == 1 && args[0] == "pick-files" {
+        // Exec preserves the manager's owned process and its stdin lifetime.
+        let _ = std::process::Command::new("/usr/bin/python3")
+            .args([
+                "-I",
+                "-B",
+                "-X",
+                "utf8",
+                "-c",
+                include_str!("pick_files.py"),
+            ])
+            .env("GIO_USE_VFS", "local")
+            .env("GSETTINGS_BACKEND", "memory")
+            .exec();
+        runtime::report("desktop_file_picker_unavailable");
+        std::process::exit(1);
+    }
     #[cfg(target_os = "linux")]
     if args.len() == 1 && args[0] == "enroll" {
         if let Err(error) = oblivion_native_linux::enrollment::enroll() {
