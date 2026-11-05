@@ -95,8 +95,7 @@ The outer Live launcher lists separate USB partitions and unpartitioned
 USB disks in System. Discovery runs without elevation and reads only system
 metadata. It excludes the entire boot device and disks with mounted, swap
 or held volumes. Device IDs describe the current boot and observed device
-generation. Passing the selected device to the controller and using it in
-Files remain open. See [Live controls](LIVE.md).
+generation. See [Live controls](LIVE.md).
 
 The read-only USB path now has separate source components for device access,
 Safe authorization and file selection. The Live broker exclusively opens the
@@ -106,9 +105,15 @@ opening, and its private channel is revoked on close, lock, expiry or owner
 exit. The QEMU adapter retains the descriptor until it confirms removal or
 the controller VM exits. The transfer guest can browse the read-only source
 and prepare a selection using the existing manifest and receipt protocol.
-The installed Live still exposes only inventory. Broker activation, the
-reservation-to-hotplug connection, Files publication and physical USB acceptance
-remain open.
+The source connects this path to **Files → Import from USB** and `files import
+--usb ID`. The browser keeps one read-only attachment while navigating. The
+approved copy uses the normal receiver journal and publishes to `workspace`.
+The runtime verifies the scoped controller worker and mapping stopped before
+it asks QEMU to eject. A fresh local receipt distinguishes confirmed removal
+from data emitted by the transfer guest. The caller that controls Debian Live
+and its terminal remains in the trusted boundary. The published beta images
+predate this flow. Physical attach, unplug and eject, USB export, and the
+installed Live acceptance remain open.
 
 The ARM64 outer Live now selects QEMU from Debian backports, records its package
 version and executable hash, and verifies that evidence before ISO packing.

@@ -50,9 +50,15 @@ Open **System** with **F3** to inspect removable USB media. The list shows
 available partitions and unpartitioned USB disks, their sizes and whether
 the kernel reports them as read-only. Connect or remove a drive, then press
 **R** to refresh. The boot drive and devices in use are excluded. The same
-inventory is available through `oblivion runtime live-media --json`. This
-screen only inspects devices. Connecting a selected device to the transfer VM
-and importing or exporting files from it are still open.
+inventory is available through `oblivion runtime live-media --json`.
+
+In the 1.0 source, open a Safe's **Files → Import from USB**, then choose a
+device. The isolated transfer VM browses ext4, FAT or exFAT media in read-only
+mode. Use **Space** to select and **C** to continue. Choose the workspace name
+and approve the file manifest. Wait for the verified result before removing the
+USB. If removal cannot be confirmed, check the runtime and the recorded copy
+outcome before retrying. USB export and acceptance on a physical Live boot
+remain open.
 
 To switch between persistent and RAM-only storage, lock Oblivion and choose
 **Change storage mode** on its welcome screen. The action is available only
