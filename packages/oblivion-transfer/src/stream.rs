@@ -89,6 +89,124 @@ impl PreparedUpload {
     }
 }
 
+/// One verified offer from a private read-only media source. The source stays
+/// attached through review, and no destination or staging is opened here.
+#[cfg(unix)]
+pub struct PreparedMediaImport<S: Transport> {
+    source: S,
+    manifest: Manifest,
+    context: Context,
+    plan: Plan,
+}
+
+#[cfg(unix)]
+impl<S: Transport> PreparedMediaImport<S> {
+    pub fn prepare(mut source: S, selected: &[String], context: Context) -> io::Result<Self> {
+        context.validate()?;
+        require(
+            context.direction == Direction::Import,
+            "invalid_file_source",
+        )?;
+        selection::validate_rooted_paths(selected)?;
+        let (manifest, plan) =
+            request_selection(&mut source, selected, &context.id, |paths, offer| {
+                plan_from_offer(paths, offer, Plan::rooted)
+            })?;
+        let prepared = Self {
+            source,
+            manifest,
+            context,
+            plan,
+        };
+        prepared.summary()?;
+        Ok(prepared)
+    }
+
+    pub fn summary(&self) -> io::Result<Summary> {
+        Summary::from_manifest(&self.manifest, &self.plan)
+    }
+
+    pub fn plan(&self) -> &Plan {
+        &self.plan
+    }
+
+    /// The destination has already been authorized for this exact operation
+    /// and dispatched to its native Files receive endpoint by the caller.
+    pub fn send<T: Transport>(
+        mut self,
+        destination: &mut T,
+        approved_digest: &str,
+        observer: &mut dyn FnMut(Phase, u64) -> io::Result<()>,
+    ) -> io::Result<Receipt> {
+        self.source.check()?;
+        let receipt = copy_protocol::send(
+            destination,
+            &mut MediaPayload {
+                source: &mut self.source,
+                manifest: &self.manifest,
+                approval: Approval {
+                    id: self.context.id.clone(),
+                    manifest_sha256: approved_digest.into(),
+                },
+            },
+            &self.context.id,
+            approved_digest,
+            observer,
+        )?;
+        self.source.check()?;
+        write_message(&mut self.source, &receipt)?;
+        self.source.flush()?;
+        let mut completed = [0; 7];
+        self.source.read_exact(&mut completed)?;
+        require(&completed == b"copied\n", "source_not_completed")?;
+        Ok(receipt)
+    }
+}
+
+#[cfg(unix)]
+struct MediaPayload<'a, S> {
+    source: &'a mut S,
+    manifest: &'a Manifest,
+    approval: Approval,
+}
+
+#[cfg(unix)]
+impl<S: Transport> copy_protocol::Source for MediaPayload<'_, S> {
+    fn manifest(&self) -> &Manifest {
+        self.manifest
+    }
+
+    fn write_payload<W: Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        self.source.check()?;
+        write_message(self.source, &self.approval)?;
+        self.source.flush()?;
+        relay_payload(self.source, writer, self.manifest)?;
+        writer.write_all(crate::END)
+    }
+}
+
+/// A relay can release the terminator only after validating all offered bytes
+/// and observing the source's own terminator.
+#[cfg(unix)]
+pub(crate) fn relay_payload(
+    source: &mut impl Transport,
+    writer: &mut impl Write,
+    manifest: &Manifest,
+) -> io::Result<()> {
+    for entry in manifest.entries() {
+        if let crate::Entry::File { size, sha256, .. } = entry {
+            require(
+                crate::copy_hash(source, writer, *size)? == *sha256,
+                "content_changed",
+            )?;
+        }
+    }
+    let mut end = [0; 8];
+    source.read_exact(&mut end)?;
+    require(&end == crate::END, "invalid_transfer_end")?;
+    source.check()
+}
+
 /// Personal ciphertext backups already own their reviewed Selection. They
 /// share this exact source protocol without introducing native Files state.
 pub fn send<T: Transport, S: copy_protocol::Source>(
@@ -143,29 +261,8 @@ impl<T: Transport> PreparedDownload<T> {
         let target = Directory::open(target)?;
         target.require_controlled()?;
         target.identity()?;
-        channel.check()?;
-        write_message(
-            &mut channel,
-            &OfferRequest {
-                id: context.id.clone(),
-                limits: Limits {
-                    entries: crate::MAX_ENTRIES,
-                    bytes: crate::MAX_DOCUMENT_BYTES,
-                },
-                paths: selected.to_vec(),
-            },
-        )?;
-        channel.flush()?;
-        let offer: SelectionOffer = read_message(&mut channel, 64 * 1024)?;
-        let plan = selection_plan(selected, &offer)?;
-        let manifest = Manifest::read(
-            &mut channel,
-            Limits {
-                entries: crate::MAX_ENTRIES,
-                bytes: crate::MAX_DOCUMENT_BYTES,
-            },
-        )?;
-        require_collection(&manifest, &plan, &offer.directories)?;
+        let (manifest, plan) =
+            request_selection(&mut channel, selected, &context.id, selection_plan)?;
         #[cfg(windows)]
         crate::windows_destination::validate(&manifest, &context.name)?;
         let prepared = Self {
@@ -550,13 +647,36 @@ fn selected_parent(transaction: &Directory, selected: &str) -> io::Result<Direct
         })
 }
 
+fn request_selection(
+    source: &mut impl Transport,
+    selected: &[String],
+    id: &str,
+    selection_plan: fn(&[String], &SelectionOffer) -> io::Result<Plan>,
+) -> io::Result<(Manifest, Plan)> {
+    let limits = Limits {
+        entries: crate::MAX_ENTRIES,
+        bytes: crate::MAX_DOCUMENT_BYTES,
+    };
+    source.check()?;
+    write_message(
+        source,
+        &OfferRequest {
+            id: id.into(),
+            limits,
+            paths: selected.to_vec(),
+        },
+    )?;
+    source.flush()?;
+    let offer = read_message(source, 64 * 1024)?;
+    let plan = selection_plan(selected, &offer)?;
+    let manifest = Manifest::read(source, limits)?;
+    require_collection(&manifest, &plan, &offer.directories)?;
+    Ok((manifest, plan))
+}
+
 /// Both the native receiver and the media relay verify the source's path-free
 /// plan against the exact requested document selection before approving bytes.
 pub(crate) fn selection_plan(selected: &[String], offer: &SelectionOffer) -> io::Result<Plan> {
-    require(
-        offer.directories.len() == selected.len(),
-        "invalid_selection_offer",
-    )?;
     for path in selected {
         validate_path(path)?;
         require(
@@ -564,7 +684,19 @@ pub(crate) fn selection_plan(selected: &[String], offer: &SelectionOffer) -> io:
             "invalid_document_selection",
         )?;
     }
-    let plan = Plan::new(
+    plan_from_offer(selected, offer, Plan::new)
+}
+
+fn plan_from_offer(
+    selected: &[String],
+    offer: &SelectionOffer,
+    plan: fn(&[Input]) -> io::Result<Plan>,
+) -> io::Result<Plan> {
+    require(
+        offer.directories.len() == selected.len(),
+        "invalid_selection_offer",
+    )?;
+    let plan = plan(
         &selected
             .iter()
             .zip(&offer.directories)

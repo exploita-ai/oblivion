@@ -2,7 +2,7 @@ use crate::channel::Channel;
 use crate::endpoint::{
     Approval, ReceiveRequest, SelectionOffer, SourceRequest, read_message, write_message,
 };
-use crate::{END, Entry, Limits, Manifest, Receipt, copy_hash, require, validate_id};
+use crate::{END, Limits, Manifest, Receipt, require, validate_id};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::OwnedFd;
@@ -296,29 +296,13 @@ fn exchange(
             bytes: 0,
             last: Instant::now(),
         };
-        for entry in manifest.entries() {
-            if let Entry::File { size, sha256, .. } = entry {
-                require(
-                    copy_hash(source, &mut writer, *size)? == *sha256,
-                    "content_changed",
-                )?;
-            }
-        }
+        crate::stream::relay_payload(source, &mut writer, &manifest)?;
     }
-    let mut end = [0; 8];
-    source.read_exact(&mut end)?;
-    require(&end == END, "invalid_transfer_end")?;
     // The receiver cannot publish until every offered file has also passed
     // validation at the relay. There is no payload buffering on the host disk.
     destination.write_all(END)?;
     let receipt: Receipt = read_message(destination, 1024)?;
-    require(
-        receipt.id == request.id
-            && receipt.manifest_sha256 == grant.approval.manifest_sha256
-            && receipt.entries == manifest.entries().len()
-            && receipt.bytes == manifest.bytes(),
-        "invalid_receipt",
-    )?;
+    crate::copy_protocol::verify_receipt(&receipt, &request.id, &manifest)?;
     write_message(source, &receipt)?;
     let mut done = [0; 7];
     source.read_exact(&mut done)?;
