@@ -5,6 +5,8 @@ use crate::native_file_events::Phase;
 use crate::{Manifest, Receipt, require, validate_id};
 use std::io::{self, Read, Write};
 
+pub(crate) const DESTINATION_FULL: &[u8; 8] = b"nospace\n";
+
 pub trait Transport: Read + Write {
     fn check(&mut self) -> io::Result<()>;
 }
@@ -58,6 +60,7 @@ pub fn send<T: Transport, S: Source>(
     channel.flush()?;
     let mut accepted = [0; 8];
     channel.read_exact(&mut accepted)?;
+    require(&accepted != DESTINATION_FULL, "insufficient_destination_space")?;
     require(&accepted == b"receive\n", "offer_rejected")?;
     let total = source.manifest().bytes();
     source.write_payload(&mut Payload {

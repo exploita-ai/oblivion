@@ -103,6 +103,30 @@ fn buffered_source_flushes_the_offer_and_payload_before_awaiting_the_receiver() 
 }
 
 #[test]
+fn sender_does_not_write_payload_when_the_receiver_lacks_space() {
+    let source = Tree::new();
+    let path = source.0.join("note");
+    fs::write(&path, b"reviewed contents").unwrap();
+    let upload = stream::PreparedUpload::prepare(&[path], context(Direction::Import), &mut || Ok(())).unwrap();
+    let digest = upload.summary().unwrap().manifest_sha256;
+    let (sender, receiver) = UnixStream::pair().unwrap();
+    let peer = std::thread::spawn(move || {
+        let mut receiver = channel(receiver);
+        let request: endpoint::ReceiveRequest = endpoint::read_message(&mut receiver, 1024).unwrap();
+        oblivion_transfer::Manifest::read(&mut receiver, request.limits).unwrap();
+        receiver.write_all(b"nospace\n").unwrap();
+        assert_eq!(receiver.read(&mut [0]).unwrap(), 0);
+    });
+    let mut sender = channel(sender);
+    assert_eq!(
+        upload.send(&mut sender, &digest, &mut |_, _| Ok(())).unwrap_err().to_string(),
+        "insufficient_destination_space"
+    );
+    drop(sender);
+    peer.join().unwrap();
+}
+
+#[test]
 fn buffered_export_flushes_the_offer_approval_and_receipt_before_awaiting_the_source() {
     let source = Tree::new();
     fs::create_dir(source.0.join("workspace")).unwrap();

@@ -51,6 +51,16 @@ impl Directory {
         self.0.metadata()
     }
 
+    pub fn has_space(&self, bytes: u64) -> io::Result<bool> {
+        let mut space = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: the directory descriptor and the output buffer remain live.
+        if unsafe { libc::fstatvfs(self.0.as_raw_fd(), space.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let space = unsafe { space.assume_init() };
+        Ok(u128::from(bytes) <= u128::from(space.f_bavail) * u128::from(space.f_frsize))
+    }
+
     /// Same currently mounted device, independent of durable filesystem UUID.
     pub fn same_device(&self, file: &File) -> io::Result<bool> {
         Ok(self.0.metadata()?.dev() == file.metadata()?.dev())

@@ -548,6 +548,13 @@ pub fn receive_directory<T: Transport>(
     let selected = manifest.entries()[0].path().to_owned();
     require(!selected.contains('/'), "invalid_source_selection")?;
     require_selection(&manifest, &selected)?;
+    // Reject an import that already exceeds its staging filesystem before the
+    // sender starts writing to the virtio channel.
+    if !guard.has_space(manifest.bytes())? {
+        channel.write_all(copy_protocol::DESTINATION_FULL)?;
+        channel.flush()?;
+        return Err(invalid("insufficient_destination_space"));
+    }
     channel.write_all(b"receive\n")?;
     let receipt = crate::filesystem::receive_at(channel, &manifest, &guard, &request.approval.id)?;
     channel.check()?;
