@@ -180,6 +180,7 @@ packages/oblivion-history/.pytest_cache/
 !NOTICE
 !script/oblivion/pack-vm-assets.sh
 !script/oblivion/build-deb.sh
+!script/oblivion/build-desktop-deb.sh
 !script/oblivion/debian/
 !script/oblivion/debian/**
 !script/oblivion/native-bundle/

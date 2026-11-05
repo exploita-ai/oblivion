@@ -577,6 +577,7 @@ COPY --from=stack-pack /out/ /
 # inventory above, then assemble the same bundle used by Linux desktop installs.
 FROM compiler AS live-native-build
 ARG TARGETARCH
+ARG OBLIVION_DESKTOP_VERSION=1.0.0~dev
 ARG MANAGER_BINARY=artifacts/oblivion-manager/bun-linux-x64/oblivion-manager
 ARG MANAGER_ASSETS=artifacts/oblivion-manager/bun-linux-x64/assets
 ARG MANAGER_LICENSES=artifacts/oblivion-manager/bun-linux-x64/licenses
@@ -598,7 +599,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends libarchive-tool
     && identity=$(python3 -B /script/oblivion/bundle-native.py prepare --runtime /runtime-output --platform "$platform" --output /prepared) \
     && OBLIVION_DESKTOP_SOURCE_SHA256="$identity" OBLIVION_DESKTOP_PLATFORM="$platform" cargo build --locked --release --bin oblivion \
     && cargo build --manifest-path /native-helper/Cargo.toml --locked --release \
-    && python3 -B /script/oblivion/bundle-native.py assemble --prepared /prepared --platform "$platform" --product-version '1.0.0~dev' --cli /build/target/release/oblivion --helper /native-helper/target/release/oblivion-vm --manager /native-manager/oblivion-manager --manager-assets /native-manager/assets --output /desktop
+    && python3 -B /script/oblivion/bundle-native.py assemble --prepared /prepared --platform "$platform" --product-version "$OBLIVION_DESKTOP_VERSION" --cli /build/target/release/oblivion --helper /native-helper/target/release/oblivion-vm --manager /native-manager/oblivion-manager --manager-assets /native-manager/assets --output /desktop
+
+FROM live-native-build AS desktop-debian-build
+ARG OBLIVION_SOURCE_REVISION
+ARG OBLIVION_SOURCE_DIRTY
+COPY script/oblivion/desktop/build-package.py script/oblivion/desktop/oblivion-desktop.conf script/oblivion/desktop/org.oblivion.desktop.policy script/oblivion/desktop/postinst /package-inputs/script/oblivion/desktop/
+COPY script/oblivion/build-desktop-deb.sh script/oblivion/Dockerfile.vm-lab script/oblivion/Dockerfile.vm-lab.dockerignore /package-inputs/script/oblivion/
+RUN apt-get update && apt-get install -y --no-install-recommends dpkg-dev libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /package-inputs/packages/oblivion-native-linux \
+    && cp -a /native-helper/Cargo.toml /native-helper/Cargo.lock /native-helper/src /package-inputs/packages/oblivion-native-linux/ \
+    && cp /script/oblivion/bundle-native.py /package-inputs/script/oblivion/ \
+    && python3 -B /package-inputs/script/oblivion/desktop/build-package.py --source /desktop --architecture "$TARGETARCH" --version "$OBLIVION_DESKTOP_VERSION" --revision "$OBLIVION_SOURCE_REVISION" --dirty "$OBLIVION_SOURCE_DIRTY" --output /out
+
+FROM scratch AS desktop-debian-artifacts
+COPY --from=desktop-debian-build /out/ /
 
 FROM nested-hypervisor-os AS live-launcher
 ARG TARGETARCH

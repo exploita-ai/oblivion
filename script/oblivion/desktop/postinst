@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+if [ "$1" = configure ] && [ -d /run/systemd/system ] && [ ! -e /dev/vhost-vsock ]; then
+    if ! /usr/sbin/modprobe -q vhost_vsock; then
+        printf '%s\n' 'Oblivion: vhost-vsock is unavailable. The launcher will check host readiness on first use.' >&2
+    fi
+fi

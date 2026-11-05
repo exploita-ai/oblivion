@@ -310,6 +310,12 @@ jobs:
           done
       - name: Verify development Debian package install and data-preserving removal
         run: sh script/oblivion/test-deb.sh
+      - name: Verify desktop Debian package and native dependency metadata
+        run: >-
+          docker run --rm --network=none --cap-drop=SYS_MODULE
+          --mount "type=bind,src=$PWD,dst=/sources,readonly"
+          oblivion-debian-packaging-test:latest
+          python3 -B /sources/script/oblivion/desktop/test-package.py
       - name: Check native per-agent Share without source credentials
         working-directory: packages/oblivion-history
         run: |

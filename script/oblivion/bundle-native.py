@@ -36,6 +36,11 @@ def digest(path):
     return result.hexdigest()
 
 
+def bundle_identity(manifest):
+    canonical = {name: value for name, value in manifest.items() if name != "bundle_id"}
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
+
+
 def safe_path(value):
     parts = value.split("/")
     devices = {"con", "prn", "aux", "nul", *["com" + str(index) for index in range(1, 10)],
@@ -214,7 +219,7 @@ def assemble(args):
                 "control_protocol": 1, "assets": "lib/manager",
                 "runtime": {"image": "runtime/controller.iso", "kernel": "runtime/kernel", "initrd": "runtime/initrd"},
                 "files": sorted(files, key=lambda item: item["path"])}
-    manifest["bundle_id"] = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
+    manifest["bundle_id"] = bundle_identity(manifest)
     encoded = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
     if len(encoded) > 1024 * 1024:
         raise ValueError("Bundle manifest exceeds 1 MiB")
