@@ -9,11 +9,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{
-    CompareObjectHandles, ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND,
-    ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY,
-    ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, ERROR_SEM_TIMEOUT, GENERIC_READ, GENERIC_WRITE,
-    GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
-    WAIT_FAILED, WAIT_OBJECT_0,
+    CompareObjectHandles, DuplicateHandle, ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE,
+    ERROR_FILE_NOT_FOUND, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_NO_DATA,
+    ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
+    ERROR_SEM_TIMEOUT, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
+    INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -27,8 +27,8 @@ use windows_sys::Win32::System::Pipes::{
     PIPE_WAIT, WaitNamedPipeW,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, WaitForMultipleObjects,
-    WaitForSingleObject,
+    CreateEventW, GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    WaitForMultipleObjects, WaitForSingleObject,
 };
 use zeroize::Zeroizing;
 
@@ -61,6 +61,12 @@ pub struct Pipe {
     closed: bool,
     read: Option<Operation>,
     write: Option<Operation>,
+}
+
+/// A zero-access reference keeps only the kernel connection alive. It exposes
+/// neither a raw handle nor read/write methods and cannot become a second pump.
+pub(crate) struct Lease {
+    _handle: OwnedHandle,
 }
 
 struct Pending {
@@ -563,6 +569,33 @@ impl Pipe {
             result = Err(error);
         }
         result
+    }
+
+    pub(crate) fn retain_lease(&self) -> io::Result<Lease> {
+        if self.closed {
+            return Err(closed());
+        }
+        let mut duplicate = null_mut();
+        let process = unsafe { GetCurrentProcess() };
+        // No DUPLICATE_SAME_ACCESS: the quiet reference has zero I/O rights.
+        // The pipe's sole I/O owner remains self throughout cancellation/drain.
+        if unsafe {
+            DuplicateHandle(
+                process,
+                self.handle.raw()?,
+                process,
+                &mut duplicate,
+                0,
+                0,
+                0,
+            )
+        } == 0
+        {
+            return Err(failed());
+        }
+        Ok(Lease {
+            _handle: unsafe { OwnedHandle::from_raw_handle(duplicate) },
+        })
     }
 
     pub(crate) fn wait(&self, deadline: Option<Instant>, read: bool) -> io::Result<()> {

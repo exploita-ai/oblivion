@@ -32,6 +32,14 @@ pub struct Channel {
     stop: Arc<AtomicBool>,
     deadline: Option<Instant>,
     closed: bool,
+    attachment: bool,
+    retained: bool,
+}
+
+/// Opaque connection authority retained through explicit controller release.
+/// Dropping it only closes a quiet kernel reference; it performs no RPC or I/O.
+pub struct Lease {
+    _pipe: private::Lease,
 }
 
 impl Client {
@@ -153,6 +161,8 @@ impl Channel {
             stop,
             deadline: Some(deadline),
             closed: false,
+            attachment: false,
+            retained: false,
         }
     }
 
@@ -161,7 +171,25 @@ impl Channel {
     pub(crate) fn claim_lease(&mut self) -> io::Result<()> {
         self.check()?;
         self.deadline = None;
+        self.attachment = true;
         Ok(())
+    }
+
+    /// Only an authenticated attachment ACK can grant one quiet lease. Data
+    /// cancellation may close this channel before the controller confirms release.
+    pub fn retain_lease(&mut self) -> io::Result<Lease> {
+        // A cancellation arriving just after ACK must not close the only
+        // connection reference before its cleanup owner can retain it. This
+        // grants no I/O rights and never clears cancellation or a deadline.
+        if self.closed || !self.attachment || self.retained {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid_attachment_lease",
+            ));
+        }
+        let pipe = self.pipe.retain_lease()?;
+        self.retained = true;
+        Ok(Lease { _pipe: pipe })
     }
 
     /// The caller explicitly supplies the next exchange's budget. A timed-out
@@ -225,7 +253,9 @@ impl Channel {
         }
     }
 
-    fn check(&mut self) -> io::Result<()> {
+    /// Check revocation/deadline before local filesystem work as well as I/O.
+    /// An observed failure seals this owned channel; it cannot be revived.
+    pub fn check(&mut self) -> io::Result<()> {
         if self.closed {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,

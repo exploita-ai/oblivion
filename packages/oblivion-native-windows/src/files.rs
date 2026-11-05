@@ -10,27 +10,16 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
 use windows_sys::Win32::Foundation::GENERIC_WRITE;
-use windows_sys::Win32::Foundation::{
-    GENERIC_EXECUTE, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
-};
-use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT,
-};
+use windows_sys::Win32::Foundation::{GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-use windows_sys::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, AclSizeInformation,
-    DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetLengthSid, INHERIT_ONLY_ACE,
-    IsValidAcl, IsValidSecurityDescriptor, IsValidSid, OWNER_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, SID,
-};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
     FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_REPARSE_POINT, FILE_EXECUTE,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_ID_INFO,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, FileIdInfo,
-    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType,
-    GetFinalPathNameByHandleW, OPEN_EXISTING, READ_CONTROL,
+    FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_TYPE_DISK, FileIdInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW, OPEN_EXISTING,
+    READ_CONTROL,
 };
 use windows_sys::Win32::Storage::Vhd::{
     GET_VIRTUAL_DISK_INFO, GET_VIRTUAL_DISK_INFO_IDENTIFIER, GET_VIRTUAL_DISK_INFO_IS_LOADED,
@@ -41,7 +30,6 @@ use windows_sys::Win32::Storage::Vhd::{
     VIRTUAL_STORAGE_TYPE_DEVICE_VHDX, VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT,
 };
 use windows_sys::Win32::System::HostComputeSystem::{HcsGrantVmAccess, HcsRevokeVmAccess};
-use windows_sys::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const MAX_DISK: u64 = 1024 * GIB;
@@ -662,118 +650,16 @@ fn read_at(pinned: &Pinned, offset: u64, bytes: &mut [u8]) -> Result<()> {
         .map_err(|_| Error("runtime_asset_read_failed"))
 }
 
-struct Security(PSECURITY_DESCRIPTOR);
-impl Drop for Security {
-    fn drop(&mut self) {
-        unsafe {
-            LocalFree(self.0);
-        }
-    }
-}
-
 fn permissions(file: &File, owner_sid: &str, private: bool) -> Result<()> {
-    let mut owner = null_mut();
-    let mut acl = null_mut();
-    let mut descriptor = null_mut();
-    if unsafe {
-        GetSecurityInfo(
-            file.as_raw_handle(),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &mut owner,
-            null_mut(),
-            &mut acl,
-            null_mut(),
-            &mut descriptor,
-        )
-    } != 0
-    {
-        return Err(Error("runtime_file_permissions_unavailable"));
-    }
-    let descriptor = Security(descriptor);
-    if descriptor.0.is_null()
-        || unsafe { IsValidSecurityDescriptor(descriptor.0) } == 0
-        || acl.is_null()
-        || unsafe { IsValidAcl(acl) } == 0
-        || !trusted_sid(&sid_text(owner)?, owner_sid)
-    {
-        return Err(Error("private_runtime_file_required"));
-    }
-    let mut info = ACL_SIZE_INFORMATION::default();
-    if unsafe {
-        GetAclInformation(
-            acl,
-            (&mut info as *mut ACL_SIZE_INFORMATION).cast(),
-            size_of::<ACL_SIZE_INFORMATION>() as u32,
-            AclSizeInformation,
-        )
-    } == 0
-    {
-        return Err(Error("runtime_file_permissions_unavailable"));
-    }
-    for index in 0..info.AceCount {
-        let mut raw = null_mut();
-        if unsafe { GetAce(acl, index, &mut raw) } == 0 || raw.is_null() {
-            return Err(Error("runtime_file_permissions_unavailable"));
-        }
-        let header = unsafe { &*raw.cast::<ACE_HEADER>() };
-        if header.AceFlags as u32 & INHERIT_ONLY_ACE != 0 {
-            continue;
-        }
-        if header.AceType as u32 == ACCESS_DENIED_ACE_TYPE {
-            continue;
-        }
-        let sid_start = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
-        let sid_header = std::mem::offset_of!(SID, SubAuthority);
-        if header.AceType as u32 != ACCESS_ALLOWED_ACE_TYPE
-            || (header.AceSize as usize) < sid_start + sid_header
-        {
-            return Err(Error("runtime_file_permissions_unsupported"));
-        }
-        let ace = unsafe { &*raw.cast::<ACCESS_ALLOWED_ACE>() };
-        let sid: PSID = std::ptr::addr_of!(ace.SidStart).cast_mut().cast();
-        let sid_size = sid_header
-            + unsafe { (*sid.cast::<SID>()).SubAuthorityCount } as usize * size_of::<u32>();
-        if sid_size > header.AceSize as usize - sid_start
-            || unsafe { IsValidSid(sid) } == 0
-            || unsafe { GetLengthSid(sid) } as usize != sid_size
-        {
-            return Err(Error("runtime_file_owner_invalid"));
-        }
-        let sid = sid_text(sid)?;
-        if trusted_sid(&sid, owner_sid) {
-            continue;
-        }
-        // Standard read/execute rights are sufficient for shared immutable
-        // assets. Unknown rights and every mutation/ownership grant fail closed.
-        let read_only = FILE_GENERIC_READ | GENERIC_READ | GENERIC_EXECUTE | FILE_EXECUTE;
-        if ace.Mask != 0 && (private || ace.Mask & !read_only != 0) {
-            return Err(Error("private_runtime_file_required"));
-        }
-    }
-    Ok(())
-}
-
-fn trusted_sid(sid: &str, owner_sid: &str) -> bool {
-    sid == owner_sid || sid == "S-1-5-18"
-}
-
-fn sid_text(sid: PSID) -> Result<String> {
-    if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
-        return Err(Error("runtime_file_owner_invalid"));
-    }
-    let mut text = null_mut();
-    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 || text.is_null() {
-        return Err(Error("runtime_file_owner_invalid"));
-    }
-    let length = (0..256).find(|index| unsafe { *text.add(*index) == 0 });
-    let value = length.and_then(|length| {
-        String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) }).ok()
-    });
-    unsafe {
-        LocalFree(text.cast());
-    }
-    value.ok_or(Error("runtime_file_owner_invalid"))
+    crate::security::file_permissions(
+        file,
+        owner_sid,
+        if private {
+            crate::security::FilePolicy::Private
+        } else {
+            crate::security::FilePolicy::Immutable
+        },
+    )
 }
 
 fn virtual_disk(pinned: &Pinned, runtime_id: &str) -> Result<u64> {
@@ -860,9 +746,8 @@ fn wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CONFIG_LIMIT, File, Identity, Pinned, Role, Security, open_raw, read_config, wide,
-    };
+    use super::{CONFIG_LIMIT, File, Identity, Pinned, Role, open_raw, read_config, wide};
+    use crate::security::Security;
     use serde_json::json;
     use std::io::Write;
     use std::os::windows::io::AsRawHandle;
@@ -973,6 +858,49 @@ mod tests {
         let error = Pinned::open(&path, Role::Asset, &identity).err().unwrap();
         assert_eq!(error.0, "private_runtime_file_required");
         assert!(!error.to_string().contains("PRIVATE_CANARY"));
+    }
+
+    #[test]
+    fn document_destination_admin_rights_never_relax_private_runtime_data() {
+        let area = Area::new();
+        let identity = Identity::current().unwrap();
+        let path = area.file("document", b"data", &identity, "(A;;GA;;;BA)");
+        let file = open_raw(&path, READ_CONTROL, false, false).unwrap();
+        assert!(
+            crate::security::file_permissions(
+                &file,
+                identity.sid(),
+                crate::security::FilePolicy::ControlledDestination
+            )
+            .is_ok()
+        );
+        assert!(
+            crate::security::file_permissions(
+                &file,
+                identity.sid(),
+                crate::security::FilePolicy::Private
+            )
+            .is_err()
+        );
+        assert!(
+            crate::security::file_permissions(
+                &file,
+                identity.sid(),
+                crate::security::FilePolicy::Immutable
+            )
+            .is_err()
+        );
+        drop(file);
+        acl(&path, &identity, "(A;;GW;;;WD)");
+        let file = open_raw(&path, READ_CONTROL, false, false).unwrap();
+        assert!(
+            crate::security::file_permissions(
+                &file,
+                identity.sid(),
+                crate::security::FilePolicy::ControlledDestination
+            )
+            .is_err()
+        );
     }
 
     #[test]

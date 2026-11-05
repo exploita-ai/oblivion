@@ -14,6 +14,17 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
+use std::fs::File;
+use windows_sys::Win32::Foundation::{GENERIC_EXECUTE, GENERIC_READ};
+use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+use windows_sys::Win32::Security::{
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, AclSizeInformation,
+    DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetLengthSid, INHERIT_ONLY_ACE,
+    IsValidAcl, IsValidSecurityDescriptor, OWNER_SECURITY_INFORMATION, PSID, SID,
+};
+use windows_sys::Win32::Storage::FileSystem::{FILE_EXECUTE, FILE_GENERIC_READ};
+use windows_sys::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
+
 pub struct Identity {
     sid: String,
 }
@@ -138,4 +149,133 @@ fn process_sid(process: HANDLE) -> Result<String> {
         LocalFree(text.cast());
     }
     result
+}
+
+pub(crate) struct Security(pub(crate) PSECURITY_DESCRIPTOR);
+impl Drop for Security {
+    fn drop(&mut self) {
+        unsafe {
+            LocalFree(self.0);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum FilePolicy {
+    Private,
+    Immutable,
+    ControlledDestination,
+}
+
+/// Runtime assets retain their existing policy. Only explicit document export
+/// destinations trust the host Administrators group in addition to User/SYSTEM.
+pub fn file_permissions(file: &File, owner_sid: &str, policy: FilePolicy) -> Result<()> {
+    let mut owner = null_mut();
+    let mut acl = null_mut();
+    let mut descriptor = null_mut();
+    if unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            &mut acl,
+            null_mut(),
+            &mut descriptor,
+        )
+    } != 0
+    {
+        return Err(Error("runtime_file_permissions_unavailable"));
+    }
+    let descriptor = Security(descriptor);
+    if descriptor.0.is_null()
+        || unsafe { IsValidSecurityDescriptor(descriptor.0) } == 0
+        || acl.is_null()
+        || unsafe { IsValidAcl(acl) } == 0
+        || !(if policy == FilePolicy::ControlledDestination {
+            sid_text(owner)? == owner_sid
+        } else {
+            trusted_sid(&sid_text(owner)?, owner_sid)
+        })
+    {
+        return Err(Error("private_runtime_file_required"));
+    }
+    let mut info = ACL_SIZE_INFORMATION::default();
+    if unsafe {
+        GetAclInformation(
+            acl,
+            (&mut info as *mut ACL_SIZE_INFORMATION).cast(),
+            size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    } == 0
+    {
+        return Err(Error("runtime_file_permissions_unavailable"));
+    }
+    for index in 0..info.AceCount {
+        let mut raw = null_mut();
+        if unsafe { GetAce(acl, index, &mut raw) } == 0 || raw.is_null() {
+            return Err(Error("runtime_file_permissions_unavailable"));
+        }
+        let header = unsafe { &*raw.cast::<ACE_HEADER>() };
+        if header.AceFlags as u32 & INHERIT_ONLY_ACE != 0 {
+            continue;
+        }
+        if header.AceType as u32 == ACCESS_DENIED_ACE_TYPE {
+            continue;
+        }
+        let sid_start = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+        let sid_header = std::mem::offset_of!(SID, SubAuthority);
+        if header.AceType as u32 != ACCESS_ALLOWED_ACE_TYPE
+            || (header.AceSize as usize) < sid_start + sid_header
+        {
+            return Err(Error("runtime_file_permissions_unsupported"));
+        }
+        let ace = unsafe { &*raw.cast::<ACCESS_ALLOWED_ACE>() };
+        let sid: PSID = std::ptr::addr_of!(ace.SidStart).cast_mut().cast();
+        let sid_size = sid_header
+            + unsafe { (*sid.cast::<SID>()).SubAuthorityCount } as usize * size_of::<u32>();
+        if sid_size > header.AceSize as usize - sid_start
+            || unsafe { IsValidSid(sid) } == 0
+            || unsafe { GetLengthSid(sid) } as usize != sid_size
+        {
+            return Err(Error("runtime_file_owner_invalid"));
+        }
+        let sid = sid_text(sid)?;
+        if trusted_sid(&sid, owner_sid)
+            || policy == FilePolicy::ControlledDestination && sid == "S-1-5-32-544"
+        {
+            continue;
+        }
+        // Standard read/execute rights are sufficient for shared immutable
+        // assets. Unknown rights and every mutation/ownership grant fail closed.
+        let read_only = FILE_GENERIC_READ | GENERIC_READ | GENERIC_EXECUTE | FILE_EXECUTE;
+        if ace.Mask != 0 && (policy == FilePolicy::Private || ace.Mask & !read_only != 0) {
+            return Err(Error("private_runtime_file_required"));
+        }
+    }
+    Ok(())
+}
+
+fn trusted_sid(sid: &str, owner_sid: &str) -> bool {
+    sid == owner_sid || sid == "S-1-5-18"
+}
+
+fn sid_text(sid: PSID) -> Result<String> {
+    if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
+        return Err(Error("runtime_file_owner_invalid"));
+    }
+    let mut text = null_mut();
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 || text.is_null() {
+        return Err(Error("runtime_file_owner_invalid"));
+    }
+    let length = (0..256).find(|index| unsafe { *text.add(*index) == 0 });
+    let value = length.and_then(|length| {
+        String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) }).ok()
+    });
+    unsafe {
+        LocalFree(text.cast());
+    }
+    value.ok_or(Error("runtime_file_owner_invalid"))
 }
