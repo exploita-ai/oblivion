@@ -17,6 +17,7 @@ import struct
 LIVE_MOUNTS = ('/run/live/medium', '/lib/live/mount/medium')
 LIVE_UID = 1000
 INSTALLATION = Path('/etc/oblivion/installation.json')
+NATIVE_HELPER = Path('/usr/lib/oblivion/desktop/bin/oblivion-vm')
 MAX_PROFILE_BYTES = 1024
 MAX_DEVICES = 64
 MAX_SECTORS = (2**53 - 1) // 512
@@ -281,7 +282,7 @@ def require_live_profile(path):
         raise ValueError('invalid_installation_profile')
 
 
-def lease_media(device_id, peer, profile=INSTALLATION):
+def lease_media(device_id, peer, profile=INSTALLATION, helper=NATIVE_HELPER):
     if os.geteuid() != 0 or os.environ.get('SUDO_UID') != str(LIVE_UID):
         raise ValueError('live_media_lease_requires_live_sudo')
     require_live_profile(profile)
@@ -291,6 +292,10 @@ def lease_media(device_id, peer, profile=INSTALLATION):
     credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('=iII'))
     pid, uid, _ = struct.unpack('=iII', credentials)
     if pid <= 0 or uid != LIVE_UID:
+        raise ValueError('invalid_live_media_lease_peer')
+    installed = helper.lstat()
+    if (not stat.S_ISREG(installed.st_mode) or installed.st_uid != 0 or installed.st_mode & 0o022
+            or not os.path.samestat(installed, Path(f'/proc/{pid}/exe').stat())):
         raise ValueError('invalid_live_media_lease_peer')
 
     descriptor, _ = open_media(device_id)

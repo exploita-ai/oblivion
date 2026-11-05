@@ -1687,6 +1687,7 @@ fn ensure_as(kind: lifecycle::Kind) -> Result<()> {
                         socket.clone(),
                         sidecar(socket, ".qmp"),
                         sidecar(socket, ".auth"),
+                        sidecar(socket, ".media"),
                     ]
                     .iter()
                     .any(|path| fs::symlink_metadata(path).is_ok())
@@ -1746,6 +1747,7 @@ pub fn recover() -> Result<()> {
             settings.control_socket.clone(),
             sidecar(&settings.control_socket, ".qmp"),
             sidecar(&settings.control_socket, ".auth"),
+            sidecar(&settings.control_socket, ".media"),
         ]
     } else {
         vec![settings.control_socket.clone()]

@@ -35,6 +35,7 @@ pub enum Operation {
     AgentAttach,
     FileAttach,
     LiveMediaReserve,
+    LiveMediaSource,
     AgentRelease,
     ShareAttach,
     ShareRelease,
@@ -84,7 +85,7 @@ impl Operation {
     }
 
     pub const fn is_attachment(self) -> bool {
-        matches!(self, Self::AgentAttach | Self::FileAttach | Self::LiveMediaReserve | Self::ShareAttach
+        matches!(self, Self::AgentAttach | Self::FileAttach | Self::LiveMediaReserve | Self::LiveMediaSource | Self::ShareAttach
             | Self::ShareImportAttach | Self::ShareExportLease | Self::BackupAttach)
     }
 

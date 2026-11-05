@@ -44,7 +44,33 @@ impl Pending {
 
 /// Transport EOF closes both directions, releasing the controller lease.
 /// Native stdin EOF is a framed message and never a transport half-close.
-pub fn duplex(mut local: UnixStream, mut guest: UnixStream, stop: Arc<AtomicBool>) -> Result<()> {
+pub fn duplex(local: UnixStream, guest: UnixStream, stop: Arc<AtomicBool>) -> Result<()> {
+    let result = transfer(&local, &guest, &stop, None);
+    let _ = local.shutdown(Shutdown::Both);
+    let _ = guest.shutdown(Shutdown::Both);
+    result
+}
+
+/// A media caller uses write EOF to end its source stream and awaits a
+/// teardown receipt on the same local socket. Keep that socket writable.
+#[cfg(target_os = "linux")]
+pub(crate) fn media_source(
+    local: &UnixStream,
+    source: UnixStream,
+    reservation: &UnixStream,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let result = transfer(local, &source, stop, Some(reservation));
+    let _ = source.shutdown(Shutdown::Both);
+    result
+}
+
+fn transfer(
+    local: &UnixStream,
+    guest: &UnixStream,
+    stop: &AtomicBool,
+    reservation: Option<&UnixStream>,
+) -> Result<()> {
     local
         .set_nonblocking(true)
         .map_err(|_| Error("bridge_setup_failed"))?;
@@ -54,102 +80,105 @@ pub fn duplex(mut local: UnixStream, mut guest: UnixStream, stop: Arc<AtomicBool
     let mut to_guest = Pending::new();
     let mut to_local = Pending::new();
     let mut guest_closed = false;
-    let result = (|| {
-        while !stop.load(Ordering::Relaxed) {
-            if guest_closed && to_local.readable().is_empty() {
+    while !stop.load(Ordering::Relaxed) {
+        if guest_closed && to_local.readable().is_empty() {
+            return Ok(());
+        }
+        let mut polls = [
+            libc::pollfd {
+                fd: local.as_raw_fd(),
+                events: (if guest_closed || to_guest.writable().is_empty() {
+                    0
+                } else {
+                    libc::POLLIN
+                }) | (if to_local.readable().is_empty() {
+                    0
+                } else {
+                    libc::POLLOUT
+                }),
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: if guest_closed
+                    || to_local.writable().is_empty() && to_guest.readable().is_empty()
+                {
+                    -1
+                } else {
+                    guest.as_raw_fd()
+                },
+                events: (if to_local.writable().is_empty() {
+                    0
+                } else {
+                    libc::POLLIN
+                }) | (if to_guest.readable().is_empty() {
+                    0
+                } else {
+                    libc::POLLOUT
+                }),
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: reservation.map_or(-1, AsRawFd::as_raw_fd),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        if unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as _, 100) } < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(Error("bridge_failed"));
+        }
+        if polls[2].revents != 0 {
+            return Err(Error("live_media_reservation_lost"));
+        }
+        for (index, mut source, destination) in
+            [(0, local, &mut to_guest), (1, guest, &mut to_local)]
+        {
+            if polls[index].revents & (libc::POLLERR | libc::POLLNVAL) != 0
+                || index == 0 && polls[index].revents & libc::POLLHUP != 0
+            {
                 return Ok(());
             }
-            let mut polls = [
-                libc::pollfd {
-                    fd: local.as_raw_fd(),
-                    events: (if guest_closed || to_guest.writable().is_empty() {
-                        0
-                    } else {
-                        libc::POLLIN
-                    }) | (if to_local.readable().is_empty() {
-                        0
-                    } else {
-                        libc::POLLOUT
-                    }),
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: if guest_closed || to_local.writable().is_empty() && to_guest.readable().is_empty() {
-                        -1
-                    } else {
-                        guest.as_raw_fd()
-                    },
-                    events: (if to_local.writable().is_empty() {
-                        0
-                    } else {
-                        libc::POLLIN
-                    }) | (if to_guest.readable().is_empty() {
-                        0
-                    } else {
-                        libc::POLLOUT
-                    }),
-                    revents: 0,
-                },
-            ];
-            if unsafe { libc::poll(polls.as_mut_ptr(), 2, 100) } < 0 {
-                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(Error("bridge_failed"));
+            if polls[index].revents & (libc::POLLIN | libc::POLLHUP) == 0 {
+                continue;
             }
-            for (index, source, destination) in [
-                (0, &mut local, &mut to_guest),
-                (1, &mut guest, &mut to_local),
-            ] {
-                if polls[index].revents & (libc::POLLERR | libc::POLLNVAL) != 0
-                    || index == 0 && polls[index].revents & libc::POLLHUP != 0
-                {
-                    return Ok(());
-                }
-                if polls[index].revents & (libc::POLLIN | libc::POLLHUP) == 0 {
-                    continue;
-                }
-                // POLLHUP is reported even without POLLIN. Reading into a full
-                // buffer returns zero without observing EOF and loses the tail.
-                if destination.writable().is_empty() {
-                    continue;
-                }
-                match source.read(destination.writable()) {
-                    Ok(0) if index == 1 => guest_closed = true,
-                    Ok(0) => return Ok(()),
-                    Ok(length) => destination.end += length,
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                        ) => {}
-                    Err(_) => return Err(Error("bridge_failed")),
-                }
+            // POLLHUP is reported even without POLLIN. Reading into a full
+            // buffer returns zero without observing EOF and loses the tail.
+            if destination.writable().is_empty() {
+                continue;
             }
-            for (index, destination, source) in [
-                (0, &mut local, &mut to_local),
-                (1, &mut guest, &mut to_guest),
-            ] {
-                if polls[index].revents & libc::POLLOUT == 0 {
-                    continue;
-                }
-                match destination.write(source.readable()) {
-                    Ok(0) => return Ok(()),
-                    Ok(length) => source.consume(length),
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                        ) => {}
-                    Err(_) => return Err(Error("bridge_failed")),
-                }
+            match source.read(destination.writable()) {
+                Ok(0) if index == 1 => guest_closed = true,
+                Ok(0) => return Ok(()),
+                Ok(length) => destination.end += length,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => return Err(Error("bridge_failed")),
             }
         }
-        Ok(())
-    })();
-    let _ = local.shutdown(Shutdown::Both);
-    let _ = guest.shutdown(Shutdown::Both);
-    result
+        for (index, mut destination, source) in
+            [(0, local, &mut to_local), (1, guest, &mut to_guest)]
+        {
+            if polls[index].revents & libc::POLLOUT == 0 {
+                continue;
+            }
+            match destination.write(source.readable()) {
+                Ok(0) => return Ok(()),
+                Ok(length) => source.consume(length),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => return Err(Error("bridge_failed")),
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

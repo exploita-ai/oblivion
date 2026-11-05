@@ -870,9 +870,14 @@ struct ClientLease {
     operation: &'static str,
     secret: Zeroizing<Vec<u8>>,
     export: Option<String>,
-    media: Option<crate::live_media::Lease>,
+    media: Option<MediaAttachment>,
     _hold: Option<UnixStream>,
     timeout: Option<Duration>,
+}
+
+enum MediaAttachment {
+    Reservation(crate::live_media::Lease),
+    Source(crate::live_media::SourceLease),
 }
 
 pub fn serve(config: &Path, uid: u32) -> Result<()> {
@@ -952,13 +957,19 @@ fn serve_connection(mut stream: UnixStream, config: std::path::PathBuf, uid: u32
                 // Keep the descriptor peer alive for a transaction-only lease;
                 // disjoint closure capture would otherwise drop it here.
                 let _hold = lease._hold;
-                if let Some(media) = lease.media {
-                    if delivered { media.wait(&stream); }
-                } else if delivered && stream.set_read_timeout(lease.timeout).is_ok() {
-                    // A held local connection owns this client. Register cleanup
-                    // even if the launcher disappeared during descriptor delivery.
-                    let mut byte = [0];
-                    let _ = stream.read(&mut byte);
+                match lease.media {
+                    Some(MediaAttachment::Reservation(media)) => media.wait(&stream, delivered),
+                    Some(MediaAttachment::Source(source)) => {
+                        if delivered { source.wait(&stream); }
+                        return;
+                    }
+                    None if delivered && stream.set_read_timeout(lease.timeout).is_ok() => {
+                        // A held local connection owns this client. Register
+                        // cleanup even if descriptor delivery failed.
+                        let mut byte = [0];
+                        let _ = stream.read(&mut byte);
+                    }
+                    None => {}
                 }
                 if let Some(export) = &lease.export {
                     if let Ok(opening) = crate::share_export::registry().end(Some(export)) {
@@ -1081,6 +1092,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
             | Operation::OpenDocuments
             | Operation::FileAttach
             | Operation::LiveMediaReserve
+            | Operation::LiveMediaSource
             | Operation::ChildTaskStart
             | Operation::ChildTaskRetry
             | Operation::ChildTaskCancel
@@ -1114,7 +1126,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
     channel
         .read_exact(&mut secret)
         .map_err(|_| Error("incomplete_secret"))?;
-    let _ordinary = if matches!(request.operation, Operation::Activity) { None }
+    let _ordinary = if matches!(request.operation, Operation::Activity | Operation::LiveMediaSource) { None }
         else { Some(ordinary.lock().map_err(|_| Error("controller_queue_failed"))?) };
     if matches!(request.operation, Operation::Activity | Operation::IdleSettings) {
         require(request.expected_session.is_none(), "invalid_idle_request")?;
@@ -1241,7 +1253,44 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         crate::storage::require_current_idle_activity(&authority)?;
         return Ok(Response { ok: true, output: String::new(), error: None, console: Some(console),
             lease: Some(ClientLease { backup: None, slot: request.slot, id: media.id().to_owned(), safe_id: session,
-                operation: "live-media-release", secret, export: None, media: Some(media), _hold: None, timeout: None }) });
+                operation: "live-media-release", secret, export: None, media: Some(MediaAttachment::Reservation(media)), _hold: None, timeout: None }) });
+    }
+    if matches!(request.operation, Operation::LiveMediaSource) {
+        let deadline = Instant::now() + Duration::from_secs(115);
+        crate::live_media::require_live()?;
+        let selected: oblivion_wire::live_media::Source<oblivion_host::scope::Slot> =
+            serde_json::from_slice(&secret).map_err(|_| Error("invalid_live_media_request"))?;
+        crate::storage::validate_id(&selected.lease_id)?;
+        require(oblivion_wire::live_media::valid_device_id(&selected.device_id), "invalid_live_media_request")?;
+        let (source, host) = {
+            let _lock = lock_named("storage.lock")?;
+            let (session, mode) = crate::storage::session_info()?.ok_or(Error("session_not_open"))?;
+            require(matches!(mode.as_str(), "agent" | "documents") && request.expected_session.as_deref() == Some(&session), "session_changed")?;
+            let host = require_current_file_opening(&session, request.slot, &selected.opening)?;
+            crate::transfer_host::idle()?;
+            let source = crate::live_media::registry().claim(&selected, &host)?;
+            (source, host)
+        };
+        let authority = oblivion_host::autolock::Activity { host, safe: Some(selected.opening.clone()) };
+        let device = crate::transfer_host::wait_live_media(&selected.lease_id, || source.check(stream))?;
+        {
+            let _lock = crate::storage::recovery_lock()?;
+            crate::storage::require_current_idle_activity(&authority)?;
+            source.check(stream)?;
+            crate::transfer_host::idle()?;
+            crate::transfer_host::start_live_media(&selected.lease_id, &device)?;
+        }
+        drop(device);
+        let (console, worker) = crate::transfer_host::attach_live_media(&selected.lease_id, deadline, || source.check(stream))?;
+        {
+            let _lock = crate::storage::recovery_lock()?;
+            crate::storage::require_current_idle_activity(&authority)?;
+            source.check(stream)?;
+        }
+        return Ok(Response { ok: true, output: String::new(), error: None, console: Some(console),
+            lease: Some(ClientLease { backup: None, slot: request.slot, id: selected.lease_id, safe_id: selected.opening.safe_id,
+                operation: "", secret: Zeroizing::new(Vec::new()), export: None, media: Some(MediaAttachment::Source(source)),
+                _hold: Some(worker), timeout: None }) });
     }
     if matches!(request.operation, Operation::AgentAttach | Operation::FileAttach) {
         let _lock = lock_named("storage.lock")?;
@@ -1340,7 +1389,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         Operation::Transfers => "transfers",
         Operation::Onion => "onion",
         Operation::ChildTaskStatus | Operation::ChildTaskReview | Operation::ChildTaskStart | Operation::ChildTaskRetry | Operation::ChildTaskCancel
-            | Operation::AgentAttach | Operation::FileAttach | Operation::LiveMediaReserve | Operation::ShareAttach | Operation::ShareImportAttach
+            | Operation::AgentAttach | Operation::FileAttach | Operation::LiveMediaReserve | Operation::LiveMediaSource | Operation::ShareAttach | Operation::ShareImportAttach
             | Operation::ShareExportBegin | Operation::ShareExportLease | Operation::ShareExportEnd
             | Operation::BackupAttach | Operation::BackupStatus | Operation::BackupCancel
             | Operation::Activity | Operation::IdleSettings => unreachable!(),
@@ -1415,7 +1464,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
     })
 }
 
-fn send_console(stream: &UnixStream, console: &UnixStream) -> Result<()> {
+pub(crate) fn send_console(stream: &UnixStream, console: &UnixStream) -> Result<()> {
     // usize storage gives cmsghdr its required alignment on both target architectures.
     let mut control = [0usize; 8];
     let mut byte = b'F';

@@ -250,6 +250,7 @@ class Lease(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.profile = Path(temp.name) / 'installation.json'
         self.profile.write_text('{"version":1,"mode":"live-launcher"}\n')
+        self.helper = Path(sys.executable).resolve()
 
     def live_pair(self):
         os.seteuid(1000)
@@ -263,7 +264,7 @@ class Lease(unittest.TestCase):
         descriptor = os.open(self.profile, os.O_RDONLY | os.O_CLOEXEC)
         with sender, receiver, patch.dict(os.environ, {'SUDO_UID': '1000'}), patch.object(
                 media, 'open_media', return_value=(descriptor, {})) as pinned:
-            media.lease_media('a' * 64, sender, self.profile)
+            media.lease_media('a' * 64, sender, self.profile, self.helper)
             pinned.assert_called_once_with('a' * 64)
             with self.assertRaises(OSError):
                 os.fstat(descriptor)
@@ -292,6 +293,13 @@ class Lease(unittest.TestCase):
                 with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as datagram:
                     with self.assertRaisesRegex(ValueError, 'invalid_live_media_lease_socket'):
                         media.lease_media('a' * 64, datagram, self.profile)
+            pinned.assert_not_called()
+
+    def test_correct_uid_cannot_use_another_executable(self):
+        sender, receiver = self.live_pair()
+        with sender, receiver, patch.dict(os.environ, {'SUDO_UID': '1000'}), patch.object(media, 'open_media') as pinned:
+            with self.assertRaisesRegex(ValueError, 'invalid_live_media_lease_peer'):
+                media.lease_media('a' * 64, sender, self.profile, self.profile)
             pinned.assert_not_called()
 
     def test_refuses_unsafe_or_invalid_installation_profiles(self):
@@ -325,7 +333,7 @@ class Lease(unittest.TestCase):
         with sender, receiver, patch.dict(os.environ, {'SUDO_UID': '1000'}), patch.object(
                 media, 'open_media', side_effect=pin_after_receiver_exits):
             with self.assertRaises(BrokenPipeError):
-                media.lease_media('a' * 64, sender, self.profile)
+                media.lease_media('a' * 64, sender, self.profile, self.helper)
         with self.assertRaises(OSError):
             os.fstat(descriptor)
 

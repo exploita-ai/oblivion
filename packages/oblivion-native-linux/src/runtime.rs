@@ -1,5 +1,12 @@
 use crate::{Result, config::RuntimeConfig, lifetime::Lifetime};
 
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[path = "media_sidecar.rs"]
+mod media_sidecar;
+
 pub fn run(config: RuntimeConfig, lifetime: Lifetime) -> Result<()> {
     #[cfg(all(
         target_os = "linux",
@@ -27,8 +34,10 @@ pub fn report(event: &str) {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 mod linux {
+    use super::media_sidecar::Sidecar;
     use crate::{
-        Error, Result, auth, bridge, config::RuntimeConfig, kvm, lifetime::Lifetime, private, qemu,
+        Error, Result, auth, bridge, config::RuntimeConfig, kvm, lifetime::Lifetime, media,
+        private, qemu,
     };
     use std::fs;
     use std::io::{Read, Write};
@@ -108,6 +117,7 @@ mod linux {
         }
         let mut endpoint = private::Endpoint::bind(&config.control_socket)?;
         let _disk = config.disk_lease()?;
+        let mut media = Sidecar::bind(&config)?;
         let qmp_path = private::sidecar(&config.control_socket, ".qmp");
         let auth_path = private::sidecar(&config.control_socket, ".auth");
         for path in [&qmp_path, &auth_path] {
@@ -120,8 +130,12 @@ mod linux {
         let _auth_path = QmpPath(auth_path.clone());
         let _signals = Signals::install();
         let mut command = Command::new(kvm::qemu().ok_or(Error("qemu_system_required"))?);
+        let mut arguments = qemu::arguments(&config)?;
+        if media.is_some() {
+            media::reserve_port(&mut arguments);
+        }
         command
-            .args(qemu::arguments(&config)?)
+            .args(arguments)
             .env_clear()
             .env("LANG", "C")
             .env("LC_ALL", "C")
@@ -247,6 +261,9 @@ mod linux {
                 }
                 if SIGNAL.swap(0, Ordering::Relaxed) != 0 && stopping.is_none() {
                     endpoint.stop_admission();
+                    if let Some(media) = &mut media {
+                        media.stop_admission();
+                    }
                     stop.store(true, Ordering::Relaxed);
                     super::report("runtime_stopping");
                     qmp.command("system_powerdown", Instant::now() + Duration::from_secs(5))?;
@@ -280,8 +297,17 @@ mod linux {
                     };
                     if event.get("event").and_then(serde_json::Value::as_str) == Some("SHUTDOWN") {
                         endpoint.stop_admission();
+                        if let Some(media) = &mut media {
+                            media.stop_admission();
+                        }
                         stop.store(true, Ordering::Relaxed);
                         stopping.get_or_insert_with(|| Instant::now() + Duration::from_secs(45));
+                    }
+                    if qmp.owns_media_error(&event) {
+                        if let Some(media) = &media {
+                            media.cancel_current();
+                            continue;
+                        }
                     }
                     if stopping.is_none()
                         && matches!(
@@ -291,6 +317,14 @@ mod linux {
                     {
                         return Err(Error("runtime_guest_failed"));
                     }
+                }
+                if let Some(media) = &mut media {
+                    media.tick(
+                        &config,
+                        &token,
+                        &mut qmp,
+                        authenticated && stopping.is_none(),
+                    )?;
                 }
                 let mut index = 0;
                 while index < bridges.len() {
@@ -337,6 +371,8 @@ mod linux {
         endpoint.stop_admission();
         stop.store(true, Ordering::Relaxed);
         drop(child);
+        drop(qmp);
+        let media_cleanup = media.map_or(Ok(()), Sidecar::finish);
         let _ = provisioner.join();
         let _ = console_thread.join();
         for bridge in bridges {
@@ -348,6 +384,6 @@ mod linux {
             4 => return Err(Error("runtime_control_authentication_failed")),
             _ => {}
         }
-        result
+        result.and(media_cleanup)
     }
 }

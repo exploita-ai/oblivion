@@ -1,8 +1,10 @@
-//! A read-only media reservation lives only while its controller attachment and
-//! the exact Safe VM remain alive. This grants no device or guest file access.
-use crate::storage::{Error, Result, random_id, require};
+//! The native owner holds a reservation stream separately from the one source
+//! attachment. The source can be revoked without losing the eject handshake.
+use crate::storage::{self, Error, Result, random_id, require};
+use oblivion_host::channel::Channel;
 use oblivion_host::{autolock::Opening, scope::Slot};
-use oblivion_wire::live_media::Reserve;
+use oblivion_wire::live_media::{DETACHED, REVOKED, Reserve, STOP, Source};
+use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
@@ -10,6 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const LIFETIME: Duration = Duration::from_secs(15 * 60);
+const CLEANUP_BUDGET: Duration = Duration::from_secs(50);
 
 struct Reservation {
     id: String,
@@ -17,6 +20,10 @@ struct Reservation {
     opening: Opening,
     device_id: String,
     signal: UnixStream,
+    owner: Arc<OwnedFd>,
+    deadline: Instant,
+    claimed: bool,
+    revoked: bool,
 }
 
 #[derive(Clone, Default)]
@@ -75,22 +82,30 @@ impl Registry {
         let id = random_id()?;
         let (controller, client) =
             UnixStream::pair().map_err(|_| Error("live_media_reservation_failed"))?;
-        let signal = controller
-            .try_clone()
-            .map_err(|_| Error("live_media_reservation_failed"))?;
+        let (watch, signal) =
+            UnixStream::pair().map_err(|_| Error("live_media_reservation_failed"))?;
+        let slot = request.opening.slot;
+        let owner = Arc::new(owner);
+        let deadline = Instant::now() + LIFETIME;
         entries.push(Reservation {
             id: id.clone(),
             host,
             opening: request.opening,
             device_id: request.device_id,
             signal,
+            owner: owner.clone(),
+            deadline,
+            claimed: false,
+            revoked: false,
         });
         let lease = Lease {
             registry: self.clone(),
             id,
+            slot,
             controller,
+            watch,
             owner,
-            deadline: Instant::now() + LIFETIME,
+            deadline,
         };
         Ok((client, lease))
     }
@@ -101,6 +116,39 @@ impl Registry {
             .lock()
             .map_err(|_| Error("live_media_reservation_failed"))?;
         Ok(entries.iter().any(|entry| entry.opening.slot == slot))
+    }
+
+    /// Caller holds storage.lock and has checked the current openings.
+    pub fn claim(&self, request: &Source<Slot>, host: &str) -> Result<SourceLease> {
+        let mut entries = self
+            .0
+            .lock()
+            .map_err(|_| Error("live_media_reservation_failed"))?;
+        let entry = entries
+            .iter_mut()
+            .find(|entry| entry.id == request.lease_id)
+            .ok_or(Error("live_media_reservation_changed"))?;
+        require(
+            !entry.revoked
+                && !entry.claimed
+                && Instant::now() < entry.deadline
+                && entry.host == host
+                && entry.opening == request.opening
+                && entry.device_id == request.device_id,
+            "live_media_reservation_changed",
+        )?;
+        let watch = entry
+            .signal
+            .try_clone()
+            .map_err(|_| Error("live_media_reservation_failed"))?;
+        entry.claimed = true;
+        Ok(SourceLease {
+            registry: self.clone(),
+            id: entry.id.clone(),
+            watch,
+            owner: entry.owner.clone(),
+            deadline: entry.deadline,
+        })
     }
 
     pub fn revoke_slot(&self, slot: Slot) -> Result<()> {
@@ -120,28 +168,38 @@ impl Registry {
             .0
             .lock()
             .map_err(|_| Error("live_media_reservation_failed"))?;
-        let mut failed = false;
-        entries.retain(|entry| {
-            if !matches(entry) {
-                return true;
-            }
+        for entry in entries.iter_mut().filter(|entry| matches(entry)) {
+            entry.revoked = true;
             if let Err(error) = entry.signal.shutdown(Shutdown::Both) {
-                if error.kind() != std::io::ErrorKind::NotConnected {
-                    failed = true;
-                    return true;
-                }
+                require(
+                    error.kind() == std::io::ErrorKind::NotConnected,
+                    "live_media_revocation_failed",
+                )?;
             }
-            false
-        });
-        require(!failed, "live_media_revocation_failed")
+        }
+        Ok(())
+    }
+
+    fn claimed(&self, id: &str) -> Result<bool> {
+        let entries = self
+            .0
+            .lock()
+            .map_err(|_| Error("live_media_reservation_failed"))?;
+        let entry = entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .ok_or(Error("live_media_reservation_changed"))?;
+        Ok(entry.claimed)
     }
 }
 
 pub struct Lease {
     registry: Registry,
     id: String,
+    slot: Slot,
     controller: UnixStream,
-    owner: OwnedFd,
+    watch: UnixStream,
+    owner: Arc<OwnedFd>,
     deadline: Instant,
 }
 
@@ -150,43 +208,152 @@ impl Lease {
         &self.id
     }
 
-    pub fn wait(self, control: &UnixStream) {
-        let mut descriptors = [
-            control.as_raw_fd(),
-            self.controller.as_raw_fd(),
-            self.owner.as_raw_fd(),
-        ]
-        .map(|fd| libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        while let Some(remaining) = self.deadline.checked_duration_since(Instant::now()) {
-            let millis = remaining.as_millis().max(1) as i32;
-            // The attachment carries no commands. Any bytes, EOF, process exit
-            // or socket error end the grant. The deadline never renews.
-            if unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, millis) } >= 0
-                || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
-            {
-                break;
+    pub fn wait(self, control: &UnixStream, delivered: bool) {
+        let stop = if delivered {
+            match ready(
+                [
+                    control.as_raw_fd(),
+                    self.controller.as_raw_fd(),
+                    self.watch.as_raw_fd(),
+                    self.owner.as_raw_fd(),
+                ],
+                self.deadline,
+            ) {
+                Ok([false, true, ..]) if self.stop_command() => Stop::Requested,
+                Ok([false, false, ..]) => Stop::Revoked,
+                _ => Stop::Lost,
             }
+        } else {
+            Stop::Lost
+        };
+        let until = Instant::now() + CLEANUP_BUDGET;
+        if self.registry.revoke(|entry| entry.id == self.id).is_err() {
+            return;
         }
+        let sent_revoke = stop == Stop::Revoked && self.notify(REVOKED);
+        let cleanup = self.registry.claimed(&self.id).and_then(|claimed| {
+            if !claimed {
+                return Ok(());
+            }
+            oblivion_host::scope::within(self.slot, || {
+                let _lock = storage::recovery_lock()?;
+                crate::transfer_host::stop_live_media(&self.id)
+            })
+        });
+        if cleanup.is_err() {
+            return;
+        }
+        let acknowledged = stop == Stop::Requested
+            || sent_revoke
+                && matches!(
+                    ready([control.as_raw_fd(), self.controller.as_raw_fd()], until),
+                    Ok([false, true])
+                )
+                && self.stop_command();
+        if acknowledged {
+            self.notify(DETACHED);
+        }
+    }
+
+    fn stop_command(&self) -> bool {
+        let mut byte = [0];
+        Channel::new(&self.controller, Duration::from_secs(2))
+            .read_exact(&mut byte)
+            .is_ok()
+            && byte == [STOP]
+    }
+
+    fn notify(&self, bytes: &[u8]) -> bool {
+        Channel::new(&self.controller, Duration::from_secs(2))
+            .write_all(bytes)
+            .is_ok()
     }
 }
 
 impl Drop for Lease {
     fn drop(&mut self) {
         let _ = self.registry.revoke(|entry| entry.id == self.id);
+        if let Ok(mut entries) = self.registry.0.lock() {
+            entries.retain(|entry| entry.id != self.id);
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    Requested,
+    Revoked,
+    Lost,
+}
+
+pub struct SourceLease {
+    registry: Registry,
+    id: String,
+    watch: UnixStream,
+    owner: Arc<OwnedFd>,
+    deadline: Instant,
+}
+
+impl SourceLease {
+    pub fn check(&self, control: &UnixStream) -> Result<()> {
+        require(
+            Instant::now() < self.deadline
+                && ready(
+                    [
+                        control.as_raw_fd(),
+                        self.watch.as_raw_fd(),
+                        self.owner.as_raw_fd(),
+                    ],
+                    Instant::now(),
+                )? == [false, false, false],
+            "live_media_revoked",
+        )
+    }
+
+    pub fn wait(&self, control: &UnixStream) {
+        let _ = ready(
+            [
+                control.as_raw_fd(),
+                self.watch.as_raw_fd(),
+                self.owner.as_raw_fd(),
+            ],
+            self.deadline,
+        );
+    }
+}
+
+impl Drop for SourceLease {
+    fn drop(&mut self) {
+        let _ = self.registry.revoke(|entry| entry.id == self.id);
+    }
+}
+
+fn ready<const N: usize>(fds: [i32; N], deadline: Instant) -> Result<[bool; N]> {
+    let mut descriptors = fds.map(|fd| libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    });
+    loop {
+        let millis = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        if unsafe { libc::poll(descriptors.as_mut_ptr(), N as _, millis) } >= 0 {
+            return Ok(descriptors.map(|entry| entry.revents != 0));
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return Err(Error("live_media_watch_failed"));
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Lease, Registry, live_profile};
+    use super::{DETACHED, Lease, REVOKED, Registry, STOP, live_profile};
     use crate::storage::Result;
     use oblivion_host::autolock::Opening;
-    use oblivion_wire::live_media::Reserve;
-    use std::io::Read;
+    use oblivion_wire::live_media::{Reserve, Source};
+    use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
 
@@ -241,11 +408,11 @@ mod tests {
         assert!(registry.revoke_host(Some(&"c".repeat(32))).is_ok());
         assert!(matches!(registry.active(0.try_into().unwrap()), Ok(true)));
         assert!(registry.revoke_slot(0.try_into().unwrap()).is_ok());
-        assert_eq!(first.read(&mut [0]).unwrap(), 0);
-        let (_next, next_lease, _owner) =
-            reserve(&registry, 0, "1").unwrap_or_else(|error| panic!("{}", error.0));
-        assert_ne!(first_lease.id(), next_lease.id());
+        assert!(reserve(&registry, 0, "1").is_err());
         drop(first_lease);
+        assert_eq!(first.read(&mut [0]).unwrap(), 0);
+        let (_next, _next_lease, _owner) =
+            reserve(&registry, 0, "1").unwrap_or_else(|error| panic!("{}", error.0));
         assert!(matches!(registry.active(0.try_into().unwrap()), Ok(true)));
         second.set_nonblocking(true).unwrap();
         assert_eq!(
@@ -253,29 +420,72 @@ mod tests {
             std::io::ErrorKind::WouldBlock
         );
         assert!(registry.revoke_host(None).is_ok());
-        assert_eq!(second.read(&mut [0]).unwrap(), 0);
+        assert!(matches!(registry.active(1.try_into().unwrap()), Ok(true)));
     }
 
     #[test]
-    fn client_eof_and_owner_loss_end_the_reservation() {
+    fn client_eof_ends_the_reservation_and_owner_loss_keeps_the_stop_handshake() {
         let registry = Registry::default();
         for owner_exits in [false, true] {
             let (mut console, mut lease, owner) =
                 reserve(&registry, 0, "1").unwrap_or_else(|error| panic!("{}", error.0));
             let (control, peer) = UnixStream::pair().unwrap();
             lease.deadline = Instant::now() + Duration::from_secs(2);
-            let thread = std::thread::spawn(move || lease.wait(&control));
-            if owner_exits {
-                drop(owner)
-            } else {
-                drop(peer)
-            }
+            let thread = std::thread::spawn(move || lease.wait(&control, true));
             console
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .unwrap();
+            if owner_exits {
+                drop(owner);
+                let mut revoked = [0; REVOKED.len()];
+                console.read_exact(&mut revoked).unwrap();
+                assert_eq!(&revoked, REVOKED);
+                console.write_all(&[STOP]).unwrap();
+                let mut detached = [0; DETACHED.len()];
+                console.read_exact(&mut detached).unwrap();
+                assert_eq!(&detached, DETACHED);
+            } else {
+                drop(peer);
+            }
             assert_eq!(console.read(&mut [0]).unwrap(), 0);
             thread.join().unwrap();
             assert!(matches!(registry.active(0.try_into().unwrap()), Ok(false)));
         }
+    }
+
+    #[test]
+    fn source_claim_requires_the_exact_reservation_and_cannot_be_reused() {
+        let registry = Registry::default();
+        let (_client, lease, _owner) =
+            reserve(&registry, 1, "1").unwrap_or_else(|error| panic!("{}", error.0));
+        let host = "b".repeat(32);
+        let mut request = Source {
+            lease_id: lease.id().into(),
+            opening: Opening {
+                slot: 0.try_into().unwrap(),
+                safe_id: format!("{:032x}", 1),
+                nonce: "a".repeat(32),
+            },
+            device_id: "1".repeat(64),
+        };
+        assert!(registry.claim(&request, &host).is_err());
+        request.opening.slot = 1.try_into().unwrap();
+        request.opening.nonce = "e".repeat(32);
+        assert!(registry.claim(&request, &host).is_err());
+        request.opening.nonce = "a".repeat(32);
+        request.device_id = "2".repeat(64);
+        assert!(registry.claim(&request, &host).is_err());
+        request.device_id = "1".repeat(64);
+        assert!(registry.claim(&request, &"c".repeat(32)).is_err());
+        let source = registry
+            .claim(&request, &host)
+            .unwrap_or_else(|error| panic!("{}", error.0));
+        let (control, _peer) = UnixStream::pair().unwrap();
+        assert!(source.check(&control).is_ok());
+        assert!(registry.claim(&request, &host).is_err());
+        registry
+            .revoke_opening(&request.opening)
+            .unwrap_or_else(|error| panic!("{}", error.0));
+        assert!(source.check(&control).is_err());
     }
 }

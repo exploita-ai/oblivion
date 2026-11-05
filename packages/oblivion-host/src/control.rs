@@ -246,7 +246,7 @@ fn attach_scoped(
 }
 
 #[cfg(target_os = "linux")]
-fn receive_descriptor(stream: &UnixStream, channel: &Channel<'_>) -> Result<UnixStream> {
+pub fn receive_descriptor(stream: &UnixStream, channel: &Channel<'_>) -> Result<UnixStream> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let mut byte = 0u8;
     let mut data = libc::iovec {

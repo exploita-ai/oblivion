@@ -17,6 +17,13 @@ printf 'd /run/oblivion-live 0755 root root -\nd /run/oblivion-live/user 0700 10
 printf 'oblivion-manager ALL=(root) NOPASSWD: /usr/lib/oblivion/live-storage.py review, /usr/lib/oblivion/live-storage.py prepare *\n' > /etc/sudoers.d/oblivion-live-storage
 chmod 0440 /etc/sudoers.d/oblivion-live-storage
 visudo -c -f /etc/sudoers.d/oblivion-live-storage
+cat > /etc/sudoers.d/oblivion-live-media <<'EOF'
+Cmnd_Alias OBLIVION_USB = /usr/lib/oblivion/live-media.py ^lease [0-9a-f]{64}$
+Defaults!OBLIVION_USB !use_pty, !log_input, !log_output, !log_allowed
+oblivion-manager ALL=(root) TIMEOUT=5s NOPASSWD: NOSETENV: OBLIVION_USB
+EOF
+chmod 0440 /etc/sudoers.d/oblivion-live-media
+visudo -c -f /etc/sudoers.d/oblivion-live-media
 usermod -a -G kvm oblivion-manager
 cat > /etc/udev/rules.d/71-oblivion-runtime.rules <<'EOF'
 KERNEL=="vhost-vsock", GROUP="kvm", MODE="0660"

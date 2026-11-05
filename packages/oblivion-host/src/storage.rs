@@ -1658,6 +1658,9 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             require(bytes.len() <= 4096, "transfer_request_too_large")?;
             let command: transfers::Command =
                 serde_json::from_slice(&bytes).map_err(|_| Error("invalid_transfer_request"))?;
+            if !matches!(command, transfers::Command::List) {
+                require(!crate::ipc::live_media_active()? && !crate::transfer_host::live_media_prepared()?, "transfer_active")?;
+            }
             if !matches!(
                 command,
                 transfers::Command::List | transfers::Command::Cancel
