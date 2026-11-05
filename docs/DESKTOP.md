@@ -11,8 +11,9 @@ The same manifest and assembly tool now also understand `windows-x86_64` with
 three native `.exe` files and the pinned OpenTUI DLL. Validation is shared through
 `oblivion-bundle`, including Windows path and case-alias checks. This is a build
 contract. The Windows command entrypoint, initial managed setup and bundle
-verification are now connected in source. Privilege setup, local payload endpoints,
-software lifecycle and hardware qualification remain unfinished; see
+verification, Files, backup, Share and stopped-only software maintenance are
+connected in source. The ordinary-user broker, unknown-resource recovery and
+hardware qualification remain unfinished; see
 [Windows status](WINDOWS.md). Do not substitute the Unix launcher in a Windows bundle.
 
 Linux ARM64 additionally requires QEMU 10.1 or newer for its outer nested
@@ -108,7 +109,7 @@ python3 -B script/oblivion/native-bundle/host-sources.py \
   packages/oblivion-host --scripts script/oblivion
 ```
 
-## Install and update
+## Install and update on macOS and Linux
 
 Use a bundle produced from trusted source. A checksum identifies contents;
 it is not a publisher signature.
@@ -140,7 +141,19 @@ Safe lifecycle remain under the native launcher's control. Installation does
 not use sudo, install QEMU, change system permissions, change swap or sysctl
 settings, or contact a provider.
 
-## Remove old software or uninstall
+## Windows development maintenance
+
+The Windows entrypoint uses the same `runtime update BUNDLE`, `runtime gc` and
+`runtime uninstall` grammar. Stop the protected runtime first; maintenance holds
+an exclusive observed-Stopped capability and never boots or initializes storage.
+Use the new verified bundle's CLI for an update to another source version.
+Uninstall preserves runtime identity, configuration, the supervision journal and
+the exact encrypted data VHDX. Its cleanup report distinguishes removed software,
+unknown retained files and binaries still in use; exit code 2 means incomplete
+removal, to retry from a verified external bundle. Ordinary-user elevation and
+installed Windows lifecycle are still unqualified; see [Windows maintenance](WINDOWS.md#stopped-only-software-maintenance).
+
+## Remove old software or uninstall on macOS and Linux
 
 First close your Safes and stop the protected runtime:
 

@@ -257,7 +257,7 @@ automatic Hyper-V DHCP fallback. HCN responses must confirm the requested
 identity and addresses. Creation precedes the VM, and cleanup requires its
 confirmed stop and observed network-resource absence. HCN calls are synchronous;
 service hangs, exact flags, coexistence and recovery still require Windows tests.
-The Windows installed entrypoint, initial setup and local Files payload endpoints are now connected in source; a normal-user privilege broker, software lifecycle and grant/network-recovery integration remain unfinished.
+The Windows installed entrypoint, initial setup and local Files payload endpoints are now connected in source; a normal-user privilege broker and grant/network-recovery integration remain unfinished, while stopped-only software maintenance is connected in source.
 Pipe peer/ACL behavior
 with the actual HCS worker, boot, inner KVM and the installed lifecycle remain
 Windows acceptance gates. See the [Windows backend](WINDOWS.md).
@@ -330,8 +330,7 @@ read bounded private metadata and use the existing pipe without hashing the ISO
 or implicitly starting a stopped runtime. Windows Files reads guest pages and
 receiver outcomes through opening-bound attachments, releasing before pipe close.
 Local Files payload copies are now connected to the shared protocol and consent
-flow. Software update/removal remains explicitly
-unavailable there and fail before installation discovery/boot.
+flow. Software update/removal is now connected through the observed-Stopped maintenance path.
 
 Windows setup now records Pending before bundle publication, configuration or
 VHDX creation. Bundle validation checks real inventory, hashes, file identities
@@ -396,7 +395,7 @@ boundaries now flush before awaiting the peer, with actual buffered Unix
 socket regressions. Windows filesystem, event-pipe and copy-orchestration fixtures
 are compiled for MSVC and registered in Windows CI; they have not been executed
 on this Mac. This does not qualify HCS boot, installed transfer persistence,
-Windows durability or the unfinished software-lifecycle endpoints.
+Windows durability, ordinary-user installation or unknown-resource recovery.
 
 Focused Unix verification passed 25 transfer cases, six copy-parser cases and
 ten real launcher/event cases. They include buffered import/export, interrupted
@@ -446,3 +445,27 @@ controller oblivion-storage compiles, as do the full Windows CLI/entrypoint/test
 and Share library for MSVC. The canonical root check passed. Windows named-pipe
 fixtures have been compiled rather than executed. Share between two installed
 candidates, actual Windows execution and the hardware acceptance matrix remain open.
+
+Windows source now connects update, verified software collection and software-only
+uninstall to the installed CLI. Mutations retain the exclusive election and
+journal writer only after observing Stopped and the previous writer's exit.
+An update records the exact base/target, preserves configuration/runtime/data
+identity, and can finish that transition after the supervisor rebind. Complete
+bundles and boot files publish from unique private staging before entering their
+fixed names. Registry and supervision records use flushed private atomic
+replacement under the same ownership locks; there is no alternate-format reader.
+
+Uninstall keeps data.vhdx, vm.json, installation metadata and the supervisor
+journal. It reports unknown or in-use software rather than deleting it or claiming
+complete removal; exit code 2 is the explicit incomplete outcome. Recovery only
+retries a stop on a live authenticated stop/recovery supervisor and then proves
+Stopped. Healthy active runtimes are refused, and absent/unknown HCS/HCN/ACL
+state is still not adopted. Ordinary-user startup remains blocked by the current
+elevated-token preflight; a real privileged broker/principal separation is still
+required and is specified in WINDOWS, not implemented by this increment.
+
+Four portable installation-model cases and six common grammar cases pass on the
+Mac, as does the canonical root check. Native Windows all-targets and the full
+CLI/entrypoint/tests compile for MSVC without warnings. Windows filesystem,
+mutex, journal replacement and pipe fixtures are compiled evidence only; their
+execution, forced-interruption durability and real lifecycle remain open.

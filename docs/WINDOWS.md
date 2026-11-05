@@ -5,7 +5,8 @@ or qualified.** An experimental HCS helper core and owned HCN ICS network are
 implemented. A same-user authenticated named-pipe client and shared CLI adapter
 are now present. The installed command entrypoint, bundle verification and
 one-shot per-user setup and local Files payload endpoints are connected in source;
-ordinary-user privilege setup, update/removal and crash recovery remain open.
+ordinary-user privilege setup and unknown-resource reconciliation remain open.
+Stopped-only update, software collection and uninstall are now connected in source.
 The manager has a Windows x64 build target; its PE
 execution and complete installed path still need qualification. This is a proposal for phase 8 of the
 [roadmap](oblivion1.0-roadmap.md), rather than instructions for an available product.
@@ -18,6 +19,33 @@ The last lease requests guarded shutdown, and only a confirmed helper exit after
 HCS/network/grant cleanup permits Stopped. Failed or uncertain shutdown persists
 Recovery. Recovery after losing the supervisor still needs the dedicated owned
 resource reconciliation; an absent pipe cannot clear that fence.
+
+## Ordinary-user privilege boundary
+
+The development boot path still requires elevation: `Installed.settings()` calls
+`preflight()`, which rejects a non-elevated token. Removing that check is not a
+qualified solution: HCN authorizes calls against the caller's token, and the HCS
+create API reserves its security-descriptor argument as NULL. [HCN authorization](https://learn.microsoft.com/en-us/windows-server/networking/technologies/hcn/hcn-top),
+[HCS create contract](https://learn.microsoft.com/en-us/virtualization/api/hcs/reference/hcscreatecomputesystem).
+
+The intended product path is one demand-start SCM broker installed by elevated
+setup, with the CLI, manager and explicit file copies remaining in the ordinary
+user process. Its authenticated client SID must be distinct from the privileged
+process identity: the current `Identity::current()` and LocalAppData discovery
+cannot simply run unchanged as SYSTEM. Broker/helper code belongs in an
+administrator/service-owned installation, with a protected SID/runtime catalog;
+a per-user writable helper or manifest is not an elevation trust anchor.
+
+The broker must admit only typed lifecycle operations for the authenticated
+caller's runtime. It must not accept a helper path, shell command or arbitrary
+HCS configuration. A local-only private pipe authenticates the client token,
+reverts impersonation and fails closed on authentication error. Setup/update/
+removal handle elevation; ordinary start/query rights must not grant service
+configuration changes. [Service access rights](https://learn.microsoft.com/en-us/windows/win32/services/service-security-and-access-rights),
+[pipe access rights](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights),
+[client impersonation](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-impersonatenamedpipeclient).
+This broker and its installed principal/privilege flow are not implemented or
+qualified by the maintenance implementation.
 
 ## First target: Windows 11 x64 with an HCS-owned Hyper-V VM
 
@@ -105,8 +133,42 @@ transfer status/recovery use private, opening-scoped messages. Local Files impor
 and export now use the same manifest, reviewed approval, payload protocol and
 receiver journal as Unix. Personal-backup streams also use native file endpoints
 and the shared restore workflow. Share also uses its common reviewed workflow.
-Software update/removal and the Live storage selector remain explicitly
-unavailable on Windows.
+Stopped-only update, software collection and uninstall are also connected. The
+Live storage selector is unavailable on Windows.
+
+## Stopped-only software maintenance
+
+Close the Safes and run `oblivion runtime stop` first. The development CLI now
+connects `runtime update BUNDLE`, `runtime gc` and `runtime uninstall`. When
+changing source versions, run the new verified bundle's launcher so its source
+binding matches the incoming bundle. None of these maintenance operations boots
+a VM or changes the data VHDX, runtime identity or configuration.
+
+A Stopped journal alone is insufficient. Maintenance owns the runtime election
+and the exclusive journal writer after the previous supervisor releases it.
+That authority remains held through filesystem changes and prevents a concurrent
+start. An update records its exact base and target, replaces only verified boot
+files and commits the new binding. The recorded transition can finish after a
+rebind without treating another bundle as a compatible substitute. Bundle and
+boot-file copies publish from complete private staging; interrupted copies never
+occupy the deterministic target name. Registry and supervision journal replacement
+use flushed private files under their existing ownership locks.
+
+`gc` removes only complete, verified obsolete software. Uninstall records removal
+of the software before collection, retaining the installation record, `vm.json`,
+supervision journal and exact `data.vhdx`. Unknown files and mapped/in-use binaries
+remain untouched and appear in the cleanup report. Exit code 2 means removal is
+incomplete; retry from a verified external bundle after closing installed programs.
+Reinstall through `runtime update BUNDLE` preserves the retained data and identity.
+No data-purge or delete-at-reboot operation is introduced.
+
+`runtime recover` retries a guarded stop only in stop/recovery states, using the
+authenticated live supervisor and then requiring the same Stopped proof. It
+refuses a healthy active runtime with an instruction to use `runtime stop`. An
+absent supervisor, unknown HCS/HCN resources or uncertain ACL grants remain fenced;
+this is not orphan-resource adoption or complete crash recovery. Filesystem,
+mutex, pipe and replacement fixtures are compiled for Windows, not executed on
+this Mac. Power-loss durability and installed lifecycle remain acceptance gates.
 
 ## Local Files copies
 
@@ -402,8 +464,7 @@ retain POSIX paths. The source-bound bundle validator supports Windows assets
 without depending on Unix ownership APIs. Compilation and fixture definitions
 do not qualify the installed manager or Hyper-V path.
 
-Remaining work is a normal-user privilege broker, update/removal and explicit
-reconciliation of owned HCS,
+Remaining work is a normal-user privilege broker and explicit reconciliation of owned HCS,
 network and ACL grants after uncertain shutdown or interrupted setup. The full
 installed path must then pass the acceptance gates below. There is no second
 Windows command grammar, beta compatibility reader or automatic emulation fallback.
