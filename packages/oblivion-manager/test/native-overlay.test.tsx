@@ -36,6 +36,31 @@ test.each([[80, 24], [160, 50]])("Files overlay stays scoped and returns without
   } finally { await app.dispose() }
 })
 
+test("Files export only requests an interactive open for a closed Safe in the manager", async () => {
+  for (const open of [true, false]) {
+    const fixture = nativePreview(() => {})
+    await fixture.run(["unlock"])
+    const id = (await fixture.status()).sessions[0]!
+    if (open) await fixture.run(["safe", "open", id])
+    const initial = await fixture.status()
+    const commands: string[][] = []
+    const app = await testRender(() => <SafeManager initial={initial} runtime={{ ...fixture,
+      run: async (args) => { commands.push(args); return fixture.run(args) },
+    }} />, { width: 80, height: 24, kittyKeyboard: true })
+    try {
+      await app.renderOnce()
+      await app.mockInput.pressKey("\x1b[18~")
+      await app.renderOnce()
+      expect(app.captureCharFrame()).toContain("Files are shared")
+      await app.mockInput.pressArrow("down")
+      await app.mockInput.pressEnter()
+      await app.renderOnce()
+      expect(commands).toEqual([["safe", "open", id, ...(open ? ["--already-open"] : [])]])
+      expect(app.captureCharFrame()).toContain("Choose Safe files")
+    } finally { await app.dispose() }
+  }
+})
+
 test("Network overlay changes only its Safe and F7 returns to the agent", async () => {
   let exits = 0
   const fixture = nativePreview(() => { exits++ })

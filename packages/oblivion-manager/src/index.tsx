@@ -29,6 +29,8 @@ const exit = () => { clipboard.dispose(); renderer.destroy(); process.exit(0) }
 
 function runsWithoutTerminal(args: string[]) {
   return (args[0] === "settings" && args[1] === "idle")
+    || (args[0] === "safe" && args[1] === "open" && args[3] === "--already-open")
+    || (args[0] === "files" && (args[1] === "recover" || args[1] === "discard") && args.at(-1) === "--json")
     || (args[0] === "network" && args[1] === "set" && args[2] === "--safe"
       && (args[4] === "--policy" || args[4] === "--tor"))
 }

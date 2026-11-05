@@ -188,6 +188,7 @@ const OVERVIEW: &str = "Oblivion — isolated, encrypted workspaces for coding a
 
 Safe management
   oblivion safe open SAFE          Open offline for files
+  oblivion safe open SAFE --already-open  Keep an open Safe open without prompting
   oblivion safe rename SAFE NAME   Change its title
   oblivion safe grow SAFE MIB      Increase a closed Safe's capacity
   oblivion safe password SAFE [--confirmed-plan SHA]

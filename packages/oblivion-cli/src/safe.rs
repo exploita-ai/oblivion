@@ -7,7 +7,8 @@ use oblivion_wire::{session_title, volume};
 use std::io::Write;
 use zeroize::Zeroizing;
 
-const HELP: &str = "Use safe open NAME, safe rename NAME NEW_NAME or safe grow NAME MIB";
+const HELP: &str =
+    "Use safe open NAME [--already-open], safe rename NAME NEW_NAME or safe grow NAME MIB";
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Command {
@@ -16,7 +17,7 @@ pub struct Command {
 
 #[derive(Debug, Eq, PartialEq)]
 enum Action {
-    Open { name: String },
+    Open { name: String, already_open: bool },
     Rename { name: String, title: String },
     Grow { name: String, mib: u64 },
 }
@@ -24,7 +25,7 @@ enum Action {
 impl Action {
     fn validate(&self) -> Result<()> {
         match self {
-            Self::Open { name } => session_title::validate(name)?,
+            Self::Open { name, .. } => session_title::validate(name)?,
             Self::Rename { name, title } => {
                 session_title::validate(name)?;
                 session_title::validate(title)?;
@@ -40,7 +41,14 @@ impl Action {
 
 pub fn parse(args: &[String]) -> Result<Command> {
     let command = match args {
-        [action, name] if action == "open" => Action::Open { name: name.clone() },
+        [action, name, options @ ..]
+            if action == "open" && (options.is_empty() || options == ["--already-open"]) =>
+        {
+            Action::Open {
+                name: name.clone(),
+                already_open: !options.is_empty(),
+            }
+        }
         [action, name, title] if action == "rename" => Action::Rename {
             name: name.clone(),
             title: title.clone(),
@@ -62,18 +70,33 @@ pub fn execute<R: run::Runtime>(
     command: Command,
     diagnostics: &mut impl Write,
 ) -> Result<i32> {
-    if !controller::status(runtime)?.app_open {
+    let already_open = matches!(
+        command.action,
+        Action::Open {
+            already_open: true,
+            ..
+        }
+    );
+    let state = controller::status(runtime)?;
+    if !state.app_open {
+        if already_open {
+            return Err("Oblivion is locked. Run oblivion unlock.".into());
+        }
         crate::storage::execute(
             runtime,
             crate::storage::Command::Unlock { read_only: false },
         )?;
     }
-    let state = controller::status(runtime)?;
+    let state = if already_open {
+        state
+    } else {
+        controller::status(runtime)?
+    };
     if state.recovery_required {
         return Err("Oblivion requires recovery before opening a Safe".into());
     }
     let name = match &command.action {
-        Action::Open { name } | Action::Rename { name, .. } | Action::Grow { name, .. } => name,
+        Action::Open { name, .. } | Action::Rename { name, .. } | Action::Grow { name, .. } => name,
     };
     let id = state.find_safe(name)?.ok_or("Safe not found")?;
     if !valid_id(&id) {
@@ -87,6 +110,7 @@ pub fn execute<R: run::Runtime>(
         Action::Open { .. } => {
             let slot = match active {
                 Some(safe) => safe.slot,
+                None if already_open => return Err("This Safe is no longer open".into()),
                 None => run::free_slot(runtime, &state)?,
             };
             if active.is_none() {

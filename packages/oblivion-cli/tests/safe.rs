@@ -21,6 +21,7 @@ fn closed() -> Value {
 fn grammar_validates_complete_names_and_capacity_before_runtime() {
     for values in [
         vec!["open", "GB"],
+        vec!["open", "GB", "--already-open"],
         vec!["rename", "GB", "Research 文档"],
         vec!["grow", "GB", "128"],
         vec!["grow", "GB", "1048576"],
@@ -72,6 +73,50 @@ fn open_uses_offline_documents_then_pins_exact_opening_without_starting_agent() 
         String::from_utf8(output).unwrap(),
         "Safe aaaaaaaa opened for files and offline work\n"
     );
+}
+
+#[test]
+fn already_open_pins_an_active_safe_without_attaching_or_prompting() {
+    let mut runtime = Runtime::new(vec![status(&active()), response(Operation::PinSafe, "")]);
+    assert_eq!(
+        safe::execute(
+            &mut runtime,
+            command(&["open", "GB", "--already-open"]),
+            &mut Vec::new()
+        )
+        .unwrap(),
+        0
+    );
+    runtime.finished();
+    assert!(runtime.events.is_empty());
+    assert!(runtime.attached.is_none());
+    assert_eq!(runtime.sent[1].slot, Some(1));
+    assert_eq!(runtime.sent[1].expected.as_deref(), Some(ID));
+}
+
+#[test]
+fn already_open_never_prompts_to_reopen_locked_storage_or_a_closed_safe() {
+    let mut locked = closed();
+    locked["app_open"] = json!(false);
+    locked["app_mode"] = json!("locked");
+    for (state, error) in [
+        (locked, "Oblivion is locked. Run oblivion unlock."),
+        (closed(), "This Safe is no longer open"),
+    ] {
+        let mut runtime = Runtime::new(vec![status(&state)]);
+        assert_eq!(
+            safe::execute(
+                &mut runtime,
+                command(&["open", "GB", "--already-open"]),
+                &mut Vec::new()
+            )
+            .unwrap_err()
+            .to_string(),
+            error
+        );
+        runtime.finished();
+        assert!(runtime.events.is_empty());
+    }
 }
 
 #[test]
