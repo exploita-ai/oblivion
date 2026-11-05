@@ -1,12 +1,13 @@
 import { closeSync, writeSync } from "node:fs"
 
 export type AgentStartup = "opening" | "connecting" | "gateway-failed" | "gateway-timeout" | "ephemeral-storage-full"
+export type AgentEvent = AgentStartup | "safe-closed-before-exit"
 
 export async function launchNativeAgent(
   launcher: string,
   args: string[],
   terminal: { suspend: () => void | Promise<void>; resume: () => void | Promise<void> },
-  report: (stage: AgentStartup) => void,
+  report: (event: AgentEvent) => void,
 ) {
   const child = Bun.spawn([launcher, ...args], {
     env: { ...process.env, OBLIVION_MANAGER_HANDOFF: "1" },
@@ -14,11 +15,11 @@ export async function launchNativeAgent(
   })
   const descriptor = child.stdio[3]
   let suspended = false
-  let completion: "attached" | "failed" | undefined
+  let completion: "attached" | "failed" | "closed" | undefined
   try {
     try {
       if (descriptor == null) throw new Error("Agent startup channel unavailable")
-      // This channel contains only single-byte stage changes. The launcher
+      // This channel contains only single-byte events. The launcher
       // waits for our acknowledgement before touching the terminal.
       const reader = Bun.file(descriptor).stream().getReader()
       try {
@@ -26,8 +27,8 @@ export async function launchNativeAgent(
           const chunk = await reader.read()
           if (chunk.done) break
           for (const byte of chunk.value) {
-            if (completion) throw new Error("Unexpected agent startup stage")
             const stage = String.fromCharCode(byte)
+            if (completion && !(completion === "attached" && stage === "D")) throw new Error("Unexpected agent event")
             switch (stage) {
               case "P":
               case "R":
@@ -53,6 +54,11 @@ export async function launchNativeAgent(
                 if (suspended) throw new Error("Manager terminal unavailable")
                 report(stage === "F" ? "gateway-failed" : stage === "T" ? "gateway-timeout" : "ephemeral-storage-full")
                 completion = "failed"
+                break
+              case "D":
+                if (completion !== "attached") throw new Error("Agent terminal was not attached")
+                report("safe-closed-before-exit")
+                completion = "closed"
                 break
               default:
                 throw new Error("Invalid agent startup stage")

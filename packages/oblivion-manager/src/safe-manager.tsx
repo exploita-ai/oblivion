@@ -144,8 +144,13 @@ export function SafeManager(props: { runtime: NativeRuntime; initial?: NativeSta
     setNotice("")
     if (args[0] === "run") setAgentStartup("opening")
     try {
-      const code = await props.runtime.run(args, args[0] === "run" ? setAgentStartup : undefined)
-      if (code !== 0) setNotice(agentStartup() === "gateway-failed" ? "The protected connection could not start. The Safe stayed offline."
+      let closedBeforeExit = false
+      const code = await props.runtime.run(args, args[0] === "run" ? (event) => {
+        if (event === "safe-closed-before-exit") closedBeforeExit = true
+        else setAgentStartup(event)
+      } : undefined)
+      if (code !== 0) setNotice(closedBeforeExit ? "The Safe closed before the agent could report its exit."
+        : agentStartup() === "gateway-failed" ? "The protected connection could not start. The Safe stayed offline."
         : agentStartup() === "gateway-timeout" ? "The protected connection timed out. The Safe stayed offline."
         : agentStartup() === "ephemeral-storage-full" ? "RAM-only storage is full. Close an unused RAM-only Safe and retry."
         : `The command ended with status ${code}.`)

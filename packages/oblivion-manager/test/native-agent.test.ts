@@ -38,3 +38,21 @@ test.skipIf(process.platform === "win32")("native agent keeps the manager active
   expect(code).toBe(1)
   expect(stages).toEqual(["connecting", "gateway-failed"])
 })
+
+test.skipIf(process.platform === "win32").each([true, false])("native agent separates confirmed Safe closure from status 1 (%s)", async (closed) => {
+  const stages: string[] = []
+  const code = await launchNativeAgent("/bin/sh", ["-ec", `
+    exchange() {
+      printf %s "$1" >&3
+      [ "$(dd bs=1 count=1 <&3 2>/dev/null)" = K ]
+    }
+    exchange R
+    if [ "$1" = yes ]; then exchange D; fi
+    exit 1
+  `, "sh", closed ? "yes" : "no"], {
+    suspend: () => { stages.push("suspend") },
+    resume: () => { stages.push("resume") },
+  }, (stage) => { stages.push(stage) })
+  expect(code).toBe(1)
+  expect(stages).toEqual(closed ? ["suspend", "safe-closed-before-exit", "resume"] : ["suspend", "resume"])
+})

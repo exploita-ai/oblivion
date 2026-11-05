@@ -85,6 +85,33 @@ test("agent startup stays in a progress modal and reports the protected connecti
   } finally { launch.resolve(); await app.dispose() }
 })
 
+test.each([
+  ["confirmed closure", true, "The Safe closed before the agent could report its exit."],
+  ["guest exit", false, "The command ended with status 1."],
+] as const)("the manager reports %s separately after returning from an agent", async (_name, closed, notice) => {
+  const fixture = nativePreview(() => {})
+  await fixture.run(["unlock"])
+  const initial = await fixture.status()
+  const refreshed = Promise.withResolvers<void>()
+  const app = await testRender(() => <SafeManager initial={initial} runtime={{ ...fixture, status: async () => {
+    const status = await fixture.status()
+    refreshed.resolve()
+    return status
+  }, run: async (_args, report) => {
+    if (closed) report?.("safe-closed-before-exit")
+    return 1
+  } }} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await app.renderOnce()
+    await app.mockInput.pressEnter()
+    await app.mockInput.pressEnter()
+    await refreshed.promise
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Your Safes")
+    expect(app.captureCharFrame()).toContain(notice)
+  } finally { await app.dispose() }
+})
+
 test("welcome describes both modes and enters ephemeral mode through the CLI", async () => {
   const fixture = nativePreview(() => {})
   const commands: string[][] = []

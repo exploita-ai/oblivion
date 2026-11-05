@@ -55,10 +55,12 @@ fn main() {
                 (Some(terminal), "gateway_start_failed") => { let _ = terminal.event(b'F'); }
                 (Some(terminal), "gateway_not_ready") => { let _ = terminal.event(b'T'); }
                 (Some(terminal), "insufficient_ephemeral_storage") => { let _ = terminal.event(b'S'); }
+                (Some(terminal), "safe_closed_before_agent_exit") => { let _ = terminal.event(b'D'); }
                 (Some(_), _) => {}
                 (None, "gateway_start_failed") => eprintln!("Oblivion: The protected gateway failed to start. The Safe stayed offline."),
                 (None, "gateway_not_ready") => eprintln!("Oblivion: The protected connection timed out. The Safe stayed offline."),
                 (None, "insufficient_ephemeral_storage") => eprintln!("Oblivion: The controller has insufficient RAM-only storage for another Safe. Close an unused RAM-only Safe and retry."),
+                (None, "safe_closed_before_agent_exit") => eprintln!("Oblivion: The Safe closed before the agent could report its exit."),
                 (None, _) => eprintln!("Oblivion: {error}"),
             }
             std::process::exit(1);
@@ -468,7 +470,35 @@ fn attach_command(id: &str, command: agent::Command<'_>, viewport: Option<agent:
     // Closing the lease is observable even if the launcher is SIGKILLed.
     let released = control::release_agent(&client, id);
     drop(lease);
-    released?;
+    agent_outcome(result, released, || {
+        tty && controller::status(&mut control::Client::new()).is_ok_and(|state| {
+            !state.recovery_required && state.open_sessions.iter().all(|entry| {
+                entry.slot != scope::current() && entry.id.as_deref() != Some(id)
+            })
+        })
+    })
+}
+
+fn agent_outcome(
+    result: control::Result<i32>,
+    released: control::Result<()>,
+    verified_closed: impl FnOnce() -> bool,
+) -> control::Result<i32> {
+    let stale_release = matches!(
+        released.as_ref().err().and_then(|error| error.downcast_ref()),
+        Some(oblivion_wire::control_client::Error::Rejected(reason)) if reason == "session_changed"
+    );
+    if !stale_release {
+        released?;
+        return result;
+    }
+    // The controller rejected the release for this Safe and slot. Before
+    // describing a lost agent channel as a closure, require verified teardown.
+    if result.as_ref().is_err_and(|error| error.is::<native_overlay::AgentDisconnected>())
+        && verified_closed()
+    {
+        return Err("safe_closed_before_agent_exit".into());
+    }
     result
 }
 fn size() -> agent::Size {
@@ -485,6 +515,33 @@ fn size() -> agent::Size {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_lost_agent_channel_with_verified_stale_release_reports_closure() {
+        fn bridge(code: Option<i32>) -> control::Result<i32> {
+            let (mut stream, mut guest) = std::os::unix::net::UnixStream::pair().unwrap();
+            if let Some(code) = code {
+                agent::write_frame(&mut guest, 4, &code.to_be_bytes()).unwrap();
+            }
+            drop(guest);
+            native_overlay::bridge(&mut stream, None, "test-safe", "opencode2", unsafe { std::mem::zeroed() }, None)
+        }
+
+        let stale_release = || Err(oblivion_wire::control_client::Error::Rejected("session_changed".into()).into());
+        for code in [0, 1, 19, 137] {
+            assert_eq!(agent_outcome(bridge(Some(code)), stale_release(), || panic!("guest exit is known")).unwrap(), code);
+        }
+        assert_eq!(
+            agent_outcome(bridge(None), stale_release(), || true).unwrap_err().to_string(),
+            "safe_closed_before_agent_exit"
+        );
+        assert!(agent_outcome(bridge(None), stale_release(), || false).unwrap_err().is::<native_overlay::AgentDisconnected>());
+        assert!(agent_outcome(bridge(None), Ok(()), || panic!("release is current")).unwrap_err().is::<native_overlay::AgentDisconnected>());
+        assert_eq!(
+            agent_outcome(bridge(None), Err("controller_busy".into()), || panic!("release is unverified")).unwrap_err().to_string(),
+            "controller_busy"
+        );
+    }
 
     fn parse(values: &[&str]) -> control::Result<Options> {
         options(

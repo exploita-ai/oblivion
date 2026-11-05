@@ -2,7 +2,7 @@
 
 use oblivion_cli::terminal_overlay::{self, Chrome, Keys, Page};
 use oblivion_host::{agent, control};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus};
@@ -127,6 +127,29 @@ fn restore(group: libc::pid_t, raw: &libc::termios) -> control::Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+pub struct AgentDisconnected(io::Error);
+
+impl std::fmt::Display for AgentDisconnected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::error::Error for AgentDisconnected {}
+
+fn agent_channel<T>(result: control::Result<T>) -> control::Result<T> {
+    result.map_err(|error| -> Box<dyn std::error::Error> {
+        match error.downcast::<io::Error>() {
+            Ok(error) if matches!(error.kind(), io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe) => {
+                AgentDisconnected(*error).into()
+            }
+            Ok(error) => error,
+            Err(error) => error,
+        }
+    })
+}
+
 pub fn bridge(
     stream: &mut std::os::unix::net::UnixStream,
     viewport: Option<agent::Size>,
@@ -162,7 +185,7 @@ fn forward(
             if child.poll()?.is_some() {
                 overlay.take();
                 flush_panel_input()?;
-                agent::write_frame(stream, 6, &libc::SIGWINCH.to_be_bytes())?;
+                agent_channel(agent::write_frame(stream, 6, &libc::SIGWINCH.to_be_bytes()))?;
             }
         }
         let caught = super::SIGNAL.swap(0, Ordering::Relaxed);
@@ -174,18 +197,18 @@ fn forward(
                 keys.set_viewport(viewport);
                 chrome.resize(current);
                 let guest = terminal_overlay::guest_size(current);
-                agent::write_frame(
+                agent_channel(agent::write_frame(
                     stream,
                     3,
                     &[guest.rows.to_be_bytes(), guest.cols.to_be_bytes()].concat(),
-                )?;
+                ))?;
             }
             if overlay.is_none() {
                 chrome.paint(&mut std::io::stdout(), Instant::now())?;
             }
         }
         if caught != 0 && caught != libc::SIGWINCH {
-            agent::write_frame(stream, 6, &caught.to_be_bytes())?;
+            agent_channel(agent::write_frame(stream, 6, &caught.to_be_bytes()))?;
             if let Some(child) = overlay.as_ref() {
                 child.signal(caught);
             }
@@ -197,7 +220,7 @@ fn forward(
             let mut expired = Vec::new();
             keys.expire(&mut expired, Instant::now());
             if !expired.is_empty() {
-                agent::write_frame(stream, 0, &expired)?;
+                agent_channel(agent::write_frame(stream, 0, &expired))?;
             }
         }
         let mut polls = [
@@ -226,7 +249,7 @@ fn forward(
             return Err(std::io::Error::last_os_error().into());
         }
         if polls[0].revents != 0 {
-            let (kind, bytes) = agent::read_frame(stream)?;
+            let (kind, bytes) = agent_channel(agent::read_frame(stream))?;
             match kind {
                 1 | 2 => {
                     if let Some(chrome) = chrome.as_deref_mut() {
@@ -235,7 +258,7 @@ fn forward(
                         let mut replies = Vec::new();
                         chrome.write_replies(&mut replies)?;
                         if !replies.is_empty() {
-                            agent::write_frame(stream, 0, &replies)?;
+                            agent_channel(agent::write_frame(stream, 0, &replies))?;
                         }
                     } else if kind == 1 {
                         std::io::stdout().write_all(&bytes)?;
@@ -296,11 +319,11 @@ fn forward(
                     if let Some(activity) = activity.as_mut() { activity.touch(Instant::now()) }
                 }
                 if !outgoing.is_empty() {
-                    agent::write_frame(stream, 0, &outgoing)?;
+                    agent_channel(agent::write_frame(stream, 0, &outgoing))?;
                 }
                 if eof {
                     input = false;
-                    agent::write_frame(stream, 5, &[])?;
+                    agent_channel(agent::write_frame(stream, 5, &[]))?;
                 }
                 if let Some(page) = page {
                     if let Some(chrome) = chrome.as_deref_mut() {
@@ -319,9 +342,9 @@ fn forward(
                 let length = std::io::stdin().read(&mut bytes)?;
                 if length == 0 {
                     input = false;
-                    agent::write_frame(stream, 5, &[])?;
+                    agent_channel(agent::write_frame(stream, 5, &[]))?;
                 } else {
-                    agent::write_frame(stream, 0, &bytes[..length])?;
+                    agent_channel(agent::write_frame(stream, 0, &bytes[..length]))?;
                 }
             }
         }
