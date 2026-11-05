@@ -5,7 +5,7 @@ use crate::client::{Channel, Client};
 use crate::files::{self, CreationParent, Executable};
 use crate::private::{self, Endpoint, Pipe, Purpose};
 use crate::security::Identity;
-use crate::{Error, Result};
+use crate::{Error, Result, resources};
 use oblivion_wire::agent;
 use oblivion_wire::control::{Operation, Request, valid_id};
 use oblivion_wire::runtime_auth::Data;
@@ -699,14 +699,23 @@ fn stopped_for(
     }
 }
 
-/// A live, authenticated supervisor may retry its owned shutdown. No HCS/HCN/
-/// ACL adoption exists here: pipe absence cannot clear an unknown helper exit.
+/// A live supervisor retries its own stop. Only exclusive journal ownership and
+/// the backend's resource lock authorize reconciliation after losing that owner.
 pub fn recover(settings: &Settings, stop: Arc<AtomicBool>, deadline: Instant) -> Result<()> {
     let identity = settings.storage_identity();
-    match Journal::read(settings, &identity)? {
-        None => return Err(Error("runtime_not_owned")),
-        Some(record) if record.phase.admitting() => return Err(Error("runtime_busy")),
-        Some(record) if record.phase != Phase::Stopped => {
+    let election = Election::acquire(settings.runtime_id(), &identity, &stop, deadline)?;
+    let record = Journal::read(settings, &identity)?.ok_or(Error("runtime_not_owned"))?;
+    if record.phase == Phase::Stopped {
+        drop(election);
+        drop(stopped(settings, stop, deadline)?);
+        return Ok(());
+    }
+    match Journal::writer(settings, &identity, false) {
+        Err(Error("supervision_journal_busy")) => {
+            drop(election);
+            if record.phase.admitting() {
+                return Err(Error("runtime_busy"));
+            }
             match exchange(
                 settings,
                 Action::Stop,
@@ -722,11 +731,41 @@ pub fn recover(settings: &Settings, stop: Arc<AtomicBool>, deadline: Instant) ->
                 Err(error) => return Err(error),
                 _ => return Err(Error("runtime_recovery_required")),
             }
+            drop(stopped(settings, stop, deadline)?);
+            Ok(())
         }
-        _ => {}
+        Err(error) => Err(error),
+        Ok(mut journal) => {
+            let mut record = journal.load()?.ok_or(Error("runtime_not_owned"))?;
+            record.phase = Phase::Recovery;
+            record.resident = false;
+            journal.save(&record)?;
+            let (context, config) = resources::Context::load(
+                settings
+                    .config
+                    .to_str()
+                    .ok_or(Error("invalid_supervisor_path"))?,
+                resource_binding(settings, &record.generation),
+                &identity,
+            )?;
+            let mut owned = context.lock(deadline, &|| check(&stop, deadline))?;
+            owned.recover(&config, &stop, deadline)?;
+            record.phase = Phase::Stopped;
+            journal.save(&record)?;
+            Ok(())
+        }
     }
-    drop(stopped(settings, stop, deadline)?);
-    Ok(())
+}
+
+fn resource_binding(settings: &Settings, generation: &str) -> resources::Binding {
+    resources::Binding {
+        runtime_id: settings.runtime_id().into(),
+        generation: generation.into(),
+        config_sha256: settings.binding.config_sha256.clone(),
+        source_sha256: settings.binding.source_sha256.clone(),
+        client_sid: settings.client_sid().into(),
+        storage_sid: settings.storage_sid().into(),
+    }
 }
 
 fn exchange(
@@ -867,7 +906,12 @@ pub fn supervise(settings: Settings, generation: &str) -> Result<()> {
             peers.retain(|peer| !peer.closed);
             let owners = peers.iter().filter(|peer| peer.lease).count();
             if record.phase == Phase::Starting && backend.is_none() && owners > 0 {
-                backend = Some(Backend::start(&settings, &verified, record.boot)?);
+                backend = Some(Backend::start(
+                    &settings,
+                    &verified,
+                    record.boot,
+                    &record.generation,
+                )?);
             }
             if let Some(backend) = backend.as_mut() {
                 if backend
@@ -952,7 +996,12 @@ struct Backend {
     client: Client,
 }
 impl Backend {
-    fn start(settings: &Settings, verified: &Verified, boot: Boot) -> Result<Self> {
+    fn start(
+        settings: &Settings,
+        verified: &Verified,
+        boot: Boot,
+        generation: &str,
+    ) -> Result<Self> {
         verified.helper.verify()?;
         boot.validate(settings.runtime_id())?;
         let mut command = Command::new(verified.helper.path());
@@ -969,6 +1018,14 @@ impl Backend {
                 settings.client_sid(),
                 "--storage-sid",
                 settings.storage_sid(),
+                "--runtime-id",
+                settings.runtime_id(),
+                "--generation",
+                generation,
+                "--config-sha256",
+                &settings.binding.config_sha256,
+                "--source-sha256",
+                &settings.binding.source_sha256,
             ]);
         if let Boot::Initialize { bytes } = boot {
             command.args(["--data-mib", &(bytes / (1024 * 1024)).to_string()]);
@@ -1640,7 +1697,9 @@ mod tests {
             )
             .unwrap_err()
             .0,
-            "windows_owned_reconciliation_required"
+            // The writer is gone, but this fixture has no bound configuration.
+            // Pipe absence alone cannot authorize external cleanup or Stopped.
+            "runtime_file_unavailable"
         );
         let record = Journal::writer(&settings, &identity, false)
             .unwrap()

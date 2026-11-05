@@ -38,6 +38,7 @@ pub mod network;
 pub mod network_model;
 #[cfg(windows)]
 pub mod private;
+pub mod resources;
 #[cfg(windows)]
 pub mod runtime;
 #[cfg(windows)]

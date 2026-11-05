@@ -98,6 +98,13 @@ impl RuntimeConfig {
         )
     }
 
+    /// Per-start ownership recorded durably before HCS or HCN effects. This is
+    /// an HCS client marker, never a credential or a Hyper-V RuntimeId.
+    pub fn owner(&self, generation: &str) -> Result<String> {
+        self.validate()?;
+        crate::hcs_model::owner(&self.vm_id(), generation)
+    }
+
     /// HCS schema 2.2: LinuxKernelDirect, VirtioSerial, SCSI and explicit
     /// HvSocket permissions. The schema and Microsoft's WSL implementation are
     /// the owners of these field names; callers cannot supply arbitrary devices.
@@ -106,8 +113,10 @@ impl RuntimeConfig {
         bootstrap_pipe: &str,
         owner_sddl: &str,
         network: Option<&Attachment>,
+        expected_owner: &str,
     ) -> Result<String> {
         self.validate()?;
+        crate::hcs_model::validate_owner(&self.vm_id(), expected_owner)?;
         let prefix = format!(r"\\.\pipe\oblivion.{}.auth.", self.runtime_id);
         if !bootstrap_pipe.strip_prefix(&prefix).is_some_and(identifier) {
             return Err(Error("invalid_runtime_auth_pipe"));
@@ -122,7 +131,7 @@ impl RuntimeConfig {
             network.validate(&self.runtime_id)?;
         }
         let document = ComputeSystem {
-            owner: "Oblivion",
+            owner: expected_owner,
             schema_version: Version { major: 2, minor: 2 },
             should_terminate_on_last_handle_closed: true,
             virtual_machine: VirtualMachine {

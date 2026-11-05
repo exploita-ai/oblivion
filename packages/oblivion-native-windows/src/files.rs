@@ -2,6 +2,7 @@
 //! sets the VHDX Identifier to UUID(runtime_id), matching the guest marker/UUID.
 //! This module never creates, repairs, mounts or adopts an unrelated disk.
 use crate::config::{CONFIG_LIMIT, RuntimeConfig};
+use crate::resources::FileEvidence;
 use crate::security::Identity;
 use crate::{Error, Result};
 use std::fs::File;
@@ -62,6 +63,7 @@ pub struct Lease {
     vm_id: String,
     granted: Vec<usize>,
     owner: String,
+    data_bytes: u64,
 }
 
 impl Lease {
@@ -80,26 +82,32 @@ impl Lease {
             }
             files.push(pinned);
         }
-        let mut signature = [0; 8];
-        read_at(&files[2], 32768, &mut signature)?;
-        if files[2].size < 34816
-            || files[2].size % 2048 != 0
-            || signature[1..6] != *b"CD001"
-            || signature[6] != 1
-        {
-            return Err(Error("runtime_iso_required"));
-        }
-        read_at(&files[3], 0, &mut signature)?;
-        if signature != *b"vhdxfile" || files[3].size < 1024 * 1024 {
-            return Err(Error("runtime_vhdx_required"));
-        }
-        virtual_disk(&files[3], &config.runtime_id)?;
+        let data_bytes = validate_runtime_files(&files, config)?;
         Ok(Self {
             files,
             vm_id: config.vm_id(),
             granted: Vec::new(),
             owner: identity.sid().to_owned(),
+            data_bytes,
         })
+    }
+
+    /// The private recovery receipt stores these original admission identities
+    /// before any grant. Asset lengths are immutable; VHDX capacity is stable
+    /// while its physical file may grow as the guest writes.
+    pub fn evidence(&self) -> Vec<FileEvidence> {
+        self.files
+            .iter()
+            .map(|file| FileEvidence {
+                volume: file.id.volume,
+                file: file.id.file,
+                bytes: if file.role == Role::Data {
+                    self.data_bytes
+                } else {
+                    file.size
+                },
+            })
+            .collect()
     }
 
     /// These APIs take paths, not handles. Leaf and ancestor handles keep those
@@ -167,6 +175,79 @@ impl Lease {
     pub fn retain_until_exit(self) {
         std::mem::forget(self);
     }
+}
+
+/// Only the caller's observed HCS Stopped/absent boundary authorizes this
+/// operation. A protected receipt binds these exact original file objects; no
+/// path, role or replacement file is adopted from a client request.
+pub fn reconcile(
+    config: &RuntimeConfig,
+    identity: &Identity,
+    expected: &[FileEvidence],
+) -> Result<()> {
+    config.validate()?;
+    if expected.len() != 4 {
+        return Err(Error("invalid_runtime_file_evidence"));
+    }
+    let mut files = Vec::new();
+    for ((path, role), evidence) in [
+        (&config.kernel, Role::Asset),
+        (&config.initrd, Role::Asset),
+        (&config.disks[0].path, Role::Asset),
+        (&config.disks[1].path, Role::Data),
+    ]
+    .into_iter()
+    .zip(expected)
+    {
+        let pinned = Pinned::pin(path, role)?;
+        if pinned.id
+            != (FileId {
+                volume: evidence.volume,
+                file: evidence.file,
+            })
+            || pinned.size == 0
+            || role == Role::Asset && pinned.size != evidence.bytes
+            || files.iter().any(|other: &Pinned| other.id == pinned.id)
+        {
+            return Err(Error("runtime_file_evidence_changed"));
+        }
+        // ACL admission is intentionally deferred only after the protected
+        // receipt matched this original object. The VM's own grant can be the
+        // reason strict pre-grant policy currently fails.
+        files.push(pinned);
+    }
+    let data_bytes = validate_runtime_files(&files, config)?;
+    if data_bytes != expected[3].bytes {
+        return Err(Error("runtime_file_evidence_changed"));
+    }
+    for file in &files {
+        file.verify()?;
+    }
+    Lease {
+        files,
+        vm_id: config.vm_id(),
+        granted: (0..4).collect(),
+        owner: identity.sid().into(),
+        data_bytes,
+    }
+    .revoke_vm_access()
+}
+
+fn validate_runtime_files(files: &[Pinned], config: &RuntimeConfig) -> Result<u64> {
+    let mut signature = [0; 8];
+    read_at(&files[2], 32768, &mut signature)?;
+    if files[2].size < 34816
+        || files[2].size % 2048 != 0
+        || signature[1..6] != *b"CD001"
+        || signature[6] != 1
+    {
+        return Err(Error("runtime_iso_required"));
+    }
+    read_at(&files[3], 0, &mut signature)?;
+    if signature != *b"vhdxfile" || files[3].size < 1024 * 1024 {
+        return Err(Error("runtime_vhdx_required"));
+    }
+    virtual_disk(&files[3], &config.runtime_id)
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -803,6 +884,12 @@ fn verify_parents(parents: &[(String, File, FileId)]) -> Result<()> {
 
 impl Pinned {
     fn open(path: &str, role: Role, identity: &Identity) -> Result<Self> {
+        let pinned = Self::pin(path, role)?;
+        permissions(&pinned.file, identity.sid(), role != Role::Asset)?;
+        Ok(pinned)
+    }
+
+    fn pin(path: &str, role: Role) -> Result<Self> {
         let parents = pin_parents(path)?;
         // Metadata-only data-file access lets HCS choose its own VHDX sharing
         // mode. Signature reads are short-lived, identity-checked handles.
@@ -813,7 +900,6 @@ impl Pinned {
         };
         let file = open_raw(path, access, role == Role::Data, false)?;
         let (id, size) = inspect(&file, path, false)?;
-        permissions(&file, identity.sid(), role != Role::Asset)?;
         let pinned = Self {
             path: path.to_owned(),
             file,
@@ -1017,7 +1103,11 @@ fn wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CONFIG_LIMIT, File, Identity, Pinned, Role, open_raw, read_config, wide};
+    use super::{
+        CONFIG_LIMIT, File, GIB, Identity, Lease, Pinned, Role, open_raw, read_config, reconcile,
+        wide,
+    };
+    use crate::config::{Disk, RuntimeConfig};
     use crate::security::Security;
     use serde_json::json;
     use std::io::Write;
@@ -1040,7 +1130,7 @@ mod tests {
             getrandom::getrandom(&mut bytes).unwrap();
             let name: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
             let path = std::env::temp_dir().join(format!("oblivion-files-{name}"));
-            std::fs::create_dir(&path).unwrap();
+            super::create_directory(path.to_str().unwrap(), &Identity::current().unwrap()).unwrap();
             Self(path)
         }
         fn path(&self, name: &str) -> String {
@@ -1051,6 +1141,44 @@ mod tests {
             File::create(&path).unwrap().write_all(bytes).unwrap();
             acl(&path, identity, extra);
             path
+        }
+
+        fn runtime(&self, identity: &Identity) -> RuntimeConfig {
+            let id = "0123456789abcdef0123456789abcdef";
+            let kernel = self.file("kernel", b"kernel", identity, "");
+            let initrd = self.file("initrd", b"initrd", identity, "");
+            let mut iso = vec![0; 34816];
+            iso[32769..32774].copy_from_slice(b"CD001");
+            iso[32774] = 1;
+            let image = self.file("controller.iso", &iso, identity, "");
+            let data = self.path("data.vhdx");
+            drop(crate::disk::create(&data, id, 4 * GIB, identity).unwrap());
+            RuntimeConfig {
+                version: 1,
+                backend: "hcs-hyperv".into(),
+                runtime_id: id.into(),
+                kernel,
+                initrd,
+                command_line: format!(
+                    "oblivion.runtime=1 oblivion.runtime-backend=hcs-hyperv oblivion.runtime-id={id}"
+                ),
+                disks: vec![
+                    Disk {
+                        path: image,
+                        read_only: true,
+                    },
+                    Disk {
+                        path: data,
+                        read_only: false,
+                    },
+                ],
+                cpu_count: 2,
+                memory_mi_b: 2048,
+                control_pipe: format!(r"\\.\pipe\oblivion.{id}.control"),
+                control_port: 4050,
+                network: false,
+                serial_stdio: false,
+            }
         }
     }
     impl Drop for Area {
@@ -1210,6 +1338,77 @@ mod tests {
         assert_eq!(
             Pinned::open(&path, Role::Asset, &identity).err().unwrap().0,
             "regular_runtime_asset_required"
+        );
+    }
+
+    #[test]
+    fn file_evidence_uses_original_ordered_file_ids_and_stable_virtual_disk_capacity() {
+        let area = Area::new();
+        let identity = Identity::current().unwrap();
+        let config = area.runtime(&identity);
+        let lease = Lease::acquire(&config, &identity).unwrap();
+        let evidence = lease.evidence();
+        assert_eq!(evidence.len(), 4);
+        for (path, observed) in [
+            &config.kernel,
+            &config.initrd,
+            &config.disks[0].path,
+            &config.disks[1].path,
+        ]
+        .into_iter()
+        .zip(&evidence)
+        {
+            let expected = super::data_file_identity(path).unwrap();
+            assert_eq!(observed.volume, expected.0);
+            assert_eq!(observed.file, expected.1);
+        }
+        assert_eq!(evidence[0].bytes, 6);
+        assert_eq!(evidence[2].bytes, 34816);
+        assert_eq!(evidence[3].bytes, 4 * GIB);
+        assert!(std::fs::metadata(&config.disks[1].path).unwrap().len() < evidence[3].bytes);
+    }
+
+    #[test]
+    fn reconciliation_refuses_replacements_and_preserves_unknown_acl_before_any_revoke() {
+        let area = Area::new();
+        let identity = Identity::current().unwrap();
+        let config = area.runtime(&identity);
+        let lease = Lease::acquire(&config, &identity).unwrap();
+        let evidence = lease.evidence();
+        drop(lease);
+        std::fs::rename(&config.kernel, area.path("original-kernel")).unwrap();
+        area.file("kernel", b"kernel", &identity, "");
+        assert_eq!(
+            reconcile(&config, &identity, &evidence).unwrap_err().0,
+            "runtime_file_evidence_changed"
+        );
+        assert!(std::path::Path::new(&area.path("original-kernel")).exists());
+
+        let lease = Lease::acquire(&config, &identity).unwrap();
+        let mut evidence = lease.evidence();
+        drop(lease);
+        // The same original kernel can carry an unexpected permission. A
+        // rejected capacity receipt must not silently repair or adopt its ACL.
+        acl(&config.kernel, &identity, "(A;;GW;;;WD)");
+        evidence[3].bytes += 1024 * 1024;
+        assert_eq!(
+            reconcile(&config, &identity, &evidence).unwrap_err().0,
+            "runtime_file_evidence_changed"
+        );
+        assert_eq!(
+            Lease::acquire(&config, &identity).err().unwrap().0,
+            "private_runtime_file_required"
+        );
+        assert_eq!(
+            reconcile(&config, &identity, &[]).unwrap_err().0,
+            "invalid_runtime_file_evidence"
+        );
+        assert_eq!(
+            Pinned::open(&config.kernel, Role::Asset, &identity)
+                .err()
+                .unwrap()
+                .0,
+            "private_runtime_file_required"
         );
     }
 

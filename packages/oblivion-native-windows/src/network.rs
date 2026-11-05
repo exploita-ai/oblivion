@@ -42,20 +42,12 @@ pub struct Lease {
 
 impl Lease {
     pub fn acquire(plan: Plan, check: &dyn Fn() -> Result<()>) -> Result<Self> {
-        plan.attachment.validate(&plan.attachment.runtime_id)?;
+        plan.validate()?;
         let network = guid(&plan.attachment.network_id)?;
         let endpoint = guid(&plan.attachment.endpoint_id)?;
         // Refuse both existing IDs before any mutation. A matching name/schema
         // is not authority to adopt a resource from an earlier invocation.
-        for (kind, id) in [(Kind::Network, network), (Kind::Endpoint, endpoint)] {
-            check()?;
-            let existing = Object::open(kind, &id)?;
-            if let Some(mut existing) = existing {
-                existing.close()?;
-                return Err(Error("hcn_runtime_resources_exist"));
-            }
-            check()?;
-        }
+        require_objects_absent(&network, &endpoint, check)?;
         let mut lease = Self {
             plan,
             network: None,
@@ -107,47 +99,98 @@ impl Lease {
     /// termination submission. Cleanup may use an unconditional check after
     /// parent EOF because removing these already-owned resources is authorized.
     pub fn stop(&mut self, check: &dyn Fn() -> Result<()>) -> Result<()> {
-        for kind in [Kind::Endpoint, Kind::Network] {
-            check()?;
-            let current = match kind {
-                Kind::Endpoint => &self.endpoint,
-                Kind::Network => &self.network,
-            };
-            let Some(object) = current else {
-                continue;
-            };
-            let properties = object.query_optional()?;
-            check()?;
-            if let Some(properties) = properties {
-                match kind {
-                    Kind::Endpoint => self.plan.verify_endpoint_properties(&properties)?,
-                    Kind::Network => self.plan.verify_network_properties(&properties)?,
-                }
-                check()?;
-                object.delete()?;
-                check()?;
-            }
-            // Delete returning S_OK is not the proof of absence.
-            if let Some(mut still_present) = Object::open(kind, &object.id)? {
-                still_present.close()?;
-                return Err(Error("hcn_network_cleanup_unconfirmed"));
-            }
-            check()?;
-            let object = match kind {
-                Kind::Endpoint => self.endpoint.take(),
-                Kind::Network => self.network.take(),
-            };
-            if let Some(mut object) = object {
-                object.close()?;
-            }
-            check()?;
-        }
-        Ok(())
+        cleanup(&self.plan, &mut self.network, &mut self.endpoint, check)
     }
 
     pub fn retain_until_exit(self) {
         std::mem::forget(self);
     }
+}
+
+/// Only a durable, privileged receipt plus the caller's confirmed HCS
+/// Stopped/absence proof authorizes this operation. A name match is never a
+/// discovery/adoption rule; only the two recorded GUIDs can be opened/deleted.
+pub fn reconcile(plan: &Plan, check: &dyn Fn() -> Result<()>) -> Result<()> {
+    plan.validate()?;
+    check()?;
+    let mut network = Object::open(Kind::Network, &guid(&plan.attachment.network_id)?)?;
+    check()?;
+    let mut endpoint = Object::open(Kind::Endpoint, &guid(&plan.attachment.endpoint_id)?)?;
+    check()?;
+    cleanup(plan, &mut network, &mut endpoint, check)
+}
+
+/// No receipt means no ownership authority: observe both deterministic IDs and
+/// reject any existing resource, even if its public name would otherwise match.
+pub fn require_absent(runtime_id: &str, check: &dyn Fn() -> Result<()>) -> Result<()> {
+    let (network, endpoint) = network_model::object_ids(runtime_id)?;
+    require_objects_absent(&guid(&network)?, &guid(&endpoint)?, check)
+}
+
+fn require_objects_absent(
+    network: &GUID,
+    endpoint: &GUID,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    for (kind, id) in [(Kind::Network, network), (Kind::Endpoint, endpoint)] {
+        check()?;
+        if let Some(mut existing) = Object::open(kind, id)? {
+            existing.close()?;
+            return Err(Error("hcn_runtime_resources_exist"));
+        }
+        check()?;
+    }
+    Ok(())
+}
+
+fn cleanup(
+    plan: &Plan,
+    network: &mut Option<Object>,
+    endpoint: &mut Option<Object>,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    plan.validate()?;
+    // Inspect the entire owned set before any deletion. In particular a valid
+    // endpoint cannot be removed first if the network ID now denotes a foreign
+    // name, generation, subnet or policy.
+    let mut present = [false; 2];
+    for (index, object) in [network.as_ref(), endpoint.as_ref()]
+        .into_iter()
+        .enumerate()
+    {
+        check()?;
+        if let Some(properties) = object.map(Object::query_optional).transpose()?.flatten() {
+            if index == 0 {
+                plan.verify_network_properties(&properties)?;
+            } else {
+                plan.verify_endpoint_properties(&properties)?;
+            }
+            present[index] = true;
+        }
+        check()?;
+    }
+    for (object, present) in [(endpoint, present[1]), (network, present[0])] {
+        check()?;
+        let Some(current) = object.as_ref() else {
+            continue;
+        };
+        if present {
+            current.delete()?;
+        }
+        check()?;
+        // Successful delete admission, including an already-missing result,
+        // is not the required observation that this exact GUID is absent.
+        if let Some(mut remaining) = Object::open(current.kind, &current.id)? {
+            remaining.close()?;
+            return Err(Error("hcn_network_cleanup_unconfirmed"));
+        }
+        check()?;
+        if let Some(mut removed) = object.take() {
+            removed.close()?;
+        }
+        check()?;
+    }
+    Ok(())
 }
 
 impl Drop for Lease {
@@ -326,7 +369,7 @@ impl Object {
                 Kind::Endpoint => HcnDeleteEndpoint(&self.id, &mut error.0),
             }
         };
-        if result != 0 {
+        if result != 0 && result != missing(self.kind) {
             return Err(Error("hcn_network_cleanup_unconfirmed"));
         }
         Ok(())
@@ -444,7 +487,7 @@ fn guid(value: &str) -> Result<GUID> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Lease, inventory};
+    use super::{Kind, Lease, Object, guid, inventory, reconcile, require_absent};
     use crate::Error;
     use crate::network_model::Plan;
 
@@ -455,10 +498,114 @@ mod tests {
             inventory(&denied).err(),
             Some(Error("supervisor_lifetime_lost"))
         );
-        let plan = Plan::new("0123456789abcdef0123456789abcdef", &[]).unwrap();
+        let plan = Plan::new(
+            "0123456789abcdef0123456789abcdef",
+            "abcdef0123456789abcdef0123456789",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            require_absent(&plan.attachment.runtime_id, &denied).err(),
+            Some(Error("supervisor_lifetime_lost"))
+        );
+        assert_eq!(
+            reconcile(&plan, &denied).err(),
+            Some(Error("supervisor_lifetime_lost"))
+        );
         assert_eq!(
             Lease::acquire(plan, &denied).err(),
             Some(Error("supervisor_lifetime_lost"))
         );
+    }
+
+    #[test]
+    #[ignore = "requires explicit elevated Windows HCN qualification; creates only new isolated fixture objects"]
+    fn exact_receipt_reconciliation_is_idempotent_and_never_partially_deletes_a_foreign_set() {
+        struct Owned {
+            network: Object,
+            endpoint: Option<Object>,
+        }
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                // These contexts came from successful fixture Create calls;
+                // no VM was constructed, and no existing object was adopted.
+                if let Some(endpoint) = &mut self.endpoint {
+                    let _ = endpoint.delete();
+                    let _ = endpoint.close();
+                }
+                let _ = self.network.delete();
+                let _ = self.network.close();
+            }
+        }
+        let random = || {
+            let mut bytes = [0; 16];
+            getrandom::getrandom(&mut bytes).unwrap();
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        for foreign in [false, true] {
+            let plan = Plan::new(&random(), &random(), &inventory(&|| Ok(())).unwrap()).unwrap();
+            let network_id = guid(&plan.attachment.network_id).unwrap();
+            let endpoint_id = guid(&plan.attachment.endpoint_id).unwrap();
+            assert!(Object::open(Kind::Network, &network_id).unwrap().is_none());
+            assert!(
+                Object::open(Kind::Endpoint, &endpoint_id)
+                    .unwrap()
+                    .is_none()
+            );
+            let mut document: serde_json::Value =
+                serde_json::from_str(&plan.network_json().unwrap()).unwrap();
+            if foreign {
+                document["Name"] = serde_json::json!(format!(
+                    "Oblivion.{}.{}.network",
+                    plan.attachment.runtime_id,
+                    random()
+                ));
+            }
+            let network = Object::create_network(&network_id, &document.to_string()).unwrap();
+            let mut owned = Owned {
+                network,
+                endpoint: None,
+            };
+            owned.endpoint = Some(
+                Object::create_endpoint(
+                    &owned.network,
+                    &endpoint_id,
+                    &plan.endpoint_json().unwrap(),
+                )
+                .unwrap(),
+            );
+            if foreign {
+                assert_eq!(
+                    reconcile(&plan, &|| Ok(())).unwrap_err().0,
+                    "hcn_network_identity_mismatch"
+                );
+                // The matching endpoint must survive the network mismatch.
+                assert!(
+                    Object::open(Kind::Endpoint, &endpoint_id)
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(Object::open(Kind::Network, &network_id).unwrap().is_some());
+            } else {
+                reconcile(&plan, &|| Ok(())).unwrap();
+                reconcile(&plan, &|| Ok(())).unwrap();
+                assert!(
+                    Object::open(Kind::Endpoint, &endpoint_id)
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(Object::open(Kind::Network, &network_id).unwrap().is_none());
+            }
+            drop(owned);
+            assert!(
+                Object::open(Kind::Endpoint, &endpoint_id)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(Object::open(Kind::Network, &network_id).unwrap().is_none());
+        }
     }
 }

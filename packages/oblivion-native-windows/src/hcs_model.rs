@@ -96,25 +96,52 @@ pub enum State {
 }
 
 #[cfg(any(windows, test))]
+#[derive(Debug)]
 pub(crate) struct Properties {
     pub state: State,
     pub runtime_id: Option<u128>,
 }
 
 #[cfg(any(windows, test))]
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct SystemProperties {
+    id: String,
+    system_type: String,
+    owner: String,
+    #[serde(default, deserialize_with = "present_runtime_id")]
+    runtime_id: Option<String>,
+    state: State,
+}
+
+#[cfg(any(windows, test))]
 impl Properties {
-    pub(crate) fn parse(document: &str, expected_id: &str) -> Result<Self> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "PascalCase")]
-        struct Reply {
-            id: String,
-            system_type: String,
-            #[serde(default, deserialize_with = "present_runtime_id")]
-            runtime_id: Option<String>,
-            state: State,
+    pub(crate) fn parse(document: &str, expected_id: &str, expected_owner: &str) -> Result<Self> {
+        Self::validate(decode(document)?, expected_id, expected_owner)
+    }
+
+    pub(crate) fn inventory(
+        document: &str,
+        expected_id: &str,
+        expected_owner: &str,
+    ) -> Result<Option<Self>> {
+        validate_owner(expected_id, expected_owner)?;
+        let mut entries: Vec<SystemProperties> = decode(document)?;
+        if entries.len() > 1 {
+            return Err(Error("invalid_hcs_inventory"));
         }
-        let reply: Reply = decode(document)?;
-        if reply.id != expected_id || reply.system_type != "VirtualMachine" {
+        entries
+            .pop()
+            .map(|entry| Self::validate(entry, expected_id, expected_owner))
+            .transpose()
+    }
+
+    fn validate(reply: SystemProperties, expected_id: &str, expected_owner: &str) -> Result<Self> {
+        validate_owner(expected_id, expected_owner)?;
+        if reply.id != expected_id
+            || reply.system_type != "VirtualMachine"
+            || reply.owner != expected_owner
+        {
             return Err(Error("invalid_hcs_properties"));
         }
         Ok(Self {
@@ -127,6 +154,90 @@ impl Properties {
                 .map_err(|_| Error("invalid_hcs_runtime_id"))?,
         })
     }
+}
+
+/// HCS SystemQuery uses Ids, not Owners: an existing foreign generation must
+/// be detected rather than hidden by an owner-filtered inventory.
+#[cfg(any(windows, test))]
+pub(crate) fn system_query(id: &str) -> Result<String> {
+    canonical_id(id)?;
+    #[derive(Serialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct Query<'a> {
+        ids: [&'a str; 1],
+    }
+    serde_json::to_string(&Query { ids: [id] }).map_err(|_| Error("invalid_hcs_query"))
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn absent(document: &str, expected_id: &str) -> Result<bool> {
+    canonical_id(expected_id)?;
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct Present {
+        id: String,
+    }
+    let entries: Vec<Present> = decode(document)?;
+    if entries.len() > 1 || entries.iter().any(|entry| entry.id != expected_id) {
+        return Err(Error("invalid_hcs_inventory"));
+    }
+    Ok(entries.is_empty())
+}
+
+pub(crate) fn owner(id: &str, generation: &str) -> Result<String> {
+    let id = canonical_id(id)?;
+    if !identifier(generation) {
+        return Err(Error("invalid_runtime_generation"));
+    }
+    Ok(format!("Oblivion.{id:032x}.{generation}"))
+}
+
+pub(crate) fn validate_owner(id: &str, value: &str) -> Result<()> {
+    let prefix = format!("Oblivion.{:032x}.", canonical_id(id)?);
+    if !value.strip_prefix(&prefix).is_some_and(identifier) {
+        return Err(Error("invalid_hcs_owner"));
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn creation(document: &str, id: &str, expected_owner: &str) -> Result<()> {
+    validate_owner(id, expected_owner)?;
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct Creation {
+        owner: String,
+        should_terminate_on_last_handle_closed: bool,
+    }
+    let created: Creation = decode(document)?;
+    if created.owner != expected_owner || !created.should_terminate_on_last_handle_closed {
+        return Err(Error("invalid_hcs_owner"));
+    }
+    Ok(())
+}
+
+fn canonical_id(id: &str) -> Result<u128> {
+    let parsed = guid(id)?;
+    if format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        parsed >> 96,
+        (parsed >> 80) & 0xffff,
+        (parsed >> 64) & 0xffff,
+        (parsed >> 48) & 0xffff,
+        parsed & 0xffffffffffff,
+    ) != id
+    {
+        return Err(Error("invalid_hcs_id"));
+    }
+    Ok(parsed)
+}
+
+fn identifier(value: &str) -> bool {
+    value.len() == 32
+        && value.bytes().any(|byte| byte != b'0')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[cfg(any(windows, test))]
@@ -179,9 +290,95 @@ pub(crate) fn guid(value: &str) -> Result<u128> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Capabilities, Error, Properties, Schema, State, MAX_REPLY_BYTES};
+    use super::{
+        Capabilities, Error, MAX_REPLY_BYTES, Properties, Schema, State, absent, creation, owner,
+        system_query, validate_owner,
+    };
+    const ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
+    const OWNER: &str =
+        "Oblivion.00112233445566778899aabbccddeeff.0123456789abcdef0123456789abcdef";
     const BASIC: &str = r#"{"Properties":[{"SupportedSchemaVersions":[{"Major":2,"Minor":11}]}]}"#;
     const PROCESSORS: &str = r#"{"PropertyResponses":{"ProcessorCapabilities":{"Response":{"ProcessorFeatures":["Sse3","NestedVirt"]}}}}"#;
+
+    #[test]
+    fn per_start_owner_requires_the_exact_canonical_runtime_and_generation() {
+        let generation = "0123456789abcdef0123456789abcdef";
+        assert_eq!(owner(ID, generation).unwrap(), OWNER);
+        validate_owner(ID, OWNER).unwrap();
+        for invalid in [
+            "Oblivion".to_owned(),
+            OWNER.to_ascii_lowercase(),
+            OWNER.replace(generation, &"0".repeat(32)),
+            format!("{OWNER}.extra"),
+            OWNER.replace("00112233445566778899aabbccddeeff", &"1".repeat(32)),
+        ] {
+            assert_eq!(
+                validate_owner(ID, &invalid),
+                Err(Error("invalid_hcs_owner"))
+            );
+        }
+        for invalid in [
+            "",
+            "0",
+            "00000000000000000000000000000000",
+            "A123456789abcdef0123456789abcdef",
+        ] {
+            assert_eq!(owner(ID, invalid), Err(Error("invalid_runtime_generation")));
+        }
+        assert!(owner(&format!("{{{ID}}}"), generation).is_err());
+        assert!(owner(&ID.to_uppercase(), generation).is_err());
+        assert_eq!(system_query(ID).unwrap(), format!(r#"{{"Ids":["{ID}"]}}"#));
+        let configuration = format!(
+            r#"{{"Owner":"{OWNER}","ShouldTerminateOnLastHandleClosed":true,"VirtualMachine":{{}}}}"#
+        );
+        creation(&configuration, ID, OWNER).unwrap();
+        assert!(creation(&configuration.replace("true", "false"), ID, OWNER).is_err());
+        assert!(creation(&configuration.replace(OWNER, "foreign"), ID, OWNER).is_err());
+    }
+
+    #[test]
+    fn inventory_never_hides_a_collision_or_accepts_foreign_generation_as_stopped() {
+        assert!(absent("[]", ID).unwrap());
+        assert!(Properties::inventory("[]", ID, OWNER).unwrap().is_none());
+        let present = format!(
+            r#"[{{"Id":"{ID}","Owner":"{OWNER}","SystemType":"VirtualMachine","State":"Stopped"}}]"#
+        );
+        assert!(!absent(&present, ID).unwrap());
+        assert_eq!(
+            Properties::inventory(&present, ID, OWNER)
+                .unwrap()
+                .unwrap()
+                .state,
+            State::Stopped
+        );
+        for invalid in [
+            present.replace(OWNER, "foreign-generation"),
+            present.replace("VirtualMachine", "Container"),
+            present.replace(ID, "11223344-5566-7788-99aa-bbccddeeff00"),
+            format!(
+                "[{},{}]",
+                &present[1..present.len() - 1],
+                &present[1..present.len() - 1]
+            ),
+            "null".into(),
+        ] {
+            assert!(Properties::inventory(&invalid, ID, OWNER).is_err());
+        }
+        for invalid in [
+            "{}".to_owned(),
+            present.replace(ID, "11223344-5566-7788-99aa-bbccddeeff00"),
+            format!(
+                "[{},{}]",
+                &present[1..present.len() - 1],
+                &present[1..present.len() - 1]
+            ),
+        ] {
+            assert!(absent(&invalid, ID).is_err());
+        }
+        // Presence rejects create even if unrelated fields cannot authorize
+        // recovery; absence never relies on parsing an owner filter.
+        assert!(!absent(&present.replace(OWNER, "foreign-generation"), ID).unwrap());
+    }
 
     #[test]
     fn official_basic_and_processor_queries_preserve_explicit_nested_capability() {
@@ -219,8 +416,8 @@ mod tests {
 
     #[test]
     fn state_and_runtime_guid_come_from_the_owned_machine_properties() {
-        let document = r#"{"Id":"owned","SystemType":"VirtualMachine","State":"Running","RuntimeId":"{00112233-4455-6677-8899-aabbccddeeff}","Stopped":false}"#;
-        let properties = Properties::parse(document, "owned").unwrap();
+        let document = r#"{"Id":"00112233-4455-6677-8899-aabbccddeeff","Owner":"Oblivion.00112233445566778899aabbccddeeff.0123456789abcdef0123456789abcdef","SystemType":"VirtualMachine","State":"Running","RuntimeId":"{00112233-4455-6677-8899-aabbccddeeff}","Stopped":false}"#;
+        let properties = Properties::parse(document, ID, OWNER).unwrap();
         assert_eq!(properties.state, State::Running);
         assert_eq!(
             properties.runtime_id,
@@ -230,26 +427,27 @@ mod tests {
             &document
                 .replace("Running", "Unknown")
                 .replace("false", "true"),
-            "owned",
+            ID,
+            OWNER,
         )
         .unwrap();
         assert_eq!(unknown.state, State::Unknown);
         let stopped = Properties::parse(
-            r#"{"Id":"owned","SystemType":"VirtualMachine","State":"Stopped"}"#,
-            "owned",
+            r#"{"Id":"00112233-4455-6677-8899-aabbccddeeff","Owner":"Oblivion.00112233445566778899aabbccddeeff.0123456789abcdef0123456789abcdef","SystemType":"VirtualMachine","State":"Stopped"}"#,
+            ID, OWNER,
         )
         .unwrap();
         assert_eq!(stopped.state, State::Stopped);
         assert!(stopped.runtime_id.is_none());
         for invalid in [
-            document.replace("owned", "other"),
+            document.replace(ID, "11223344-5566-7788-99aa-bbccddeeff00"),
             document.replace("VirtualMachine", "Container"),
             document.replace(
                 "00112233-4455-6677-8899-aabbccddeeff",
                 "00000000-0000-0000-0000-000000000000",
             ),
         ] {
-            assert!(Properties::parse(&invalid, "owned").is_err());
+            assert!(Properties::parse(&invalid, ID, OWNER).is_err());
         }
     }
 
@@ -260,8 +458,8 @@ mod tests {
             Capabilities::parse(&oversized, PROCESSORS).unwrap_err(),
             Error("hcs_reply_too_large")
         );
-        let document = r#"{"Id":"owned","SystemType":"VirtualMachine","State":"secret-canary","RuntimeId":"00112233-4455-6677-8899-aabbccddeeff"}"#;
-        let error = match Properties::parse(document, "owned") {
+        let document = r#"{"Id":"00112233-4455-6677-8899-aabbccddeeff","Owner":"Oblivion.00112233445566778899aabbccddeeff.0123456789abcdef0123456789abcdef","SystemType":"VirtualMachine","State":"secret-canary","RuntimeId":"00112233-4455-6677-8899-aabbccddeeff"}"#;
+        let error = match Properties::parse(document, ID, OWNER) {
             Ok(_) => panic!("accepted unknown state"),
             Err(error) => error,
         };
@@ -269,8 +467,8 @@ mod tests {
         assert!(!format!("{error:?} {error}").contains("canary"));
         assert!(std::error::Error::source(&error).is_none());
         assert!(Properties::parse(
-            r#"{"Id":"owned","SystemType":"VirtualMachine","State":"Stopped","RuntimeId":null}"#,
-            "owned",
+            r#"{"Id":"00112233-4455-6677-8899-aabbccddeeff","Owner":"Oblivion.00112233445566778899aabbccddeeff.0123456789abcdef0123456789abcdef","SystemType":"VirtualMachine","State":"Stopped","RuntimeId":null}"#,
+            ID, OWNER,
         )
         .is_err());
     }

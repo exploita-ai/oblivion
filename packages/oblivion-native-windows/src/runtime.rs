@@ -5,7 +5,7 @@ use crate::hcs::{Machine, State};
 use crate::lifetime::Lifetime;
 use crate::private::{Endpoint, Purpose};
 use crate::security::Identity;
-use crate::{Error, Result, auth, bridge, files, hcs, network, network_model, private};
+use crate::{Error, Result, auth, bridge, files, hcs, network, network_model, private, resources};
 use oblivion_wire::runtime_auth::Data;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -128,20 +128,71 @@ pub fn main() -> Result<()> {
                 .ok_or(Error("invalid_runtime_generation"))?,
         );
     }
+    let [
+        runtime_option,
+        runtime_id,
+        generation_option,
+        generation,
+        config_option,
+        config_sha,
+        source_option,
+        source_sha,
+        rest @ ..,
+    ] = rest
+    else {
+        return Err(Error("invalid_arguments"));
+    };
+    if runtime_option != "--runtime-id"
+        || generation_option != "--generation"
+        || config_option != "--config-sha256"
+        || source_option != "--source-sha256"
+    {
+        return Err(Error("invalid_arguments"));
+    }
     let lifetime = Lifetime::inherited()?;
-    let config = files::read_config(
+    let (context, config) = resources::Context::load(
         path.to_str().ok_or(Error("invalid_runtime_config_path"))?,
+        resources::Binding {
+            runtime_id: runtime_id
+                .to_str()
+                .ok_or(Error("invalid_runtime_binding"))?
+                .into(),
+            generation: generation
+                .to_str()
+                .ok_or(Error("invalid_runtime_binding"))?
+                .into(),
+            config_sha256: config_sha
+                .to_str()
+                .ok_or(Error("invalid_runtime_binding"))?
+                .into(),
+            source_sha256: source_sha
+                .to_str()
+                .ok_or(Error("invalid_runtime_binding"))?
+                .into(),
+            client_sid: client.sid().into(),
+            storage_sid: storage.sid().into(),
+        },
         &storage,
     )?;
+    let mut resources = context.lock(Instant::now() + Duration::from_secs(30), &|| {
+        lifetime.check()
+    })?;
     match (operation.to_str(), rest) {
-        (Some("run"), []) => run_with_data(config, lifetime, client, storage, Data::Existing)?,
+        (Some("run"), []) => run_with_data(
+            config,
+            lifetime,
+            client,
+            storage,
+            Data::Existing,
+            &mut resources,
+        )?,
         (Some("install"), [option, mib]) if option == "--data-mib" => {
             let bytes = mib
                 .to_str()
                 .and_then(|value| value.parse::<u64>().ok())
                 .and_then(|value| value.checked_mul(1024 * 1024))
                 .ok_or(Error("invalid_runtime_disk_size"))?;
-            install_for(config, lifetime, client, storage, bytes)?;
+            install_for(config, lifetime, client, storage, bytes, &mut resources)?;
         }
         _ => return Err(Error("invalid_arguments")),
     }
@@ -149,27 +200,15 @@ pub fn main() -> Result<()> {
     Ok(())
 }
 
-pub fn run(config: RuntimeConfig, lifetime: Lifetime, identity: Identity) -> Result<()> {
-    run_with_data(config, lifetime, identity.clone(), identity, Data::Existing)
-}
-
 /// Only this fresh creation path can grant guest initialization. Ordinary run
 /// never manufactures authority from a configuration flag or an existing file.
-pub fn install(
-    config: RuntimeConfig,
-    lifetime: Lifetime,
-    identity: Identity,
-    bytes: u64,
-) -> Result<()> {
-    install_for(config, lifetime, identity.clone(), identity, bytes)
-}
-
 fn install_for(
     config: RuntimeConfig,
     lifetime: Lifetime,
     client: Identity,
     storage: Identity,
     bytes: u64,
+    resources: &mut resources::Journal,
 ) -> Result<()> {
     lifetime.check()?;
     config.validate()?;
@@ -182,7 +221,7 @@ fn install_for(
         runtime_id: evidence.runtime_id().to_owned(),
         bytes: evidence.bytes(),
     };
-    let result = run_with_data(config, lifetime, client, storage, data);
+    let result = run_with_data(config, lifetime, client, storage, data, resources);
     drop(created);
     result
 }
@@ -193,6 +232,7 @@ fn run_with_data(
     client: Identity,
     storage: Identity,
     data: Data,
+    resources: &mut resources::Journal,
 ) -> Result<()> {
     lifetime.check()?;
     config.validate()?;
@@ -200,6 +240,22 @@ fn run_with_data(
         return Err(Error("hcs_nested_virtualization_required"));
     }
     let mut leases = files::Lease::acquire(&config, &storage)?;
+    hcs::require_absent(
+        &config.vm_id(),
+        Instant::now() + Duration::from_secs(10),
+        &|| lifetime.check(),
+    )?;
+    let plan = if config.network {
+        let occupied = network::inventory(&|| lifetime.check())?;
+        Some(network_model::Plan::new(
+            &config.runtime_id,
+            resources.generation(),
+            &occupied,
+        )?)
+    } else {
+        None
+    };
+    resources.prepare(leases.evidence(), plan.clone())?;
     let mut endpoint = Endpoint::bind_for(&config.control_pipe, Purpose::Control, &client)?;
     let mut suffix = Zeroizing::new([0; 16]);
     getrandom::getrandom(suffix.as_mut_slice())
@@ -212,21 +268,17 @@ fn run_with_data(
     // HCN has synchronous service calls, not cancellable operation handles.
     // Create networking before any VM exists; remove it only after the VM is
     // confirmed stopped. A stalled HCN call never leaves an authorized guest.
-    let mut network = if config.network {
-        let occupied = network::inventory(&|| lifetime.check())?;
-        Some(network::Lease::acquire(
-            network_model::Plan::new(&config.runtime_id, &occupied)?,
-            &|| lifetime.check(),
-        )?)
-    } else {
-        None
-    };
+    let mut network = plan
+        .map(|plan| network::Lease::acquire(plan, &|| lifetime.check()))
+        .transpose()?;
+    let owner = config.owner(resources.generation())?;
     let mut stopped = true;
     let result = (|| {
         let configuration = config.hcs(
             &bootstrap_name,
             &client.sddl(),
             network.as_ref().map(network::Lease::attachment),
+            &owner,
         )?;
         lifetime.check()?;
         leases.grant_vm_access(&config.vm_id())?;
@@ -238,6 +290,7 @@ fn run_with_data(
             bootstrap,
             &mut stopped,
             data,
+            &owner,
         )
     })();
     if !stopped {
@@ -259,7 +312,9 @@ fn run_with_data(
         .as_mut()
         .map_or(Ok(()), |network| network.stop(&|| Ok(())));
     let revoked = leases.revoke_vm_access();
-    disconnected.and(revoked).and(result)
+    disconnected.and(revoked)?;
+    resources.clean()?;
+    result
 }
 
 fn serve(
@@ -270,11 +325,13 @@ fn serve(
     mut bootstrap: Endpoint,
     confirmed_stop: &mut bool,
     data: Data,
+    owner: &str,
 ) -> Result<()> {
     let token = Arc::new(auth::token()?);
     *confirmed_stop = false;
     let machine = Machine::create(
         &config.vm_id(),
+        owner,
         configuration,
         Instant::now() + Duration::from_secs(30),
         &|| lifetime.check(),
@@ -450,7 +507,7 @@ fn terminate(machine: &Machine) -> Result<()> {
         if Instant::now() >= deadline {
             return requested.and(Err(Error("runtime_shutdown_unconfirmed")));
         }
-        if machine.state(deadline, &|| Ok(()))?.state == State::Stopped {
+        if machine.stopped(deadline, &|| Ok(()))? {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(50));

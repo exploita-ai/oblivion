@@ -67,7 +67,8 @@ impl Prefix {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Attachment {
     pub runtime_id: String,
     pub network_id: String,
@@ -114,13 +115,19 @@ impl Attachment {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Plan {
+    pub generation: String,
     pub attachment: Attachment,
 }
 
 impl Plan {
-    pub fn new(runtime_id: &str, occupied: &[Prefix]) -> Result<Self> {
+    pub fn new(runtime_id: &str, generation: &str, occupied: &[Prefix]) -> Result<Self> {
         let identity = Identity::new(runtime_id)?;
+        if !oblivion_wire::control::valid_id(generation) {
+            return Err(Error("invalid_hcn_generation"));
+        }
         if occupied.len() > MAX_PREFIXES {
             return Err(Error("hcn_prefix_inventory_too_large"));
         }
@@ -151,6 +158,7 @@ impl Plan {
             length: PREFIX_LENGTH,
         };
         Ok(Self {
+            generation: generation.into(),
             attachment: Attachment {
                 runtime_id: runtime_id.to_owned(),
                 network_id: identity.network,
@@ -165,6 +173,22 @@ impl Plan {
         })
     }
 
+    /// Persisted receipts validate this model at their admission boundary.
+    /// Generation is lifecycle identity, never an authorization secret.
+    pub fn validate(&self) -> Result<()> {
+        if !oblivion_wire::control::valid_id(&self.generation) {
+            return Err(Error("invalid_hcn_generation"));
+        }
+        self.attachment.validate(&self.attachment.runtime_id)
+    }
+
+    fn name(&self, role: &str) -> String {
+        format!(
+            "Oblivion.{}.{}.{role}",
+            self.attachment.runtime_id, self.generation
+        )
+    }
+
     /// The current WSL HcnCreateNetwork request uses the default document shape,
     /// not a v2 Ipams document: ICS, a separate switch and constrained addresses.
     /// Flags omit DNS and DHCP. Their real Windows behavior remains a platform
@@ -172,9 +196,9 @@ impl Plan {
     /// https://github.com/microsoft/WSL/blob/master/src/windows/common/NatNetworking.cpp
     /// https://github.com/microsoft/WSL/blob/master/src/shared/inc/hns_schema.h
     pub fn network_json(&self) -> Result<String> {
-        self.attachment.validate(&self.attachment.runtime_id)?;
+        self.validate()?;
         let document = Network {
-            name: format!("Oblivion.{}.network", self.attachment.runtime_id),
+            name: self.name("network"),
             kind: "ICS",
             isolate_switch: true,
             flags: NONPERSISTENT,
@@ -195,9 +219,9 @@ impl Plan {
     /// address, gateway and MAC through the validated boot attachment.
     /// https://github.com/microsoft/WSL/blob/master/src/shared/inc/hns_schema.h
     pub fn endpoint_json(&self) -> Result<String> {
-        self.attachment.validate(&self.attachment.runtime_id)?;
+        self.validate()?;
         let document = Endpoint {
-            name: format!("Oblivion.{}.endpoint", self.attachment.runtime_id),
+            name: self.name("endpoint"),
             virtual_network: &self.attachment.network_id,
             ip_address: &self.attachment.ip_address,
             mac_address: self.attachment.hcs_mac(),
@@ -212,7 +236,7 @@ impl Plan {
     /// and all static addresses must still match our original plan exactly.
     /// https://github.com/microsoft/WSL/blob/master/src/windows/common/WslCoreNetworkingSupport.h
     pub fn verify_network_properties(&self, document: &str) -> Result<()> {
-        self.attachment.validate(&self.attachment.runtime_id)?;
+        self.validate()?;
         #[derive(Deserialize)]
         #[serde(rename_all = "PascalCase")]
         struct Current {
@@ -231,7 +255,7 @@ impl Plan {
         }
         let current: Current = decode(document)?;
         if !same_guid(&current.id, &self.attachment.network_id)
-            || current.name != format!("Oblivion.{}.network", self.attachment.runtime_id)
+            || current.name != self.name("network")
             || current.kind != "ICS"
             || !current.isolate_switch
             || current.flags != NONPERSISTENT
@@ -256,7 +280,7 @@ impl Plan {
     }
 
     pub fn verify_endpoint_properties(&self, document: &str) -> Result<()> {
-        self.attachment.validate(&self.attachment.runtime_id)?;
+        self.validate()?;
         #[derive(Deserialize)]
         #[serde(rename_all = "PascalCase")]
         struct Current {
@@ -278,7 +302,7 @@ impl Plan {
         }
         let current: Current = decode(document)?;
         if !same_guid(&current.id, &self.attachment.endpoint_id)
-            || current.name != format!("Oblivion.{}.endpoint", self.attachment.runtime_id)
+            || current.name != self.name("endpoint")
             || !same_guid(&current.virtual_network, &self.attachment.network_id)
             || !current
                 .mac_address
@@ -402,6 +426,13 @@ struct Identity {
     adapter: String,
     mac: String,
 }
+
+#[cfg(windows)]
+pub(crate) fn object_ids(runtime_id: &str) -> Result<(String, String)> {
+    let identity = Identity::new(runtime_id)?;
+    Ok((identity.network, identity.endpoint))
+}
+
 impl Identity {
     fn new(runtime_id: &str) -> Result<Self> {
         if runtime_id.len() != 32
@@ -527,23 +558,82 @@ mod tests {
     use serde_json::{Value, json};
     use std::net::Ipv4Addr;
     const ID: &str = "0123456789abcdef0123456789abcdef";
+    const GENERATION: &str = "abcdef0123456789abcdef0123456789";
+
+    #[test]
+    fn persisted_plan_roundtrips_one_exact_generation_and_rejects_foreign_properties() {
+        let plan = Plan::new(ID, GENERATION, &[]).unwrap();
+        let encoded = serde_json::to_vec(&plan).unwrap();
+        let restored: Plan = serde_json::from_slice(&encoded).unwrap();
+        restored.validate().unwrap();
+        assert_eq!(restored, plan);
+        let later = Plan::new(ID, "123456789abcdef0123456789abcdef0", &[]).unwrap();
+        // Stable runtime object IDs are still absence-checked by acquisition;
+        // a receipt for a later invocation cannot remove the earlier names.
+        assert_eq!(later.attachment, plan.attachment);
+        let mut network: Value = serde_json::from_str(&plan.network_json().unwrap()).unwrap();
+        network["ID"] = json!(plan.attachment.network_id);
+        let mut endpoint: Value = serde_json::from_str(&plan.endpoint_json().unwrap()).unwrap();
+        endpoint["ID"] = json!(plan.attachment.endpoint_id);
+        assert_eq!(
+            later
+                .verify_network_properties(&network.to_string())
+                .unwrap_err()
+                .0,
+            "hcn_network_identity_mismatch"
+        );
+        assert_eq!(
+            later
+                .verify_endpoint_properties(&endpoint.to_string())
+                .unwrap_err()
+                .0,
+            "hcn_endpoint_identity_mismatch"
+        );
+        for extra in ["root", "owner", "credential"] {
+            let mut value = serde_json::to_value(&plan).unwrap();
+            value[extra] = json!("not part of a receipt plan");
+            assert!(serde_json::from_value::<Plan>(value).is_err());
+            let mut value = serde_json::to_value(&plan).unwrap();
+            value["attachment"][extra] = json!("not part of an attachment");
+            assert!(serde_json::from_value::<Plan>(value).is_err());
+        }
+        for generation in [
+            "",
+            "PRIVATE_CANARY",
+            "ABCDEF0123456789abcdef0123456789",
+            "../runtime",
+        ] {
+            assert_eq!(
+                Plan::new(ID, generation, &[]).unwrap_err().0,
+                "invalid_hcn_generation"
+            );
+            let mut value = serde_json::to_value(&plan).unwrap();
+            value["generation"] = json!(generation);
+            let restored: Plan = serde_json::from_value(value).unwrap();
+            assert_eq!(restored.validate().unwrap_err().0, "invalid_hcn_generation");
+        }
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value["attachment"]["ip_address"] = json!(plan.attachment.gateway);
+        let restored: Plan = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.validate().unwrap_err().0, "invalid_hcn_attachment");
+    }
 
     #[test]
     fn owned_isolated_ics_and_flat_endpoint_match_static_guest_without_extra_services() {
-        let plan = Plan::new(ID, &[]).unwrap();
+        let plan = Plan::new(ID, GENERATION, &[]).unwrap();
         plan.attachment.validate(ID).unwrap();
         let network: Value = serde_json::from_str(&plan.network_json().unwrap()).unwrap();
         let endpoint: Value = serde_json::from_str(&plan.endpoint_json().unwrap()).unwrap();
         assert_eq!(
             network,
-            json!({"Name":format!("Oblivion.{ID}.network"),
+            json!({"Name":format!("Oblivion.{ID}.{GENERATION}.network"),
             "Type":"ICS","IsolateSwitch":true,"Flags":8,"Subnets":[{
                 "AddressPrefix":plan.attachment.subnet,"GatewayAddress":plan.attachment.gateway,
                 "IpSubnets":[{"IpAddressPrefix":plan.attachment.subnet}]}]})
         );
         assert_eq!(
             endpoint,
-            json!({"Name":format!("Oblivion.{ID}.endpoint"),
+            json!({"Name":format!("Oblivion.{ID}.{GENERATION}.endpoint"),
             "VirtualNetwork":plan.attachment.network_id,"MacAddress":plan.attachment.hcs_mac(),
             "IPAddress":plan.attachment.ip_address,"PrefixLength":28,
             "GatewayAddress":plan.attachment.gateway})
@@ -562,14 +652,19 @@ mod tests {
 
     #[test]
     fn chooses_nonoverlapping_private_prefix_and_does_not_treat_default_route_as_reserved() {
-        let first = Plan::new(ID, &[]).unwrap();
-        let same = Plan::new(ID, &[Prefix::parse("0.0.0.0/0").unwrap()]).unwrap();
+        let first = Plan::new(ID, GENERATION, &[]).unwrap();
+        let same = Plan::new(ID, GENERATION, &[Prefix::parse("0.0.0.0/0").unwrap()]).unwrap();
         assert_eq!(first.attachment, same.attachment);
         let occupied = Prefix::parse(&first.attachment.subnet).unwrap();
-        let next = Plan::new(ID, &[occupied]).unwrap();
+        let next = Plan::new(ID, GENERATION, &[occupied]).unwrap();
         let chosen = Prefix::parse(&next.attachment.subnet).unwrap();
         assert!(chosen.last() < occupied.network || occupied.last() < chosen.network);
-        let other = Plan::new("1123456789abcdef0123456789abcdef", &[occupied, chosen]).unwrap();
+        let other = Plan::new(
+            "1123456789abcdef0123456789abcdef",
+            GENERATION,
+            &[occupied, chosen],
+        )
+        .unwrap();
         assert_ne!(other.attachment.network_id, first.attachment.network_id);
     }
 
@@ -581,11 +676,11 @@ mod tests {
             Prefix::parse("192.168.0.0/16").unwrap(),
         ];
         assert_eq!(
-            Plan::new(ID, &blocked).err().unwrap().0,
+            Plan::new(ID, GENERATION, &blocked).err().unwrap().0,
             "hcn_private_subnet_unavailable"
         );
         assert_eq!(
-            Plan::new(ID, &vec![blocked[0]; MAX_PREFIXES + 1])
+            Plan::new(ID, GENERATION, &vec![blocked[0]; MAX_PREFIXES + 1])
                 .err()
                 .unwrap()
                 .0,
@@ -623,7 +718,7 @@ mod tests {
     #[test]
     fn attachment_rejects_foreign_identity_public_subnet_reserved_addresses_and_arbitrary_boot_text()
      {
-        let original = Plan::new(ID, &[]).unwrap().attachment;
+        let original = Plan::new(ID, GENERATION, &[]).unwrap().attachment;
         for field in 0..9 {
             let mut value = original.clone();
             match field {
@@ -646,7 +741,7 @@ mod tests {
             "PRIVATE_CANARY",
         ] {
             assert_eq!(
-                Plan::new(invalid, &[]).err().unwrap().0,
+                Plan::new(invalid, GENERATION, &[]).err().unwrap().0,
                 "invalid_hcn_runtime_identity"
             );
         }
@@ -654,7 +749,7 @@ mod tests {
 
     #[test]
     fn default_queries_refuse_foreign_objects_policies_and_reassigned_addresses() {
-        let plan = Plan::new(ID, &[]).unwrap();
+        let plan = Plan::new(ID, GENERATION, &[]).unwrap();
         let mut original: Value = serde_json::from_str(&plan.network_json().unwrap()).unwrap();
         original["ID"] = json!(plan.attachment.network_id);
         original["Health"] = json!({"Extra":"provider-field"});
