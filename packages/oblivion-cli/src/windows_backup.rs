@@ -3,7 +3,8 @@
 use crate::backup::Native;
 use crate::controller::Result;
 use crate::windows::Runtime;
-use oblivion_transfer::backup::{Output, OutputTarget, Source};
+use oblivion_transfer::backup::Source;
+use oblivion_transfer::local_file::{Output, Target};
 use oblivion_transfer::{MAX_ENCRYPTED_VOLUME_BYTES, Receipt, stream};
 use oblivion_wire::backup::{Exported, Imported};
 use oblivion_wire::slot::Slot;
@@ -13,7 +14,7 @@ use std::sync::atomic::AtomicBool;
 
 impl Native for Runtime {
     type Source = Source;
-    type Destination = OutputTarget;
+    type Destination = Target;
     type Output = Output;
 
     fn prepare_import(&mut self, path: &str) -> Result<Source> {
@@ -24,8 +25,8 @@ impl Native for Runtime {
         source.bytes()
     }
 
-    fn prepare_export(&mut self, path: &str) -> Result<OutputTarget> {
-        Ok(OutputTarget::new(Path::new(path))?)
+    fn prepare_export(&mut self, path: &str) -> Result<Target> {
+        Ok(Target::new(Path::new(path))?)
     }
 
     fn send_import(
@@ -48,7 +49,7 @@ impl Native for Runtime {
 
     fn receive_export(
         &mut self,
-        destination: OutputTarget,
+        destination: Target,
         prepared: &Exported,
         slot: Slot,
     ) -> Result<(Output, Receipt)> {

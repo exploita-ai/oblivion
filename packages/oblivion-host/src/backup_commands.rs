@@ -2,8 +2,9 @@
 //! output authorities are also used by Windows; no Safe filesystem is mounted.
 use oblivion_cli::backup::{Command, Native};
 use oblivion_host::{control, scope};
-use oblivion_transfer::backup::{Output, OutputTarget, Source};
+use oblivion_transfer::backup::Source;
 use oblivion_transfer::channel::Channel;
+use oblivion_transfer::local_file::{Output, Target};
 use oblivion_transfer::{MAX_ENCRYPTED_VOLUME_BYTES, Receipt, stream};
 use oblivion_wire::backup::{Exported, Imported};
 use std::fs::File;
@@ -23,7 +24,7 @@ pub fn run(command: Command) -> control::Result<i32> {
 
 impl Native for super::UnixRuntime {
     type Source = Source;
-    type Destination = OutputTarget;
+    type Destination = Target;
     type Output = Output;
 
     fn prepare_import(&mut self, path: &str) -> control::Result<Source> {
@@ -34,8 +35,8 @@ impl Native for super::UnixRuntime {
         source.bytes()
     }
 
-    fn prepare_export(&mut self, path: &str) -> control::Result<OutputTarget> {
-        Ok(OutputTarget::new(Path::new(path))?)
+    fn prepare_export(&mut self, path: &str) -> control::Result<Target> {
+        Ok(Target::new(Path::new(path))?)
     }
 
     fn send_import(
@@ -59,7 +60,7 @@ impl Native for super::UnixRuntime {
 
     fn receive_export(
         &mut self,
-        destination: OutputTarget,
+        destination: Target,
         prepared: &Exported,
         slot: scope::Slot,
     ) -> control::Result<(Output, Receipt)> {

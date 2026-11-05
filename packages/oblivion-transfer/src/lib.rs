@@ -3,6 +3,8 @@
 pub mod browser;
 #[cfg(any(unix, windows))]
 pub mod backup;
+#[cfg(any(unix, windows))]
+pub mod local_file;
 #[cfg(unix)]
 pub mod channel;
 pub mod copy_protocol;

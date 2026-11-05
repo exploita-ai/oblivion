@@ -281,7 +281,7 @@ pub fn download_open_file<T: Transport>(
         (32 * 1024 * 1024..=crate::MAX_ENCRYPTED_VOLUME_BYTES).contains(&maximum),
         "invalid_backup_limit",
     )?;
-    crate::backup::destination_file(&file, true)?;
+    crate::local_file::verify_output(&file, true)?;
     let limits = Limits {
         entries: 1,
         bytes: maximum,

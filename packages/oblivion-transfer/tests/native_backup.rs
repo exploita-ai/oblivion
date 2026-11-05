@@ -1,7 +1,8 @@
 #![cfg(unix)]
 mod support;
-use oblivion_transfer::backup::{OutputTarget, Source};
+use oblivion_transfer::backup::Source;
 use oblivion_transfer::copy_protocol;
+use oblivion_transfer::local_file::Target;
 use oblivion_transfer::{ENCRYPTED_VOLUME_NAME, Entry};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
@@ -56,8 +57,8 @@ fn ciphertext_source_has_one_fixed_alias_and_changed_bytes_never_emit_end() {
 fn private_output_never_replaces_a_late_target_or_deletes_foreign_temporary_data() {
     let tree = Tree::new();
     let path = tree.0.join("personal.luks");
-    let temporary = tree.0.join(format!(".oblivion-backup-{ID}.partial"));
-    let mut output = OutputTarget::new(&path).unwrap().create(ID).unwrap();
+    let temporary = tree.0.join(format!(".oblivion-export-{ID}.partial"));
+    let mut output = Target::new(&path).unwrap().create(ID).unwrap();
     output
         .copy_file()
         .unwrap()
@@ -69,7 +70,7 @@ fn private_output_never_replaces_a_late_target_or_deletes_foreign_temporary_data
     assert_eq!(fs::read(&path).unwrap(), b"unrelated destination");
     assert!(!temporary.exists());
     fs::remove_file(&path).unwrap();
-    let mut output = OutputTarget::new(&path).unwrap().create(ID).unwrap();
+    let mut output = Target::new(&path).unwrap().create(ID).unwrap();
     output
         .copy_file()
         .unwrap()
@@ -82,7 +83,7 @@ fn private_output_never_replaces_a_late_target_or_deletes_foreign_temporary_data
     assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
     assert_eq!(fs::metadata(&path).unwrap().nlink(), 1);
     fs::remove_file(&path).unwrap();
-    let mut output = OutputTarget::new(&path).unwrap().create(ID).unwrap();
+    let mut output = Target::new(&path).unwrap().create(ID).unwrap();
     output
         .copy_file()
         .unwrap()
@@ -110,7 +111,7 @@ fn process_owned_backup_publication_supports_tmpfs_without_a_filesystem_uuid() {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
-    let mut output = OutputTarget::new(&path.join("backup.luks"))
+    let mut output = Target::new(&path.join("backup.luks"))
         .unwrap()
         .create(ID)
         .unwrap();
