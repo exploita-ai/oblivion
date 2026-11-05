@@ -828,7 +828,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
     }
     let _lock = if matches!(op, "lock" | "recover" | "child-start-close" | "share-release" | "share-export-cancel" | "share-export-cleanup" | "share-import-finish" | "share-import-abort" | "share-import-discard") || branch_latch.is_some() {
         recovery_lock()?
-    } else if matches!(op, "status" | "start-agent" | "close-idle" | "agent-release") {
+    } else if matches!(op, "status" | "create" | "start-agent" | "close-idle" | "agent-release") {
         admission_lock()?
     } else {
         lock()?
