@@ -156,20 +156,27 @@ The helper uses the fixed System32 DISM command and never restarts Windows.
 When a restart is required, no Oblivion VM, service or data disk is created;
 restart Windows and rerun the same installer. The parent reports the installed
 launcher after confirming the helper's exit and the original user's broker.
-PATH registration and desktop shortcuts are not implemented by this development
-entrypoint. Clean Windows startup, UAC with a different administrator and actual
-Hyper-V preparation remain acceptance gates.
+That original parent registers the verified release's native `bin` directory in
+its own user PATH. Open a new terminal, then run `oblivion`. No command wrapper
+reconstructs agent arguments. Other PATH entries and their value type are
+preserved; collision or uncertain ownership produces an explicit incomplete
+registration result. Clean Windows startup, UAC with a different administrator,
+actual registry execution and Hyper-V preparation remain acceptance gates.
 
 The Windows entrypoint uses the same `runtime update BUNDLE`, `runtime gc` and
 `runtime uninstall` grammar. Stop the protected runtime first; maintenance holds
 an exclusive observed-Stopped capability and never boots or initializes storage.
-Use the new verified bundle's CLI for an update to another source version.
+The installed CLI accepts an explicitly selected current-format update bundle
+and authenticates the new helper against that bundle's source.
 Uninstall preserves runtime identity, configuration, the supervision journal and
 the exact encrypted data VHDX. Its cleanup report distinguishes removed software,
 unknown retained files and binaries still in use; exit code 2 means incomplete
-removal, to retry from a verified external bundle. Maintenance still requires an
-explicitly elevated process; only initial installation has the native UAC
-handoff. Ordinary launch uses the per-user SCM broker and leaves the CLI and
+removal, to retry from a verified external bundle. The invoking source remains
+pinned through helper exit: uninstall from an installed command preserves its
+complete in-use release. Maintenance uses the same native UAC handoff; the original
+parent updates or removes only its owned user PATH entry. Reinstall restores
+software around the preserved disk without initializing it again.
+Ordinary launch uses the per-user SCM broker and leaves the CLI and
 manager unelevated. Maintenance stops that broker while holding the same
 observed-Stopped guard. Actual Windows lifecycle is still unqualified; see
 [Windows maintenance](WINDOWS.md#stopped-only-software-maintenance).

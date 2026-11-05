@@ -175,8 +175,8 @@ the helper observes caller EOF throughout feature servicing and installation and
 joins its owned worker. The parent removes staging only after actual helper exit. A
 cancelled DISM operation is not reported as a rollback; another attempt re-queries
 Windows. Normal launch starts the service through limited SCM rights. Update,
-collection and removal still require an explicitly elevated process; their UAC
-handoff is not implemented. The source bundle must
+collection and removal use the same authenticated UAC handoff from the ordinary
+CLI; only their helper is elevated. The source bundle must
 also meet the private ACL contract; arbitrary extraction into a broadly writable
 directory is not accepted as a trusted installation source.
 
@@ -203,9 +203,13 @@ Live storage selector is unavailable on Windows.
 ## Stopped-only software maintenance
 
 Close the Safes and run `oblivion runtime stop` first. The development CLI now
-connects `runtime update BUNDLE`, `runtime gc` and `runtime uninstall`. When
-changing source versions, run the new verified bundle's launcher so its source
-binding matches the incoming bundle. None of these maintenance operations boots
+connects `runtime update BUNDLE`, `runtime gc` and `runtime uninstall` from a normal
+terminal. An explicit update verifies the incoming current-format bundle and
+binds the UAC exchange to that bundle's source, including when it differs from
+the invoking CLI. GC and uninstall verify the actual running launcher's file
+identity and role before staging. Only published-software ancestor pins use
+metadata-only access; root/file ACLs, hashes and private data access are unchanged.
+None of these maintenance operations boots
 a VM or changes the data VHDX, runtime identity or configuration.
 
 A Stopped journal alone is insufficient. Maintenance owns the runtime election
@@ -223,8 +227,24 @@ of the software before collection, retaining the installation record, `vm.json`,
 supervision journal and exact `data.vhdx`. Unknown files and mapped/in-use binaries
 remain untouched and appear in the cleanup report. Exit code 2 means removal is
 incomplete; retry from a verified external bundle after closing installed programs.
-Reinstall through `runtime update BUNDLE` preserves the retained data and identity.
+The caller keeps its source bundle pinned through helper exit, so uninstall from
+an installed CLI retains that complete in-use release rather than deleting part
+of it. A verified external bundle can finish removal. Both reinstall through
+`install.cmd` and `runtime update BUNDLE` restore software around the retained
+data and identity; they never regain a new-disk initialization capability.
 No data-purge or delete-at-reboot operation is introduced.
+
+After authenticated installation or update, the original parent registers the
+verified `releases/BUNDLE_ID/bin` directory in its own HKCU PATH. There is no
+command wrapper and agent arguments go directly to the native executable.
+Uninstall removes only the entry owned by that runtime, even if software cleanup
+is incomplete. Other PATH entries, raw UTF-16 and REG_SZ/REG_EXPAND_SZ types stay
+under the user's control. A bounded pending record precedes each write and
+reconciles only known before/after snapshots; unknown registrations, collisions
+or unrelated changes are preserved and reported. A registration failure returns
+code 2 without reporting that the completed software operation was rolled back.
+Windows receives an environment-change notification, but the calling terminal's
+inherited PATH cannot be changed: open a new terminal after installation/update.
 
 `runtime recover` refuses a healthy supervisor that still owns its journal.
 A live supervisor already stopping can retry its authenticated stop. If the

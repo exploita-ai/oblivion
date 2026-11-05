@@ -567,7 +567,9 @@ servicing and installation share caller-EOF cancellation and scoped owned worker
 Interrupted Windows servicing remains unconfirmed and is re-queried on retry.
 Human-readable diagnostics preserve the distinction between unavailable hardware
 observations and a proved firmware setting. PowerShell 7, Python and the SDK are
-builder dependencies only. User PATH/shortcuts and maintenance UAC are unfinished.
+builder dependencies only. User command registration and software maintenance now
+use the original parent and the authenticated UAC helper respectively, as detailed
+below.
 
 Verification passed all 33 portable native-backend library cases. Full bundle
 fixtures passed 16 cases with one case-alias test skipped on the Mac's
@@ -579,3 +581,33 @@ cancellation, clean Windows PE startup with Hyper-V disabled, reboot continuatio
 and nested-Safe boot remain acceptance gates. SDK import declarations do not prove
 that ComputeCore/ComputeNetwork can load on that clean baseline. No ISO, VM or
 Windows OS settings were changed for this increment.
+
+Windows update, GC and uninstall now use that same UAC operation. The bounded
+request/response binds the exact reviewed operation; update authenticates the
+incoming current-format bundle's source instead of the old CLI's source. GC and
+uninstall verify the actual running launcher role and FileID before staging.
+Metadata-only handles admit published-software ancestors without granting access
+to the private catalog or data; root/leaf ACLs, inventory and hashes remain checked.
+The parent retains its source pins through helper exit, preventing partial
+deletion of the invoking release. In-use uninstall stays explicitly incomplete;
+a verified external bundle can finish it. Install now restores an Uninstalled
+runtime through the existing stopped-only update path, preserving the original
+disk identity without a Pending initialization capability.
+
+Only the original parent writes its own HKCU command registration after an
+authenticated outcome. The native release's bin directory goes directly into
+user PATH, without a shell wrapper. Other entries, raw UTF-16 and registry type
+are preserved. A bounded pending ownership record precedes writes, detects a
+changed snapshot and reconciles known before/after states. Uninstall removes
+only its owned entry; uncertain registration returns an explicit incomplete code.
+An environment-change notification does not update the old terminal, so the CLI
+asks the user to open a new one.
+
+All 39 portable native-backend library cases pass, including operation confusion
+and the five new PATH planner/recovery cases. The canonical root check passes.
+The complete native backend and CLI library/entrypoint/tests compile for MSVC
+without warnings. New real Windows fixtures cover restricted-token software
+admission, source pins, private catalog/data refusal and isolated HKCU keys; the
+software lifecycle fixture now includes reinstall. They are compiled evidence
+only on the Mac. Actual UAC, registry mutation, uninstall/reinstall, cleanup
+durability and nested Hyper-V qualification remain open. No ISO or VM was built.

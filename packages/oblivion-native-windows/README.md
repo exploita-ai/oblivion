@@ -42,8 +42,10 @@ boots and stops the new runtime, and commits Ready only after checking the VHDX.
 Pending setup can regain bootstrap authority only for its exact SDK-created
 disk identity, never from a matching filename/UUID or an unknown partial file.
 Metadata-only status/activity discovery does not hash boot assets or call HCS.
-Initial setup requests UAC for its one-shot helper; maintenance still requires
-an explicitly elevated process. `broker.rs` connects ordinary
+Setup, update, GC and uninstall request UAC for their one-shot helper while
+retaining the original user identity. The parent registers only the verified
+native release directory in its own HKCU PATH, preserving other entries and
+requiring a new terminal to refresh the inherited environment. `broker.rs` connects ordinary
 launch, metadata discovery and runtime controls to a per-user demand-start SCM
 service. The service authenticates the caller token and uses administrator-owned
 software and state; it never accepts executable/configuration paths from clients.
@@ -52,6 +54,13 @@ Client/storage SIDs are explicit supervisor bindings and cross-session election
 uses a global mutex. Update/GC/uninstall quiesce the broker only while retaining
 the observed-Stopped guard. Real Windows execution, forced-interruption
 qualification and signed distribution remain open.
+
+Maintenance pins the invoking source through helper exit. Metadata-only
+ancestor access admits published software under the protected catalog without
+granting access to private configuration or data; root/leaf ACL and hash checks
+remain unchanged. Installed-command uninstall reports its pinned release as in
+use; an external verified bundle can finish deletion. Reinstall uses the
+stopped software-update path and preserves the original data identity.
 
 The network follows the HCN default schema used by Microsoft's WSL implementation:
 ICS with `IsolateSwitch: true` and the nonpersistent flag, a requested private
@@ -148,7 +157,8 @@ From this package directory:
 cargo test --locked --lib --test config
 # Cross-compilation only:
 cargo check --locked --all-targets --target x86_64-pc-windows-msvc
-# Real Windows kernel-object tests and executable linking, without creating a VM:
+# Real Windows kernel-object tests and executable linking, in an elevated test
+# terminal for the isolated restricted-token ACL fixture; no VM is created:
 cargo test --locked --all-targets
 cargo build --locked --bin oblivion-vm
 ```
