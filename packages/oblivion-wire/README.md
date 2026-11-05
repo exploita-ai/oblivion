@@ -20,7 +20,8 @@ Launch requests and the incremental frame decoder are shared here.
 
 The private runtime bootstrap has one current v2 format: READY, the per-boot
 token, bounded Existing/NewDisk metadata and SET. NewDisk carries only an exact
-runtime identity and capacity; the creating host adapter owns authorization.
+runtime identity and capacity; the host adapter owns authorization from fresh
+SDK creation or the exact protected Pending setup receipt.
 There is no disk pathname or compatibility reader in this protocol. Control
 connections retain their separate HELLO/token/ACK exchange.
 

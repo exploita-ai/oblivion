@@ -4,8 +4,8 @@ Experimental `oblivion-vm.exe` source for a headless, owned Hyper-V controller.
 This is the backend core, **not an installable Windows Oblivion release**.
 The installed Windows frontend and initial setup are connected in source.
 Ordinary-user broker and receipt-bound resource recovery are connected in source.
-Interrupted initial disk setup, SDK crash recovery and actual nested-Safe boot
-remain incomplete or unqualified.
+Pending setup resume is connected to the original disk identity. SDK crash
+recovery and actual nested-Safe boot remain unqualified.
 The surrounding architecture is described in [Windows](../../docs/WINDOWS.md).
 
 The helper uses the Windows SDK through the pinned `windows-sys` bindings.
@@ -33,7 +33,8 @@ ACLs, file identities and hashes before publishing into a new private directory.
 `installation.rs` derives a per-user SID catalog from the ProgramData known
 folder and a strict Pending/Ready registry. It prepares boot copies outside the immutable release,
 boots and stops the new runtime, and commits Ready only after checking the VHDX.
-Interrupted setup never authorizes another initialization or automatic deletion.
+Pending setup can regain bootstrap authority only for its exact SDK-created
+disk identity, never from a matching filename/UUID or an unknown partial file.
 Metadata-only status/activity discovery does not hash boot assets or call HCS.
 Initial setup and maintenance require elevation. `broker.rs` connects ordinary
 launch, metadata discovery and runtime controls to a per-user demand-start SCM
@@ -42,8 +43,8 @@ software and state; it never accepts executable/configuration paths from clients
 User processes retain their terminal, local Files endpoints and runtime lease.
 Client/storage SIDs are explicit supervisor bindings and cross-session election
 uses a global mutex. Update/GC/uninstall quiesce the broker only while retaining
-the observed-Stopped guard. Real Windows execution, completion of interrupted
-initial disk setup and signed distribution remain open.
+the observed-Stopped guard. Real Windows execution, forced-interruption
+qualification and signed distribution remain open.
 
 The network follows the HCN default schema used by Microsoft's WSL implementation:
 ICS with `IsolateSwitch: true` and the nonpersistent flag, a requested private
@@ -158,3 +159,13 @@ no external resources are modified on that branch. Normal termination and
 recovery share the same Stopped-or-confirmed-absence observation. No recovery
 operation rewrites arbitrary ACLs or creates/starts an existing VM. Windows SDK
 execution and forced-interruption durability remain unqualified.
+
+Setup creates the VHDX in random private staging and flushes it before persisting
+its identity. Only then is that object moved to data.vhdx without overwrite. The
+Pending registry distinguishes uncreated, staged and published data and can
+finish a rename-before-record interruption without recreating the disk. An
+exclusive setup lock serializes retries; Ready revokes the Pending ticket. The
+helper's initialize operation reopens only the original recorded disk and never
+creates one. Setup cancellation waits for its owned Child to exit and then uses
+resource recovery. The guest consumes each private NewDisk authority and runs
+fsck on an existing matching ext4 filesystem; it never formats that branch.

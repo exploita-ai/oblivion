@@ -337,7 +337,7 @@ VHDX creation. Bundle validation checks real inventory, hashes, file identities
 and ACLs; publication creates only a new private directory. Boot copies are
 separate from the immutable release. Setup commits Ready only after authenticated
 controller startup, verified shutdown and VHDX UUID/capacity/file-identity checks.
-Interrupted setup never retries as disk initialization. Current preflight requires
+Pending setup now retries bootstrap only for its recorded original disk identity. Current preflight requires
 an elevated token and nested HCS capabilities for setup and the privileged worker;
 ordinary launch now delegates to the SCM broker described below. Portable installation tests and MSVC compilation pass.
 Windows-only fixture execution, actual installation/boot, privilege setup and
@@ -515,3 +515,24 @@ Windows I/O/SDK cases have not been executed. Full lifecycle, interrupted initia
 disk setup, forced interruption/power loss and SDK revoke behavior when a VM ACE
 is already absent remain qualification or implementation gates. No image was
 built or platform qualified by this source increment.
+
+Windows setup now resumes the exact recorded Pending disk. The installer creates
+a private staging VHDX, flushes it, commits FileID/UUID/capacity before publishing
+data.vhdx and reconciles rename-before-registry interruption by the same FileID.
+It preserves unknown/unrecorded partials and refuses replacement disks even with
+the same UUID. Initial metadata and configuration publish atomically; a setup
+lock serializes attempts. Ready revokes the Pending bootstrap ticket. The helper
+no longer creates disks: its initialize operation receives the opaque capability
+and reopens only the recorded object. A setup-only cancellation revokes the owned
+Child lifetime, observes actual exit, drains the reply and releases the supervisor
+writer before receipt recovery. Existing ordinary runtimes are refused.
+
+The guest now validates and consumes a reissued NewDisk capability even when the
+matching marker or ext4 filesystem already exists. The ext4 branch runs fsck and
+never mkfs. Five portable installation-model tests and ten Mac guest/profile
+cases pass. A real Linux sparse-FD/bootstrap/ext4 payload case passes with the
+same SHA256 after repeated initialization; the Linux FD suite has four passing
+cases and one mount case skipped for missing capabilities. Windows SDK creation,
+publish/resume, setup-lock and owned-child cancellation fixtures are compiled
+evidence only. Installed Windows setup, forced interruption and power-loss
+durability remain unqualified. No new ISO was built for this increment.

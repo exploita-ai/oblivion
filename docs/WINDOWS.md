@@ -4,10 +4,10 @@ Implementation checkpoint: 5 November 2026. **The Windows product is not complet
 or qualified.** An experimental HCS helper core and owned HCN ICS network are
 implemented. A same-user authenticated named-pipe client and shared CLI adapter
 are now present. The installed command entrypoint, bundle verification and
-one-shot per-user setup and local Files payload endpoints are connected in source;
+resumable protected per-user setup and local Files payload endpoints are connected in source;
 ordinary-user admission uses a demand-start SCM broker and owned-resource
-recovery uses private receipts. Interrupted initial setup and installed
-privilege qualification remain open.
+recovery uses private receipts. Pending disk recovery is connected in source; installed privilege and
+forced-interruption qualification remain open.
 Stopped-only update, software collection and uninstall are now connected in source.
 The manager has a Windows x64 build target; its PE
 execution and complete installed path still need qualification. This is a proposal for phase 8 of the
@@ -120,13 +120,23 @@ installed bundle's ACLs. The data VHDX remains outside replaceable software.
 Setup boots the new controller, waits for authenticated control and stops it
 cleanly. Only after checking the ungranted VHDX UUID, capacity and file identity
 does it commit Ready. Encrypted user storage is created separately by `oblivion
-init` or the manager. A failed or interrupted setup remains Pending and cannot
-be retried as a new disk initialization. No automatic deletion of partial or
-unknown content is implemented.
+init` or the manager. Pending setup has explicit Uncreated, Staged and Published
+disk states. The installer creates a randomly named private VHDX, flushes it,
+records its original FileID/UUID/capacity, then publishes it without replacing a
+target. A rename completed before the next registry commit is reconciled only
+by that same FileID. SDK-created but unrecorded staging files remain untouched;
+a new attempt never adopts them as initialization authority.
+
+Rerunning the exact bundle resumes Pending setup under one exclusive setup lock.
+Software, configuration and boot copies publish atomically and complete verified
+copies can be reused. Only the recorded disk can regain a bootstrap capability;
+a matching filename or VHDX UUID alone is insufficient. Ready removes that
+Pending authorization. No automatic deletion of partial or unknown data is
+implemented.
 
 If bootstrap committed Ready but SCM registration failed, rerunning installation
 with the exact verified bundle completes registration under the stopped-runtime
-guard. It never creates or initializes another disk. During maintenance the
+guard. It never recreates the recorded data disk. During maintenance the
 broker is Disabled before stopping it; the new ImagePath and demand-start mode
 are committed together before the guard is released. An interrupted maintenance
 operation can leave the broker disabled and requires retrying the matching
@@ -198,8 +208,12 @@ Without a receipt, recovery performs no external mutation: it requires positive
 HCS absence, both HCN IDs absent and strict ungranted runtime files with the
 correct VHDX identity. A missing pipe or file is not sufficient evidence. A
 helper still finishing cleanup retains the resource lock and prevents recovery
-from racing its operations. Interrupted initial disk setup is not automatically
-reinitialized. Filesystem, mutex, receipt replacement and SDK fixtures compile
+from racing its operations. Pending setup can cancel only its previous owned
+initialization process, wait for observed process exit and reconcile its receipt
+before resuming. This internal action is unavailable for an ordinary Existing
+runtime and never treats a killed helper as proof of VM shutdown. A clean receipt
+is rechecked against strict original-file evidence without repeating an already
+completed ACL revoke. Filesystem, mutex, receipt replacement and SDK fixtures compile
 for Windows but have not been executed here. Forced interruption, power loss,
 HcsRevokeVmAccess with an already-absent ACE and installed lifecycle remain
 acceptance gates.
@@ -453,8 +467,8 @@ sends the runtime identity and capacity; the guest places this authority in
 root-only RAM and consumes it before marking the matching blank block device.
 It then uses the existing ext4 preparation. Ordinary `run` sends Existing and
 refuses a blank, unrecognized disk. This does not require attaching the VHDX to
-the Windows host for formatting. Installed setup and interrupted-install recovery
-remain to be connected and qualified. [SDK creation](https://learn.microsoft.com/en-us/windows/win32/api/virtdisk/nf-virtdisk-createvirtualdisk).
+the Windows host for formatting. Pending setup recovery is connected in source;
+actual installation and forced-interruption behavior remain to be qualified. [SDK creation](https://learn.microsoft.com/en-us/windows/win32/api/virtdisk/nf-virtdisk-createvirtualdisk).
 
 A VHDX can present the same logical block disk to the controller; LUKS2 and Safe
 volumes remain inside it, with no Windows filesystem mount. Microsoft supports
@@ -499,8 +513,9 @@ retain POSIX paths. The source-bound bundle validator supports Windows assets
 without depending on Unix ownership APIs. Compilation and fixture definitions
 do not qualify the installed manager or Hyper-V path.
 
-Remaining work includes installed broker/recovery qualification and interrupted
-initial setup after disk creation. Foreign resources are never adopted by recovery. The full
+Remaining work includes installed broker/recovery qualification and real setup
+interruption across SDK creation, publication and guest preparation. Foreign
+resources are never adopted by recovery. The full
 installed path must then pass the acceptance gates below. There is no second
 Windows command grammar, beta compatibility reader or automatic emulation fallback.
 

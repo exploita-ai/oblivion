@@ -13,8 +13,8 @@ three native `.exe` files and the pinned OpenTUI DLL. Validation is shared throu
 contract. The Windows command entrypoint, initial managed setup and bundle
 verification, Files, backup, Share and stopped-only software maintenance are
 connected in source, including an ordinary-user SCM broker backed by protected
-per-user installations and receipt-bound owned-resource recovery. Interrupted
-initial setup and installed/hardware qualification remain unfinished; see
+per-user installations, receipt-bound owned-resource recovery and exact-identity
+Pending setup resume. Installed/hardware qualification remains unfinished; see
 [Windows status](WINDOWS.md). Do not substitute the Unix launcher in a Windows bundle.
 
 Linux ARM64 additionally requires QEMU 10.1 or newer for its outer nested
