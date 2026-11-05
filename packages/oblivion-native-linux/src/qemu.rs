@@ -1,5 +1,6 @@
 use crate::{Error, Result, config::RuntimeConfig, private};
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -136,9 +137,13 @@ pub fn connect_private(path: &Path, deadline: Instant) -> Result<UnixStream> {
     Ok(stream)
 }
 
+const MAX_PENDING_EVENTS: usize = 32;
+
 pub struct Qmp {
     stream: UnixStream,
     buffered: Vec<u8>,
+    events: VecDeque<Value>,
+    event_overflow: bool,
     sequence: u32,
 }
 impl Qmp {
@@ -150,9 +155,11 @@ impl Qmp {
         let mut qmp = Self {
             stream,
             buffered: Vec::new(),
+            events: VecDeque::new(),
+            event_overflow: false,
             sequence: 0,
         };
-        let greeting = qmp.until(deadline)?;
+        let greeting = qmp.until_wire(deadline)?;
         if !greeting.get("QMP").is_some_and(Value::is_object) {
             return Err(Error("invalid_qmp_greeting"));
         }
@@ -161,6 +168,9 @@ impl Qmp {
     }
 
     pub fn command(&mut self, name: &str, deadline: Instant) -> Result<Value> {
+        if self.event_overflow {
+            return Err(Error("qmp_event_queue_overflow"));
+        }
         self.sequence += 1;
         let data = json!({"execute":name,"id":self.sequence}).to_string() + "\n";
         self.stream
@@ -185,7 +195,17 @@ impl Qmp {
             }
         }
         loop {
-            let value = self.until(deadline)?;
+            let value = self.until_wire(deadline)?;
+            if value.get("event").is_some() {
+                if self.events.len() == MAX_PENDING_EVENTS {
+                    // Missing an event makes this monitor's state uncertain.
+                    self.events.clear();
+                    self.event_overflow = true;
+                    return Err(Error("qmp_event_queue_overflow"));
+                }
+                self.events.push_back(value);
+                continue;
+            }
             if value.get("id").and_then(Value::as_u64) != Some(u64::from(self.sequence)) {
                 continue;
             }
@@ -197,6 +217,16 @@ impl Qmp {
     }
 
     pub fn next(&mut self) -> Result<Option<Value>> {
+        if self.event_overflow {
+            return Err(Error("qmp_event_queue_overflow"));
+        }
+        if let Some(event) = self.events.pop_front() {
+            return Ok(Some(event));
+        }
+        self.next_wire()
+    }
+
+    fn next_wire(&mut self) -> Result<Option<Value>> {
         if let Some(newline) = self.buffered.iter().position(|byte| *byte == b'\n') {
             let line: Vec<_> = self.buffered.drain(..=newline).collect();
             return serde_json::from_slice(&line)
@@ -212,7 +242,7 @@ impl Qmp {
                 }
                 self.buffered.extend_from_slice(&chunk[..length]);
                 if self.buffered.contains(&b'\n') {
-                    self.next()
+                    self.next_wire()
                 } else {
                     Ok(None)
                 }
@@ -229,12 +259,12 @@ impl Qmp {
         }
     }
 
-    fn until(&mut self, deadline: Instant) -> Result<Value> {
+    fn until_wire(&mut self, deadline: Instant) -> Result<Value> {
         loop {
             if Instant::now() >= deadline {
                 return Err(Error("qmp_timeout"));
             }
-            if let Some(value) = self.next()? {
+            if let Some(value) = self.next_wire()? {
                 return Ok(value);
             }
             self.wait(libc::POLLIN, deadline)?;
@@ -255,6 +285,70 @@ impl Qmp {
             return Err(Error("qmp_timeout"));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_PENDING_EVENTS, Qmp};
+    use std::collections::VecDeque;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    fn socket_pair() -> (Qmp, UnixStream) {
+        let (stream, peer) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        (
+            Qmp {
+                stream,
+                buffered: Vec::new(),
+                events: VecDeque::new(),
+                event_overflow: false,
+                sequence: 0,
+            },
+            peer,
+        )
+    }
+
+    #[test]
+    fn commands_preserve_event_order_across_replies() {
+        let (mut qmp, mut peer) = socket_pair();
+        peer.write_all(
+            b"{\"event\":\"STOP\"}\n\
+              {\"return\":1,\"id\":1}\n\
+              {\"event\":\"RESUME\"}\n\
+              {\"event\":\"DEVICE_DELETED\"}\n\
+              {\"return\":2,\"id\":2}\n\
+              {\"event\":\"SHUTDOWN\"}\n",
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        assert_eq!(qmp.command("query-status", deadline).unwrap(), 1);
+        assert_eq!(qmp.command("system_powerdown", deadline).unwrap(), 2);
+        for event in ["STOP", "RESUME", "DEVICE_DELETED", "SHUTDOWN"] {
+            assert_eq!(qmp.next().unwrap().unwrap()["event"], event);
+        }
+        assert!(qmp.next().unwrap().is_none());
+    }
+
+    #[test]
+    fn an_event_burst_cannot_leave_a_partial_monitor_usable() {
+        let (mut qmp, mut peer) = socket_pair();
+        for _ in 0..=MAX_PENDING_EVENTS {
+            peer.write_all(b"{\"event\":\"STOP\"}\n").unwrap();
+        }
+        peer.write_all(b"{\"return\":{},\"id\":1}\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        assert_eq!(
+            qmp.command("query-status", deadline).unwrap_err().0,
+            "qmp_event_queue_overflow"
+        );
+        assert_eq!(qmp.next().unwrap_err().0, "qmp_event_queue_overflow");
+        assert_eq!(
+            qmp.command("system_powerdown", deadline).unwrap_err().0,
+            "qmp_event_queue_overflow"
+        );
     }
 }
 
