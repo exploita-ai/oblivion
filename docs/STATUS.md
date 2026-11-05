@@ -112,8 +112,17 @@ The runtime verifies the scoped controller worker and mapping stopped before
 it asks QEMU to eject. A fresh local receipt distinguishes confirmed removal
 from data emitted by the transfer guest. The caller that controls Debian Live
 and its terminal remains in the trusted boundary. The published beta images
-predate this flow. Physical attach, unplug and eject, USB export, and the
-installed Live acceptance remain open.
+predate this flow. Physical attach, unplug and eject remain acceptance gates.
+
+**Files → Export to USB** and `files export --usb ID` now prepare the native
+Safe selection before requesting any write access. The isolated writer uses a
+new operation folder, verifies hashes, records the manifest and receipt, and
+publishes without overwriting an existing export. The guest confirms unmount
+and flush on a private control port. The controller checks the stopped worker
+and absent mapper before the runtime syncs the original descriptor and ejects
+the QEMU device. Confirmed receipts are visible during the manager run. Reading
+and recovering interrupted USB operations from the drive, and physical export
+acceptance across the supported filesystems, remain open.
 
 The ARM64 outer Live now selects QEMU from Debian backports, records its package
 version and executable hash, and verifies that evidence before ISO packing.

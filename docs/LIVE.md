@@ -57,8 +57,19 @@ device. The isolated transfer VM browses ext4, FAT or exFAT media in read-only
 mode. Use **Space** to select and **C** to continue. Choose the workspace name
 and approve the file manifest. Wait for the verified result before removing the
 USB. If removal cannot be confirmed, check the runtime and the recorded copy
-outcome before retrying. USB export and acceptance on a physical Live boot
-remain open.
+outcome before retrying.
+
+**Files → Export to USB** starts in the Safe file picker. Choose the files,
+select a writable USB, then use **Write to USB** on the manifest review. Only
+then does the isolated writer get write access. The files are readable outside
+the Safe in `/Oblivion-<operation>/files`. Each export gets its own folder.
+Wait for the verified removal message before disconnecting the drive.
+
+The CLI accepts `oblivion files export --safe SAFE --path workspace/FILE
+--usb ID` and shows the same review. The 1.0 source targets ext4, FAT and
+exFAT. FAT has a per-file size limit. The current manager retains confirmed
+USB receipts for this run. Reading and recovering interrupted USB operations
+from the drive and acceptance on a physical Live boot remain open.
 
 To switch between persistent and RAM-only storage, lock Oblivion and choose
 **Change storage mode** on its welcome screen. The action is available only
