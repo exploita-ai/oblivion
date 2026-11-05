@@ -141,7 +141,7 @@ test("multi-line paste is rejected and cancelling path entry preserves the brows
   } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
 })
 
-test.each(["literal", "terminal-drop"])("an import %s path cannot mutate a Safe before the existing transfer review", async (spelling) => {
+test.each(["literal", "path-field-drop", "browser-drop"])("an import %s path cannot mutate a Safe before the existing transfer review", async (spelling) => {
   const fixture = await files()
   const source = path.join(fixture.root, "$(touch literal-only).txt")
   const commands: string[][] = []
@@ -158,7 +158,12 @@ test.each(["literal", "terminal-drop"])("an import %s path cannot mutate a Safe 
   try {
     await app.renderOnce()
     await app.mockInput.pressEnter()
-    await enter(app, spelling === "literal" ? source : `${fixture.root}/\\$\\(touch\\ literal-only\\).txt `)
+    if (spelling === "browser-drop") {
+      await visible(app, "0 selected")
+      await app.mockInput.pasteBracketedText(source)
+    } else {
+      await enter(app, spelling === "literal" ? source : `${fixture.root}/\\$\\(touch\\ literal-only\\).txt `)
+    }
     await visible(app, "Review local path")
     expect(commands).toHaveLength(0)
     await app.mockInput.pressEnter()
@@ -181,6 +186,53 @@ test.each(["literal", "terminal-drop"])("an import %s path cannot mutate a Safe 
     expect(copies[0]?.args.slice(8)).toEqual(["--operation", expect.stringMatching(/^[a-f0-9]{32}$/), "--opening", "d".repeat(32)])
     expect(app.captureCharFrame()).not.toContain("destination was not replaced")
   } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
+})
+
+test.each([[80, 24], [160, 50]])("a grouped drop is reviewed before it changes the import selection at %ix%i", async (width, height) => {
+  const fixture = await files()
+  const [selected, setSelected] = createSignal([fixture.file])
+  const app = await testRender(() => <LocalChooser directoryOnly={false} initialDirectory={fixture.root}
+    selection={{ paths: selected(), change: setSelected, continue: () => {} }} choose={() => {}} back={() => {}} />, { width, height, kittyKeyboard: true })
+  const group = `"${fixture.file}" "${fixture.folder}"`
+  try {
+    await visible(app, "Notes città with spaces.txt")
+    await app.mockInput.pasteBracketedText(`"${fixture.file}" "${path.join(fixture.root, "missing.txt")}"`)
+    await visible(app, "Could not read the dropped paths")
+    expect(selected()).toEqual([fixture.file])
+
+    await app.mockInput.pasteBracketedText(group)
+    await visible(app, "Review dropped paths")
+    expect(app.captureCharFrame()).toContain("Add to selection")
+    expect(selected()).toEqual([fixture.file])
+    await app.mockInput.pressEscape()
+    await visible(app, "Choose local files")
+    expect(selected()).toEqual([fixture.file])
+
+    await app.mockInput.pasteBracketedText(group)
+    await visible(app, "Review dropped paths")
+    await app.mockInput.pressEnter()
+    await visible(app, "2 selected")
+    expect(selected()).toEqual([fixture.file, fixture.folder])
+  } finally { await app.dispose(); await rm(fixture.root, { recursive: true }) }
+})
+
+test.skipIf(process.platform !== "win32")("Windows Terminal drop preserves native separators and dollar signs", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "oblivion-windows-drop-"))
+  const folder = path.join(root, "Città with spaces")
+  const file = path.join(root, "Budget $ and notes.txt")
+  await Promise.all([mkdir(folder), writeFile(file, "synthetic file")])
+  const [selected, setSelected] = createSignal<string[]>([])
+  const app = await testRender(() => <LocalChooser directoryOnly={false} initialDirectory={root}
+    selection={{ paths: selected(), change: setSelected, continue: () => {} }} choose={() => {}} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await visible(app, "0 selected")
+    await app.mockInput.pasteBracketedText(`"${file}" "${folder}"`)
+    await visible(app, "Review dropped paths")
+    expect(selected()).toEqual([])
+    await app.mockInput.pressEnter()
+    await visible(app, "2 selected")
+    expect(selected()).toEqual([file, folder])
+  } finally { await app.dispose(); await rm(root, { recursive: true }) }
 })
 
 test.each([[80, 24], [160, 50]])("terminal-escaped dropped paths keep Unicode and require a choice at %ix%i", async (width, height) => {
