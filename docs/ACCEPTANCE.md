@@ -202,6 +202,8 @@ Usare archivi e dischi separati dai dati personali, file sintetici e due runtime
 
 | 6 novembre 2026 · stessa coppia Mac ARM64 `8537845`, Safe `f1de0063` | CLI installata con PTY, manager reale, archivio QA persistente dopo avvio a freddo | SAFE-01 `Parziale` · riprova CLI riuscita | General si presenta bloccato e si riapre con la Safe da 2.304 MiB. La CLI cresce da 2.304 a 2.560 MiB in 30 s senza staging, mapper o recupero. L'ID e il nome restano identici. La stessa Safe si riapre e l'export `8315f6de` conserva SHA-256 `812987e04bc60c526badb61d5e4938f0b7f1e93899a72603ad7ea2e41f1c2d54`. Il manager mostra la stessa Safe aperta a 2,5 GiB. Log SHA-256 `5da337d1d7a016d281e66a39eb8d300e328d1dae8f2e82d285f1179ffdaa2840` e `88e497b3937550e6e32ba73069843475f690fb4e8df16ee035a0a3dd7024692c`. |
 
+| 6 novembre 2026 · stessa coppia Mac ARM64 `8537845` | Terminale.app aperto dall'utente, handoff manuale sulla Safe QA `f1de0063` | FILE-05 · UI-02 · AG-06 `Parziale` | Computer Use rifiuta l'accesso a Terminale.app anche con una finestra aperta. Preparati comando QA, tre fixture sintetiche e SHA-256. La Safe risulta aperta senza recupero dopo la chiusura della scheda browser. Esito del picker nativo in attesa. Log SHA-256 `e3e89a40937507642592b3f098ebd8256e214c043f892121eabbfefcd78ab98c`. |
+
 ## Prerequisiti aperti
 
 - L'archivio QA persistente Mac è inizializzato e contiene una Safe con fixture. Per FAM-01, BAK-01/02 e SHARE-01/02 serve un secondo archivio QA indipendente. Il collaudo dei login salvati richiede almeno una chat sintetica autenticata nel volume di origine.
