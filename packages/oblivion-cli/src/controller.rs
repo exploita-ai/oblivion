@@ -54,6 +54,8 @@ pub struct Opened<S> {
     pub slot: S,
     pub id: Option<String>,
     pub mode: Option<String>,
+    #[serde(default)]
+    pub recovery_required: bool,
 }
 
 #[derive(Deserialize)]

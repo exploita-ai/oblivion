@@ -76,6 +76,59 @@ fn open_uses_offline_documents_then_pins_exact_opening_without_starting_agent() 
 }
 
 #[test]
+fn open_retries_a_slot_taken_by_another_safe_with_the_same_password() {
+    let initial = closed();
+    let mut current = initial.clone();
+    current["open_sessions"] = json!([
+        {"slot":0,"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","mode":"documents"}
+    ]);
+    let mut runtime = Runtime::new(vec![
+        status(&initial),
+        status(&initial),
+        rejected(Operation::OpenDocuments, "vm_already_running"),
+        status(&current),
+        response(Operation::OpenDocuments, ""),
+        response(Operation::PinSafe, ""),
+    ]);
+    assert_eq!(
+        safe::execute(&mut runtime, command(&["open", "GB"]), &mut Vec::new()).unwrap(),
+        0
+    );
+    runtime.finished();
+    assert_eq!(runtime.events, ["password:Safe password"]);
+    assert_eq!(runtime.sent[2].slot, Some(0));
+    assert_eq!(runtime.sent[4].slot, Some(1));
+    assert_eq!(runtime.sent[2].session.as_deref(), Some(ID));
+    assert_eq!(runtime.sent[4].session.as_deref(), Some(ID));
+    assert_eq!(runtime.sent[2].body.as_slice(), runtime.sent[4].body.as_slice());
+    assert_eq!(runtime.sent[5].slot, Some(1));
+    assert_eq!(runtime.sent[5].expected.as_deref(), Some(ID));
+}
+
+#[test]
+fn open_does_not_retry_a_slot_whose_owner_requires_recovery() {
+    let initial = closed();
+    let mut current = initial.clone();
+    current["open_sessions"] = json!([
+        {"slot":0,"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","mode":"documents","recovery_required":true}
+    ]);
+    let mut runtime = Runtime::new(vec![
+        status(&initial),
+        status(&initial),
+        rejected(Operation::OpenDocuments, "vm_already_running"),
+        status(&current),
+    ]);
+    assert_eq!(
+        safe::execute(&mut runtime, command(&["open", "GB"]), &mut Vec::new())
+            .unwrap_err()
+            .to_string(),
+        "vm_already_running"
+    );
+    runtime.finished();
+    assert_eq!(runtime.events, ["password:Safe password"]);
+}
+
+#[test]
 fn already_open_pins_an_active_safe_without_attaching_or_prompting() {
     let mut runtime = Runtime::new(vec![status(&active()), response(Operation::PinSafe, "")]);
     assert_eq!(

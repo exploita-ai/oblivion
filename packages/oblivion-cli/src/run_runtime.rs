@@ -4,6 +4,7 @@ use crate::controller::{self, AgentSafeState, AppMode, Call, Controller, Result,
 use crate::run::Options;
 use oblivion_transport::Transport;
 use oblivion_wire::control::Operation;
+use oblivion_wire::control_client;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
@@ -95,7 +96,7 @@ pub fn open_existing<R: Runtime>(
     state: &State<R::Slot>,
     slot: R::Slot,
     id: &str,
-) -> Result<()> {
+) -> Result<R::Slot> {
     require_id(id)?;
     let child = state.agent_safes.iter().find(|safe| safe.id == id);
     if child.is_some_and(|safe| safe.state != AgentSafeState::AwaitingStart) {
@@ -109,17 +110,52 @@ pub fn open_existing<R: Runtime>(
             expected_session: Some(id),
             secret: &[],
         })?;
-        return Ok(());
+        return Ok(slot);
     }
     let secret = runtime.password("Safe password")?;
-    runtime.request(Call {
-        operation: Operation::OpenDocuments,
-        slot: Some(slot),
-        session: Some(id),
-        expected_session: None,
-        secret: &secret,
-    })?;
-    Ok(())
+    let open = |runtime: &mut R, slot| {
+        runtime.request(Call {
+            operation: Operation::OpenDocuments,
+            slot: Some(slot),
+            session: Some(id),
+            expected_session: None,
+            secret: &secret,
+        })
+    };
+    let error = match open(runtime, slot) {
+        Ok(_) => return Ok(slot),
+        Err(error) => error,
+    };
+    if !matches!(
+        error.downcast_ref(),
+        Some(control_client::Error::Rejected(code)) if code == "vm_already_running"
+    ) {
+        return Err(error);
+    }
+    // The slot can change while the password prompt is open. Confirm that
+    // another Safe owns it before replaying the request for the same ID.
+    let Ok(current) = controller::status(runtime) else {
+        return Err(error);
+    };
+    if !current.app_open
+        || current.app_mode != state.app_mode
+        || current.recovery_required
+        || !current.sessions.iter().any(|safe| safe == id)
+        || current.open_sessions.iter().any(|safe| safe.id.as_deref() == Some(id))
+        || !current.open_sessions.iter().any(|safe| {
+            safe.slot == slot
+                && !safe.recovery_required
+                && matches!(safe.mode.as_deref(), Some("documents" | "agent"))
+                && safe.id.as_deref().is_some_and(oblivion_wire::control::valid_id)
+        })
+    {
+        return Err(error);
+    }
+    let Ok(slot) = free_slot(runtime, &current) else {
+        return Err(error);
+    };
+    open(runtime, slot)?;
+    Ok(slot)
 }
 
 /// The window limits retrying gateway_not_ready, as in the current launcher.
@@ -233,9 +269,8 @@ pub fn execute<R: Runtime>(
     }
     let slot = free_slot(runtime, &state)?;
     let created = existing.is_none() && !options.ephemeral && state.app_mode == AppMode::Persistent;
-    let id = if let Some(id) = existing {
-        open_existing(runtime, &state, slot, &id)?;
-        id
+    let (slot, id) = if let Some(id) = existing {
+        (open_existing(runtime, &state, slot, &id)?, id)
     } else if options.ephemeral || state.app_mode != AppMode::Persistent {
         runtime.request(Call {
             operation: Operation::OpenDocumentsEphemeral,
@@ -251,7 +286,7 @@ pub fn execute<R: Runtime>(
             .and_then(|opened| opened.id)
             .ok_or("Safe failed to open")?;
         require_id(&id)?;
-        id
+        (slot, id)
     } else {
         let secret = runtime.new_password("New Safe password")?;
         let response = runtime.request(Call {
@@ -285,7 +320,7 @@ pub fn execute<R: Runtime>(
             expected_session: None,
             secret: &secret,
         })?;
-        id.to_owned()
+        (slot, id.to_owned())
     };
     let result = (|| {
         if created {

@@ -64,11 +64,11 @@ pub fn execute<R: run::Runtime>(
         .find(|safe| safe.id.as_deref() == Some(&id));
     let slot = match active {
         Some(safe) => safe.slot,
-        None => run::free_slot(runtime, &state)?,
+        None => {
+            let slot = run::free_slot(runtime, &state)?;
+            run::open_existing(runtime, &state, slot, &id)?
+        }
     };
-    if active.is_none() {
-        run::open_existing(runtime, &state, slot, &id)?;
-    }
     let result = (|| {
         if let Some(mode) = options.policy {
             runtime.request(Call {

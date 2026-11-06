@@ -111,11 +111,11 @@ pub fn execute<R: run::Runtime>(
             let slot = match active {
                 Some(safe) => safe.slot,
                 None if already_open => return Err("This Safe is no longer open".into()),
-                None => run::free_slot(runtime, &state)?,
+                None => {
+                    let slot = run::free_slot(runtime, &state)?;
+                    run::open_existing(runtime, &state, slot, &id)?
+                }
             };
-            if active.is_none() {
-                run::open_existing(runtime, &state, slot, &id)?;
-            }
             let result = (|| {
                 runtime.request(Call {
                     operation: Operation::PinSafe,

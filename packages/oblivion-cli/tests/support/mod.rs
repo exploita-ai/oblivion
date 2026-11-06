@@ -69,7 +69,9 @@ impl Controller for Runtime {
             expected: call.expected_session.map(str::to_owned),
             body: Zeroizing::new(call.secret.to_vec()),
         });
-        step.output.map_err(Into::into)
+        step.output.map_err(|error| {
+            oblivion_wire::control_client::Error::Rejected(error.into()).into_boxed()
+        })
     }
 }
 impl run::Runtime for Runtime {
