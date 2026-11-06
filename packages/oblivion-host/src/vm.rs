@@ -748,7 +748,12 @@ pub fn stop_role(role: Role, force: bool) -> Result<()> {
         require(stopped_role(role)?, "vm_still_running")?;
         return Ok(());
     }
-    qmp(role, "system_powerdown")?;
+    match qmp(role, "system_powerdown") {
+        Ok(_) => {}
+        // The unit can finish stopping and remove its monitor after the first check.
+        Err(Error("vm_control_unavailable")) if stopped_role(role).unwrap_or(false) => return Ok(()),
+        Err(error) => return Err(error),
+    }
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if stopped_role(role)? {
