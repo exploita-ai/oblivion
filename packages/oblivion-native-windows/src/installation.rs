@@ -388,6 +388,22 @@ mod native {
                 }
                 Err(_) => return Err(Error("installation_directory_unavailable")),
             }
+            if self.broker {
+                checked_directory(
+                    self.path
+                        .parent()
+                        .ok_or(Error("unsupported_installation_path"))?,
+                    &self.storage,
+                    &Identity::from_sid("S-1-5-11")?,
+                )?;
+            }
+            checked_directory(&self.path, &self.storage, &self.client)?;
+            if exists(&self.file("releases")?)? {
+                checked_directory(&self.path.join("releases"), &self.storage, &self.client)?;
+            }
+            if exists(&self.file("boot")?)? {
+                checked_directory(&self.path.join("boot"), &self.storage, &self.storage)?;
+            }
             CreationParent::open(&self.file("installation.json")?, &self.storage)
         }
         fn create(&self) -> Result<()> {
@@ -397,9 +413,10 @@ mod native {
                         .parent()
                         .ok_or(Error("unsupported_installation_path"))?,
                     &self.storage,
+                    &Identity::from_sid("S-1-5-11")?,
                 )?;
             }
-            ensure_directory(&self.path, &self.storage)
+            ensure_directory(&self.path, &self.storage, &self.client)
         }
     }
 
@@ -572,8 +589,8 @@ mod native {
             }
         };
         let (mut registry, _) = registry(root, &identity)?;
-        ensure_directory(&root.path.join("releases"), &identity)?;
-        ensure_directory(&root.path.join("boot"), &identity)?;
+        ensure_directory(&root.path.join("releases"), &identity, &root.client)?;
+        ensure_directory(&root.path.join("boot"), &identity, &identity)?;
         check(&stop, deadline)?;
         let release = root.release(&record.bundle.bundle_id)?;
         let bundle = if exists(&release)? {
@@ -1716,12 +1733,12 @@ mod native {
         }
         Ok((count, format!("{:x}", hash.finalize())))
     }
-    fn ensure_directory(path: &Path, identity: &Identity) -> Result<()> {
+    fn ensure_directory(path: &Path, identity: &Identity, reader: &Identity) -> Result<()> {
         let text = path
             .to_str()
             .ok_or(Error("unsupported_installation_path"))?;
         let parent = CreationParent::ancestors(text)?;
-        let descriptor = identity.file_descriptor()?;
+        let descriptor = identity.traversal_for(reader)?;
         let attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: descriptor.as_ptr(),
@@ -1734,13 +1751,18 @@ mod native {
             return Err(Error("private_installation_directory_unavailable"));
         }
         parent.verify()?;
-        CreationParent::open(
-            path.join(".review")
-                .to_str()
-                .ok_or(Error("unsupported_installation_path"))?,
-            identity,
-        )?;
+        checked_directory(path, identity, reader)?;
         Ok(())
+    }
+
+    fn checked_directory(path: &Path, storage: &Identity, reader: &Identity) -> Result<Directory> {
+        let directory = Directory::open(
+            path.to_str().ok_or(Error("unsupported_installation_path"))?,
+            storage,
+            true,
+        )?;
+        directory.require_traversal(storage, reader)?;
+        Ok(directory)
     }
     #[cfg(test)]
     fn create_private(path: &str, identity: &Identity) -> Result<File> {
@@ -1829,7 +1851,8 @@ mod native {
         use super::{
             AtomicReview, AtomicStage, FileIdentity, PendingDisk, Phase, Record, Root, atomic,
             atomic_file_identity, atomic_review, boot_asset, boot_leaf, collect, collect_software,
-            configuration, control_id, copy_boot, create_private, create_record, empty_setup,
+            checked_directory, configuration, control_id, copy_boot, create_private, create_record,
+            empty_setup,
             ensure_directory, maintenance, prepare_disk, random_id, read_record, registry,
             setup_lock, uninstall, update_bundle, verified_bundle,
         };
@@ -1855,7 +1878,8 @@ mod native {
                 )
                 .unwrap();
                 assert!(!root.path().exists());
-                ensure_directory(root.path(), &Identity::current().unwrap()).unwrap();
+                ensure_directory(root.path(), root.storage_identity(), root.client_identity())
+                    .unwrap();
                 Self(root)
             }
         }
@@ -2031,6 +2055,46 @@ mod native {
         }
 
         #[test]
+        fn broker_directory_roles_are_exact_and_old_private_ancestors_are_not_rewritten() {
+            let area = Area::new();
+            let storage = Identity::administrators().unwrap();
+            let caller = Identity::current().unwrap();
+            let users = Identity::from_sid("S-1-5-11").unwrap();
+            let other = Identity::from_sid("S-1-5-21-100000001-100000002-100000003-1001").unwrap();
+            let shared = area.0.path().join("shared");
+            let root = Root::new(
+                shared.join(caller.sid()),
+                storage.clone(),
+                caller.clone(),
+                true,
+            )
+            .unwrap();
+            root.create().unwrap();
+            checked_directory(&shared, &storage, &users).unwrap();
+            checked_directory(root.path(), &storage, &caller).unwrap();
+            assert!(checked_directory(root.path(), &storage, &users).is_err());
+            root.guard().unwrap();
+            let releases = root.path().join("releases");
+            ensure_directory(&releases, &storage, &other).unwrap();
+            assert!(root.guard().is_err());
+            assert!(ensure_directory(&releases, &storage, &caller).is_err());
+            checked_directory(&releases, &storage, &other).unwrap();
+            std::fs::remove_dir(&releases).unwrap();
+            ensure_directory(&releases, &storage, &caller).unwrap();
+            root.guard().unwrap();
+            let boot = root.path().join("boot");
+            ensure_directory(&boot, &storage, &caller).unwrap();
+            assert!(root.guard().is_err());
+            assert!(ensure_directory(&boot, &storage, &storage).is_err());
+            checked_directory(&boot, &storage, &caller).unwrap();
+
+            let old = area.0.path().join("old-private-catalog");
+            ensure_directory(&old, &storage, &storage).unwrap();
+            assert!(ensure_directory(&old, &storage, &caller).is_err());
+            checked_directory(&old, &storage, &storage).unwrap();
+        }
+
+        #[test]
         fn broker_roots_derive_programdata_and_storage_from_the_authenticated_user_only() {
             let owner = Identity::current().unwrap();
             let root = Root::for_user(&owner).unwrap();
@@ -2055,7 +2119,7 @@ mod native {
             let root = &area.0;
             let identity = Identity::current().unwrap();
             for child in ["releases", "boot"] {
-                ensure_directory(&root.path().join(child), &identity).unwrap();
+                ensure_directory(&root.path().join(child), &identity, &identity).unwrap();
             }
             let bundle = source.open().unwrap();
             let binding = bundle.binding().unwrap();

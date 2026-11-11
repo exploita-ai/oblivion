@@ -40,6 +40,15 @@ are explicit, durable supervisor bindings; process identity is not substituted
 for the authenticated user's identity. The election mutex uses the global object
 namespace so setup and Session 0 share the same maintenance exclusion.
 
+Fresh setup grants directory traversal (`FILE_TRAVERSE`, `0x20`) to Authenticated
+Users on the shared `Oblivion` directory and only to the authenticated caller SID
+on its catalog and `releases` directories. These protected, non-inheriting ACLs
+grant no directory listing, metadata, DACL or write access. They allow the ordinary
+client to retain deny-delete ancestor handles while opening published software.
+Boot copies, configuration, journals and the data VHDX remain private. Setup
+requires the exact current ACL on existing directories and refuses a mismatch;
+it does not migrate or rewrite old installations or change the OS ProgramData ACL.
+
 The broker admits only describe, acquire, resident-start, stop and recovery for
 that caller's runtime. Requests contain no SID, helper path, shell command or HCS
 configuration. Before sending a request the client verifies the protected SCM
@@ -217,8 +226,10 @@ connects `runtime update BUNDLE`, `runtime gc` and `runtime uninstall` from a no
 terminal. An explicit update verifies the incoming current-format bundle and
 binds the UAC exchange to that bundle's source, including when it differs from
 the invoking CLI. GC and uninstall verify the actual running launcher's file
-identity and role before staging. Only published-software ancestor pins use
-metadata-only access; root/file ACLs, hashes and private data access are unchanged.
+identity and role before staging. Published-software ancestor pins use
+traversal-only access, reject reparse points and retain deny-delete protection.
+They verify file identities without requiring metadata or DACL read access;
+published asset ACLs and hashes are still checked.
 None of these maintenance operations boots
 a VM or changes the data VHDX, runtime identity or configuration.
 

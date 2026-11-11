@@ -297,7 +297,7 @@ pub(crate) struct CreationParent {
 impl CreationParent {
     pub(crate) fn open(path: &str, identity: &Identity) -> Result<Self> {
         let parent = Self::ancestors(path)?;
-        permissions(
+        directory_permissions(
             &parent
                 .parents
                 .last()
@@ -516,7 +516,7 @@ impl Directory {
         let ancestors = pin_parents(path)?;
         let file = open_raw(path, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?;
         let (id, _) = inspect(&file, path, true)?;
-        permissions(&file, identity.sid(), private)?;
+        directory_permissions(&file, identity.sid(), private)?;
         Ok(Self(Arc::new(DirectoryPin {
             path: path.into(),
             file,
@@ -537,6 +537,15 @@ impl Directory {
 
     pub(crate) fn path(&self) -> &str {
         &self.0.path
+    }
+
+    pub(crate) fn require_traversal(&self, storage: &Identity, reader: &Identity) -> Result<()> {
+        self.verify()?;
+        crate::security::file_permissions(
+            &self.0.file,
+            storage.sid(),
+            crate::security::FilePolicy::PrivateDirectory(Some(reader.sid())),
+        )
     }
 
     pub(crate) fn verify(&self) -> Result<()> {
@@ -595,7 +604,7 @@ impl Directory {
         self.verify()?;
         let file = open_raw(&path, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?;
         let (id, _) = inspect(&file, &path, true)?;
-        permissions(&file, identity.sid(), private)?;
+        directory_permissions(&file, identity.sid(), private)?;
         Ok(Self(Arc::new(DirectoryPin {
             path,
             file,
@@ -608,7 +617,7 @@ impl Directory {
     pub(crate) fn create_child(&self, name: &str, identity: &Identity) -> Result<Self> {
         let path = self.child_path(name)?;
         self.verify()?;
-        permissions(&self.0.file, identity.sid(), true)?;
+        directory_permissions(&self.0.file, identity.sid(), true)?;
         create_directory(&path, identity)?;
         self.child(name, identity, true)
     }
@@ -666,7 +675,7 @@ impl Directory {
     pub(crate) fn create_file(&self, name: &str, identity: &Identity) -> Result<Asset> {
         let path = self.child_path(name)?;
         self.verify()?;
-        permissions(&self.0.file, identity.sid(), true)?;
+        directory_permissions(&self.0.file, identity.sid(), true)?;
         let descriptor = identity.file_descriptor()?;
         let attributes = SECURITY_ATTRIBUTES {
             nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -870,7 +879,11 @@ impl Mutation {
             if inspect(&file, path, directory)?.0 != expected {
                 return Err(Error("runtime_asset_changed"));
             }
-            permissions(&file, identity.sid(), private)?;
+            if directory {
+                directory_permissions(&file, identity.sid(), private)?;
+            } else {
+                permissions(&file, identity.sid(), private)?;
+            }
             Ok(file)
         };
         let guard = open(READ_CONTROL | FILE_READ_ATTRIBUTES)?;
@@ -940,7 +953,11 @@ fn software_acl(
 ) -> Result<()> {
     // Only an already private, storage-owned object can become published code.
     // The owner is retained; the descriptor grants the client read/execute only.
-    permissions(original, storage.sid(), true)?;
+    if directory {
+        directory_permissions(original, storage.sid(), true)?;
+    } else {
+        permissions(original, storage.sid(), true)?;
+    }
     let file = open_raw(
         path,
         READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES,
@@ -1256,6 +1273,18 @@ fn permissions(file: &File, owner_sid: &str, private: bool) -> Result<()> {
     )
 }
 
+fn directory_permissions(file: &File, owner_sid: &str, private: bool) -> Result<()> {
+    crate::security::file_permissions(
+        file,
+        owner_sid,
+        if private {
+            crate::security::FilePolicy::PrivateDirectory(None)
+        } else {
+            crate::security::FilePolicy::Immutable
+        },
+    )
+}
+
 fn virtual_disk(pinned: &Pinned, runtime_id: &str) -> Result<u64> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     if unsafe { GetFileInformationByHandle(pinned.file.as_raw_handle(), &mut info) } == 0
@@ -1427,7 +1456,13 @@ mod tests {
     }
 
     fn acl(path: &str, identity: &Identity, extra: &str) {
-        let file = open_raw(path, READ_CONTROL | WRITE_DAC | WRITE_OWNER, false, false).unwrap();
+        let file = open_raw(
+            path,
+            READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+            false,
+            std::fs::metadata(path).unwrap().is_dir(),
+        )
+        .unwrap();
         let text = format!("O:{}{}{}", identity.sid(), identity.sddl(), extra);
         let mut descriptor = null_mut();
         assert_ne!(
@@ -1473,6 +1508,61 @@ mod tests {
             },
             0
         );
+    }
+
+    #[test]
+    fn private_directory_traversal_is_exact_noninheriting_and_never_private_file_execute() {
+        let area = Area::new();
+        let identity = Identity::current().unwrap();
+        let caller = Identity::from_sid("S-1-5-21-100000001-100000002-100000003-1001").unwrap();
+        let other = Identity::from_sid("S-1-5-21-100000001-100000002-100000003-1002").unwrap();
+        let path = area.0.to_str().unwrap();
+        let old = super::Directory::open(path, &identity, true).unwrap();
+        assert!(old.require_traversal(&identity, &caller).is_err());
+        drop(old);
+        acl(path, &identity, &format!("(A;;0x20;;;{})", caller.sid()));
+        let directory = super::Directory::open(path, &identity, true).unwrap();
+        directory.require_traversal(&identity, &caller).unwrap();
+        assert!(directory.require_traversal(&identity, &other).is_err());
+        let file = area.file(
+            "private",
+            b"private",
+            &identity,
+            &format!("(A;;0x20;;;{})", caller.sid()),
+        );
+        let file = open_raw(&file, READ_CONTROL | super::FILE_READ_ATTRIBUTES, false, false).unwrap();
+        assert!(crate::security::file_permissions(
+            &file,
+            identity.sid(),
+            crate::security::FilePolicy::Private
+        )
+        .is_err());
+        assert!(crate::security::file_permissions(
+            &file,
+            identity.sid(),
+            crate::security::FilePolicy::PrivateDirectory(None)
+        )
+        .is_err());
+        drop((directory, file));
+        for ace in [
+            format!("(A;;0x21;;;{})", caller.sid()),
+            format!("(A;;0xa0;;;{})", caller.sid()),
+            format!("(A;;0x20020;;;{})", caller.sid()),
+            format!("(A;;GX;;;{})", caller.sid()),
+            format!("(A;OI;0x20;;;{})", caller.sid()),
+            format!("(A;CI;0x20;;;{})", caller.sid()),
+            format!("(A;OICIIO;0x20;;;{})", caller.sid()),
+        ] {
+            acl(path, &identity, &ace);
+            assert!(super::Directory::open(path, &identity, true).is_err(), "{ace}");
+        }
+        acl(
+            path,
+            &identity,
+            &format!("(A;;0x20;;;{})(A;;0x20;;;{})", caller.sid(), other.sid()),
+        );
+        let directory = super::Directory::open(path, &identity, true).unwrap();
+        assert!(directory.require_traversal(&identity, &caller).is_err());
     }
 
     #[test]
