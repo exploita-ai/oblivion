@@ -73,7 +73,7 @@ jobs:
           OBLIVION_ARCH: ${{ matrix.arch }}
           OBLIVION_BUILD_SCOPE: GitHub release-candidate image built from the recorded public source commit; checksums are not a cryptographic signature.
           OBLIVION_IMAGE_NAME: ${{ needs.authorize.outputs.image_name }}
-        run: bun run build:iso
+        run: bun run build:live
       - name: Verify and stage the image
         id: image
         shell: bash

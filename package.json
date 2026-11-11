@@ -8,13 +8,14 @@
   "packageManager": "bun@1.4.4",
   "scripts": {
     "dev": "bun run --cwd packages/oblivion-manager dev",
-    "build:iso": "sh script/oblivion/build-stack.sh",
+    "build:live": "sh script/oblivion/build-image.sh live",
+    "build:runtime": "sh script/oblivion/build-image.sh controller",
     "build:deb": "sh script/oblivion/build-deb.sh",
     "vm:disk": "python3 script/oblivion/prepare-vm-disk.py",
-    "lint": "oxlint packages/oblivion-manager packages/oblivion-tools packages/theme packages/tui-kit script/upgrade-opentui.ts",
+    "lint": "oxlint packages/oblivion-manager packages/oblivion-tools packages/theme packages/tui-kit script/*.ts",
     "typecheck": "bun turbo typecheck --concurrency=3",
     "typecheck:tsc": "bun turbo typecheck:tsc --concurrency=3",
-    "check": "bun run lint && bun run typecheck",
+    "check": "bun run script/check-bun.ts && bun run lint && bun run typecheck",
     "upgrade-opentui": "bun run script/upgrade-opentui.ts",
     "prepare": "husky",
     "test": "echo 'do not run tests from root' && exit 1"

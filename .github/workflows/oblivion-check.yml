@@ -236,6 +236,14 @@ jobs:
           cargo check --locked --lib --bins --features lab-emulation
           cargo test --locked --lib --bin oblivion --bin oblivion-storage
           cargo test --locked --test display --test frontend_command --test frontend --test frontend_safes --test frontend_files --test frontend_settings --test frontend_family --test frontend_tasks --test frontend_backup --test safe_admin --test delegation --test backup_cli --test file_attachment --test managed --test terminal_screen --test workspace --test share_control --test channel
+      - name: Exercise scoped network, storage and Onion transfer contracts
+        working-directory: packages/oblivion-host
+        run: |
+          # onion_vm checks arguments only. The real QEMU fixture in
+          # onion_uplink stays ignored; this step never starts a VM.
+          cargo test --locked --test egress --test network-policy --test tor_profile \
+            --test scope --test session_title --test transfers --test volume \
+            --test onion --test onion_copy --test onion_task --test onion_uplink --test onion_vm
       - name: Exercise the portable private wire
         working-directory: packages/oblivion-wire
         run: cargo test --locked
@@ -368,7 +376,24 @@ jobs:
           for package in oblivion-gateway oblivion-transfer oblivion-transport oblivion-tor-state; do
             (cd "packages/$package" && cargo check --locked --lib --bins && cargo test --locked --lib)
           done
-          (cd packages/oblivion-transfer && cargo test --locked --offline --test approved --test share --test personal_copy --test native_backup --test local_file --test native_files --test prepared_files --test multi_files --test transfer_inventory --test endpoint --test relay --test stream && cargo build --locked --offline --bin oblivion-copy)
+          (cd packages/oblivion-transport && cargo test --locked --test commands)
+      - name: Exercise gateway activation and revocation over local sockets
+        working-directory: packages/oblivion-gateway
+        run: cargo test --locked --features lab-emulation --test activation
+      - name: Exercise all local Unix transfer contracts
+        working-directory: packages/oblivion-transfer
+        run: |
+          # Fixtures use temporary directories and owned subprocesses, not USB
+          # devices. The privileged remount fixture runs separately below.
+          # Hash the full 512 MiB backup fixture with optimized endpoints.
+          cargo test --locked --offline --release --test backup_sender
+          cargo test --locked --offline --test approved --test browser \
+            --test channel --test endpoint --test file_consent --test local_file \
+            --test media_export --test media_import --test media_recovery --test multi_files \
+            --test native_backup --test native_files --test personal_copy --test prepared_files \
+            --test recovery --test relay --test relay_process --test share --test stream \
+            --test transfer --test transfer_inventory
+          cargo build --locked --offline --bin oblivion-copy
       - name: Recover receiver records after a real filesystem remount
         working-directory: packages/oblivion-transfer
         run: |
@@ -437,6 +462,13 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 tests/native-runtime.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/runtime-disk-fd.py
           PYTHONDONTWRITEBYTECODE=1 python3 tests/runtime-network.py
+      - name: Exercise scoped network, storage and Onion transfer contracts
+        working-directory: packages/oblivion-host
+        run: |
+          # Keep the real QEMU fixture ignored, as in the Linux contract job.
+          cargo test --locked --test egress --test network-policy --test tor_profile \
+            --test scope --test session_title --test transfers --test volume \
+            --test onion --test onion_copy --test onion_task --test onion_uplink --test onion_vm
       - name: Compile the actual Apple helper
         working-directory: packages/oblivion-native
         run: swift build --configuration release
@@ -450,9 +482,18 @@ jobs:
         run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
       - name: Verify pinned official agent notices and installed inventory offline
         run: python3 -B packages/oblivion-host/tests/install-agents.py
-      - name: Verify native file reconciliation and ciphertext-only personal copies
+      - name: Exercise all local macOS transfer contracts
         working-directory: packages/oblivion-transfer
-        run: cargo test --locked --test personal_copy --test native_backup --test local_file --test native_files --test prepared_files --test multi_files --test transfer_inventory --test endpoint --test relay --test stream
+        run: |
+          # relay_process requires Linux pidfds and /proc; remount requires
+          # Linux mount privileges. Both have dedicated coverage in that job.
+          # Hash the full 512 MiB backup fixture with optimized endpoints.
+          cargo test --locked --release --test backup_sender
+          cargo test --locked --test approved --test browser \
+            --test channel --test endpoint --test file_consent --test local_file \
+            --test media_export --test media_import --test media_recovery --test multi_files \
+            --test native_backup --test native_files --test personal_copy --test prepared_files \
+            --test recovery --test relay --test share --test stream --test transfer --test transfer_inventory
       - name: Check native per-agent Share without source credentials
         working-directory: packages/oblivion-history
         run: |

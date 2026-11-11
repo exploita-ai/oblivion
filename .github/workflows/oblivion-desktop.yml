@@ -39,7 +39,7 @@ jobs:
             *) echo 'A native Linux runner matching the controller architecture is required.' >&2; exit 1 ;;
           esac
           export OBLIVION_IMAGE_NAME="oblivion-controller-${GITHUB_SHA:0:12}"
-          sh script/oblivion/build-runtime.sh
+          bun run build:runtime
           runtime="artifacts/oblivion-runtime-$OBLIVION_ARCH"
           (
             cd "$runtime"
