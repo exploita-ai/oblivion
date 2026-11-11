@@ -62,6 +62,7 @@ then **?** lists its native shortcuts.
 ```sh
 oblivion network status --safe research --json
 oblivion network set --safe research --tor
+oblivion network set --safe research --proxy-prompt
 oblivion network set --safe research --policy strict
 oblivion proxy add office
 oblivion proxy list --json
@@ -78,10 +79,17 @@ or policy on launch, put `--tor`, `-x socks5h://HOST:PORT`,
 to change one setting at a time on an already open Safe. Tor and SOCKS5 carry
 TCP traffic without direct fallback.
 
-`proxy add NAME` prompts privately for a SOCKS5 URL. If a URL is supplied on
-the command line, it can end up in shell history. A username with the password
-omitted triggers a private password prompt. Removing a saved profile leaves
-active Safe connections unchanged.
+`proxy add NAME` and `network set --safe SAFE --proxy-prompt` accept a SOCKS5
+URL or `HOST:PORT:USER:PASS` in a hidden terminal prompt. In the Network panel,
+use **F9 → T → Paste SOCKS5 details**. A URL with a username and no password
+opens a separate private password prompt. Use the private prompt to keep
+credentials out of shell history and process arguments.
+
+The launcher resolves proxy hostnames using the system resolver when you enter
+them and selects a public IPv4 address. The Safe or saved profile retains that
+address and port. Enter the hostname again to refresh the address. Destination
+names continue to resolve through the configured SOCKS5 server. Removing a
+saved profile leaves active Safe connections unchanged.
 
 Setting an idle timer to `0` disables that timer. A timer omitted from an
 update keeps its current value. Idle locking closes active agent sessions.

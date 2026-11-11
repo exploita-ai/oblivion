@@ -523,7 +523,7 @@ fn common_proxy_profile_creation_prompts_privately_and_leaves_active_safes_uncha
     let diagnostics = String::from_utf8(diagnostics).unwrap();
     assert!(diagnostics.contains("Active Safes keep their current transport"));
     assert!(!diagnostics.contains("CANARY") && !diagnostics.contains("alice"));
-    assert_eq!(terminal.prompts, ["SOCKS5 URL (hidden)"]);
+    assert_eq!(terminal.prompts, ["SOCKS5 endpoint (hidden)"]);
     assert!(terminal.answers.is_empty());
     server.join().unwrap();
 }

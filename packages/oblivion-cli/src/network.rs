@@ -16,7 +16,7 @@ pub struct Command {
 }
 
 enum Change {
-    Transport(proxy::Request),
+    Transport(Option<proxy::Request>),
     Profile(String),
     Policy(Access),
 }
@@ -39,7 +39,7 @@ pub fn parse(args: &[String]) -> std::result::Result<Command, &'static str> {
                 safe = Some(values.next().ok_or("Missing Safe name")?.clone());
             }
             "--json" if !json => json = true,
-            "--tor" | "--proxy" | "-x" | "--proxy-profile" | "--policy" => {
+            "--tor" | "--proxy" | "-x" | "--proxy-prompt" | "--proxy-profile" | "--policy" => {
                 if action == Some("status") {
                     return Err("Use network set to change the selected transport or policy");
                 }
@@ -47,12 +47,13 @@ pub fn parse(args: &[String]) -> std::result::Result<Command, &'static str> {
                     return Err("Choose either a transport or a policy for this change");
                 }
                 change = Some(match value.as_str() {
-                    "--tor" => Change::Transport(proxy::Request::Ready(
+                    "--tor" => Change::Transport(Some(proxy::Request::Ready(
                         oblivion_transport::Transport::Tor {},
-                    )),
-                    "--proxy" | "-x" => {
-                        Change::Transport(proxy::parse(values.next().ok_or("Missing proxy URL")?)?)
-                    }
+                    ))),
+                    "--proxy" | "-x" => Change::Transport(Some(proxy::parse(
+                        values.next().ok_or("Missing proxy endpoint")?,
+                    )?)),
+                    "--proxy-prompt" => Change::Transport(None),
                     "--proxy-profile" => {
                         let name = values.next().ok_or("Missing proxy profile name")?;
                         oblivion_transport::proxy_profiles::valid_name(name)?;
@@ -99,7 +100,10 @@ pub fn execute<R: run::Runtime>(
     if let Some(change) = command.change {
         let (operation, body) = match change {
             Change::Transport(request) => {
-                let transport = proxy::complete(request, runtime)?;
+                let transport = match request {
+                    Some(request) => proxy::complete(request, runtime)?,
+                    None => proxy::read_hidden(runtime)?,
+                };
                 writeln!(
                     diagnostics,
                     "Changing transport for Safe {}. Its active network requests will be interrupted.",

@@ -218,7 +218,7 @@ pub(crate) fn run_options(args: &[&str]) -> run::Options<oblivion_transport::Tra
         .unwrap()
         .resolve_transport(|request| match request {
             oblivion_cli::proxy::Request::Ready(transport) => Ok(transport),
-            oblivion_cli::proxy::Request::NeedsPassword(_) => Err("Unexpected proxy prompt"),
+            _ => Err("Expected a complete numeric proxy"),
         })
         .unwrap()
 }

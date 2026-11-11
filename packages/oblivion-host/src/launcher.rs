@@ -344,8 +344,6 @@ fn read_password(
         .write(true)
         .open("/dev/tty")
         .map_err(|_| "Password entry requires an interactive terminal")?;
-    write!(tty, "{label}: ")?;
-    tty.flush()?;
     let mut saved = unsafe { std::mem::zeroed() };
     if unsafe { libc::tcgetattr(tty.as_raw_fd(), &mut saved) } != 0 {
         return Err("Password requires a terminal".into());
@@ -357,6 +355,8 @@ fn read_password(
     }
     let mut result = Zeroizing::new(Vec::new());
     let input = (|| -> control::Result<()> {
+        write!(tty, "{label}: ")?;
+        tty.flush()?;
         let mut byte = [0];
         loop {
             tty.read_exact(&mut byte)?;

@@ -30,6 +30,22 @@ const policies = [
   { id: "offline", value: "offline", name: "Offline", description: "Block this Safe's network access, including provider requests. Local file operations remain available." },
 ] as const
 
+function validateProxyEndpoint(value: string) {
+  const message = "Enter a hostname or IPv4 address and port, for example proxy.example.com:1080."
+  const endpoint = /^([a-z0-9.-]+):([0-9]{1,5})$/i.exec(value)
+  if (!endpoint || endpoint[0] !== value || Number(endpoint[2]) < 1 || Number(endpoint[2]) > 65535) return message
+
+  const host = endpoint[1].replace(/\.$/, "")
+  const labels = host.split(".")
+  if (/^[0-9.]+$/.test(host)) {
+    if (host !== endpoint[1] || labels.length !== 4 || !labels.every((label) => /^(0|[1-9][0-9]{0,2})$/.test(label) && Number(label) <= 255)) return message
+    return
+  }
+  const suffix = labels.at(-1)!
+  if (host.length > 253 || labels.length < 2 || !/[a-z]/i.test(suffix) || /^(localhost|local|internal|home|lan|arpa|invalid|test|example)$/i.test(suffix)
+    || !labels.every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label))) return message
+}
+
 export function NativeNetwork(props: { safe: string; name: string; open: boolean; host?: NativeStatus; runtime: NativeRuntime; run: (args: string[]) => Promise<boolean>; observed: (value: NetworkObservation) => void; back: () => void }) {
   const [observation, setObservation] = createSignal<NetworkObservation>()
   const [selected, setSelected] = createSignal(0)
@@ -64,7 +80,11 @@ export function NativeNetwork(props: { safe: string; name: string; open: boolean
     if (!policy || unavailable(policy)) return
     void change(["--policy", policy.id])
   }
-  function route(index: number) { if (index === 0) { void change(["--tor"]); return }; setView("proxy") }
+  function route(index: number) {
+    if (index === 0) { void change(["--tor"]); return }
+    if (index === 1) { setView("proxy"); return }
+    if (index === 2) void change(["--proxy-prompt"])
+  }
   const snapshot = () => observation()?.state
   const transportLabel = () => now() - (observation()?.received ?? 0) + (snapshot()?.network_status?.age_ms ?? 10_001) > 10_000 ? "STATUS UNKNOWN" : snapshot()?.network_status?.label ?? "STATUS UNKNOWN"
 
@@ -106,17 +126,14 @@ export function NativeNetwork(props: { safe: string; name: string; open: boolean
       items={[{ name: "Open Safe offline", description: "Unlock this Safe without starting an agent or connecting a protected route.", action: "Open Safe", run: () => { void props.run(["safe", "open", props.safe]).then(async (ok) => { if (ok) await refresh() }) } }]}
       selected={0} change={() => {}} focused choose={() => { void props.run(["safe", "open", props.safe]).then(async (ok) => { if (ok) await refresh() }) }} back={props.back} />}>
     <Show when={view() === "proxy"}><FormView form={{ title: "SOCKS5 proxy", description: "This Safe uses remote DNS through the proxy. A password is requested privately in the terminal when a username is supplied.", fields: [
-      { id: "endpoint", label: "IPv4 address and port", value: snapshot()?.egress?.selected.endpoint ?? "", validate: (value) => {
-        const parts = value.split(":")
-        if (!/^\d{1,3}(\.\d{1,3}){3}:\d{1,5}$/.test(value) || parts[0].split(".").some((part) => Number(part) > 255) || Number(parts[1]) < 1 || Number(parts[1]) > 65535) return "Enter an IPv4 address and port, for example 192.0.2.10:1080."
-        return undefined
-      } },
+      { id: "endpoint", label: "Hostname or IPv4 address and port", value: snapshot()?.egress?.selected.endpoint ?? "", validate: validateProxyEndpoint },
       { id: "username", label: "Username (optional)" },
     ], submit: "Apply proxy", run: async () => {} }} cancel={() => setView("transport")} submit={(values) => { void change(["-x", `socks5h://${values.username ? encodeURIComponent(values.username) + "@" : ""}${values.endpoint}`]) }} /></Show>
     <Show when={view() === "transport"}><Menu title="Connection privacy" description={`${props.name} · ${transportLabel()}`}
       items={[
         { name: "Tor", badge: snapshot()?.egress?.selected.mode === "tor" ? "Selected" : undefined, description: "Use this Safe's independent Tor gateway. Status becomes ready only after verification.", action: "Use Tor", run: () => route(0) },
         { name: "SOCKS5 proxy", badge: snapshot()?.egress?.selected.mode === "socks5" ? "Selected" : undefined, description: "Configure a proxy for this Safe, with optional authentication and remote DNS.", action: "Configure proxy", run: () => route(1) },
+        { name: "Paste SOCKS5 details", description: "Paste a SOCKS5 URL or host:port:user:password at a private terminal prompt.", action: "Open private prompt", run: () => route(2) },
       ]} selected={routeSelected()} change={setRouteSelected} focused disabled={working()} choose={route} back={() => setView("policy")} /></Show>
     <Show when={view() === "policy"}><Menu title="Network access" description={`${props.name} · ${transportLabel()} · Applies to every agent in this Safe.`}
       toolbar={[{ title: "Change route", key: "T", run: () => setView("transport") }, { title: "Refresh", key: "R", run: () => { void refresh() } }]}

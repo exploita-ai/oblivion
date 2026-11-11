@@ -148,6 +148,7 @@ fn omitted_proxy_password_is_an_explicit_effect_free_request_for_the_frontend() 
             proxy::Request::NeedsPassword(request) => {
                 request.complete(Zeroizing::new("synthetic-private-password".into()))
             }
+            proxy::Request::NeedsResolution(_) => panic!("expected a literal IPv4 proxy"),
         })
         .unwrap();
     let Some(Transport::Socks5 {

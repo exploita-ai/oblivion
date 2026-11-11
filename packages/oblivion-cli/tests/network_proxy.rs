@@ -103,6 +103,8 @@ fn full_pure_parsing_rejects_invalid_changes_and_private_proxy_options() {
         vec!["status"],
         vec!["set", "--safe", "GB"],
         vec!["status", "--safe", "GB", "--tor"],
+        vec!["status", "--safe", "GB", "--proxy-prompt"],
+        vec!["set", "--safe", "GB", "--proxy-prompt", "--tor"],
         vec![
             "status",
             "--safe",
@@ -239,6 +241,39 @@ fn network_policy_is_typed_and_locked_or_closed_safes_never_prompt_or_mutate() {
 }
 
 #[test]
+fn network_accepts_provider_details_from_the_private_prompt() {
+    let mut runtime = Runtime::new(vec![
+        state("persistent", true),
+        String::new(),
+        observation(),
+    ]);
+    runtime
+        .passwords
+        .push_back(b"192.0.2.5:5000:PRIVATE_USER:PRIVATE_PASSWORD:tail".to_vec());
+    let mut output = vec![];
+    let mut diagnostics = vec![];
+    network::execute(
+        &mut runtime,
+        network::parse(&args(&["set", "--safe", "GB", "--proxy-prompt"])).unwrap(),
+        &mut output,
+        &mut diagnostics,
+    )
+    .unwrap();
+    assert_eq!(runtime.prompts, ["SOCKS5 endpoint (hidden)"]);
+    let call = &runtime.sent[1];
+    assert_eq!(call.operation, Operation::Egress);
+    assert_eq!(call.slot, Some(2));
+    assert_eq!(call.expected.as_deref(), Some(ID));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&call.body).unwrap(),
+        json!({"action":"save","transport":{"mode":"socks5","endpoint":"192.0.2.5:5000",
+        "authentication":{"username":"PRIVATE_USER","password":"PRIVATE_PASSWORD:tail"}}}),
+    );
+    assert!(!String::from_utf8(output).unwrap().contains("PRIVATE_"));
+    assert!(!String::from_utf8(diagnostics).unwrap().contains("PRIVATE_"));
+}
+
+#[test]
 fn proxy_hidden_url_and_user_password_stay_in_controller_payload_only() {
     let mut runtime = Runtime::new(vec![String::new()]);
     runtime
@@ -254,7 +289,10 @@ fn proxy_hidden_url_and_user_password_stay_in_controller_payload_only() {
         &mut diagnostics,
     )
     .unwrap();
-    assert_eq!(runtime.prompts, ["SOCKS5 URL (hidden)", "Proxy password"]);
+    assert_eq!(
+        runtime.prompts,
+        ["SOCKS5 endpoint (hidden)", "Proxy password"]
+    );
     let call = &runtime.sent[0];
     assert_eq!(call.operation, Operation::ProxyProfiles);
     assert_eq!(call.slot, None);

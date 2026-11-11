@@ -48,7 +48,11 @@ pub fn parse(args: &[String]) -> std::result::Result<Command, &'static str> {
                 },
             }
         }
-        _ => return Err("Use proxy list [--json], proxy add NAME [-x URL], or proxy remove NAME"),
+        _ => {
+            return Err(
+                "Use proxy list [--json], proxy add NAME [-x ENDPOINT], or proxy remove NAME",
+            );
+        }
     };
     Ok(Command { action })
 }
@@ -63,19 +67,13 @@ pub fn execute<R: run::Runtime>(
     let change = match command.action {
         Action::List { .. } => oblivion_transport::proxy_profiles::Command::List {},
         Action::Remove { name } => oblivion_transport::proxy_profiles::Command::Remove { name },
-        Action::Add { name, proxy } => {
-            let request = match proxy {
-                Some(request) => request,
-                None => {
-                    let entered = runtime.password("SOCKS5 URL (hidden)")?;
-                    proxy::parse(std::str::from_utf8(&entered).map_err(|_| "invalid_proxy_url")?)?
-                }
-            };
-            oblivion_transport::proxy_profiles::Command::Add {
-                name,
-                transport: proxy::complete(request, runtime)?,
-            }
-        }
+        Action::Add { name, proxy } => oblivion_transport::proxy_profiles::Command::Add {
+            name,
+            transport: match proxy {
+                Some(request) => proxy::complete(request, runtime)?,
+                None => proxy::read_hidden(runtime)?,
+            },
+        },
     };
     let response = runtime.request(Call {
         operation: Operation::ProxyProfiles,

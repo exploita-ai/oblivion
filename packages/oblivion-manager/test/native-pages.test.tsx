@@ -60,7 +60,7 @@ test("System uses controller-reported hardware", async () => {
   } finally { await app.dispose() }
 })
 
-test("SOCKS5 configuration leaves password entry to the native terminal", async () => {
+test.each(["192.0.2.10:1080", "proxy.example.com.:5000"])("SOCKS5 configuration for %s leaves password entry to the native terminal", async (endpoint) => {
   const fixture = nativePreview(() => {})
   const commands: string[][] = []
   const app = await testRender(() => <NativeNetwork safe="0123456789abcdef0123456789abcdef" name="Research" open runtime={fixture} run={async (args) => { commands.push(args); return true }} observed={() => {}} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
@@ -70,13 +70,29 @@ test("SOCKS5 configuration leaves password entry to the native terminal", async 
     await app.mockInput.pressArrow("down")
     await app.mockInput.pressEnter()
     await app.renderOnce()
-    await app.mockInput.typeText("192.0.2.10:1080")
+    await app.mockInput.typeText(endpoint)
     await app.mockInput.pressEnter()
     await app.mockInput.typeText("alice space")
     await app.mockInput.pressEnter()
     await app.mockInput.pressEnter()
     await app.renderOnce()
-    expect(commands).toEqual([["network", "set", "--safe", "0123456789abcdef0123456789abcdef", "-x", "socks5h://alice%20space@192.0.2.10:1080"]])
+    expect(commands).toEqual([["network", "set", "--safe", "0123456789abcdef0123456789abcdef", "-x", `socks5h://alice%20space@${endpoint}`]])
+  } finally { await app.dispose() }
+})
+
+test("pasting SOCKS5 details opens a private terminal prompt", async () => {
+  const fixture = nativePreview(() => {})
+  const commands: string[][] = []
+  const app = await testRender(() => <NativeNetwork safe="0123456789abcdef0123456789abcdef" name="Research" open runtime={fixture} run={async (args) => { commands.push(args); return true }} observed={() => {}} back={() => {}} />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await app.renderOnce()
+    await app.mockInput.pressKey("t")
+    await app.mockInput.pressArrow("down")
+    await app.mockInput.pressArrow("down")
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Open private prompt")
+    await app.mockInput.pressEnter()
+    expect(commands).toEqual([["network", "set", "--safe", "0123456789abcdef0123456789abcdef", "--proxy-prompt"]])
   } finally { await app.dispose() }
 })
 

@@ -133,15 +133,18 @@ Global reads use the maintenance slot; mutations keep the transaction's recorded
 slot. Secret decoding has static errors and zeroizing buffers. Windows local
 backup file endpoints remain to be implemented.
 
-SOCKS5 URLs accept the existing literal IPv4/port syntax and optional percent-
-encoded credentials. Both `socks5://` and `socks5h://` use the existing transport;
-no destination DNS lookup occurs here. A username without `:PASSWORD` returns a
-typed `NeedsPassword` request. The platform frontend prompts privately, then
-completes and validates it. Secret-bearing requests have no Debug implementation;
-decoded buffers and credential values use zeroizing storage, and errors are
-static strings without the supplied URL. Explicit credentials supplied in argv
-still follow the desktop shell/process trust boundary; parsing cannot erase
-those original OS arguments.
+SOCKS5 accepts IPv4 addresses and hostnames with a port. The `socks5://` and
+`socks5h://` URL forms accept percent-encoded credentials. The
+`HOST:PORT:USER:PASS` form takes literal credentials and accepts colons in the
+password. Use `proxy add NAME` or `network set --safe SAFE --proxy-prompt` to
+enter the full value privately. A URL with a username and no password opens a
+separate private prompt. Credentials supplied in argv can appear in shell
+history or the process list.
+
+Parsing performs no DNS lookup. The launcher resolves the proxy hostname at
+configuration time and pins a public IPv4 address for the gateway. The gateway
+passes destination names to the SOCKS5 server. Secret-bearing requests have no
+Debug implementation, and credential buffers use zeroizing storage.
 
 From this directory:
 

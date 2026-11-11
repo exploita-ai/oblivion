@@ -278,7 +278,8 @@ Network, scoped to an open Safe
   oblivion network status --safe SAFE --json
   oblivion network set --safe SAFE --policy open-internet|strict|offline
   oblivion network set --safe SAFE --tor
-  oblivion network set --safe SAFE -x socks5h://[USER:PASS@]IP:PORT
+  oblivion network set --safe SAFE -x socks5h://[USER:PASS@]HOST:PORT
+  oblivion network set --safe SAFE --proxy-prompt
   oblivion network set --safe SAFE --proxy-profile NAME
 
 Automatic lock
@@ -288,7 +289,7 @@ Automatic lock
 
 Saved SOCKS5 profiles
   oblivion proxy list [--json]      Show profile names and public metadata
-  oblivion proxy add NAME [-x URL]  Save a proxy; omitted URL is entered privately
+  oblivion proxy add NAME [-x ENDPOINT]  Save a proxy with an optional private prompt
   oblivion proxy remove NAME       Remove a profile without changing active Safes
 
 Run options (before the agent)
@@ -296,7 +297,7 @@ Run options (before the agent)
   --name NAME                      Create a new named Safe
   --ephemeral                      Create a RAM-only Safe
   --tor                            Route through Tor
-  -x, --proxy socks5h://[USER:PASS@]IP:PORT
+  -x, --proxy socks5h://[USER:PASS@]HOST:PORT
   --proxy-profile NAME             Select saved proxy inside the controller
   --policy open-internet|strict|offline
 
@@ -305,6 +306,7 @@ All arguments after the agent are passed unchanged inside the Safe.
 File copies review their prepared content before confirmation; --yes explicitly
 approves an unattended copy. The manager uses a private event/approval channel.
 Proxy USER without :PASS prompts privately for its password.
+Use --proxy-prompt or proxy add NAME to enter HOST:PORT:USER:PASS privately.
 In an interactive agent: F7 opens Files, F9 opens Network. The agent keeps running.
 Esc returns from the trusted overlay. Function keys in pasted text are passed through.
 ";

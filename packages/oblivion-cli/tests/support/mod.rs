@@ -176,7 +176,7 @@ pub fn options(values: &[&str]) -> run::Options<Transport> {
     .resolve_transport(|request| -> std::result::Result<_, &'static str> {
         match request {
             proxy::Request::Ready(transport) => Ok(transport),
-            proxy::Request::NeedsPassword(_) => Err("no proxy prompt in this fixture"),
+            _ => Err("expected a complete numeric proxy in this fixture"),
         }
     })
     .unwrap()
