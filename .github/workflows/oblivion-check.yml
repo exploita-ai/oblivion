@@ -376,13 +376,14 @@ jobs:
         run: |
           cargo check --locked --all-targets
           cargo test --locked
-          for iteration in $(seq 1 200); do
+          for iteration in $(seq 1 1000); do
             if ! cargo test --locked --offline --lib > "$RUNNER_TEMP/oblivion-linux-helper-stress.log" 2>&1; then
               printf 'Linux helper stress failed on iteration %s\n' "$iteration"
               cat "$RUNNER_TEMP/oblivion-linux-helper-stress.log"
               exit 1
             fi
           done
+          printf 'Linux helper stress: 1000 complete suite runs passed.\n'
       - name: Compile and test the gateway and bounded transfer libraries
         run: |
           for package in oblivion-gateway oblivion-transfer oblivion-transport oblivion-tor-state; do

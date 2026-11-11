@@ -89,6 +89,19 @@ mod tests {
         let lifetime = Lifetime::new(child).unwrap();
         assert!(lifetime.check().is_ok());
         drop(supervisor);
+        // A concurrent test's fork can retain the peer until exec closes its
+        // CLOEXEC descriptors. Wait for actual EOF readiness, not drop timing.
+        let mut ready = libc::pollfd {
+            fd: lifetime.0.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe { libc::poll(&mut ready, 1, 2000) },
+            1,
+            "supervisor endpoint did not become ready after its owner closed"
+        );
+        assert_ne!(ready.revents & (libc::POLLIN | libc::POLLHUP), 0);
         assert_eq!(
             lifetime.check().err().unwrap().0,
             "supervisor_lifetime_lost"

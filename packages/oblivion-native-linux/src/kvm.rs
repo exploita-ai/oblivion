@@ -223,8 +223,8 @@ fn qemu_version(path: &Path, deadline: std::time::Instant) -> Option<(u32, u32, 
 mod tests {
     use super::{qemu_compatible, qemu_version};
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
 
@@ -237,8 +237,22 @@ mod tests {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
-            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            // A writer in this process can leak into another test's fork until
+            // exec, making this script ETXTBSY. Create it in a child instead.
+            // https://github.com/rust-lang/rust/issues/114554
+            assert!(
+                Command::new("/bin/sh")
+                    .args([
+                        "-c",
+                        "umask 077; printf '%s\\n' \"$2\" > \"$1\" && /bin/chmod 700 \"$1\"",
+                        "oblivion-qemu-fixture",
+                    ])
+                    .arg(&path)
+                    .arg(format!("#!/bin/sh\n{body}\n"))
+                    .status()
+                    .unwrap()
+                    .success()
+            );
             Self(path)
         }
     }
