@@ -113,6 +113,54 @@ fn copy_grammar_keeps_selection_order_and_does_not_open_paths() {
 }
 
 #[test]
+fn export_paths_require_safe_roots_before_shared_shape_validation() {
+    for (path, message) in [
+        (
+            "outside/secret",
+            "Export paths must be under workspace or imports",
+        ),
+        (
+            "/workspace/secret",
+            "Export paths must be under workspace or imports",
+        ),
+        (
+            "C:/workspace/secret",
+            "Export paths must be under workspace or imports",
+        ),
+        ("workspace/../secret", "invalid_selection_path"),
+        ("imports//secret", "invalid_selection_path"),
+    ] {
+        let error = parse(&args(&[
+            "export",
+            "--safe",
+            "GB",
+            "--path",
+            path,
+            "--destination",
+            "unopened",
+        ]))
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), message, "{path}");
+    }
+    for path in ["workspace/project", "imports/note"] {
+        let command = parse(&args(&[
+            "export",
+            "--safe",
+            "GB",
+            "--path",
+            path,
+            "--destination",
+            "unopened",
+        ]))
+        .unwrap();
+        assert!(
+            matches!(command.selection, CopyInput::Download { selected, .. } if selected == [path])
+        );
+    }
+}
+
+#[test]
 fn native_windows_and_unix_paths_are_literal_until_the_endpoint_resolves_them() {
     let source = r"C:\Users\alice\project $HOME 'quoted'";
     let command = parse(&args(&["import", "--safe", "GB", "--source", source])).unwrap();
