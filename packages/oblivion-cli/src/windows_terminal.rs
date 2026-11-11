@@ -648,7 +648,17 @@ struct Input {
     worker: Option<JoinHandle<()>>,
 }
 impl Input {
-    fn start(mut file: File) -> io::Result<Self> {
+    fn start(file: File) -> io::Result<Self> {
+        // Cancelling the client read can leave conhost's read pending. A fresh
+        // CONIN$ handle gives the worker its own read context, whose final close
+        // also ends the server wait. A duplicate would retain that context via
+        // Terminal.input and consume input intended for the next panel/reader.
+        // https://github.com/microsoft/terminal/issues/12143#issuecomment-1012318882
+        let mut file = if mode(&file).is_some() {
+            OpenOptions::new().read(true).open("CONIN$")?
+        } else {
+            file
+        };
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&stopped);
         let (send, events) = mpsc::sync_channel(1);

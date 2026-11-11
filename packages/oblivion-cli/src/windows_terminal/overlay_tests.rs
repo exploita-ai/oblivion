@@ -3,6 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::System::Console::{
     ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleCP,
@@ -10,7 +11,7 @@ use windows_sys::Win32::System::Console::{
     LEFT_CTRL_PRESSED, SHIFT_PRESSED, SetConsoleCP, SetConsoleMode, SetConsoleOutputCP,
     WriteConsoleInputW,
 };
-use windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE;
+use windows_sys::Win32::System::Threading::{CREATE_NEW_CONSOLE, WaitForSingleObject};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MAPVK_VK_TO_VSC, MapVirtualKeyW, VkKeyScanW,
 };
@@ -66,6 +67,16 @@ fn console_handoff_fixture() {
     assert_eq!((agent.2, agent.3), (65001, 65001));
     terminal.flush_input().unwrap();
 
+    let queued = "QUEUED_BEFORE_PANEL"
+        .encode_utf16()
+        .map(|unit| key(0, unit))
+        .collect::<Vec<_>>();
+    console_snapshot("before reader, cleared", &terminal.input);
+    inject(&terminal.input, &queued);
+    console_snapshot("before reader, injected", &terminal.input);
+    terminal.flush_input().unwrap();
+    console_snapshot("before reader, flushed", &terminal.input);
+
     let reader = Input::start(terminal.input.try_clone().unwrap()).unwrap();
     // Win32 virtual-key codes VK_F7 and VK_F9. Let conhost encode them
     // rather than injecting their escape sequences into the decoder.
@@ -74,11 +85,9 @@ fn console_handoff_fixture() {
     inject(&terminal.input, &f7);
     expect_panel(reader, Page::Files, b"");
 
-    let queued = "QUEUED_BEFORE_PANEL"
-        .encode_utf16()
-        .map(|unit| key(0, unit))
-        .collect::<Vec<_>>();
+    console_snapshot("after reader joined, before injection", &terminal.input);
     inject(&terminal.input, &queued);
+    console_snapshot("after reader joined, injected", &terminal.input);
     assert!(queued_count(&terminal.input) > 0);
     terminal.flush_input().unwrap();
     assert_eq!(queued_count(&terminal.input), 0);
@@ -177,6 +186,19 @@ fn inject(input: &File, records: &[INPUT_RECORD]) {
         0
     );
     assert_eq!(count as usize, records.len());
+    eprintln!(
+        "console injection: requested={} accepted={count}",
+        records.len()
+    );
+}
+
+fn console_snapshot(label: &str, input: &File) {
+    eprintln!(
+        "console {label}: mode={:?} queued={} wait={:#x}",
+        mode(input),
+        queued_count(input),
+        unsafe { WaitForSingleObject(input.as_raw_handle(), 0) },
+    );
 }
 
 fn queued_count(input: &File) -> u32 {
@@ -218,10 +240,16 @@ fn expect_panel(reader: Input, page: Page, prefix: &[u8]) {
     }
     assert_eq!(text, prefix);
     let reader = attachment.input.as_mut().unwrap();
+    eprintln!(
+        "console before join: stopped={} worker_finished={}",
+        reader.stopped.load(Ordering::Acquire),
+        reader.worker.as_ref().unwrap().is_finished(),
+    );
     let deadline = Instant::now() + Duration::from_secs(3);
     while !reader.poll_stop().unwrap() {
         assert!(Instant::now() < deadline, "console reader did not join");
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(reader.worker.is_none());
+    eprintln!("console reader joined");
 }
