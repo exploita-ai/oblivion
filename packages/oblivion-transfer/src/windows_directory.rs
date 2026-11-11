@@ -331,8 +331,9 @@ impl Directory {
     }
 
     pub fn sync(&self) -> io::Result<()> {
+        // An empty native name reopens RootDirectory itself; "." is not normalized.
         let file = self.relative(
-            ".",
+            "",
             FILE_GENERIC_READ | FILE_GENERIC_WRITE,
             FILE_OPEN,
             FILE_DIRECTORY_FILE,
@@ -463,7 +464,7 @@ impl Directory {
     }
     pub fn visit(&self, mut visitor: impl FnMut(&CStr) -> io::Result<()>) -> io::Result<()> {
         let file = self.relative(
-            ".",
+            "",
             FILE_GENERIC_READ,
             FILE_OPEN,
             FILE_DIRECTORY_FILE,
