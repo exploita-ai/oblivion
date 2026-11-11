@@ -805,7 +805,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         args.len()
             == if matches!(
                 op,
-                "open" | "enter" | "enter-documents" | "discard-session-pending" | "agent-release" | "live-media-release" | "branch-recover"
+                "open" | "enter" | "enter-documents" | "prepare-agent" | "discard-session-pending" | "agent-release" | "live-media-release" | "branch-recover"
                     | "backup-export-begin" | "backup-discard" | "family-password-preview"
                     | "open-child-documents" | "open-agent-child" | "share-export-source-open" | "share-release" | "share-import-finish"
             ) {
@@ -828,7 +828,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
     }
     let lock = if matches!(op, "lock" | "recover" | "child-start-close" | "share-release" | "share-export-cancel" | "share-export-cleanup" | "share-import-finish" | "share-import-abort" | "share-import-discard") || branch_latch.is_some() {
         recovery_lock()?
-    } else if matches!(op, "status" | "create" | "enter-documents" | "session-storage" | "start-agent" | "close-idle" | "agent-release") {
+    } else if matches!(op, "status" | "create" | "create-prepare-agent" | "enter-documents" | "prepare-agent" | "prepare-agent-ephemeral" | "session-storage" | "start-agent" | "close-idle" | "agent-release") {
         admission_lock()?
     } else {
         lock()?
@@ -913,6 +913,9 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             | "open"
             | "enter-documents"
             | "enter-documents-ephemeral"
+            | "create-prepare-agent"
+            | "prepare-agent"
+            | "prepare-agent-ephemeral"
             | "start-agent"
             | "start-child-agent"
             | "discard-general-pending"
@@ -1338,7 +1341,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
         "unlock" | "unlock-read-only" => {
             config.unlock(&password(false)?, op == "unlock-read-only")
         }
-        "create" => config.create(&password(true)?, config.session_mib),
+        "create" | "create-prepare-agent" => config.create(&password(true)?, config.session_mib, op == "create-prepare-agent"),
         "session-storage" => {
             let request: oblivion_host::volume::Request =
                 serde_json::from_slice(&read_storage_request(4096)?)
@@ -1346,7 +1349,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             request.validate().map_err(Error)?;
             match request {
                 oblivion_host::volume::Request::Create { mib, password } => {
-                    config.create(password.as_bytes(), mib)
+                    config.create(password.as_bytes(), mib, false)
                 }
                 oblivion_host::volume::Request::Grow { id, mib, password } => {
                     config.grow(&id, mib, password.as_bytes())
@@ -1380,15 +1383,20 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             trusted_file(&persistent_safe_path(&command.id)?)?;
             write_session_title(&command.id, &command.title)
         }
-        "enter-documents" | "enter-documents-ephemeral" => {
+        "enter-documents" | "enter-documents-ephemeral" | "prepare-agent" | "prepare-agent-ephemeral" => {
             let vm = config.vm.as_ref().ok_or(Error("vm_not_configured"))?;
             vm.validate()?;
-            require(crate::vm::stopped()?, "vm_already_running")?;
-            if op == "enter-documents-ephemeral" {
-                return config.open_ephemeral_documents(&random_id()?, vm);
+            require(!mapping_open("oblivion-session")? && crate::vm::stopped()?, "vm_already_running")?;
+            let prepare = op == "prepare-agent-ephemeral";
+            if matches!(op, "enter-documents-ephemeral" | "prepare-agent-ephemeral") {
+                let id = random_id()?;
+                config.open_ephemeral(&id, (!prepare).then_some(vm))?;
+                if prepare { println!("{id}"); }
+                return Ok(());
             }
             let id = &args[3];
             config.open(id, &password(false)?)?;
+            if op == "prepare-agent" { return config.prepare_mapped_agent(id); }
             write_session_info(id, "starting")?;
             if let Err(error) = vm.start_documents() {
                 crate::vm::stop(true)?;
@@ -1500,23 +1508,28 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 println!("{}", serde_json::to_string(&AgentStart { started: false, opening }).map_err(|_| Error("encode_failed"))?);
                 return Ok(());
             }
-            require(mode == "documents", "documents_not_open")?;
+            let prepared = mode == "prepared";
+            require(mode == "documents" || prepared, "documents_not_open")?;
+            if prepared { require(crate::vm::stopped()?, "vm_already_running")?; }
             let clients = Path::new(&scope::current().runtime()).join("agent-clients");
             require(!clients.exists() || fs::read_dir(clients).map_err(|_| Error("client_check_failed"))?.next().is_none(), "transfer_active")?;
             require(!crate::ipc::live_media_active()?, "transfer_active")?;
             require(!crate::onion_host::prepared()? && !crate::transfer_host::prepared()?, "transfer_active")?;
             let access = crate::safe_access_store::status(true)?.current;
             if access == Access::Offline {
-                config.admit_agent(false)?;
+                config.admit_agent(false, prepared)?;
                 let vm = config.vm.as_ref().ok_or(Error("vm_not_configured"))?;
                 write_session_info(&id, "starting")?;
                 let result = (|| {
-                    crate::vm::stop(false)?;
+                    if !prepared { crate::vm::stop(false)?; }
                     vm.start_agent_offline()?;
                     write_key_file("native-offline", b"1")?;
                     write_session_info(&id, "agent")
                 })();
-                if result.is_err() { recover_agent_start(&config)?; }
+                if result.is_err() {
+                    if prepared { require(config.close_slot(true)?, "agent_cleanup_required")?; }
+                    else { recover_agent_start(&config)?; }
+                }
                 if let Err(error) = require_child_start(authority.as_ref(), &opening) {
                     require(config.close_slot(true)?, "child_cleanup_required")?;
                     return Err(error);
@@ -1527,16 +1540,19 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
             require(config.gateway.is_some(), "gateway_not_configured")?;
             let vm = config.vm.as_ref().ok_or(Error("vm_not_configured"))?;
             let tools = session_policy(&id, access)?;
-            config.prepare_agent_gateway(&id)?;
+            config.prepare_agent_gateway(&id, prepared)?;
             let result = (|| {
-                crate::vm::stop(false)?;
+                if !prepared { crate::vm::stop(false)?; }
                 let token = crate::gateway::prepare()?;
                 vm.start_agent(&token, if access == Access::Open { "open" } else { "strict" }, tools)?;
                 write_session_info(&id, "agent")
             })();
             if result.is_err() {
-                recover_agent_start(&config)?;
-                crate::gateway::shutdown()?;
+                if prepared { require(config.close_slot(true)?, "agent_cleanup_required")?; }
+                else {
+                    recover_agent_start(&config)?;
+                    crate::gateway::shutdown()?;
+                }
             }
             if let Err(error) = require_child_start(authority.as_ref(), &opening) {
                 require(config.close_slot(true)?, "child_cleanup_required")?;
@@ -1833,7 +1849,7 @@ fn execute(args: Vec<String>, expected: Option<&str>) -> Result<()> {
                 network_status: network_observation(
                     session_info()?.as_ref().map(|(_, mode)| mode.as_str()),
                 ),
-                session_mode: session_info()?.map(|(_, mode)| mode),
+                session_mode: session_info()?.map(|(_, mode)| visible_session_mode(mode)),
                 active_session: session_info()?.map(|(id, _)| id),
                 safe_access: crate::safe_access_store::status(mode != MountMode::Closed)?,
                 general_present: !backing_recovery_required && !backing_unavailable
@@ -2583,8 +2599,13 @@ impl Config {
         create_ram_profile()
     }
 
-    fn create(&self, secret: &[u8], mib: u64) -> Result<()> {
+    fn create(&self, secret: &[u8], mib: u64, prepare_agent: bool) -> Result<()> {
         let bytes = oblivion_host::volume::size(mib).map_err(Error)?;
+        if prepare_agent {
+            require(!mapping_open("oblivion-session")? && crate::vm::stopped()?, "vm_already_running")?;
+            self.vm.as_ref().ok_or(Error("vm_not_configured"))?.validate()?;
+            self.admit_session(false)?;
+        }
         require(
             mount_mode()? == MountMode::ReadWrite && mapping_open("oblivion-general")?,
             "general_not_writable",
@@ -2606,7 +2627,14 @@ impl Config {
         let closed = crypt_close("oblivion-session");
         formatted?;
         closed?;
-        publish(&path, &PathBuf::from(format!("{MOUNT}/sessions/{id}.luks")))?;
+        let destination = PathBuf::from(format!("{MOUNT}/sessions/{id}.luks"));
+        publish(&path, &destination)?;
+        if prepare_agent {
+            // The new volume was verified and published under this lock. Use
+            // the key already derived for it instead of re-unlocking its family.
+            open_safe_mapping(&destination, &id, credential.as_ref(), 0, &capability)?;
+            self.prepare_mapped_agent(&id)?;
+        }
         println!("{id}");
         Ok(())
     }
@@ -2999,7 +3027,7 @@ impl Config {
         result
     }
 
-    fn open_ephemeral_documents(&self, id: &str, vm: &crate::vm::Config) -> Result<()> {
+    fn open_ephemeral(&self, id: &str, documents: Option<&crate::vm::Config>) -> Result<()> {
         require(matches!(mount_mode()?, MountMode::ReadOnly | MountMode::RamOnly), "ephemeral_requires_ephemeral_mode")?;
         require(!mapping_open("oblivion-session")?, "session_already_open")?;
         let image = PathBuf::from(scope::path(EPHEMERAL));
@@ -3023,11 +3051,12 @@ impl Config {
         let mut vm_start_attempted = false;
         let result = (|| {
             create_image(&image, self.ephemeral_mib)?;
-            self.format(&image, &secret)?;
-            crypt_open(&image, "oblivion-session", &secret, false)?;
+            format_derived_volume(&image, &secret)?;
+            crypt_open_keyslot(&image, "oblivion-session", &secret, false, Some(0))?;
             drop(secret);
             write_key_file("opening-nonce", random_id()?.as_bytes())?;
             format_session()?;
+            let Some(vm) = documents else { return write_session_info(id, "prepared") };
             write_session_info(id, "starting")?;
             vm_start_attempted = true;
             vm.start_documents()?;
@@ -3053,6 +3082,12 @@ impl Config {
         self.open_credential(id, secret).map(|_| ())
     }
 
+    fn prepare_mapped_agent(&self, id: &str) -> Result<()> {
+        let result = write_session_info(id, "prepared");
+        if result.is_err() { require(self.close_slot(true)?, "agent_cleanup_required")?; }
+        result
+    }
+
     fn open_credential(&self, id: &str, secret: &[u8]) -> Result<SafeCredential> {
         crate::family_rotation_host::require_available(id)?;
         crate::backup_host::require_safe_available(id)?;
@@ -3070,15 +3105,7 @@ impl Config {
         trusted_file(&path)?;
         self.admit_family()?;
         let credential = safe_credential(&path, Some(id), secret)?;
-        crypt_open_keyslot(&path, "oblivion-session", credential.key.as_ref(), false, Some(credential.token.keyslot))?;
-        if let Err(error) = write_key_file("opening-nonce", random_id()?.as_bytes()) {
-            crypt_close("oblivion-session")?;
-            return Err(error);
-        }
-        if let Err(error) = crate::ipc::retain_family(id, &credential.capability) {
-            crypt_close("oblivion-session")?;
-            return Err(error);
-        }
+        open_safe_mapping(&path, id, credential.key.as_ref(), credential.token.keyslot, &credential.capability)?;
         Ok(credential)
     }
 
@@ -3761,6 +3788,14 @@ struct SafeCredential {
     key: Zeroizing<[u8; 32]>,
 }
 
+fn open_safe_mapping(path: &Path, id: &str, key: &[u8], keyslot: u8, capability: &family::Capability) -> Result<()> {
+    let nonce = random_id()?;
+    crypt_open_keyslot(path, "oblivion-session", key, false, Some(keyslot))?;
+    let result = write_key_file("opening-nonce", nonce.as_bytes()).and_then(|()| crate::ipc::retain_family(id, capability));
+    if result.is_err() { crypt_close("oblivion-session")?; }
+    result
+}
+
 fn safe_credential(path: &Path, expected: Option<&str>, password: &[u8]) -> Result<SafeCredential> {
     let token = safe_family_token(path)?;
     crate::family_rotation_host::require_family_available(token.descriptor.family_id())?;
@@ -3806,8 +3841,8 @@ fn format_derived_volume(path: &Path, credential: &[u8]) -> Result<()> {
     run("/usr/sbin/cryptsetup", &[
         "luksFormat", "--batch-mode", "--type", "luks2", "--cipher", "aes-xts-plain64",
         "--key-size", "512", "--key-slot", "0", "--pbkdf", "pbkdf2",
-        // Password hardening is in the Argon2id wrapper. This slot receives
-        // a uniformly random 256-bit derivation rather than a human password.
+        // This slot receives a randomly generated or derived binary key.
+        // Any human password is hardened separately by the Argon2id wrapper.
         "--pbkdf-force-iterations", "1000", "--key-file", "-",
         path.to_str().ok_or(Error("invalid_path"))?,
     ], Some(credential))
@@ -3924,7 +3959,7 @@ mod ram_only_tests {
             export: None, onion: None, gateway_network: false, backing_fence: false,
         };
         assert_eq!(config.initialize(b"not-a-persistent-password").err().map(|error| error.0), Some("volume_busy"));
-        assert_eq!(config.create(b"not-a-persistent-password", 128).err().map(|error| error.0), Some("general_not_writable"));
+        assert_eq!(config.create(b"not-a-persistent-password", 128, false).err().map(|error| error.0), Some("general_not_writable"));
         assert_eq!(config.unlock(b"not-a-persistent-password", true).err().map(|error| error.0), Some("general_already_open"));
         let mut proxies = proxy_profiles::Registry::new(proxy_profiles::Archive::empty(), proxy_profiles::Archive::empty()).unwrap();
         let command = proxy_profiles::Command::decode(br#"{"action":"add","name":"Fixture","transport":{"mode":"socks5","endpoint":"192.0.2.22:1080","authentication":null}}"#).unwrap();
@@ -4008,13 +4043,13 @@ mod agent_safe_tests {
             "filesystem":"/unused/root.squashfs", "memory_mib":512, "cpus":1
         }"#).unwrap();
         let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        assert!(matches!(config.open_ephemeral_documents(id, &vm), Err(Error("operation_failed"))));
+        assert!(matches!(config.open_ephemeral(id, Some(&vm)), Err(Error("operation_failed"))));
         assert!(!Path::new(EPHEMERAL).exists());
         assert!(!runtime_record("opening-nonce").exists());
         assert!(!runtime_record("session-recovery-required").exists());
 
         write_key_file("ephemeral.luks", b"existing allocation").unwrap_or_else(|error| panic!("{}", error.0));
-        assert!(matches!(config.open_ephemeral_documents(id, &vm), Err(Error("ephemeral_cleanup_required"))));
+        assert!(matches!(config.open_ephemeral(id, Some(&vm)), Err(Error("ephemeral_cleanup_required"))));
         assert_eq!(fs::read(EPHEMERAL).unwrap(), b"existing allocation");
         assert!(runtime_record("session-recovery-required").exists());
     }
@@ -4804,7 +4839,7 @@ pub(crate) fn session_info() -> Result<Option<(String, String)>> {
         .map_err(|_| Error("invalid_session_state"))?;
     validate_id(&value.0)?;
     require(
-        matches!(value.1.as_str(), "documents" | "starting" | "agent" | "share"),
+        matches!(value.1.as_str(), "prepared" | "documents" | "starting" | "agent" | "share"),
         "invalid_session_state",
     )?;
     Ok(Some(value))
@@ -4834,6 +4869,12 @@ fn write_session_info(id: &str, mode: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn visible_session_mode(mode: String) -> String {
+    // A prepared opening reserves its slot and volume but has no guest yet.
+    // Keep it distinct from a failed transition that requires recovery.
+    if mode == "prepared" { "starting".into() } else { mode }
 }
 pub(crate) fn session_admin(command: oblivion_host::safe_admin::Command) -> Result<oblivion_host::safe_admin::Response> {
     require(!recovery_required()? && mapping_open("oblivion-session")? && !crate::vm::stopped()?, "session_not_open")?;
@@ -4875,7 +4916,7 @@ fn diagnostic_report() -> Result<oblivion_host::diagnostics::Report> {
             match session.as_ref().map(|(_, mode)| mode.as_str()) {
                 Some("documents") => Session::Documents,
                 Some("agent") => Session::Agent,
-                Some("starting") => Session::Starting,
+                Some("starting" | "prepared") => Session::Starting,
                 _ => Session::Locked,
             }
         },
@@ -4984,7 +5025,7 @@ fn open_sessions() -> Result<Vec<OpenSession>> {
                 slot,
                 recovery_required: info.is_none() || Path::new(&scope::path("/run/oblivion/session-recovery-required")).exists(),
                 id: info.as_ref().map(|entry| entry.0.clone()),
-                mode: info.map(|entry| entry.1),
+                mode: info.map(|entry| visible_session_mode(entry.1)),
             });
             Ok(())
         })?;
@@ -5053,20 +5094,24 @@ impl Config {
             if ephemeral { "insufficient_ephemeral_memory" } else { "insufficient_session_memory" })
     }
 
-    fn admit_agent(&self, network: bool) -> Result<()> {
+    fn admit_agent(&self, network: bool, prepared: bool) -> Result<()> {
         let opened = open_sessions()?;
         require(!opened.iter().any(|entry| entry.recovery_required), "recovery_required")?;
         let additional = if network && !gateway_reserved()? {
             self.gateway.as_ref().map_or(0, crate::vm::Config::reservation_mib)
         } else { 0 };
-        self.admit_memory(self.reserved_mib(&opened)?, additional, additional, "insufficient_gateway_memory")
+        // Prepared openings already reserve their guest against MemTotal, but
+        // still need its boot memory available alongside the gateway.
+        let guest_peak = if prepared { self.vm.as_ref().map_or(0, crate::vm::Config::reservation_mib) } else { 0 };
+        self.admit_memory(self.reserved_mib(&opened)?, additional, additional + guest_peak,
+            if network { "insufficient_gateway_memory" } else { "insufficient_session_memory" })
     }
 
-    fn prepare_agent_gateway(&self, id: &str) -> Result<()> {
+    fn prepare_agent_gateway(&self, id: &str, prepared: bool) -> Result<()> {
         // Documents keeps its offline VM until capacity and the transport are
         // ready. A failed preflight must release any partly started gateway.
         let result = (|| {
-            self.admit_agent(true)?;
+            self.admit_agent(true, prepared)?;
             if crate::gateway::state()? == "inactive" {
                 crate::gateway::start(false)?;
             }

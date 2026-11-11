@@ -97,6 +97,16 @@ pub fn open_existing<R: Runtime>(
     slot: R::Slot,
     id: &str,
 ) -> Result<R::Slot> {
+    open_existing_for(runtime, state, slot, id, false)
+}
+
+fn open_existing_for<R: Runtime>(
+    runtime: &mut R,
+    state: &State<R::Slot>,
+    slot: R::Slot,
+    id: &str,
+    for_agent: bool,
+) -> Result<R::Slot> {
     require_id(id)?;
     let child = state.agent_safes.iter().find(|safe| safe.id == id);
     if child.is_some_and(|safe| safe.state != AgentSafeState::AwaitingStart) {
@@ -113,9 +123,14 @@ pub fn open_existing<R: Runtime>(
         return Ok(slot);
     }
     let secret = runtime.password("Safe password")?;
+    let operation = if for_agent && state.app_mode == AppMode::Persistent && child.is_none() {
+        Operation::PrepareAgent
+    } else {
+        Operation::OpenDocuments
+    };
     let open = |runtime: &mut R, slot| {
         runtime.request(Call {
-            operation: Operation::OpenDocuments,
+            operation,
             slot: Some(slot),
             session: Some(id),
             expected_session: None,
@@ -126,36 +141,45 @@ pub fn open_existing<R: Runtime>(
         Ok(_) => return Ok(slot),
         Err(error) => error,
     };
+    let slot = retry_occupied_slot(runtime, state.app_mode, slot, Some(id), error.as_ref())
+        .ok_or(error)?;
+    open(runtime, slot)?;
+    Ok(slot)
+}
+
+fn retry_occupied_slot<R: Runtime>(
+    runtime: &mut R,
+    mode: AppMode,
+    slot: R::Slot,
+    id: Option<&str>,
+    error: &(dyn std::error::Error + 'static),
+) -> Option<R::Slot> {
     if !matches!(
         error.downcast_ref(),
         Some(control_client::Error::Rejected(code)) if code == "vm_already_running"
     ) {
-        return Err(error);
+        return None;
     }
     // The slot can change while the password prompt is open. Confirm that
-    // another Safe owns it before replaying the request for the same ID.
-    let Ok(current) = controller::status(runtime) else {
-        return Err(error);
-    };
+    // another Safe owns it before replaying a definitely rejected request.
+    let current = controller::status(runtime).ok()?;
     if !current.app_open
-        || current.app_mode != state.app_mode
+        || current.app_mode != mode
         || current.recovery_required
-        || !current.sessions.iter().any(|safe| safe == id)
-        || current.open_sessions.iter().any(|safe| safe.id.as_deref() == Some(id))
+        || id.is_some_and(|id| {
+            !current.sessions.iter().any(|safe| safe == id)
+                || current.open_sessions.iter().any(|safe| safe.id.as_deref() == Some(id))
+        })
         || !current.open_sessions.iter().any(|safe| {
             safe.slot == slot
                 && !safe.recovery_required
-                && matches!(safe.mode.as_deref(), Some("documents" | "agent"))
+                && matches!(safe.mode.as_deref(), Some("starting" | "documents" | "agent"))
                 && safe.id.as_deref().is_some_and(oblivion_wire::control::valid_id)
         })
     {
-        return Err(error);
+        return None;
     }
-    let Ok(slot) = free_slot(runtime, &current) else {
-        return Err(error);
-    };
-    open(runtime, slot)?;
-    Ok(slot)
+    free_slot(runtime, &current).ok()
 }
 
 /// The window limits retrying gateway_not_ready, as in the current launcher.
@@ -255,6 +279,9 @@ pub fn execute<R: Runtime>(
         .iter()
         .find(|opened| opened.id == existing && existing.is_some())
     {
+        if opened.mode.as_deref() == Some("starting") {
+            return Err("Safe is still starting. Wait for it to finish, or close it and retry.".into());
+        }
         if options.transport.is_some()
             || options.proxy_profile.is_some()
             || options.policy.is_some()
@@ -270,60 +297,41 @@ pub fn execute<R: Runtime>(
     let slot = free_slot(runtime, &state)?;
     let created = existing.is_none() && !options.ephemeral && state.app_mode == AppMode::Persistent;
     let (slot, id) = if let Some(id) = existing {
-        (open_existing(runtime, &state, slot, &id)?, id)
-    } else if options.ephemeral || state.app_mode != AppMode::Persistent {
-        runtime.request(Call {
-            operation: Operation::OpenDocumentsEphemeral,
-            slot: Some(slot),
-            session: None,
-            expected_session: None,
-            secret: &[],
-        })?;
-        let id = controller::status_at(runtime, Some(slot))?
-            .open_sessions
-            .into_iter()
-            .find(|opened| opened.slot == slot)
-            .and_then(|opened| opened.id)
-            .ok_or("Safe failed to open")?;
-        require_id(&id)?;
-        (slot, id)
+        (open_existing_for(runtime, &state, slot, &id, true)?, id)
     } else {
-        let secret = runtime.new_password("New Safe password")?;
-        let response = runtime.request(Call {
-            operation: Operation::Create,
-            slot: Some(slot),
-            session: None,
-            expected_session: None,
-            secret: &secret,
-        })?;
+        let (operation, secret) = if created {
+            (Operation::CreatePrepareAgent, runtime.new_password("New Safe password")?)
+        } else {
+            (Operation::PrepareAgentEphemeral, Zeroizing::default())
+        };
+        let prepare = |runtime: &mut R, slot| {
+            runtime.request(Call {
+                operation,
+                slot: Some(slot),
+                session: None,
+                expected_session: None,
+                secret: &secret,
+            })
+        };
+        let (slot, response) = match prepare(runtime, slot) {
+            Ok(response) => (slot, response),
+            Err(error) => {
+                let slot = retry_occupied_slot(runtime, state.app_mode, slot, None, error.as_ref())
+                    .ok_or(error)?;
+                (slot, prepare(runtime, slot)?)
+            }
+        };
         let id = response.trim();
         require_id(id)?;
-        let title = options
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("Safe {}", &id[..8]));
-        let rename = oblivion_wire::session_title::Rename {
-            id: id.into(),
-            title,
-        };
-        runtime.request(Call {
-            operation: Operation::RenameSession,
-            slot: Some(slot),
-            session: None,
-            expected_session: None,
-            secret: &serde_json::to_vec(&rename)?,
-        })?;
-        runtime.request(Call {
-            operation: Operation::OpenDocuments,
-            slot: Some(slot),
-            session: Some(id),
-            expected_session: None,
-            secret: &secret,
-        })?;
         (slot, id.to_owned())
     };
     let result = (|| {
         if created {
+            let rename = oblivion_wire::session_title::Rename {
+                id: id.clone(),
+                title: options.name.take().unwrap_or_else(|| format!("Safe {}", &id[..8])),
+            };
+            safe_call(runtime, slot, &id, Operation::RenameSession, &serde_json::to_vec(&rename)?)?;
             runtime.notice(Notice::SafeOpened(&id))?;
         }
         if let Some(transport) = options.transport.take() {

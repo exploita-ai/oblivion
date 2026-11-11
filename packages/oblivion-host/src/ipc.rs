@@ -1049,6 +1049,8 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
     require(!matches!(request.operation, Operation::BackupImportBegin | Operation::BackupImportFinish | Operation::BackupAttach
         | Operation::BackupStatus | Operation::BackupCancel | Operation::BackupDiscard) || request.expected_session.is_none(), "invalid_backup_request")?;
     require(!matches!(request.operation, Operation::StartAgent) || request.expected_session.is_some(), "expected_session_required")?;
+    require(!matches!(request.operation, Operation::CreatePrepareAgent | Operation::PrepareAgent | Operation::PrepareAgentEphemeral)
+        || request.expected_session.is_none(), "invalid_agent_preparation_request")?;
     require(!matches!(request.operation, Operation::ChildTaskStatus | Operation::ChildTaskReview | Operation::ChildTaskStart
         | Operation::ChildTaskRetry | Operation::ChildTaskCancel) || request.expected_session.is_some(), "expected_session_required")?;
     require(!matches!(request.operation, Operation::OpenChildDocuments)
@@ -1063,7 +1065,7 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
     require(
         matches!(
             request.operation,
-            Operation::OpenDocuments | Operation::OpenChildDocuments | Operation::DiscardSessionPending | Operation::AgentRelease
+            Operation::OpenDocuments | Operation::OpenChildDocuments | Operation::PrepareAgent | Operation::DiscardSessionPending | Operation::AgentRelease
                 | Operation::ShareRelease | Operation::ShareExportSourceOpen
                 | Operation::ShareExportLease | Operation::ShareImportFinish
                 | Operation::BackupExportBegin | Operation::BackupAttach | Operation::BackupCancel | Operation::BackupDiscard | Operation::FamilyPasswordPreview
@@ -1089,9 +1091,11 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
             | Operation::Unlock
             | Operation::UnlockReadOnly
             | Operation::Create
+            | Operation::CreatePrepareAgent
             | Operation::RenameSession
             | Operation::SessionStorage
             | Operation::OpenDocuments
+            | Operation::PrepareAgent
             | Operation::FileAttach
             | Operation::LiveMediaReserve
             | Operation::LiveMediaAttach
@@ -1355,6 +1359,9 @@ fn handle(stream: &mut UnixStream, config: &Path, uid: u32, families: &Families,
         Operation::OpenDocuments => "enter-documents",
         Operation::OpenChildDocuments => "open-child-documents",
         Operation::OpenDocumentsEphemeral => "enter-documents-ephemeral",
+        Operation::CreatePrepareAgent => "create-prepare-agent",
+        Operation::PrepareAgent => "prepare-agent",
+        Operation::PrepareAgentEphemeral => "prepare-agent-ephemeral",
         Operation::StartAgent => "start-agent",
         Operation::PinSafe => "pin-safe",
         Operation::AgentRelease => "agent-release",

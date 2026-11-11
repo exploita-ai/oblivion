@@ -94,7 +94,7 @@ fn shared_run_fences_transport_configuration_and_cleanup_to_the_opened_safe() {
                     source["open_sessions"] = serde_json::json!([]);
                     reply(&mut stream, &source.to_string(), None);
                 }
-                Operation::OpenDocuments => {
+                Operation::PrepareAgent => {
                     assert!(!opened);
                     assert_eq!(request.slot.index(), 0);
                     assert_eq!(request.session.as_deref(), Some(SAFE));
@@ -212,7 +212,7 @@ fn shared_run_rejects_a_malformed_created_identifier_before_any_followup_request
             let (request, secret) = receive(&mut stream);
             match request.operation {
                 Operation::Status => reply(&mut stream, &state().to_string(), None),
-                Operation::Create => {
+                Operation::CreatePrepareAgent => {
                     assert_eq!(secret.as_slice(), b"SYNTHETIC_PASSWORD_CANARY");
                     reply(&mut stream, "PRIVATE_ID_CANARY", None);
                     break;
