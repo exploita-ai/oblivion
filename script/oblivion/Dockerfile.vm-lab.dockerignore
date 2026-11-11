@@ -209,6 +209,7 @@ packages/oblivion-share/*
 
 !script/oblivion/controller-*
 !script/oblivion/bundle-native.py
+!script/oblivion/bundle-version.py
 !script/oblivion/desktop/
 !script/oblivion/desktop/**
 !docs/

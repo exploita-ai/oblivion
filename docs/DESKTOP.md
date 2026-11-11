@@ -1,11 +1,11 @@
-# Native desktop development bundles
+# Native desktop bundles
 
-These are development-only bundles for Apple Silicon macOS (`darwin-arm64`,
-Apple Virtualization.framework), x86_64 Linux (`linux-x86_64`) and ARM64 Linux
-(`linux-arm64`, QEMU/KVM).
+Desktop bundles support explicit `dev`, `rc` and `stable` channels for Apple
+Silicon macOS (`darwin-arm64`, Apple Virtualization.framework), x86_64 Linux
+(`linux-x86_64`) and ARM64 Linux (`linux-arm64`, QEMU/KVM).
 They package the native launcher, VM helper, terminal manager, and a separately
-built matching Oblivion controller ISO. They are not release artifacts and do
-not establish support on real hardware.
+built matching Oblivion controller ISO. A channel describes the build version;
+platform qualification, signing and publication remain separate release gates.
 
 The same manifest and assembly tool now also understand `windows-x86_64` with
 three native `.exe` files and the pinned OpenTUI DLL. Validation is shared through
@@ -56,7 +56,12 @@ The Linux jobs build the matching private controller and the generated MCP
 bundle. The native jobs verify that source pairing before compiling the
 launcher, helper and manager. Each archive has a SHA-256 sidecar. The
 [Debian desktop workflow](../.github/workflows/oblivion-desktop-deb.yml)
-builds the Linux packages. All three downloads are development artifacts.
+builds the Linux packages. Select the same source tag in each workflow to build
+matching RC or stable versions. Branch builds use the development channel.
+Tagged RC source must be contained in `dev`; stable source must be contained in
+`main`. Both require a successful integration check run for that exact commit,
+with all jobs successful. Artifacts are retained for 90 days; these workflows
+do not publish desktop releases automatically.
 
 Build on the matching host platform. Install the Bun version pinned in root
 `package.json`, Rust and its cached locked dependencies, and the native compiler
@@ -77,15 +82,29 @@ when its checksums are internally consistent. `bun run build:live` builds the ou
 Live launcher OS with this same controller image embedded.
 
 ```sh
-OBLIVION_DESKTOP_VERSION=1.0.0~dev20261104 \
+OBLIVION_BUNDLE_CHANNEL=rc \
+OBLIVION_DESKTOP_VERSION=1.0.0~rc1 \
 OBLIVION_DESKTOP_RUNTIME=artifacts/oblivion-runtime-arm64 \
 sh script/oblivion/build-native.sh
 ```
 
 On x86_64 Linux use `artifacts/oblivion-runtime-amd64`; ARM64 Linux uses
-`artifacts/oblivion-runtime-arm64`. The version must start with a
-digit, contain `~dev`, and be at most 64 characters using ASCII letters,
-digits, `.`, `+`, `:`, `~` or `-`. Output defaults to
+`artifacts/oblivion-runtime-arm64`. Channel and version are required together:
+
+| Channel | Product version example | Workflow source |
+| --- | --- | --- |
+| `dev` | `1.0.0~dev42.abcdef012345` | Branch; run number and first 12 source SHA digits |
+| `rc` | `1.0.0~rc1` | Tag `v1.0.0-rc.1` on checked source contained in `dev` |
+| `stable` | `1.0.0` | Tag `v1.0.0` on checked source contained in `main` |
+
+Versions have exactly three decimal base components without leading zeroes.
+The dev/RC counter is positive, the dev suffix is 12 lowercase hexadecimal
+digits, and the complete version is at most 64 ASCII characters. Local builders
+validate the pair; they do not attest source authorization or qualification.
+`script/oblivion/bundle-version.py resolve` owns the workflow ref-to-version
+mapping. The same contract applies to the bundle embedded in Live.
+
+Output defaults to
 `artifacts/oblivion-desktop-PLATFORM/VERSION`; `OBLIVION_DESKTOP_OUTPUT` can
 select a new directory. Existing output is never overwritten. The build calls
 the existing Swift helper build on macOS, the Rust helper build on Linux, the
@@ -99,10 +118,10 @@ ACLs on other files, install tools, boot a VM or build an ISO.
 
 ```powershell
 # Actual PE executables and assets only; no runtime or installable bundle:
-pwsh -File script/oblivion/build-native-windows.ps1 -Version '1.0.0~dev20261105'
+pwsh -File script/oblivion/build-native-windows.ps1 -Channel rc -Version '1.0.0~rc1'
 
 # Assemble a bundle only with the matching real amd64 controller and evidence:
-pwsh -File script/oblivion/build-native-windows.ps1 -Version '1.0.0~dev20261105' -Runtime artifacts/oblivion-runtime-amd64
+pwsh -File script/oblivion/build-native-windows.ps1 -Channel rc -Version '1.0.0~rc1' -Runtime artifacts/oblivion-runtime-amd64
 ```
 
 Without `-Runtime`, output is explicitly marked build inputs and contains no
@@ -110,7 +129,7 @@ Without `-Runtime`, output is explicitly marked build inputs and contains no
 verify the runtime checksums and exact current source inventory. Git attributes
 keep source text in LF form on every platform; the build refuses source changes
 during compilation. Outputs must be new paths and retain their private ACLs.
-This is an unsigned development build, not proof of Windows installer support
+This is an unsigned build, not proof of Windows installer support
 or bit-identical binaries across different Windows SDK/linker versions.
 
 For an existing CI controller, `-ToolsBundle PATH` with `-Runtime` reuses the
@@ -189,11 +208,11 @@ settings, or contact a provider.
 
 ## Debian desktop package
 
-On a compatible Debian host, install the development desktop package with APT,
+On a compatible Debian host, install the desktop package with APT,
 then run the normal command as your own user.
 
 ```sh
-sudo apt install ./oblivion-desktop_1.0.0~dev20261105_amd64.deb
+sudo apt install ./oblivion-desktop_1.0.0~rc1_amd64.deb
 oblivion
 # Or go straight to an agent in a new Safe.
 oblivion run codex
@@ -221,18 +240,18 @@ private software as well as the package, close the Safes, stop the runtime,
 run `oblivion runtime uninstall`, then run `sudo apt remove oblivion-desktop`.
 Removing the package alone preserves the user's installed release and data.
 
-From a checkout with the pinned Bun and Docker Buildx, build the development
+From a checkout with the pinned Bun and Docker Buildx, build the desktop
 package for either `amd64` or `arm64`.
 
 ```sh
 bun install --frozen-lockfile
-OBLIVION_ARCH=amd64 OBLIVION_DEB_VERSION=1.0.0~dev20261105 \
+OBLIVION_ARCH=amd64 OBLIVION_BUNDLE_CHANNEL=rc OBLIVION_DEB_VERSION=1.0.0~rc1 \
   sh script/oblivion/build-desktop-deb.sh
 ```
 
 The package and checksum are written to `artifacts/oblivion-desktop-deb-<arch>/`.
 The manual [Debian desktop workflow](../.github/workflows/oblivion-desktop-deb.yml)
-builds both architectures as development artifacts. The package embeds the
+builds both architectures with the channel/version selected by the source ref. The package embeds the
 verified controller image and build inventory. Installed APT, Polkit and
 nested-VM acceptance on target hosts remains open.
 
@@ -360,14 +379,16 @@ does not bypass quarantine or Gatekeeper.
 
 ## Bundle evidence and acceptance gates
 
-`bundle.json` is a strict version-1 `oblivion-desktop` manifest. It records
-the explicit development product version, platform/backend, control protocol,
+`bundle.json` is a strict version-2 `oblivion-desktop` manifest. It records
+the required channel and matching product version, platform/backend, control protocol,
 source identity, manager asset directory, boot assets, and a sorted SHA-256,
 byte count and executable flag for every regular file except the manifest
 itself. Its `bundle_id` hashes compact, recursively key-sorted JSON with the
 `bundle_id` field omitted. Bundles contain at most 1024 files, use ASCII
 relative paths of at most 512 characters without dot components, contain no
-links or devices, and limit each file to 64 GiB.
+links or devices, and limit each file to 64 GiB. The channel participates in the
+canonical identity. Version-1 manifests, `development_only`, absent/unknown
+channels and mismatched versions are rejected; there is no compatibility reader.
 
 Original runtime inventories and checksums live under `evidence/runtime`;
 `evidence/runtime-image.json` associates the original ISO filename with

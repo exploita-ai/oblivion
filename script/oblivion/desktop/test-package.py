@@ -18,8 +18,12 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("bundle_native", HERE.parent / "bundle-native.py")
 bundle = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bundle)
+spec = importlib.util.spec_from_file_location("desktop_package", HERE / "build-package.py")
+package = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(package)
 
 
+@unittest.skipUnless(sys.platform == "linux" and shutil.which("dpkg-shlibdeps"), "requires Debian packaging tools")
 class DesktopPackage(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="oblivion-desktop-package-")
@@ -32,7 +36,8 @@ class DesktopPackage(unittest.TestCase):
             "amd64": ("linux-x86_64", "x86_64-linux-gnu", "x64"),
             "arm64": ("linux-arm64", "aarch64-linux-gnu", "arm64"),
         }[self.arch]
-        self.version = "1.0.0~dev-fixture"
+        self.channel = "dev"
+        self.version = "1.0.0~dev1.abcdef012345"
         for name in ("oblivion", "oblivion-vm", "oblivion-manager"):
             self.copy(Path("/usr/bin/true"), "bin/" + name)
         self.copy(Path(f"/usr/lib/{triplet}/libm.so.6"), f"lib/manager/@opentui/core-linux-{native}/libopentui.so")
@@ -46,7 +51,7 @@ class DesktopPackage(unittest.TestCase):
             "image_sha256": bundle.digest(self.source / "runtime/controller.iso"),
         }).encode("ascii"))
         self.manifest = {
-            "format": "oblivion-desktop", "version": 1, "development_only": True,
+            "format": "oblivion-desktop", "version": 2, "channel": self.channel,
             "product_version": self.version, "platform": platform, "backend": "qemu-kvm",
             "source_sha256": source_id, "control_protocol": 1, "assets": "lib/manager",
             "runtime": {"image": "runtime/controller.iso", "kernel": "runtime/kernel", "initrd": "runtime/initrd"},
@@ -77,6 +82,7 @@ class DesktopPackage(unittest.TestCase):
         return subprocess.run([
             sys.executable, "-B", str(HERE / "build-package.py"), "--source", str(self.source),
             "--architecture", self.arch, "--version", self.version, "--revision", "1" * 40,
+            "--channel", self.channel,
             "--dirty", "false", "--output", str(self.output),
         ], capture_output=True, text=True)
 
@@ -105,6 +111,10 @@ class DesktopPackage(unittest.TestCase):
             evidence = json.load(archive.extractfile(paths["usr/share/doc/oblivion-desktop/build/inputs.json"]))
             self.assertEqual(evidence["bundle_id"], self.manifest["bundle_id"])
             self.assertEqual(evidence["source_sha256"], self.manifest["source_sha256"])
+            self.assertEqual(evidence["version"], 2)
+            self.assertEqual(evidence["channel"], self.channel)
+            self.assertEqual(evidence["product_version"], self.version)
+            self.assertNotIn("development_only", evidence)
             inputs = archive.extractfile(paths["usr/share/doc/oblivion-desktop/build/packaging-sources.sha256"]).read()
             self.assertIn(b"packages/oblivion-native-linux/src/kvm.rs", inputs)
             policy = xml.parse(archive.extractfile(paths["usr/share/polkit-1/actions/org.oblivion.desktop.policy"]))
@@ -116,6 +126,30 @@ class DesktopPackage(unittest.TestCase):
         before = checksum.read_bytes()
         self.assertNotEqual(self.build().returncode, 0)
         self.assertEqual(checksum.read_bytes(), before)
+
+    def test_candidate_and_stable_packages_preserve_the_bundle_channel(self):
+        for channel, version in (("rc", "1.0.0~rc1"), ("stable", "1.0.0")):
+            with self.subTest(channel=channel):
+                self.channel, self.version = channel, version
+                self.manifest.update(channel=channel, product_version=version)
+                self.seal()
+                result = self.build()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                artifact = self.output / f"oblivion-desktop_{version}_{self.arch}.deb"
+                self.assertEqual(subprocess.check_output(["dpkg-deb", "--field", artifact, "Version"], text=True).strip(), version)
+                payload = subprocess.check_output(["dpkg-deb", "--fsys-tarfile", artifact])
+                with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
+                    manifest = json.load(archive.extractfile("./usr/lib/oblivion-desktop/bundle.json"))
+                    evidence = json.load(archive.extractfile("./usr/share/doc/oblivion-desktop/build/inputs.json"))
+                    self.assertEqual((manifest["channel"], evidence["channel"]), (channel, channel))
+                    self.assertEqual((manifest["product_version"], evidence["product_version"]), (version, version))
+
+    def test_package_rejects_a_valid_but_different_channel_and_version(self):
+        self.channel, self.version = "rc", "1.0.0~rc1"
+        result = self.build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("channels or versions differ", result.stderr)
+        self.assertEqual(list(self.output.iterdir()), [])
 
     def test_rejects_foreign_elf_even_when_bundle_hashes_match(self):
         helper = self.source / "bin/oblivion-vm"
@@ -135,6 +169,35 @@ class DesktopPackage(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("controller source or image identity changed", result.stderr)
         self.assertEqual(list(self.output.iterdir()), [])
+
+
+class BundleContract(unittest.TestCase):
+    def test_invalid_request_is_rejected_before_packaging_tools_or_inputs(self):
+        with self.assertRaisesRegex(ValueError, "invalid_bundle_channel_or_version"):
+            package.build(Path("missing"), "amd64", "dev", "1.0.0", "1" * 40, False, Path("missing-output"))
+
+    def test_copy_rejects_previous_missing_and_inconsistent_release_metadata(self):
+        golden = json.loads((HERE.parents[2] / "packages/oblivion-bundle/tests/fixtures/windows-v2.json").read_bytes())
+        golden.update(platform="linux-x86_64", backend="qemu-kvm")
+        for changes, missing, expected in (
+            ({"version": 1}, None, "Bundle identity or platform does not match the package"),
+            ({"development_only": True}, None, "Bundle identity or platform does not match the package"),
+            ({"channel": "rc"}, None, "invalid_bundle_channel_or_version"),
+            ({"channel": "unknown"}, None, "invalid_bundle_channel_or_version"),
+            ({}, "channel", "'channel'"), ({}, "product_version", "'product_version'"),
+        ):
+            with self.subTest(changes=changes, missing=missing), tempfile.TemporaryDirectory() as temporary:
+                source = Path(temporary) / "source"
+                source.mkdir()
+                manifest = {**golden, **changes}
+                if missing:
+                    manifest.pop(missing)
+                manifest["bundle_id"] = bundle.bundle_identity(manifest)
+                (source / "bundle.json").write_text(json.dumps(manifest))
+                target = Path(temporary) / "target"
+                with self.assertRaisesRegex(KeyError if missing else ValueError, "^" + expected + "$"):
+                    package.copy_bundle(source, target, "linux-x86_64")
+                self.assertFalse(target.exists())
 
 
 if __name__ == "__main__":

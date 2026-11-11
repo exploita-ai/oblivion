@@ -1891,7 +1891,7 @@ mod native {
 
         fn pending(area: &Area) -> Record {
             let manifest: oblivion_bundle::Manifest = serde_json::from_str(include_str!(
-                "../../oblivion-bundle/tests/fixtures/windows-v1.json"
+                "../../oblivion-bundle/tests/fixtures/windows-v2.json"
             ))
             .unwrap();
             let runtime_id = random_id().unwrap();
@@ -2521,7 +2521,7 @@ mod native {
             )
             .unwrap();
             let manifest: oblivion_bundle::Manifest = serde_json::from_str(include_str!(
-                "../../oblivion-bundle/tests/fixtures/windows-v1.json"
+                "../../oblivion-bundle/tests/fixtures/windows-v2.json"
             ))
             .unwrap();
             let mut record = Record {
@@ -2597,7 +2597,7 @@ mod tests {
     }
     fn record() -> Value {
         let manifest: oblivion_bundle::Manifest = serde_json::from_str(include_str!(
-            "../../oblivion-bundle/tests/fixtures/windows-v1.json"
+            "../../oblivion-bundle/tests/fixtures/windows-v2.json"
         ))
         .unwrap();
         json!({"version":1,"runtime_id":ID,"bundle":manifest.binding().unwrap(),

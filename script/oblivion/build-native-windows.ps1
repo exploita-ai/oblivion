@@ -1,7 +1,7 @@
 #Requires -Version 7.4
 <#
 .SYNOPSIS
-Build paired unsigned Windows development inputs, optionally with a real runtime.
+Build paired unsigned Windows inputs, optionally with a real runtime.
 .DESCRIPTION
 Run in a non-elevated x64 MSVC Developer PowerShell with Rust 1.88.0,
 repository-pinned Bun, Python 3 and cached Cargo/workspace dependencies.
@@ -14,6 +14,7 @@ No tools are installed and no VM, HCS service or image build is started.
 [CmdletBinding()]
 param(
     [string]$Version = $env:OBLIVION_DESKTOP_VERSION,
+    [string]$Channel = $env:OBLIVION_BUNDLE_CHANNEL,
     [string]$Runtime = $env:OBLIVION_DESKTOP_RUNTIME,
     [string]$Output = $env:OBLIVION_DESKTOP_OUTPUT,
     [string]$Python = 'python',
@@ -31,9 +32,6 @@ if (-not $IsWindows -or [Runtime.InteropServices.RuntimeInformation]::OSArchitec
 $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if ([Security.Principal.WindowsPrincipal]::new($Identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Use a non-elevated MSVC Developer PowerShell; generated files must be owned by the actual user.'
-}
-if ($Version -notmatch '^[0-9][0-9A-Za-z.+:~-]{0,63}$' -or -not $Version.Contains('~dev')) {
-    throw 'Set an explicit development version, for example -Version 1.0.0~dev20261105.'
 }
 $Repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $Builder = Join-Path $PSScriptRoot 'bundle-native.py'
@@ -102,6 +100,7 @@ function Install-ToolsBundle {
 foreach ($Tool in @($Python, 'cargo', 'rustc', 'bun')) {
     if (-not (Get-Command $Tool -CommandType Application -ErrorAction SilentlyContinue)) { throw "Required tool is missing: $Tool." }
 }
+Invoke-Native -Executable $Python -Arguments @('-B', (Join-Path $PSScriptRoot 'bundle-version.py'), 'validate', '--channel', $Channel, '--product-version', $Version)
 $Rust = (Invoke-Native -Executable 'rustc' -Arguments @('--version') -Capture) -join "`n"
 if ($Rust -notmatch '^rustc 1\.88\.0 ') { throw 'Select the pinned Rust 1.88.0 MSVC toolchain before building.' }
 $Cargo = (Invoke-Native -Executable 'cargo' -Arguments @('--version') -Capture) -join ''
@@ -116,7 +115,7 @@ $Linker = Join-Path $env:VCToolsInstallDir 'bin/Hostx64/x64/link.exe'
 if (-not (Test-Path -LiteralPath $Linker -PathType Leaf)) { throw 'The x64 MSVC linker is unavailable.' }
 if (-not $Output) {
     $Kind = if ($Runtime) { 'oblivion-desktop-windows-x86_64' } else { 'oblivion-windows-build-inputs' }
-    $Output = Join-Path $Repository "artifacts/$Kind/$($Version.Replace(':', '_'))"
+    $Output = Join-Path $Repository "artifacts/$Kind/$Version"
 }
 $Output = [IO.Path]::GetFullPath($Output, $Repository)
 if ($Output -notmatch '^[A-Za-z]:\\') { throw 'Output must be on a local Windows drive.' }
@@ -131,7 +130,7 @@ $Parent = [IO.Path]::GetDirectoryName($Output)
 [void][IO.Directory]::CreateDirectory($Parent)
 $Work = Join-Path $Parent ('.windows-build-' + [guid]::NewGuid().ToString('N'))
 New-PrivateDirectory $Work
-$Variables = @('OBLIVION_DESKTOP_VERSION', 'OBLIVION_DESKTOP_SOURCE_SHA256', 'OBLIVION_DESKTOP_PLATFORM', 'CARGO_TARGET_DIR', 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER')
+$Variables = @('OBLIVION_BUNDLE_CHANNEL', 'OBLIVION_DESKTOP_VERSION', 'OBLIVION_DESKTOP_SOURCE_SHA256', 'OBLIVION_DESKTOP_PLATFORM', 'CARGO_TARGET_DIR', 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER')
 $Saved = @{}
 foreach ($Name in $Variables) { $Saved[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process') }
 Push-Location -LiteralPath $Repository
@@ -147,6 +146,7 @@ try {
         if ($Paired -ne $Source) { throw 'The runtime candidate does not match the current native source inventory.' }
     }
     $env:OBLIVION_DESKTOP_VERSION = $Version
+    $env:OBLIVION_BUNDLE_CHANNEL = $Channel
     $env:OBLIVION_DESKTOP_SOURCE_SHA256 = $Source
     $env:OBLIVION_DESKTOP_PLATFORM = $Platform
     $env:CARGO_TARGET_DIR = Join-Path $Work 'cargo-target'
@@ -160,7 +160,7 @@ try {
     $Cli = Join-Path $env:CARGO_TARGET_DIR "$Target/release/oblivion.exe"
     $Helper = Join-Path $env:CARGO_TARGET_DIR "$Target/release/oblivion-vm.exe"
     $Assets = Join-Path $Work 'manager/assets'
-    $Metadata = [ordered]@{ format = 'oblivion-windows-native-build'; version = 1; development_only = $true;
+    $Metadata = [ordered]@{ format = 'oblivion-windows-native-build'; version = 2; channel = $Channel;
         product_version = $Version; platform = $Platform; source_sha256 = $Source; runtime_included = [bool]$Runtime;
         toolchain = @{ rustc = $RustDetails; cargo = $Cargo; bun = $Bun; python = $PythonVersion;
             msvc_toolset = $env:VCToolsVersion; windows_sdk = $env:WindowsSDKVersion;
@@ -169,7 +169,7 @@ try {
     if ($Runtime) {
         [IO.File]::WriteAllText((Join-Path $Prepared 'evidence/windows-native-build.json'), $BuildEvidence, [Text.UTF8Encoding]::new($false))
         Invoke-Native -Executable $Python -Arguments @('-B', $Builder, 'assemble', '--prepared', $Prepared, '--platform', $Platform,
-            '--product-version', $Version, '--cli', $Cli, '--helper', $Helper, '--manager', $Manager,
+            '--channel', $Channel, '--product-version', $Version, '--cli', $Cli, '--helper', $Helper, '--manager', $Manager,
             '--manager-assets', $Assets, '--output', $Output)
     } else {
         $Inputs = Join-Path $Work 'build-inputs'
@@ -182,12 +182,14 @@ try {
         [IO.File]::Copy($Inventory, (Join-Path $Inputs 'evidence/host-sources.sha256'), $false)
         [IO.File]::WriteAllText((Join-Path $Inputs 'evidence/build.json'), $BuildEvidence, [Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllText((Join-Path $Inputs 'README.md'), @"
-# Windows development build inputs
+# Windows build inputs
 
 This is not an installable Oblivion desktop bundle. It contains no runtime ISO,
 VHDX, bundle.json or installation approval. Supply a matching real runtime candidate
-to build-native-windows.ps1 -Runtime to assemble a complete unsigned development bundle.
+to build-native-windows.ps1 -Runtime to assemble a complete unsigned bundle.
 
+Channel: $Channel
+Product version: $Version
 Source SHA256: $Source
 Toolchain versions are recorded in evidence/build.json. Binary reproducibility across
 different Windows SDK/linker versions has not been qualified.
@@ -199,7 +201,7 @@ different Windows SDK/linker versions has not been qualified.
         [IO.File]::WriteAllText((Join-Path $Inputs 'SHA256SUMS'), ($Sums -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
         [IO.Directory]::Move($Inputs, $Output)
     }
-    Write-Host "Unsigned development output: $Output"
+    Write-Host "Unsigned $Channel output: $Output"
     Write-Host 'No installer, hypervisor, VM or ISO build was run.'
 } finally {
     foreach ($Name in $Variables) { [Environment]::SetEnvironmentVariable($Name, $Saved[$Name], 'Process') }

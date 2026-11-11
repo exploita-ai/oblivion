@@ -253,6 +253,8 @@ jobs:
       - uses: ./.github/actions/setup-bun
       - name: Build the MCP source input for native bundle pairing
         run: bun run --cwd packages/oblivion-tools build
+      - name: Verify bundle channels and release ref mapping
+        run: python3 -B script/oblivion/test-bundle-version.py
       - name: Verify native bundle pairing and distribution inventory
         run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
       - name: Verify pinned official agent notices and installed inventory offline
@@ -492,6 +494,8 @@ jobs:
       - uses: ./.github/actions/setup-bun
       - name: Build the MCP source input for native bundle pairing
         run: bun run --cwd packages/oblivion-tools build
+      - name: Verify bundle channels and release ref mapping
+        run: python3 -B script/oblivion/test-bundle-version.py
       - name: Verify native bundle pairing and distribution inventory
         run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
       - name: Verify pinned official agent notices and installed inventory offline

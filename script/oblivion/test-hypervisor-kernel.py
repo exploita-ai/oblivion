@@ -166,10 +166,11 @@ class KernelInventory(unittest.TestCase):
             subprocess.run(['xorriso', '-as', 'mkisofs', '-quiet', '-o', str(image), str(boot.parent)],
                            check=True, capture_output=True)
 
-        def write_bundle(evidence):
+        def write_bundle(evidence, channel='dev', version='1.0.0~dev1.abcdef012345'):
             record.write_text(json.dumps(evidence))
             (bundle / 'bundle.json').write_text(json.dumps({
-                'format': 'oblivion-desktop', 'version': 1, 'platform': 'linux-arm64',
+                'format': 'oblivion-desktop', 'version': 2, 'platform': 'linux-arm64',
+                'channel': channel, 'product_version': version,
                 'runtime': {'image': 'runtime/controller.iso', 'kernel': 'runtime/kernel', 'initrd': 'runtime/initrd'},
                 'files': [{'path': path.relative_to(bundle).as_posix(), 'sha256': kernel.digest(path)}
                           for path in (record, image, runtime / 'kernel', runtime / 'initrd')]}))
@@ -180,6 +181,10 @@ class KernelInventory(unittest.TestCase):
         self.assertNotEqual(value['kernel_sha256'], outer['kernel_sha256'])
         self.assertEqual(kernel.verify_controller(bundle, 'arm64'),
                          {**value, 'controller_iso_sha256': kernel.digest(image)})
+        for channel, version in (('rc', '1.0.0~rc1'), ('stable', '1.0.0')):
+            write_bundle(value, channel, version)
+            self.assertEqual(kernel.verify_controller(bundle, 'arm64'),
+                             {**value, 'controller_iso_sha256': kernel.digest(image)})
         with self.assertRaisesRegex(ValueError, 'architecture_mismatch'):
             kernel.verify_controller(bundle, 'amd64')
         write_bundle({**value, 'role': 'outer-live'})
@@ -198,6 +203,27 @@ class KernelInventory(unittest.TestCase):
         write_bundle(value)
         with self.assertRaisesRegex(ValueError, 'iso_boot_digest_mismatch:initrd.img'):
             kernel.verify_controller(bundle, 'arm64')
+
+    def test_embedded_bundle_rejects_old_missing_and_mismatched_release_metadata_before_files(self):
+        manifest = {
+            'format': 'oblivion-desktop', 'version': 2, 'platform': 'linux-arm64',
+            'channel': 'dev', 'product_version': '1.0.0~dev1.abcdef012345',
+            'runtime': {'image': 'runtime/controller.iso', 'kernel': 'runtime/kernel', 'initrd': 'runtime/initrd'},
+        }
+        for changes, missing, expected in (
+            ({'version': 1}, None, 'embedded_controller_bundle_role_or_architecture_mismatch'),
+            ({'development_only': True}, None, 'embedded_controller_bundle_role_or_architecture_mismatch'),
+            ({'channel': 'rc'}, None, 'invalid_bundle_channel_or_version'),
+            ({'channel': 'unknown'}, None, 'invalid_bundle_channel_or_version'),
+            ({}, 'channel', "'channel'"), ({}, 'product_version', "'product_version'"),
+        ):
+            with self.subTest(changes=changes, missing=missing):
+                value = {**manifest, **changes}
+                if missing:
+                    value.pop(missing)
+                (self.root / 'bundle.json').write_text(json.dumps(value))
+                with self.assertRaisesRegex(KeyError if missing else ValueError, '^' + expected + '$'):
+                    kernel.verify_controller(self.root, 'arm64')
 
     def test_arm64_grub_enables_nested_mode_and_amd64_stays_unchanged(self):
         self.record()

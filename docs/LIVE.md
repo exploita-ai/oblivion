@@ -123,3 +123,25 @@ Debian interfaces: [NetworkManager](https://manpages.debian.org/trixie/network-m
 [keyboard configuration](https://manpages.debian.org/trixie/keyboard-configuration/keyboard.5.en.html),
 [console keymap application](https://manpages.debian.org/trixie/console-setup/setupcon.1.en.html),
 [Cage keyboard environment](https://manpages.debian.org/trixie/cage/cage.1.en.html).
+
+## Build channels
+
+Live embeds the same manifest-v2 bundle used by native desktop. Set the channel
+and product version explicitly; both reach the compiled launcher and embedded
+manifest, as well as the default ISO filename. For example:
+
+```sh
+OBLIVION_ARCH=amd64 OBLIVION_BUNDLE_CHANNEL=rc OBLIVION_DESKTOP_VERSION=1.0.0~rc1 \
+  bun run build:live
+```
+
+`stable` uses a version such as `1.0.0`; `dev` uses
+`1.0.0~dev1.abcdef012345` with the source SHA prefix. There is no implicit
+version or older manifest reader. Controller-only builds still use
+`bun run build:runtime` without an outer bundle channel.
+
+The image workflow resolves the version from the source ref. RC tags require
+checked source contained in `dev`; stable tags require checked source contained
+in `main`. Tagged images remain drafts with checksums and 90-day CI retention.
+A stable channel does not replace hardware acceptance, signing or release
+publication. See the [release gates](DEVELOPMENT.md#candidate-builds-and-remaining-release-gates).

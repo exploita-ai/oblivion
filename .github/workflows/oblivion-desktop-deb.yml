@@ -5,14 +5,30 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: oblivion-desktop-deb-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  metadata:
+    name: Resolve and authorize bundle metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      channel: ${{ steps.bundle.outputs.channel }}
+      product_version: ${{ steps.bundle.outputs.product_version }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/bundle-metadata
+        id: bundle
+
   desktop-deb:
     name: Build desktop package (${{ matrix.arch }})
+    needs: metadata
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
@@ -27,13 +43,15 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - name: Build the paired development package
+      - name: Build the paired desktop package
         shell: bash
         env:
           OBLIVION_ARCH: ${{ matrix.arch }}
+          OBLIVION_BUNDLE_CHANNEL: ${{ needs.metadata.outputs.channel }}
+          OBLIVION_DEB_VERSION: ${{ needs.metadata.outputs.product_version }}
         run: |
           set -euo pipefail
-          version="1.0.0~dev${GITHUB_RUN_NUMBER}.${GITHUB_SHA:0:12}"
+          version="$OBLIVION_DEB_VERSION"
           printf 'DESKTOP_DEB_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
           OBLIVION_DEB_VERSION="$version" sh script/oblivion/build-desktop-deb.sh
       - name: Verify the package and checksum
@@ -51,16 +69,16 @@ jobs:
           test "$(dpkg-deb -f "$directory/$package" Version)" = "$DESKTOP_DEB_VERSION"
           printf 'deb=%s\n' "$directory/$package" >> "$GITHUB_OUTPUT"
           printf 'checksum=%s\n' "$directory/$package.sha256" >> "$GITHUB_OUTPUT"
-      - name: Retain development package and checksum
+      - name: Retain desktop package and checksum
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: oblivion-desktop-deb-${{ matrix.arch }}-${{ github.sha }}
           path: |
             ${{ steps.package.outputs.deb }}
             ${{ steps.package.outputs.checksum }}
-          retention-days: 7
+          retention-days: 90
           if-no-files-found: error
           compression-level: 0
       - name: Record acceptance scope
         run: |
-          echo 'These are development desktop packages for the recorded source, not release uploads. Checksums do not qualify package installation, Polkit/KVM access, nested guest boot or redistribution.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'These are desktop packages for the recorded source and channel. They are not automatically published releases. Checksums do not qualify package installation, Polkit/KVM access, nested guest boot or redistribution.' >> "$GITHUB_STEP_SUMMARY"

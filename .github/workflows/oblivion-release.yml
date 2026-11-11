@@ -1,12 +1,14 @@
 name: Oblivion image drafts
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     tags: ["v*"]
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: oblivion-images-${{ github.ref }}
@@ -18,35 +20,43 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: read
     outputs:
       image_name: ${{ steps.source.outputs.image_name }}
       release: ${{ steps.source.outputs.release }}
+      channel: ${{ steps.bundle.outputs.channel }}
+      product_version: ${{ steps.bundle.outputs.product_version }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Require main or a tag contained in main
+      - uses: ./.github/actions/bundle-metadata
+        id: bundle
+      - name: Prepare an immutable draft destination for tagged builds
         id: source
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ steps.bundle.outputs.channel }}
+          PRODUCT_VERSION: ${{ steps.bundle.outputs.product_version }}
+          REVISION: ${{ steps.bundle.outputs.revision }}
         run: |
           set -euo pipefail
-          git fetch --no-tags origin main
-          if [ "$GITHUB_REF" = refs/heads/main ]; then
-            printf 'image_name=oblivion-main-%s\n' "${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+          printf 'image_name=oblivion-%s\n' "$PRODUCT_VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$CHANNEL" = dev ]; then
             printf 'release=false\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          case "$GITHUB_REF" in refs/tags/v*) ;; *) exit 1;; esac
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
-          tag=${GITHUB_REF_NAME}
-          printf 'image_name=oblivion-%s\n' "$tag" >> "$GITHUB_OUTPUT"
           printf 'release=true\n' >> "$GITHUB_OUTPUT"
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --target "$GITHUB_SHA" --title "Oblivion $tag" \
-              --draft --prerelease --generate-notes
+          prerelease=false
+          if [ "$CHANNEL" = rc ]; then prerelease=true; fi
+          if existing=$(gh release view "$GITHUB_REF_NAME" --json isDraft,isPrerelease); then
+            test "$(printf '%s' "$existing" | jq -r '.isDraft')" = true
+            test "$(printf '%s' "$existing" | jq -r '.isPrerelease')" = "$prerelease"
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --target "$REVISION" \
+              --title "Oblivion $GITHUB_REF_NAME" --draft --prerelease="$prerelease" --generate-notes
           fi
 
   build:
@@ -71,7 +81,9 @@ jobs:
       - name: Build the public image
         env:
           OBLIVION_ARCH: ${{ matrix.arch }}
-          OBLIVION_BUILD_SCOPE: GitHub release-candidate image built from the recorded public source commit; checksums are not a cryptographic signature.
+          OBLIVION_BUNDLE_CHANNEL: ${{ needs.authorize.outputs.channel }}
+          OBLIVION_DESKTOP_VERSION: ${{ needs.authorize.outputs.product_version }}
+          OBLIVION_BUILD_SCOPE: GitHub image built from the recorded public source commit and explicit channel; checksums are not a cryptographic signature.
           OBLIVION_IMAGE_NAME: ${{ needs.authorize.outputs.image_name }}
         run: bun run build:live
       - name: Verify and stage the image
@@ -99,21 +111,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ISO: ${{ steps.image.outputs.iso }}
           CHECKSUM: ${{ steps.image.outputs.checksum }}
-        run: gh release upload "$GITHUB_REF_NAME" "$ISO" "$CHECKSUM" --clobber
+        run: gh release upload "$GITHUB_REF_NAME" "$ISO" "$CHECKSUM"
 
       - name: Retain built images and architecture checksums
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: oblivion-image-${{ matrix.arch }}-${{ github.sha }}
           path: release/
-          retention-days: 7
+          retention-days: 90
           if-no-files-found: error
           compression-level: 0
       - name: Record release qualification scope
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'SCOPE'
           These are current-source image builds with checksums, not qualified releases.
-          Tag builds remain draft prereleases. Automatic publication is disabled until
-          real native nested-VM acceptance is implemented and recorded for this commit.
+          RC and stable tags remain drafts; source checks and branch ancestry are required.
+          Automatic publication is disabled until real native nested-VM acceptance and
+          distribution requirements are satisfied and recorded for this commit and artifact.
           Compilation, local protocol tests and image hashes do not replace that gate.
           SCOPE

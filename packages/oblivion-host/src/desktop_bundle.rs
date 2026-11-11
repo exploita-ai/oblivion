@@ -279,7 +279,7 @@ fn owned(metadata: &fs::Metadata, directory: bool, root_owned: bool) -> Result<(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use oblivion_bundle::relative;
+    use oblivion_bundle::{Channel, relative};
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
 
@@ -346,10 +346,10 @@ pub(crate) mod tests {
             files.sort_by(|a, b| a.path.cmp(&b.path));
             let manifest = Manifest {
                 format: "oblivion-desktop".into(),
-                version: 1,
-                development_only: true,
+                version: 2,
+                channel: Channel::Dev,
                 bundle_id: String::new(),
-                product_version: "1.0.0~devfixture".into(),
+                product_version: "1.0.0~dev1.abcdef012345".into(),
                 platform: platform.into(),
                 backend: if platform == "darwin-arm64" {
                     "apple-vz"
@@ -446,6 +446,25 @@ pub(crate) mod tests {
         assert!(
             Bundle::verified(&fixture.root, Some(&fixture.source), test_platform(), true).is_err()
         );
+    }
+
+    #[test]
+    fn verifies_dev_rc_and_stable_bundles_through_the_filesystem_adapter() {
+        let fixture = Fixture::new();
+        let mut manifest: Manifest =
+            serde_json::from_slice(&fs::read(fixture.root.join("bundle.json")).unwrap()).unwrap();
+        for (channel, version) in [
+            (Channel::Dev, "1.0.0~dev1.abcdef012345"),
+            (Channel::Rc, "1.0.0~rc1"),
+            (Channel::Stable, "1.0.0"),
+        ] {
+            manifest.channel = channel;
+            manifest.product_version = version.into();
+            fixture.save(manifest.clone());
+            let bundle = fixture.bundle();
+            assert_eq!(bundle.id(), manifest.identity().unwrap());
+            bundle.binding().unwrap().validate().unwrap();
+        }
     }
 
     #[test]

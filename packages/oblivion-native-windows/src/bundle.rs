@@ -487,7 +487,7 @@ pub(crate) mod tests {
     use super::VerifiedBundle;
     use crate::files::{CreationParent, Directory, Executable};
     use crate::security::Identity;
-    use oblivion_bundle::{File, Manifest, Runtime};
+    use oblivion_bundle::{Channel, File, Manifest, Runtime};
     use sha2::{Digest, Sha256};
     use std::fs::OpenOptions;
     use std::io::Write;
@@ -592,10 +592,10 @@ pub(crate) mod tests {
             files.sort_by(|left, right| left.path.cmp(&right.path));
             let mut manifest = Manifest {
                 format: "oblivion-desktop".into(),
-                version: 1,
-                development_only: true,
+                version: 2,
+                channel: Channel::Dev,
                 bundle_id: String::new(),
-                product_version: "1.0.0~dev-fixture".into(),
+                product_version: "1.0.0~dev1.abcdef012345".into(),
                 platform: "windows-x86_64".into(),
                 backend: "hcs-hyperv".into(),
                 source_sha256: format!("{:x}", Sha256::digest(version.as_bytes())),

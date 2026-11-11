@@ -4,8 +4,15 @@ set -eu
 cd "$(dirname "$0")/../.."
 [ "$#" -eq 1 ] || { echo 'Usage: build-image.sh controller|live' >&2; exit 2; }
 case "$1" in
-    controller) target=controller-runtime-artifacts; output=oblivion-runtime ;;
-    live) target=live-iso-artifacts; output=oblivion-stack ;;
+    controller) target=controller-runtime-artifacts; output=oblivion-runtime; image_name=${OBLIVION_IMAGE_NAME:-oblivion-development}; set -- ;;
+    live)
+        target=live-iso-artifacts; output=oblivion-stack
+        channel=${OBLIVION_BUNDLE_CHANNEL:-}
+        version=${OBLIVION_DESKTOP_VERSION:-}
+        python3 -B script/oblivion/bundle-version.py validate --channel "$channel" --product-version "$version"
+        image_name=${OBLIVION_IMAGE_NAME:-oblivion-$version}
+        set -- --build-arg "OBLIVION_BUNDLE_CHANNEL=$channel" --build-arg "OBLIVION_DESKTOP_VERSION=$version"
+        ;;
     *) echo 'Image role must be controller or live' >&2; exit 2 ;;
 esac
 arch=${OBLIVION_ARCH:-arm64}
@@ -22,7 +29,8 @@ for name in @opentui/core @opentui/solid solid-js zod shell-quote; do
 done
 docker buildx build --platform "linux/$arch" --file script/oblivion/Dockerfile.vm-lab \
     --target "$target" \
-    --build-arg "OBLIVION_IMAGE_NAME=${OBLIVION_IMAGE_NAME:-oblivion-development}" \
+    "$@" \
+    --build-arg "OBLIVION_IMAGE_NAME=$image_name" \
     --build-arg "OBLIVION_HOST_KERNEL_VERSION=${OBLIVION_HOST_KERNEL_VERSION:-}" \
     --build-arg "MANAGER_BINARY=artifacts/oblivion-manager/$manager/oblivion-manager" \
     --build-arg "MANAGER_ASSETS=artifacts/oblivion-manager/$manager/assets" \

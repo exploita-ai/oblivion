@@ -17,7 +17,7 @@ SCRIPT_INPUTS = (
     "onionshare-source.json", "onionshare-requirements.lock",
     "onionshare-licenses.json", "install-onionshare.py",
     "install-vbox-clipboard.py", "vbox-clipboard.json",
-    "native-bundle/host-sources.py", "display", "live-os",
+    "native-bundle/host-sources.py", "bundle-version.py", "display", "live-os",
 )
 PACKAGE_INPUTS = {
     "oblivion-bundle": ("Cargo.toml", "Cargo.lock", "src"),

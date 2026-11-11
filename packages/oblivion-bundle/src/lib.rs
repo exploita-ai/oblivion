@@ -52,12 +52,32 @@ impl Binding {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase", try_from = "String")]
+pub enum Channel {
+    Dev,
+    Rc,
+    Stable,
+}
+impl TryFrom<String> for Channel {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "dev" => Ok(Self::Dev),
+            "rc" => Ok(Self::Rc),
+            "stable" => Ok(Self::Stable),
+            _ => Err("invalid_desktop_bundle_channel"),
+        }
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub format: String,
     pub version: u8,
-    pub development_only: bool,
+    pub channel: Channel,
     pub bundle_id: String,
     pub product_version: String,
     pub platform: String,
@@ -147,26 +167,14 @@ impl Manifest {
     pub fn validate(&self, source: Option<&str>, platform: &str) -> Result<(), &'static str> {
         let target = target(platform)?;
         if self.format != "oblivion-desktop"
-            || self.version != 1
-            || !self.development_only
+            || self.version != 2
             || self.bundle_id != self.identity()?
             || self.platform != target.platform
             || self.backend != target.backend
             || !hash(&self.source_sha256)
             || source.is_some_and(|source| !hash(source) || self.source_sha256 != source)
             || self.control_protocol != 1
-            || self.product_version.is_empty()
-            || self.product_version.len() > 64
-            || !self
-                .product_version
-                .as_bytes()
-                .first()
-                .is_some_and(u8::is_ascii_digit)
-            || !self.product_version.contains("~dev")
-            || !self
-                .product_version
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b".+:~-".contains(&byte))
+            || !product_version(&self.product_version, self.channel)
             || self.assets != "lib/manager"
             || self.runtime.image != BOOT[0]
             || self.runtime.kernel != BOOT[1]
@@ -246,6 +254,50 @@ impl Manifest {
         binding.validate()?;
         Ok(binding)
     }
+}
+
+fn product_version(value: &str, channel: Channel) -> bool {
+    if value.len() > 64 || !value.is_ascii() {
+        return false;
+    }
+    let base = match channel {
+        Channel::Stable => value,
+        Channel::Rc => {
+            let Some((base, number)) = value.split_once("~rc") else {
+                return false;
+            };
+            if !decimal(number) || number == "0" {
+                return false;
+            }
+            base
+        }
+        Channel::Dev => {
+            let Some((base, suffix)) = value.split_once("~dev") else {
+                return false;
+            };
+            let Some((number, sha)) = suffix.split_once('.') else {
+                return false;
+            };
+            if !decimal(number)
+                || number == "0"
+                || sha.len() != 12
+                || !sha
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return false;
+            }
+            base
+        }
+    };
+    let mut parts = base.split('.');
+    (0..3).all(|_| parts.next().is_some_and(decimal)) && parts.next().is_none()
+}
+
+fn decimal(value: &str) -> bool {
+    !value.is_empty()
+        && (value == "0" || !value.starts_with('0'))
+        && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 pub fn hash(value: &str) -> bool {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify an existing runtime image, then assemble an unsigned development bundle."""
+"""Verify an existing runtime image, then assemble an unsigned desktop bundle."""
 import argparse
 import hashlib
 import importlib.util
@@ -14,6 +14,9 @@ import sys
 
 
 REPO = Path(__file__).resolve().parents[2]
+spec = importlib.util.spec_from_file_location("bundle_version", Path(__file__).with_name("bundle-version.py"))
+release = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(release)
 PLATFORMS = {
     "darwin-arm64": ("arm64", "apple-vz", "@opentui/core-darwin-arm64/libopentui.dylib"),
     "linux-x86_64": ("amd64", "qemu-kvm", "@opentui/core-linux-x64/libopentui.so"),
@@ -71,7 +74,7 @@ def current_sources():
 
 def require_current(path):
     if regular(path).read_bytes() != current_sources():
-        raise ValueError("Runtime host-sources.sha256 does not match current runtime sources; rebuild the matching development ISO first")
+        raise ValueError("Runtime host-sources.sha256 does not match current runtime sources; rebuild the matching ISO first")
     return digest(path)
 
 
@@ -154,8 +157,7 @@ def prepare(args):
 
 
 def assemble(args):
-    if not re.fullmatch(r"[0-9][0-9A-Za-z.+:~\-]{0,63}", args.product_version) or "~dev" not in args.product_version:
-        raise ValueError("An explicit ASCII development version containing ~dev is required")
+    release.validate(args.channel, args.product_version)
     if (args.prepared / "bundle.json").exists() or (args.prepared / "bundle.json").is_symlink():
         raise ValueError("Prepared bundle already has a manifest")
     source_id = require_current(args.prepared / "evidence/runtime/host-sources.sha256")
@@ -213,7 +215,7 @@ def assemble(args):
                       "executable": name in binaries if args.platform == "windows-x86_64" else bool(mode & 0o111)})
     if not files or len(files) > 1024:
         raise ValueError("Bundle must contain between 1 and 1024 files")
-    manifest = {"format": "oblivion-desktop", "version": 1, "development_only": True,
+    manifest = {"format": "oblivion-desktop", "version": 2, "channel": args.channel,
                 "product_version": args.product_version, "platform": args.platform,
                 "backend": PLATFORMS[args.platform][1], "source_sha256": source_id,
                 "control_protocol": 1, "assets": "lib/manager",
@@ -244,6 +246,7 @@ def main():
     build.add_argument("--prepared", required=True, type=Path)
     build.add_argument("--platform", required=True, choices=PLATFORMS)
     build.add_argument("--product-version", required=True)
+    build.add_argument("--channel", required=True)
     for name in ("cli", "helper", "manager", "manager-assets", "output"):
         build.add_argument("--" + name, required=True, type=Path)
     args = parser.parse_args()

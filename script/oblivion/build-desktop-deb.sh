@@ -4,10 +4,8 @@ set -eu
 cd "$(dirname "$0")/../.."
 arch=${OBLIVION_ARCH:-amd64}
 version=${OBLIVION_DEB_VERSION:-}
-case "$version" in *~dev*) ;; *) echo 'Set OBLIVION_DEB_VERSION to an explicit ~dev version' >&2; exit 2;; esac
-case "$version" in [0-9]*) ;; *) echo 'Desktop package version must start with a digit' >&2; exit 2;; esac
-case "$version" in *[!0-9A-Za-z.+:~-]*) echo 'Desktop package version contains unsupported characters' >&2; exit 2;; esac
-[ "${#version}" -le 64 ] || { echo 'Desktop package version exceeds 64 characters' >&2; exit 2; }
+channel=${OBLIVION_BUNDLE_CHANNEL:-}
+python3 -B script/oblivion/bundle-version.py validate --channel "$channel" --product-version "$version"
 case "$arch" in
     amd64) manager=bun-linux-x64 ;;
     arm64) manager=bun-linux-arm64 ;;
@@ -32,6 +30,7 @@ work=$(mktemp -d "$output/.desktop-export.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 docker buildx build --platform "linux/$arch" --file script/oblivion/Dockerfile.vm-lab \
     --target desktop-debian-artifacts --build-arg "OBLIVION_DESKTOP_VERSION=$version" \
+    --build-arg "OBLIVION_BUNDLE_CHANNEL=$channel" \
     --build-arg "OBLIVION_SOURCE_REVISION=$revision" --build-arg "OBLIVION_SOURCE_DIRTY=$dirty" \
     --build-arg "OBLIVION_HOST_KERNEL_VERSION=${OBLIVION_HOST_KERNEL_VERSION:-}" \
     --build-arg "MANAGER_BINARY=artifacts/oblivion-manager/$manager/oblivion-manager" \

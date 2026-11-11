@@ -124,6 +124,7 @@ COPY script/oblivion/display/ /runtime-inputs/display/
 COPY script/oblivion/agent-notices/ /runtime-inputs/agent-notices/
 COPY script/oblivion/live-os/ /runtime-inputs/live-os/
 COPY script/oblivion/native-bundle/host-sources.py /runtime-inputs/native-bundle/host-sources.py
+COPY script/oblivion/bundle-version.py /runtime-inputs/bundle-version.py
 COPY script/oblivion/native-bundle/host-sources.py /host-sources.py
 RUN cargo test --locked && cargo build --locked --release --bins --examples && cp target/release/oblivion-storage /tmp/oblivion-storage \
     && cargo build --locked --release --features lab-emulation --bin oblivion-storage
@@ -584,7 +585,8 @@ COPY --from=stack-pack /out/ /
 # inventory above, then assemble the same bundle used by Linux desktop installs.
 FROM compiler AS live-native-build
 ARG TARGETARCH
-ARG OBLIVION_DESKTOP_VERSION=1.0.0~dev
+ARG OBLIVION_DESKTOP_VERSION
+ARG OBLIVION_BUNDLE_CHANNEL
 ARG MANAGER_BINARY=artifacts/oblivion-manager/bun-linux-x64/oblivion-manager
 ARG MANAGER_ASSETS=artifacts/oblivion-manager/bun-linux-x64/assets
 ARG MANAGER_LICENSES=artifacts/oblivion-manager/bun-linux-x64/licenses
@@ -597,16 +599,17 @@ COPY script/oblivion/desktop/install.sh /script/oblivion/desktop/install.sh
 COPY ${MANAGER_BINARY} /native-manager/oblivion-manager
 COPY ${MANAGER_ASSETS} /native-manager/assets/
 COPY ${MANAGER_LICENSES} /oblivion-manager/node_modules/
-RUN apt-get update && apt-get install -y --no-install-recommends libarchive-tools && rm -rf /var/lib/apt/lists/* \
+RUN python3 -B /script/oblivion/bundle-version.py validate --channel "$OBLIVION_BUNDLE_CHANNEL" --product-version "$OBLIVION_DESKTOP_VERSION" \
+    && apt-get update && apt-get install -y --no-install-recommends libarchive-tools && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /packages \
     && ln -s /build /packages/oblivion-host \
     && for package in oblivion-cli oblivion-bundle oblivion-native-windows oblivion-wire oblivion-transfer oblivion-share oblivion-tor-state oblivion-transport oblivion-history oblivion-tools oblivion-gateway oblivion-onion oblivion-clipboard oblivion-manager theme tui-kit; do ln -s "/$package" "/packages/$package"; done \
     && cp /workspace-inputs/* / \
     && case "$TARGETARCH" in amd64) platform=linux-x86_64;; arm64) platform=linux-arm64;; *) exit 1;; esac \
     && identity=$(python3 -B /script/oblivion/bundle-native.py prepare --runtime /runtime-output --platform "$platform" --output /prepared) \
-    && OBLIVION_DESKTOP_VERSION="$OBLIVION_DESKTOP_VERSION" OBLIVION_DESKTOP_SOURCE_SHA256="$identity" OBLIVION_DESKTOP_PLATFORM="$platform" cargo build --locked --release --bin oblivion \
+    && OBLIVION_BUNDLE_CHANNEL="$OBLIVION_BUNDLE_CHANNEL" OBLIVION_DESKTOP_VERSION="$OBLIVION_DESKTOP_VERSION" OBLIVION_DESKTOP_SOURCE_SHA256="$identity" OBLIVION_DESKTOP_PLATFORM="$platform" cargo build --locked --release --bin oblivion \
     && cargo build --manifest-path /native-helper/Cargo.toml --locked --release \
-    && python3 -B /script/oblivion/bundle-native.py assemble --prepared /prepared --platform "$platform" --product-version "$OBLIVION_DESKTOP_VERSION" --cli /build/target/release/oblivion --helper /native-helper/target/release/oblivion-vm --manager /native-manager/oblivion-manager --manager-assets /native-manager/assets --output /desktop
+    && python3 -B /script/oblivion/bundle-native.py assemble --prepared /prepared --platform "$platform" --channel "$OBLIVION_BUNDLE_CHANNEL" --product-version "$OBLIVION_DESKTOP_VERSION" --cli /build/target/release/oblivion --helper /native-helper/target/release/oblivion-vm --manager /native-manager/oblivion-manager --manager-assets /native-manager/assets --output /desktop
 
 FROM live-native-build AS desktop-debian-build
 ARG OBLIVION_SOURCE_REVISION
@@ -617,8 +620,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends dpkg-dev libstd
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /package-inputs/packages/oblivion-native-linux \
     && cp -a /native-helper/Cargo.toml /native-helper/Cargo.lock /native-helper/src /package-inputs/packages/oblivion-native-linux/ \
-    && cp /script/oblivion/bundle-native.py /package-inputs/script/oblivion/ \
-    && python3 -B /package-inputs/script/oblivion/desktop/build-package.py --source /desktop --architecture "$TARGETARCH" --version "$OBLIVION_DESKTOP_VERSION" --revision "$OBLIVION_SOURCE_REVISION" --dirty "$OBLIVION_SOURCE_DIRTY" --output /out
+    && cp /script/oblivion/bundle-native.py /script/oblivion/bundle-version.py /package-inputs/script/oblivion/ \
+    && python3 -B /package-inputs/script/oblivion/desktop/build-package.py --source /desktop --architecture "$TARGETARCH" --channel "$OBLIVION_BUNDLE_CHANNEL" --version "$OBLIVION_DESKTOP_VERSION" --revision "$OBLIVION_SOURCE_REVISION" --dirty "$OBLIVION_SOURCE_DIRTY" --output /out
 
 FROM scratch AS desktop-debian-artifacts
 COPY --from=desktop-debian-build /out/ /
@@ -659,7 +662,7 @@ RUN sh /tmp/display-setup && rm /tmp/display-setup
 FROM live-pack-tools AS live-iso-pack
 ARG OBLIVION_IMAGE_NAME=oblivion-development
 COPY --from=live-launcher / /host/
-COPY script/oblivion/live-* script/oblivion/hypervisor-kernel.py script/oblivion/hypervisor-qemu.py /sources/
+COPY script/oblivion/live-* script/oblivion/hypervisor-kernel.py script/oblivion/hypervisor-qemu.py script/oblivion/bundle-version.py /sources/
 COPY script/oblivion/live-os/ /sources/live-os/
 RUN OBLIVION_IMAGE_NAME="$OBLIVION_IMAGE_NAME" sh /sources/live-pack.sh
 

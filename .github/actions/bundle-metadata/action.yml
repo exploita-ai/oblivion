@@ -1,0 +1,43 @@
+name: Resolve and authorize bundle metadata
+description: Use one channel/version and require checked dev or main source for tagged bundles
+outputs:
+  channel:
+    value: ${{ steps.metadata.outputs.channel }}
+    description: dev, rc or stable
+  product_version:
+    value: ${{ steps.metadata.outputs.product_version }}
+    description: Canonical version embedded in every bundle component
+  revision:
+    value: ${{ steps.metadata.outputs.revision }}
+    description: Checked-out source commit, including peeled annotated tags
+runs:
+  using: composite
+  steps:
+    - name: Resolve channel and version from the source ref
+      id: metadata
+      shell: bash
+      run: |
+        set -euo pipefail
+        revision=$(git rev-parse HEAD)
+        python3 -B script/oblivion/bundle-version.py resolve \
+          --ref "$GITHUB_REF" --revision "$revision" --run-number "$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
+        printf 'revision=%s\n' "$revision" >> "$GITHUB_OUTPUT"
+    - name: Require integrated and checked source for RC and stable bundles
+      if: steps.metadata.outputs.channel != 'dev'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CHANNEL: ${{ steps.metadata.outputs.channel }}
+        REVISION: ${{ steps.metadata.outputs.revision }}
+      run: |
+        set -euo pipefail
+        case "$CHANNEL" in rc) branch=dev ;; stable) branch=main ;; *) exit 1 ;; esac
+        git fetch --no-tags origin "$branch"
+        git merge-base --is-ancestor "$REVISION" "origin/$branch"
+        run=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/oblivion-check.yml/runs" \
+          -f head_sha="$REVISION" -f per_page=100 \
+          --jq '.workflow_runs | map(select(.event == "push" or .event == "workflow_dispatch")) | first | select(.status == "completed" and .conclusion == "success") | .id')
+        test -n "$run" || { echo 'The exact source commit needs a successful integration check run.' >&2; exit 1; }
+        checked=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?per_page=100" \
+          --jq '.total_count > 0 and .total_count == (.jobs | length) and all(.jobs[]; .status == "completed" and .conclusion == "success")')
+        test "$checked" = true || { echo 'The source check run must contain only successful jobs.' >&2; exit 1; }
