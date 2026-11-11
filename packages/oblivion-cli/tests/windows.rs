@@ -993,9 +993,11 @@ fn complete_windows_import_command_sends_only_selected_manifest_and_verified_pay
     std::fs::write(&source, b"abc").unwrap();
     std::fs::write(area.0.join("not-selected.txt"), b"do not transmit").unwrap();
     let (id, mut data) = listener();
-    let mut release = instance(&id, false);
+    let release_id = id.clone();
     let server = std::thread::spawn(move || {
         copy_preflight(&mut data);
+        // A second available instance could accept a preflight Status request.
+        let mut release = instance(&release_id, false);
         let dispatch: Value = read_message(&mut data, 8192).unwrap();
         assert_eq!(
             dispatch,
@@ -1070,9 +1072,11 @@ fn complete_windows_export_command_publishes_recovers_and_never_reports_denied_r
     for refused in [false, true] {
         let area = CopyArea::new();
         let (id, mut data) = listener();
-        let mut release = instance(&id, false);
+        let release_id = id.clone();
         let server = std::thread::spawn(move || {
             copy_preflight(&mut data);
+            // A second available instance could accept a preflight Status request.
+            let mut release = instance(&release_id, false);
             let dispatch: Value = read_message(&mut data, 4096).unwrap();
             assert_eq!(dispatch, json!({"operation":"export"}));
             let offer: OfferRequest = read_message(&mut data, 65536).unwrap();
