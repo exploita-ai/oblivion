@@ -111,10 +111,6 @@ fn qemu_version(path: &Path, deadline: std::time::Instant) -> Option<(u32, u32, 
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .inspect_err(|_error| {
-            #[cfg(test)]
-            eprintln!("qemu_version spawn {}: {_error:?}", path.display());
-        })
         .ok()?;
     let result = (|| {
         let mut output = child.stdout.take()?;
@@ -123,19 +119,12 @@ fn qemu_version(path: &Path, deadline: std::time::Instant) -> Option<(u32, u32, 
             || unsafe { libc::fcntl(output.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
                 < 0
         {
-            #[cfg(test)]
-            eprintln!("qemu_version fcntl: {:?}", std::io::Error::last_os_error());
             return None;
         }
         let mut bytes = Vec::new();
         let mut ended = false;
         loop {
             if std::time::Instant::now() >= deadline {
-                #[cfg(test)]
-                eprintln!(
-                    "qemu_version deadline: {} bytes, ended={ended}",
-                    bytes.len()
-                );
                 return None;
             }
             let mut chunk = [0; 512];
@@ -152,28 +141,13 @@ fn qemu_version(path: &Path, deadline: std::time::Instant) -> Option<(u32, u32, 
                         error.kind(),
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
                     ) => {}
-                Err(_error) => {
-                    #[cfg(test)]
-                    eprintln!("qemu_version read: {_error:?}");
-                    return None;
-                }
+                Err(_) => return None,
             }
-            if let Some(status) = child
-                .try_wait()
-                .inspect_err(|_error| {
-                    #[cfg(test)]
-                    eprintln!("qemu_version try_wait: {_error:?}");
-                })
-                .ok()?
-            {
+            if let Some(status) = child.try_wait().ok()? {
                 if !status.success() {
-                    #[cfg(test)]
-                    eprintln!("qemu_version child exit: {status}");
                     return None;
                 }
                 if ended {
-                    #[cfg(test)]
-                    eprintln!("qemu_version output: {:?}", String::from_utf8_lossy(&bytes));
                     let release = std::str::from_utf8(&bytes)
                         .ok()?
                         .strip_prefix("QEMU emulator version ")?
@@ -206,8 +180,6 @@ fn qemu_version(path: &Path, deadline: std::time::Instant) -> Option<(u32, u32, 
             if unsafe { libc::poll(&mut ready, 1, remaining) } < 0
                 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
             {
-                #[cfg(test)]
-                eprintln!("qemu_version poll: {:?}", std::io::Error::last_os_error());
                 return None;
             }
         }
