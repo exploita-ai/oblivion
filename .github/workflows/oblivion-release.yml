@@ -23,7 +23,6 @@ jobs:
       actions: read
     outputs:
       image_name: ${{ steps.source.outputs.image_name }}
-      release: ${{ steps.source.outputs.release }}
       channel: ${{ steps.bundle.outputs.channel }}
       product_version: ${{ steps.bundle.outputs.product_version }}
     steps:
@@ -45,10 +44,8 @@ jobs:
           set -euo pipefail
           printf 'image_name=oblivion-%s\n' "$PRODUCT_VERSION" >> "$GITHUB_OUTPUT"
           if [ "$CHANNEL" = dev ]; then
-            printf 'release=false\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          printf 'release=true\n' >> "$GITHUB_OUTPUT"
           prerelease=false
           if [ "$CHANNEL" = rc ]; then prerelease=true; fi
           if existing=$(gh release view "$GITHUB_REF_NAME" --json isDraft,isPrerelease); then
@@ -87,7 +84,6 @@ jobs:
           OBLIVION_IMAGE_NAME: ${{ needs.authorize.outputs.image_name }}
         run: bun run build:live
       - name: Verify and stage the image
-        id: image
         shell: bash
         env:
           ARCHITECTURE: ${{ matrix.arch }}
@@ -100,19 +96,7 @@ jobs:
           test -f "$iso"
           test "$(find "$directory" -maxdepth 1 -type f -name '*.iso' | wc -l)" -eq 1
           test "$(stat -c %s "$iso")" -gt 0
-          mkdir release
-          cp "$iso" release/
-          (cd release && sha256sum "$(basename "$iso")" > "$IMAGE_NAME-$ARCHITECTURE.sha256")
-          printf 'iso=%s\n' "release/$(basename "$iso")" >> "$GITHUB_OUTPUT"
-          printf 'checksum=%s\n' "release/$IMAGE_NAME-$ARCHITECTURE.sha256" >> "$GITHUB_OUTPUT"
-      - name: Upload directly to the draft GitHub Release
-        if: needs.authorize.outputs.release == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ISO: ${{ steps.image.outputs.iso }}
-          CHECKSUM: ${{ steps.image.outputs.checksum }}
-        run: gh release upload "$GITHUB_REF_NAME" "$ISO" "$CHECKSUM"
-
+          python3 -B script/oblivion/release-assets.py --input "$iso" --output release
       - name: Retain built images and architecture checksums
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -121,6 +105,10 @@ jobs:
           retention-days: 90
           if-no-files-found: error
           compression-level: 0
+      - uses: ./.github/actions/upload-bundle-release
+        with:
+          channel: ${{ needs.authorize.outputs.channel }}
+          directory: release
       - name: Record release qualification scope
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'SCOPE'

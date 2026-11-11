@@ -128,7 +128,7 @@ Debian interfaces: [NetworkManager](https://manpages.debian.org/trixie/network-m
 
 Live embeds the same manifest-v2 bundle used by native desktop. Set the channel
 and product version explicitly; both reach the compiled launcher and embedded
-manifest, as well as the default ISO filename. For example:
+manifest, as well as the local builder's default ISO filename. For example:
 
 ```sh
 OBLIVION_ARCH=amd64 OBLIVION_BUNDLE_CHANNEL=rc OBLIVION_DESKTOP_VERSION=1.0.0~rc1 \
@@ -142,6 +142,22 @@ version or older manifest reader. Controller-only builds still use
 
 The image workflow resolves the version from the source ref. RC tags require
 checked source contained in `dev`; stable tags require checked source contained
-in `main`. Tagged images remain drafts with checksums and 90-day CI retention.
-A stable channel does not replace hardware acceptance, signing or release
-publication. See the [release gates](DEVELOPMENT.md#candidate-builds-and-remaining-release-gates).
+in `main`. The internal version remains `1.0.0~rcN`; delivery filenames replace
+`~` with `-`, for example `oblivion-1.0.0-rc1-amd64.iso`, without changing the
+image bytes or the embedded manifest.
+
+ISOs larger than 1900 MiB are delivered as raw `.part01`, `.part02`, … files,
+with the full file's `.sha256`, a `.parts.sha256` list and `.reassemble.txt`.
+Download every part and follow the generated instructions: ordered `cat` on
+Linux/macOS or `copy /b` on Windows, followed by verification of the complete
+SHA-256. Verify the reconstructed ISO before writing or booting it. See the
+[shared download instructions](DESKTOP.md#download-and-reassemble-delivery-assets).
+
+The workflow retains the staged delivery files in CI for 90 days before
+uploading them to the tag's draft release. Its authorization job prepares that
+draft; the native desktop and Debian package workflows use the same existing
+draft for the same tag. Uploads verify draft/prerelease status and refuse
+existing asset names. RC drafts are prereleases, stable drafts are not; no
+workflow automatically publishes them. A release-upload failure does not
+discard the retained CI build. Hardware acceptance, signing and publication
+remain separate [release gates](DEVELOPMENT.md#candidate-builds-and-remaining-release-gates).
