@@ -6,10 +6,10 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::System::Console::{
-    ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleCP,
+    ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, FOCUS_EVENT, GetConsoleCP,
     GetConsoleOutputCP, GetNumberOfConsoleInputEvents, INPUT_RECORD, KEY_EVENT, LEFT_ALT_PRESSED,
-    LEFT_CTRL_PRESSED, SHIFT_PRESSED, SetConsoleCP, SetConsoleMode, SetConsoleOutputCP,
-    WriteConsoleInputW,
+    LEFT_CTRL_PRESSED, MENU_EVENT, MOUSE_EVENT, PeekConsoleInputW, SHIFT_PRESSED, SetConsoleCP,
+    SetConsoleMode, SetConsoleOutputCP, WINDOW_BUFFER_SIZE_EVENT, WriteConsoleInputW,
 };
 use windows_sys::Win32::System::Threading::{CREATE_NEW_CONSOLE, WaitForSingleObject};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -88,9 +88,9 @@ fn console_handoff_fixture() {
     console_snapshot("after reader joined, before injection", &terminal.input);
     inject(&terminal.input, &queued);
     console_snapshot("after reader joined, injected", &terminal.input);
-    assert!(queued_count(&terminal.input) > 0);
+    assert!(queued_input(&terminal.input).0 > 0);
     terminal.flush_input().unwrap();
-    assert_eq!(queued_count(&terminal.input), 0);
+    assert_eq!(queued_input(&terminal.input), (0, 0));
 
     // Exercise actual changes to the shared console that the panel can leave
     // behind. The agent settings and original shell snapshot are distinct.
@@ -120,10 +120,10 @@ fn console_handoff_fixture() {
         .map(|unit| key(0, unit))
         .collect::<Vec<_>>();
     inject(&terminal.input, &queued);
-    assert!(queued_count(&terminal.input) > 0);
+    assert!(queued_input(&terminal.input).0 > 0);
     terminal.restore_panel(&modes).unwrap();
     assert_eq!(settings(&terminal), agent);
-    assert_eq!(queued_count(&terminal.input), 0);
+    assert_eq!(queued_input(&terminal.input), (0, 0));
 
     let reader = Input::start(terminal.input.try_clone().unwrap()).unwrap();
     inject(&terminal.input, &[key(0, b'z' as u16), key(0x78, 0)]);
@@ -208,6 +208,52 @@ fn queued_count(input: &File) -> u32 {
         0
     );
     count
+}
+
+fn queued_input(input: &File) -> (usize, usize) {
+    let mut records = [INPUT_RECORD::default(); 128];
+    let mut count = 0;
+    assert_ne!(
+        unsafe {
+            PeekConsoleInputW(
+                input.as_raw_handle(),
+                records.as_mut_ptr(),
+                records.len() as u32,
+                &mut count,
+            )
+        },
+        0
+    );
+    assert!(
+        (count as usize) < records.len(),
+        "console fixture queue exceeded snapshot"
+    );
+    let mut types = Vec::new();
+    let mut keys = Vec::new();
+    let mut mouse = 0;
+    for record in &records[..count as usize] {
+        types.push(record.EventType);
+        match record.EventType as u32 {
+            KEY_EVENT => {
+                let key = unsafe { record.Event.KeyEvent };
+                keys.push((
+                    key.bKeyDown,
+                    key.wRepeatCount,
+                    key.wVirtualKeyCode,
+                    key.wVirtualScanCode,
+                    unsafe { key.uChar.UnicodeChar },
+                    key.dwControlKeyState,
+                ));
+            }
+            MOUSE_EVENT => mouse += 1,
+            // Console metadata can arrive after a flush; ReadFile does not
+            // forward these records to the agent as keyboard input.
+            FOCUS_EVENT | MENU_EVENT | WINDOW_BUFFER_SIZE_EVENT => {}
+            other => panic!("unexpected console input event type {other:#x}"),
+        }
+    }
+    eprintln!("console queued event types={types:?} keys={keys:?}");
+    (keys.len(), mouse)
 }
 
 fn expect_panel(reader: Input, page: Page, prefix: &[u8]) {
