@@ -48,7 +48,7 @@ def digest(path):
 
 
 def inventory(host, scripts, workspace):
-    roots = [(host, "", ("Cargo.toml", "Cargo.lock", "src", "tests", "host", "examples", "guest", "import", "export"))]
+    roots = [(host, "", ("Cargo.toml", "Cargo.lock", "src", "tests", "host", "guest", "import", "export"))]
     roots.extend((host.parent / name, "../" + name + "/", names) for name, names in PACKAGE_INPUTS.items())
     roots.extend(((scripts, "../runtime-inputs/", SCRIPT_INPUTS),
                   (workspace, "../workspace-inputs/", ("package.json", "bun.lock", "LICENSE", "NOTICE"))))

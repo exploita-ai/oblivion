@@ -673,7 +673,7 @@ mod tests {
             fn request(&mut self, call: Call<'_, u8>) -> Result<String> {
                 let response=match call.operation {
                     Operation::ShareImportBegin=>serde_json::to_string(&begun())?,
-                    Operation::Status=>json!({"app_open":true,"app_mode":"persistent","general_present":true,"general_incomplete":false,"general_bytes":8589934592u64,"recovery_required":false,"sessions":[],"session_titles":{},"open_sessions":[],"agent_safes":[]}).to_string(),
+                    Operation::Status=>json!({"app_open":true,"app_mode":"persistent","general_present":true,"general_incomplete":false,"backing_recovery_required":false,"general_bytes":8589934592u64,"recovery_required":false,"sessions":[],"session_titles":{},"open_sessions":[],"agent_safes":[]}).to_string(),
                     Operation::ShareImportOpen=>json!({"slot":3,"safe_id":"f".repeat(32),"nonce":"2".repeat(32)}).to_string(),
                     Operation::ShareImportFinish|Operation::ShareImportAbort=>String::new(),
                     _=>panic!("unexpected controller operation"),

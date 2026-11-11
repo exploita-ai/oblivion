@@ -32,7 +32,6 @@ pub struct State<S> {
     pub general_incomplete: bool,
     pub general_bytes: u64,
     pub recovery_required: bool,
-    #[serde(default)]
     pub backing_recovery_required: bool,
     pub sessions: Vec<String>,
     pub session_titles: BTreeMap<String, String>,
@@ -54,7 +53,6 @@ pub struct Opened<S> {
     pub slot: S,
     pub id: Option<String>,
     pub mode: Option<String>,
-    #[serde(default)]
     pub recovery_required: bool,
 }
 
@@ -137,8 +135,8 @@ pub enum Command {
 }
 
 impl Command {
-    /// Only this slice is parsed here. Other commands stay with their owning
-    /// frontend until migrated; these spellings have no second launcher parser.
+    /// Parse controller commands for the shared top-level dispatcher. Other
+    /// command families have their own parser in this crate.
     pub fn parse(args: &[String]) -> Result<Option<Self>> {
         match args.first().map(String::as_str) {
             Some("status") if args.len() == 2 && args[1] == "--json" => Ok(Some(Self::StatusJson)),

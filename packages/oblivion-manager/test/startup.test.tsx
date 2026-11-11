@@ -3,7 +3,13 @@ import { testRender } from "@opentui/solid"
 import { ManualClock } from "@opentui/core/testing"
 import { BootLogo, wordmark } from "../src/boot-logo"
 import { Startup } from "../src/startup"
-import { nativePreview, statusReader, type NativeStatus } from "../src/native-control"
+import { nativePreview, nativeStatus, statusReader, type NativeStatus } from "../src/native-control"
+
+test("controller status requires the backing recovery observation", async () => {
+  const state = await nativePreview(() => {}).status()
+  expect(nativeStatus.safeParse(state).success).toBe(true)
+  expect(nativeStatus.safeParse({ ...state, backing_recovery_required: undefined }).success).toBe(false)
+})
 
 for (const [width, height] of [[80, 24], [160, 50]]) {
   test(`the boot wordmark occupies exactly three seconds while status initializes at ${width}x${height}`, async () => {

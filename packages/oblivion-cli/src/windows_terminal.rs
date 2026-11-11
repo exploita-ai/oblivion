@@ -333,7 +333,10 @@ impl Terminal {
                     break;
                 };
                 match kind {
-                    1 | 2 => {
+                    agent::RELAY_FAILURE_KIND if bytes.is_empty() => {
+                        return Ok(agent::RELAY_FAILURE_STATUS);
+                    }
+                    1 | 2 if !bytes.is_empty() => {
                         let (file, guard) = if kind == 1 {
                             (&self.output, &mut output_guard)
                         } else {

@@ -94,9 +94,9 @@ pub(crate) fn reply(stream: &mut UnixStream, output: &str, error: Option<&str>) 
 pub(crate) fn state() -> serde_json::Value {
     serde_json::json!({
         "app_open":true,"app_mode":"persistent","general_present":true,
-        "general_incomplete":false,"general_bytes":8589934592_u64,"recovery_required":false,
+        "general_incomplete":false,"backing_recovery_required":false,"general_bytes":8589934592_u64,"recovery_required":false,
         "sessions":[SAFE],"session_titles":{SAFE:"GB"},
-        "open_sessions":[{"slot":4,"id":SAFE,"mode":"documents"}],
+        "open_sessions":[{"slot":4,"id":SAFE,"mode":"documents","recovery_required":false}],
         "agent_safes":[],"platform_details":{"preserve_this_field":true}
     })
 }

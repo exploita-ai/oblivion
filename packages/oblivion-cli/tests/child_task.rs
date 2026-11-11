@@ -283,7 +283,7 @@ fn locked_closed_recovery_and_invalid_safe_ids_stop_before_task_access() {
             _ => {
                 state["sessions"] = json!(["BAD"]);
                 state["session_titles"] = json!({"BAD":"GB"});
-                state["open_sessions"] = json!([{"slot":1,"id":"BAD","mode":"agent"}]);
+                state["open_sessions"] = json!([{"slot":1,"id":"BAD","mode":"agent","recovery_required":false}]);
             }
         }
         let mut runtime = Runtime::new(vec![status(&state)]);

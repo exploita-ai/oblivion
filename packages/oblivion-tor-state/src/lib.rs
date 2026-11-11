@@ -3,7 +3,6 @@ use std::collections::HashSet;
 
 pub const VERSION: &str = "0.4.9.15";
 pub const LIMIT: usize = 128 * 1024;
-const PREVIOUS_VERSIONS: &[&str] = &["0.4.9.14"];
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct InvalidState;
@@ -13,7 +12,7 @@ pub struct State(String);
 
 impl State {
     /// A saved profile must already be selective. Never silently discard an
-    /// unknown field or migrate state from an unreviewed Tor version.
+    /// unknown field or accept state from a different Tor version.
     pub fn parse(text: &str) -> Result<Self, InvalidState> {
         let state = Self::select(text)?;
         if state.0 != text {
@@ -108,9 +107,7 @@ impl State {
             if let Some(value) = line.strip_prefix("TorVersion ") {
                 const PREFIX: &str = "Tor ";
                 if version.replace(value).is_some()
-                    || !value.strip_prefix(PREFIX).is_some_and(|candidate| {
-                        candidate == VERSION || PREVIOUS_VERSIONS.contains(&candidate)
-                    })
+                    || value.strip_prefix(PREFIX) != Some(VERSION)
                 {
                     return Err(InvalidState);
                 }
@@ -187,6 +184,7 @@ fn timestamp(value: &str, separator: u8) -> bool {
 mod tests {
     use super::State;
 
+    // sampled_by is guard provenance, not the persisted state's format version.
     const GUARD: &str = "Guard in=default rsa_id=0123456789ABCDEF0123456789ABCDEF01234567 nickname=TestGuard sampled_on=2026-10-24T01:02:03 sampled_idx=0 sampled_by=0.4.9.14 listed=1 confirmed_on=2026-10-24T01:03:04 confirmed_idx=0 pb_circ_attempts=4.000000 pb_circ_successes=3.000000\n";
     const META: &str = "TorVersion Tor 0.4.9.15\nLastWritten 2026-10-24 01:04:05\n";
 
@@ -235,8 +233,17 @@ mod tests {
     }
 
     #[test]
-    fn accepts_the_reviewed_previous_patch_for_guard_migration() {
-        let previous = format!("{GUARD}{}", META.replace("0.4.9.15", "0.4.9.14"));
-        assert_eq!(State::parse(&previous).unwrap().as_str(), previous);
+    fn only_the_pinned_version_can_be_loaded_or_selected() {
+        let current = format!("{GUARD}{META}");
+        assert_eq!(State::parse(&current).unwrap().as_str(), current);
+        assert_eq!(State::select(&current).unwrap().as_str(), current);
+        for version in ["0.4.9.14", "0.4.9.16", "0.4.10.0"] {
+            let rejected = current.replace(
+                "TorVersion Tor 0.4.9.15",
+                &format!("TorVersion Tor {version}"),
+            );
+            assert!(State::parse(&rejected).is_err());
+            assert!(State::select(&rejected).is_err());
+        }
     }
 }

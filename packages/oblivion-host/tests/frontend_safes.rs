@@ -15,7 +15,7 @@ fn offline_open_uses_a_free_slot_and_pins_the_safe_without_starting_an_agent() {
                 Operation::Status => {
                     let mut source = state();
                     source["open_sessions"] =
-                        serde_json::json!([{"slot":0,"id":"b".repeat(32),"mode":"agent"}]);
+                        serde_json::json!([{"slot":0,"id":"b".repeat(32),"mode":"agent","recovery_required":false}]);
                     reply(&mut stream, &source.to_string(), None);
                 }
                 Operation::OpenDocuments => {
@@ -65,7 +65,7 @@ fn rename_uses_the_catalog_when_slots_are_full_and_the_active_slot_for_ram_title
                             source["app_mode"] = serde_json::json!("ram-only");
                             source["sessions"] = serde_json::json!([]);
                         } else {
-                            source["open_sessions"] = serde_json::json!((0..scope::LIMIT).map(|index| serde_json::json!({"slot":index,"id":format!("{index:032x}"),"mode":"agent"})).collect::<Vec<_>>());
+                            source["open_sessions"] = serde_json::json!((0..scope::LIMIT).map(|index| serde_json::json!({"slot":index,"id":format!("{index:032x}"),"mode":"agent","recovery_required":false})).collect::<Vec<_>>());
                         }
                         reply(&mut stream, &source.to_string(), None);
                     }
@@ -110,7 +110,7 @@ fn storage_growth_uses_a_free_maintenance_slot_and_sends_the_password_privately(
                 Operation::Status => {
                     let mut source = state();
                     source["open_sessions"] =
-                        serde_json::json!([{"slot":0,"id":"b".repeat(32),"mode":"agent"}]);
+                        serde_json::json!([{"slot":0,"id":"b".repeat(32),"mode":"agent","recovery_required":false}]);
                     reply(&mut stream, &source.to_string(), None);
                 }
                 Operation::SessionStorage => {

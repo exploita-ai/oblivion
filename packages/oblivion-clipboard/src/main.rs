@@ -4,16 +4,8 @@
 //! source; on paste (compositor's `Send` event) we then issue REQUEST to the
 //! daemon and forward the bytes. Eager REQUEST breaks the SPICE grab channel.
 
-mod data_control;
 mod udscs;
 
-use data_control::{
-    ext_data_control_device_v1, ext_data_control_offer_v1, ext_data_control_source_v1,
-    zwlr_data_control_device_v1, zwlr_data_control_offer_v1, zwlr_data_control_source_v1, Device,
-    ExtDataControlDeviceV1, ExtDataControlManagerV1, ExtDataControlOfferV1, ExtDataControlSourceV1,
-    Manager, Offer, Source, ZwlrDataControlDeviceV1, ZwlrDataControlManagerV1,
-    ZwlrDataControlOfferV1, ZwlrDataControlSourceV1, EXT_MANAGER_INTERFACE, WLR_MANAGER_INTERFACE,
-};
 use std::io::{Read, Write};
 use std::os::unix::io::{AsFd, AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::net::UnixStream;
@@ -30,6 +22,12 @@ use wayland_client::protocol::wl_registry;
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::{
     delegate_noop, event_created_child, Connection, Dispatch, EventQueue, QueueHandle, WEnum,
+};
+use wayland_protocols_wlr::data_control::v1::client::{
+    zwlr_data_control_device_v1::{self, ZwlrDataControlDeviceV1},
+    zwlr_data_control_manager_v1::ZwlrDataControlManagerV1,
+    zwlr_data_control_offer_v1::{self, ZwlrDataControlOfferV1},
+    zwlr_data_control_source_v1::{self, ZwlrDataControlSourceV1},
 };
 
 const VDAGENTD_SOCKET: &str = "/run/oblivion-clipboard-broker/socket";
@@ -98,19 +96,16 @@ fn spice_type_for_mime(mime: &str) -> Option<u32> {
 
 struct AppState {
     seat: Option<WlSeat>,
-    manager: Option<Manager>,
-    device: Option<Device>,
+    manager: Option<ZwlrDataControlManagerV1>,
+    device: Option<ZwlrDataControlDeviceV1>,
     daemon: Arc<Mutex<UnixStream>>,
     conn: Option<Connection>,
-    current_source: Option<Source>,
-    current_offer: Option<Offer>,
+    current_source: Option<ZwlrDataControlSourceV1>,
+    current_offer: Option<ZwlrDataControlOfferV1>,
     // Mimes advertised by the current offer, accumulated from
     // `data_control_offer.offer` events before `Selection` arrives.
     current_offer_mimes: Vec<String>,
     we_own_clipboard: bool,
-    // Globals discovered during first roundtrip; one is bound afterwards.
-    ext_manager_name: Option<u32>,
-    wlr_manager_name: Option<u32>,
     // Tracked output geometry. `width`/`height` are the last values we've
     // already reported to the daemon; `pending_*` are staged from wl_output
     // Mode events and committed on `done`.
@@ -149,37 +144,20 @@ fn main() {
         current_offer: None,
         current_offer_mimes: Vec::new(),
         we_own_clipboard: false,
-        ext_manager_name: None,
-        wlr_manager_name: None,
         width: 0,
         height: 0,
         pending_width: 0,
         pending_height: 0,
     };
 
-    let registry = conn.display().get_registry(&qh, ());
+    conn.display().get_registry(&qh, ());
     event_queue.roundtrip(&mut state).expect("roundtrip failed");
-
-    // Now that all globals are known, bind exactly one data-control manager.
-    state.manager = if let Some(name) = state.ext_manager_name {
-        eprintln!("oblivion-clipboard: using ext-data-control-v1");
-        Some(Manager::Ext(
-            registry.bind::<ExtDataControlManagerV1, _, _>(name, 1, &qh, ()),
-        ))
-    } else if let Some(name) = state.wlr_manager_name {
-        eprintln!("oblivion-clipboard: using wlr-data-control (legacy)");
-        Some(Manager::Wlr(
-            registry.bind::<ZwlrDataControlManagerV1, _, _>(name, 2, &qh, ()),
-        ))
-    } else {
-        None
-    };
 
     let (Some(manager), Some(seat)) = (&state.manager, &state.seat) else {
         eprintln!("oblivion-clipboard: missing manager or seat");
         std::process::exit(1);
     };
-    state.device = Some(manager.get_data_device(seat, &qh));
+    state.device = Some(manager.get_data_device(seat, &qh, ()));
 
     // Second roundtrip so wl_output Mode/Done events arrive (they come after
     // the global advertisement we processed above).
@@ -312,7 +290,7 @@ fn handle_daemon_msg(state: &mut AppState, qh: &QueueHandle<AppState>, msg: &Uds
                 if let Some(old) = state.current_source.take() {
                     old.destroy();
                 }
-                let source = manager.create_data_source(qh);
+                let source = manager.create_data_source(qh, ());
                 for mime in &mimes_to_offer {
                     source.offer((*mime).to_string());
                 }
@@ -405,8 +383,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
                     // if we already have geometry), but avoid leaking extras.
                     let _ = registry.bind::<WlOutput, _, _>(name, 2, qh, ());
                 }
-                EXT_MANAGER_INTERFACE => state.ext_manager_name = Some(name),
-                WLR_MANAGER_INTERFACE => state.wlr_manager_name = Some(name),
+                // Cage in the current image exposes this protocol explicitly.
+                "zwlr_data_control_manager_v1" => {
+                    state.manager =
+                        Some(registry.bind::<ZwlrDataControlManagerV1, _, _>(name, 2, qh, ()));
+                }
                 _ => {}
             }
         }
@@ -415,7 +396,6 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
 
 delegate_noop!(AppState: ignore WlSeat);
 delegate_noop!(AppState: ignore ZwlrDataControlManagerV1);
-delegate_noop!(AppState: ignore ExtDataControlManagerV1);
 
 impl Dispatch<ZwlrDataControlOfferV1, ()> for AppState {
     fn event(
@@ -427,21 +407,6 @@ impl Dispatch<ZwlrDataControlOfferV1, ()> for AppState {
         _: &QueueHandle<Self>,
     ) {
         if let zwlr_data_control_offer_v1::Event::Offer { mime_type } = event {
-            handle_offer_mime(state, mime_type);
-        }
-    }
-}
-
-impl Dispatch<ExtDataControlOfferV1, ()> for AppState {
-    fn event(
-        state: &mut Self,
-        _: &ExtDataControlOfferV1,
-        event: ext_data_control_offer_v1::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        if let ext_data_control_offer_v1::Event::Offer { mime_type } = event {
             handle_offer_mime(state, mime_type);
         }
     }
@@ -493,7 +458,7 @@ impl Dispatch<WlOutput, ()> for AppState {
     }
 }
 
-fn handle_data_offer(state: &mut AppState, offer: Offer) {
+fn handle_data_offer(state: &mut AppState, offer: ZwlrDataControlOfferV1) {
     if let Some(old) = state.current_offer.take() {
         old.destroy();
     }
@@ -530,7 +495,11 @@ fn handle_selection(state: &mut AppState, has_offer: bool) {
 
 /// Drain `offer` into a `Vec` via a pipe for a given mime type.
 /// Returns `None` if pipe creation fails.
-fn read_offer(offer: &Offer, mime: &str, conn: Option<&Connection>) -> Option<Vec<u8>> {
+fn read_offer(
+    offer: &ZwlrDataControlOfferV1,
+    mime: &str,
+    conn: Option<&Connection>,
+) -> Option<Vec<u8>> {
     let mut fds = [0i32; 2];
     if unsafe { libc_pipe(fds.as_mut_ptr()) } != 0 {
         return None;
@@ -608,9 +577,7 @@ impl Dispatch<ZwlrDataControlDeviceV1, ()> for AppState {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            zwlr_data_control_device_v1::Event::DataOffer { id } => {
-                handle_data_offer(state, Offer::Wlr(id))
-            }
+            zwlr_data_control_device_v1::Event::DataOffer { id } => handle_data_offer(state, id),
             zwlr_data_control_device_v1::Event::Selection { id } => {
                 handle_selection(state, id.is_some())
             }
@@ -633,49 +600,6 @@ impl Dispatch<ZwlrDataControlSourceV1, ()> for AppState {
                 handle_source_send(state, mime_type, fd)
             }
             zwlr_data_control_source_v1::Event::Cancelled => handle_source_cancelled(state),
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<ExtDataControlDeviceV1, ()> for AppState {
-    event_created_child!(AppState, ExtDataControlDeviceV1, [
-        0 => (ExtDataControlOfferV1, ()),
-    ]);
-    fn event(
-        state: &mut Self,
-        _: &ExtDataControlDeviceV1,
-        event: ext_data_control_device_v1::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        match event {
-            ext_data_control_device_v1::Event::DataOffer { id } => {
-                handle_data_offer(state, Offer::Ext(id))
-            }
-            ext_data_control_device_v1::Event::Selection { id } => {
-                handle_selection(state, id.is_some())
-            }
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<ExtDataControlSourceV1, ()> for AppState {
-    fn event(
-        state: &mut Self,
-        _: &ExtDataControlSourceV1,
-        event: ext_data_control_source_v1::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        match event {
-            ext_data_control_source_v1::Event::Send { mime_type, fd } => {
-                handle_source_send(state, mime_type, fd)
-            }
-            ext_data_control_source_v1::Event::Cancelled => handle_source_cancelled(state),
             _ => {}
         }
     }

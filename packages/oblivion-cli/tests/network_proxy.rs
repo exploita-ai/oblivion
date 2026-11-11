@@ -86,9 +86,9 @@ fn args(values: &[&str]) -> Vec<String> {
 }
 fn state(mode: &str, open: bool) -> String {
     json!({"app_open":mode!="locked","app_mode":mode,"general_present":true,
-        "general_incomplete":false,"general_bytes":8589934592u64,"recovery_required":false,
+        "general_incomplete":false,"backing_recovery_required":false,"general_bytes":8589934592u64,"recovery_required":false,
         "sessions":[ID],"session_titles":{ID:"GB"},
-        "open_sessions":if open { json!([{"slot":2,"id":ID,"mode":"documents"}]) } else {json!([])},
+        "open_sessions":if open { json!([{"slot":2,"id":ID,"mode":"documents","recovery_required":false}]) } else {json!([])},
         "agent_safes":[]})
     .to_string()
 }

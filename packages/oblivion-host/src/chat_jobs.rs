@@ -405,6 +405,10 @@ fn receive(
         }
         let mut channel = Channel::new(stream, Duration::from_secs(5));
         let (kind, payload) = private_frame(&mut channel)?;
+        if kind == oblivion_wire::agent::RELAY_FAILURE_KIND {
+            require(payload.is_empty(), "invalid_chat_job_frame")?;
+            return Err(Error("chat_job_interrupted"));
+        }
         if kind == 4 {
             require(payload.len() == 4, "invalid_chat_job_frame")?;
             let info: Info = latest.ok_or(Error("chat_job_interrupted"))?;
@@ -414,7 +418,7 @@ fn receive(
             )?;
             return Ok(info);
         }
-        require(matches!(kind, 1 | 2), "invalid_chat_job_frame")?;
+        require(matches!(kind, 1 | 2) && !payload.is_empty(), "invalid_chat_job_frame")?;
         total += payload.len();
         require(total <= 65536, "invalid_chat_job_frame")?;
         if kind == 2 {
@@ -560,6 +564,22 @@ mod tests {
         peer.write_all(&[1]).unwrap();
         peer.write_all(&65537u32.to_be_bytes()).unwrap();
         assert!(private_frame(&mut Channel::new(&host, Duration::from_secs(1))).is_err());
+    }
+
+    #[test]
+    fn relay_failure_is_terminal_and_never_accepts_the_legacy_marker() {
+        for (kind, payload, expected) in [
+            (oblivion_wire::agent::RELAY_FAILURE_KIND, &b""[..], "chat_job_interrupted"),
+            (oblivion_wire::agent::RELAY_FAILURE_KIND, &b"unexpected"[..], "invalid_chat_job_frame"),
+            (2, &b""[..], "invalid_chat_job_frame"),
+        ] {
+            let context = context();
+            let (host, mut peer) = UnixStream::pair().unwrap();
+            agent::write_frame(&mut peer, kind, payload).unwrap();
+            peer.shutdown(std::net::Shutdown::Write).unwrap();
+            let error = receive(&host, &context, &"c".repeat(32), None).err().unwrap();
+            assert_eq!(error.0, expected);
+        }
     }
 
     #[test]

@@ -50,7 +50,7 @@ class CodexNativeTests(unittest.TestCase):
             root = Path(tmp).resolve()
             source = vault(root / "source")
             selected, path, rows = codex(source)
-            rows[0]["payload"].pop("history_mode")
+            rows[0]["payload"]["history_mode"] = "legacy"
             data = b"".join((json.dumps(row) + "\n").encode() for row in rows)
             path.write_bytes(data)
             archive = root / "native.jsonl"
@@ -58,6 +58,21 @@ class CodexNativeTests(unittest.TestCase):
             destination = vault(root / "target")
             import_histories(archive, destination)
             self.assertEqual(next((destination / "home/.codex/sessions").rglob("*.jsonl")).read_bytes(), data)
+
+    def test_missing_or_unknown_history_mode_refuses_the_export(self):
+        for mode in (None, "obsolete"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                source = vault(root / "source")
+                selected, path, rows = codex(source)
+                rows[0]["payload"].pop("history_mode")
+                if mode is not None:
+                    rows[0]["payload"]["history_mode"] = mode
+                path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+                archive = root / "native.jsonl"
+                with self.assertRaisesRegex(ValueError, "unsupported_codex_format"):
+                    export_histories(source, [selected], archive)
+                self.assertFalse(archive.exists())
 
     def test_missing_history_prefix_refuses_the_whole_export(self):
         with tempfile.TemporaryDirectory() as tmp:

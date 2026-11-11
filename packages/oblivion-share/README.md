@@ -5,7 +5,8 @@ uses the standard age format and the existing Oblivion transfer manifest and
 payload verifier. It never opens a source filesystem or mounts a Safe.
 
 The application supplies guest streams containing only approved `workspace`,
-`imports` and canonical `history/chats.jsonl` content. Known credential-store
+`imports` and a `history/chats.jsonl` archive of the selected native conversations.
+That transfer file is not a shared live conversation catalog. Known credential-store
 paths are rejected by the shared transfer validator. Full home directories,
 provider profiles, proxy secrets and installed-system overlays are not portable
 roots. Content scanning happens before approval in the guest and cannot promise
@@ -39,8 +40,10 @@ A complete earlier Safe in a multi-Safe package is still staging until the
 entire package authenticates.
 
 The library does not run clients or import native credentials. The guest
-portable-history adapter handles canonical chat validation. Provider-specific
-reasoning and native records have explicit omission counts in the review.
+[native-history adapter](../oblivion-history/README.md) validates each pinned
+client's records and restores them for that same client. Native reasoning and
+signatures retain their original format; unsupported records and relationships
+are disclosed as omissions in review.
 
 ## Verification
 

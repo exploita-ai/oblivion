@@ -116,7 +116,7 @@ fn args(values: &[&str]) -> Vec<String> {
 }
 fn state(mode: &str) -> Value {
     json!({"app_open":mode!="locked","app_mode":mode,"general_present":true,
-        "general_incomplete":false,"general_bytes":8589934592u64,"recovery_required":false,
+        "general_incomplete":false,"backing_recovery_required":false,"general_bytes":8589934592u64,"recovery_required":false,
         "sessions":[SAFE],"session_titles":{SAFE:"GB"},"open_sessions":[],"agent_safes":[]})
 }
 fn entry(outcome: &str, active: bool) -> Value {
@@ -596,7 +596,7 @@ fn copy_preflight_rejects_nonwritable_recovery_ephemeral_or_open_safes_before_en
     }
     for ephemeral in [false, true] {
         let mut value = state("persistent");
-        value["open_sessions"] = json!([{"slot":1,"id":SAFE,"mode":"documents"}]);
+        value["open_sessions"] = json!([{"slot":1,"id":SAFE,"mode":"documents","recovery_required":false}]);
         if ephemeral {
             value["sessions"] = json!([]);
         }

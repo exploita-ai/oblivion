@@ -1,6 +1,21 @@
 use oblivion_transport::{egress, policy, proxy_profiles};
 
 #[test]
+fn tool_policy_requires_an_explicit_current_access_mode() {
+    let input = serde_json::json!({
+        "session": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "policy": {"version": 1, "rules": []},
+    });
+    assert!(serde_json::from_value::<policy::Tools>(input.clone()).is_err());
+    for access in ["open", "strict", "offline"] {
+        let mut current = input.clone();
+        current["access"] = serde_json::json!(access);
+        let tools: policy::Tools = serde_json::from_value(current.clone()).unwrap();
+        assert_eq!(serde_json::to_value(tools).unwrap(), current);
+    }
+}
+
+#[test]
 fn transport_and_access_commands_keep_the_existing_strict_wire_shapes() {
     for json in [
         r#"{"action":"save","transport":{"mode":"tor"}}"#,

@@ -80,7 +80,7 @@ fn open_retries_a_slot_taken_by_another_safe_with_the_same_password() {
     let initial = closed();
     let mut current = initial.clone();
     current["open_sessions"] = json!([
-        {"slot":0,"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","mode":"documents"}
+        {"slot":0,"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","mode":"documents","recovery_required":false}
     ]);
     let mut runtime = Runtime::new(vec![
         status(&initial),
@@ -222,8 +222,8 @@ fn only_failed_new_openings_are_eligible_for_fenced_idle_cleanup() {
 fn persistent_catalog_rename_needs_no_free_slot_or_password() {
     let mut value = closed();
     value["open_sessions"] = json!([
-        {"slot":0,"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","mode":"agent"},
-        {"slot":1,"id":"cccccccccccccccccccccccccccccccc","mode":"documents"}
+        {"slot":0,"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","mode":"agent","recovery_required":false},
+        {"slot":1,"id":"cccccccccccccccccccccccccccccccc","mode":"documents","recovery_required":false}
     ]);
     let mut runtime = Runtime::new(vec![
         status(&value),
@@ -300,7 +300,7 @@ fn temporary_titles_require_and_fence_an_active_safe_and_collisions_are_rejected
 fn grow_reserves_a_free_maintenance_slot_and_sends_the_shared_closed_target_request() {
     let mut value = closed();
     value["open_sessions"] =
-        json!([{"slot":0,"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","mode":"agent"}]);
+        json!([{"slot":0,"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","mode":"agent","recovery_required":false}]);
     let mut runtime = Runtime::new(vec![
         status(&value),
         status(&value),
@@ -336,8 +336,8 @@ fn grow_rejects_ineligible_storage_and_exhausted_slots_before_password_entry() {
     ram_child["session_titles"] = json!({ID:"GB"});
     let mut full = closed();
     full["open_sessions"] = json!([
-        {"slot":0,"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","mode":"agent"},
-        {"slot":1,"id":"cccccccccccccccccccccccccccccccc","mode":"agent"}
+        {"slot":0,"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","mode":"agent","recovery_required":false},
+        {"slot":1,"id":"cccccccccccccccccccccccccccccccc","mode":"agent","recovery_required":false}
     ]);
     for (value, message) in [
         (active(), "Close the Safe before increasing its storage"),

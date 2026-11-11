@@ -8,11 +8,12 @@ opening, startup and cleanup for tmux. `init`, `unlock`, `ephemeral` and `lock`
 share their storage-mode checks, confirmation and controller operations. The Windows frontend consumes
 the same implementation without reproducing these decisions.
 
-The frontend uses an injected authenticated controller and platform hooks for
-private passwords, human confirmation, available slots, monotonic time,
-waiting, notices and terminal attachment. It does not open sockets, configure a
-VM, read an OS credential store or manage a terminal itself. Controller-side
-authorization remains authoritative; a parsed request does not grant access or
+The shared executors use an injected authenticated controller and platform hooks
+for private passwords, human confirmation, available slots, monotonic time,
+waiting, notices and terminal attachment. Platform adapters own sockets, VM
+discovery and terminal handling; the Windows adapters live in this crate, while
+the Unix launcher is in `oblivion-host`. Controller-side authorization remains
+authoritative; a parsed request does not grant access or
 mean a named Safe exists.
 
 Options stop at `codex`, `claude` or `opencode2`. All subsequent UTF-8 strings are
@@ -61,15 +62,15 @@ zero explicitly disables it. The preferences and full status view have one wire
 model shared with the controller; human-activity and monotonic-clock logic remain
 there.
 
-Files `list`, `transfers`, `status`, `recover` and `discard` now use the shared
+Files `list`, `transfers`, `status`, `recover` and `discard` use the shared
 parser and executor. Safe selection and fresh opening checks are also consumed
-by the Unix import/export adapter. Metadata pages and receiver outcomes are
+by the native import/export adapters. Metadata pages and receiver outcomes are
 validated before output or recovery; an operation remains bound to its Safe,
 slot and opening nonce. The platform adapter owns the private file-channel lease
-and local destination filesystem. Trusted source selection, manifest review,
-approval and payload streaming for import/export remain in the Unix adapter;
-this extraction does not supply Windows filesystem endpoints. Invalid inspection
-syntax is rejected by the launcher before it starts the runtime.
+and local destination filesystem. Unix and Windows import/export adapters bind
+trusted source selection, manifest review, approval and payload streaming to
+their native filesystem endpoints. Invalid inspection syntax is rejected by
+the launcher before it starts the runtime.
 
 `safe task status/review/start/retry/cancel` uses the shared frontend and one
 Wire model with the controller. Reviewing a saved task does not start its agent
@@ -105,11 +106,11 @@ Another terminal reuses the same runtime. Last-owner idle shutdown is guarded,
 and uncertain stop leaves Recovery. Installed discovery verifies one current
 bundle, configuration and data identity. The broker owns the privileged runtime
 and exposes only typed lifecycle requests; the manager and host file selection
-remain unelevated. Installed Windows qualification and owned-resource
-reconciliation after losing the supervisor remain unfinished.
+remain unelevated. Receipt-bound owned-resource recovery is connected in source;
+installed Windows and forced-interruption qualification remain open.
 
 `command` owns the complete top-level grammar and help for both native entrypoints.
-The Unix copy and Share adapters supply typed parsers before runtime startup;
+Copy and Share operations use typed parsers before runtime startup;
 no command falls through to a second raw-argument dispatcher. The Windows binary
 is built explicitly with `--features windows-launcher --bin oblivion` on Windows.
 It starts the actual installed manager with a held runtime lease, or runs the
@@ -118,20 +119,23 @@ Status polling and human-activity forwarding read bounded private metadata and
 address the existing pipe, without hashing the ISO or booting a stopped runtime.
 `runtime start` explicitly starts a resident runtime.
 
-Windows Files connects guest directory pages and receiver metadata through the
-opening-scoped file attachment. It releases the client before closing that pipe,
-including malformed-response paths. Local payload copies, Share and personal
-backup file endpoints, runtime updates/removal and the Live storage selector
-are still explicitly unavailable on Windows; these fail before installation
-discovery or VM startup. The shared help describes the full product grammar,
-not a claim that every Windows endpoint is complete.
+Windows Files connects guest directory pages, receiver metadata and reviewed
+local payload copies through the opening-scoped file attachment. It releases
+the client before closing that pipe, including malformed-response paths.
+Native Share and personal-backup endpoints are connected, as are runtime
+update, recovery, garbage collection, uninstall and explicit archive removal.
+These paths still need installed-Windows qualification. USB transfers and the
+Live storage selector belong to Oblivion Live and are rejected on Windows
+before installation discovery or VM startup. Help uses the Windows platform
+profile rather than advertising Live-only operations.
 
 Personal backup grammar and `status`, `finish` and `discard` use the common
 frontend. The native ciphertext copy engine consumes the same status and finish
 operations: a lost final reply is reconciled before another restore can run.
 Global reads use the maintenance slot; mutations keep the transaction's recorded
 slot. Secret decoding has static errors and zeroizing buffers. Windows local
-backup file endpoints remain to be implemented.
+backup endpoints use native file handles and the private backup attachment;
+whole-runtime restore qualification remains open.
 
 SOCKS5 accepts IPv4 addresses and hostnames with a port. The `socks5://` and
 `socks5h://` URL forms accept percent-encoded credentials. The

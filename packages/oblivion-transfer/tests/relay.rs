@@ -290,6 +290,30 @@ fn mismatched_approval_closes_both_ports_without_authorizing_either_endpoint() {
 }
 
 #[test]
+fn retired_progress_approval_is_rejected_before_authorizing_either_endpoint() {
+    let source = Tree::new();
+    fs::write(source.0.join("document.txt"), CONTENT).unwrap();
+    let selection = Selection::prepare(&source.0, &request().paths, LIMITS).unwrap();
+    for progress in [false, true] {
+        let mut relay = Relay::start();
+        relay.offer(selection.manifest());
+        write_message(
+            &mut relay.control,
+            &serde_json::json!({
+                "id": ID,
+                "manifest_sha256": selection.manifest().sha256(),
+                "progress": progress,
+            }),
+        )
+        .unwrap();
+        assert!(relay.finish().is_err());
+        assert_eq!(relay.source.read(&mut [0]).unwrap(), 0);
+        assert_eq!(relay.destination.read(&mut [0]).unwrap(), 0);
+        assert_eq!(relay.control.read(&mut [0]).unwrap(), 0);
+    }
+}
+
+#[test]
 fn either_owner_death_revokes_a_pending_approval_with_data_ports_still_open() {
     let source = Tree::new();
     fs::write(source.0.join("document.txt"), CONTENT).unwrap();

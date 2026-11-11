@@ -140,14 +140,14 @@ impl run::Runtime for Runtime {
     }
 }
 pub fn state(mode: &str) -> Value {
-    json!({"app_open":mode!="locked","app_mode":mode,"general_present":true,"general_incomplete":false,
+    json!({"app_open":mode!="locked","app_mode":mode,"general_present":true,"general_incomplete":false,"backing_recovery_required":false,
         "general_bytes":8589934592_u64,"recovery_required":false,"sessions":[],"session_titles":{},"open_sessions":[],"agent_safes":[]})
 }
 pub fn active() -> Value {
     let mut value = state("persistent");
     value["sessions"] = json!([ID]);
     value["session_titles"] = json!({ID:"GB"});
-    value["open_sessions"] = json!([{"slot":1,"id":ID,"mode":"agent"}]);
+    value["open_sessions"] = json!([{"slot":1,"id":ID,"mode":"agent","recovery_required":false}]);
     value
 }
 pub fn response(operation: Operation, value: impl Into<String>) -> Step {

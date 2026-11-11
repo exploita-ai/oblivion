@@ -124,7 +124,6 @@ pub struct Request<S> {
     pub operation: Operation,
     pub secret_len: u32,
     pub session: Option<String>,
-    #[serde(default)]
     pub slot: S,
 }
 

@@ -24,7 +24,7 @@ export const nativeStatus = z.object({
   general_open: z.boolean(),
   general_readonly: z.boolean(),
   recovery_required: z.boolean(),
-  backing_recovery_required: z.boolean().default(false),
+  backing_recovery_required: z.boolean(),
   family_password_pending: z.array(z.string().regex(/^[a-f0-9]{32}$/)).max(32768),
   sessions: z.array(z.string().regex(/^[a-f0-9]{32}$/)),
   safe_parents: z.array(z.object({ id: z.string().regex(/^[a-f0-9]{32}$/), parent: z.string().regex(/^[a-f0-9]{32}$/) })),

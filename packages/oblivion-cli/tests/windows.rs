@@ -114,9 +114,9 @@ fn fixture(
 
 fn state(slot: u8) -> String {
     json!({"app_open":true,"app_mode":"persistent","general_present":true,
-        "general_incomplete":false,"general_bytes":1_073_741_824u64,"recovery_required":false,
+        "general_incomplete":false,"backing_recovery_required":false,"general_bytes":1_073_741_824u64,"recovery_required":false,
         "sessions":[SAFE],"session_titles":{SAFE:"GB"},
-        "open_sessions":[{"slot":slot,"id":SAFE,"mode":"persistent"}],"agent_safes":[]})
+        "open_sessions":[{"slot":slot,"id":SAFE,"mode":"persistent","recovery_required":false}],"agent_safes":[]})
     .to_string()
 }
 
@@ -152,6 +152,23 @@ fn malformed_peer_slot_is_rejected_before_a_safe_command_or_output() {
 
 #[test]
 fn runtime_attaches_native_argv_and_duplex_pipes_then_releases_the_exact_safe_client() {
+    for code in [7i32, agent::RELAY_FAILURE_STATUS] {
+        assert_eq!(agent_attachment(vec![(4, code.to_be_bytes().to_vec())]).unwrap(), code);
+    }
+}
+
+#[test]
+fn relay_failure_uses_its_own_terminal_frame_and_rejects_the_legacy_marker() {
+    assert_eq!(agent_attachment(vec![(agent::RELAY_FAILURE_KIND, vec![])]).unwrap(), agent::RELAY_FAILURE_STATUS);
+    for frames in [
+        vec![(agent::RELAY_FAILURE_KIND, vec![1])],
+        vec![(2, vec![]), (4, agent::RELAY_FAILURE_STATUS.to_be_bytes().to_vec())],
+    ] {
+        assert_eq!(agent_attachment(frames).unwrap_err(), "Invalid agent response");
+    }
+}
+
+fn agent_attachment(frames: Vec<(u8, Vec<u8>)>) -> Result<i32, String> {
     fn pipe() -> (File, File) {
         let mut read = null_mut();
         let mut write = null_mut();
@@ -201,7 +218,9 @@ fn runtime_attaches_native_argv_and_duplex_pipes_then_releases_the_exact_safe_cl
         assert_eq!(received, incoming);
         agent::write_frame(&mut control, 1, &outgoing).unwrap();
         agent::write_frame(&mut control, 2, b"diagnostic\n").unwrap();
-        agent::write_frame(&mut control, 4, &7i32.to_be_bytes()).unwrap();
+        for (kind, payload) in frames {
+            agent::write_frame(&mut control, kind, &payload).unwrap();
+        }
         let release = connect(&mut release_channel);
         assert_eq!(release["operation"], json!(Operation::AgentRelease));
         assert_eq!(release["slot"], 4);
@@ -233,8 +252,7 @@ fn runtime_attaches_native_argv_and_duplex_pipes_then_releases_the_exact_safe_cl
         Terminal::from_files(stdin, output, error),
     )
     .unwrap();
-    assert_eq!(
-        runtime
+    let result = runtime
             .attach(
                 4.try_into().unwrap(),
                 SAFE,
@@ -246,9 +264,7 @@ fn runtime_attaches_native_argv_and_duplex_pipes_then_releases_the_exact_safe_cl
                     "".into(),
                 ]
             )
-            .unwrap(),
-        7
-    );
+            .map_err(|error| error.to_string());
     drop(runtime);
     let mut bytes = vec![];
     stdout.read_to_end(&mut bytes).unwrap();
@@ -257,6 +273,7 @@ fn runtime_attaches_native_argv_and_duplex_pipes_then_releases_the_exact_safe_cl
     stderr.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes, b"diagnostic\n");
     server.join().unwrap();
+    result
 }
 
 #[test]

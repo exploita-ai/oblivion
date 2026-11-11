@@ -2,9 +2,9 @@
 
 The Linux controller manages Oblivion's encrypted archive, independent Safe
 VMs, per-Safe gateways and explicit transfer capabilities. The native Rust CLI
-uses that same controller through a private relay on desktop platforms, or a
-local authenticated socket on an installed Debian/Live system. The OpenTUI
-manager is a separate client of these interfaces.
+uses that same controller through a private relay into a headless Debian VM on
+desktop platforms and Debian Live. The controller's authenticated local socket
+belongs inside that VM. The OpenTUI manager uses the native launcher interfaces.
 
 This is current 1.0 source under development. Component tests and successful
 compilation do not qualify the full installed product. See the
@@ -18,8 +18,8 @@ controller mounts only the general filesystem privately with
 `nodev,nosuid,noexec`; it does not mount a Safe's filesystem. Only that Safe's VM
 mounts the unlocked block device at `/vault`.
 
-A Safe contains the workspace, imports, home, native client profiles, canonical
-conversation catalog and the writable system layer used by sudo installations.
+A Safe contains the workspace, imports, home, native client profiles and
+histories, and the writable system layer used by sudo installations.
 Its Debian base remains immutable. Temporary paths use RAM; swap, hibernation,
 core dumps and persistent journals are disabled in the managed image.
 
@@ -46,12 +46,17 @@ Native arguments are passed as structured argv. Official client authentication
 and saved credentials remain in the Safe's encrypted home. No provider-key
 broker or modified OpenCode chat server is part of the current architecture.
 
-The canonical history service projects the current native resume stores. This
-is separate from a managed job's process lifecycle. The optional scoped MCP
-bridge derives Safe authority from the private VM connection, not an ID or path
-chosen by the agent. Child-Safe creation records provenance, allocates a distinct
-volume and obeys family/quota limits. Automatic child startup with credential
-delegation is not yet implemented.
+Each official client owns its history and native resume. The
+[native-history adapter](../oblivion-history/README.md) reads and restores those
+formats only for reviewed Share transfers; there is no common conversation
+catalog or history watcher. Managed jobs have a separate process lifecycle.
+The optional scoped MCP bridge derives Safe authority from the private VM
+connection, not an ID or path chosen by the agent. Child-Safe creation records
+provenance, allocates a distinct volume and obeys family/quota limits. Automatic
+startup can delegate only the requested client's supported credential and admit
+the saved task with its stable request ID. Missing or unsupported credentials
+leave an explicit authentication requirement. Installed-VM and real-provider
+qualification remain open; see [provider limits](../../docs/PROVIDERS.md).
 
 ## Networking and files
 
@@ -85,11 +90,11 @@ with `SO_PEERCRED`; clients verify the controller's root identity. Operation
 frames are bounded and unknown fields rejected. Passwords use private channels,
 not argv, environment values or temporary key files.
 
-Direct installations are selected by the explicit root-owned
-`/etc/oblivion/installation.json` marker. A desktop runtime failure cannot
-silently fall back to executing a privileged local controller. The Linux vsock
-relay also requires a fresh private per-boot credential because host CID alone
-is not a user identity.
+Desktop and Live launchers select their native VM backend; an external Linux
+installation does not run the privileged controller on the user's operating
+system. A runtime failure cannot silently fall back to a local controller.
+The Linux vsock relay also requires a fresh private per-boot credential because
+host CID alone is not a user identity.
 
 Only specific data sockets are delegated to clients. QMP, arbitrary host paths
 and root descriptors are not. QEMU roles have separate identities and confined
@@ -108,6 +113,7 @@ cargo test --locked --lib --bin oblivion
 Linux controller and protocol suites run in CI with synthetic fixtures. An
 explicit `lab-emulation` feature exists for diagnostic software-emulation
 fixtures; production requires hardware virtualization and never falls back to
-TCG automatically. macOS native qualification currently fails during inner
-Safe KVM boot before Oblivion services. Linux hardware and Windows packaging
-also remain separate release gates.
+TCG automatically. The Mac diagnostic build has booted nested Safes and passed
+recorded storage and file-transfer exercises. Native-terminal qualification and
+the final distribution profile remain open, alongside Linux hardware, Windows
+and physical Live-media acceptance. See the [acceptance register](../../docs/ACCEPTANCE.md).

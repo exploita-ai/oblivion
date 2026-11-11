@@ -324,6 +324,7 @@ fn tools(rules: Value) -> Tools {
     serde_json::from_value(json!({
         "session": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "policy": {"version": 1, "rules": rules},
+        "access": "strict",
     }))
     .unwrap()
 }
@@ -331,11 +332,11 @@ fn tools(rules: Value) -> Tools {
 #[test]
 fn tools_configuration_validates_session_and_policy_at_the_private_boundary() {
     for invalid in [
-        json!({"session": "bad", "policy": {"version": 1, "rules": []}}),
-        json!({"session": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "policy": {"version": 1, "rules": []}}),
-        json!({"session": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "policy": {"version": 2, "rules": []}}),
-        json!({"session": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "policy": {"version": 1, "rules": [{"destination": "127.0.0.1", "port": 80, "action": "allow"}]}}),
-        json!({"session": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "policy": {"version": 1, "rules": []}, "direct": true}),
+        json!({"session": "bad", "policy": {"version": 1, "rules": []}, "access": "strict"}),
+        json!({"session": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "policy": {"version": 1, "rules": []}, "access": "strict"}),
+        json!({"session": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "policy": {"version": 2, "rules": []}, "access": "strict"}),
+        json!({"session": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "policy": {"version": 1, "rules": [{"destination": "127.0.0.1", "port": 80, "action": "allow"}]}, "access": "strict"}),
+        json!({"session": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "policy": {"version": 1, "rules": []}, "access": "strict", "direct": true}),
     ] {
         assert!(
             serde_json::from_value::<Credentials>(json!({

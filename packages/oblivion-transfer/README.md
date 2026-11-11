@@ -6,11 +6,12 @@ before publication, and never overwrites an existing transaction. No network,
 USB mounting, shell execution, logging or archive extraction in this library.
 
 Manifest validation, payload hashes, paginated directory metadata, copy control
-messages and Share content rules are platform independent. The Unix filesystem
-endpoints are separate from that shared protocol; they retain pinned descriptor
-identities and explicit publication. The same portable library compiles for the
-Windows MSVC target. This does not implement Windows file handles, ACLs,
-reparse-point rejection or a Windows runtime backend.
+messages and Share content rules are platform independent. Unix and Windows
+filesystem endpoints are separate from that shared protocol; they retain pinned
+descriptor or handle identities and explicit publication. Windows sources and
+receivers use native name, ACL and reparse-point checks. VM startup and runtime
+authorization belong to the native backend, not this copy engine. Compiling for
+Windows MSVC does not qualify an installed Windows transfer.
 
 The `oblivion-copy` endpoint uses an inherited private descriptor, a monotonic
 transport deadline, approval bound to the offered manifest and a verified
@@ -108,12 +109,13 @@ A published receipt records the original transfer, while later working-file
 edits remain intact. Discard removes only identifiable unpublished private data,
 never published output. Missing or untrusted context remains an unknown result.
 
-## Encrypted session portability
+## Personal Safe backups
 
-Closed-session backup and restore reuse the streaming, approval and receipt
+Closed-Safe backup and restore reuse the streaming, approval and receipt
 protocol. `session.oblivion` is the existing LUKS2 volume, including its chats,
 documents and embedded metadata. There is no new encryption format; restoring
-it requires the original session password. General application settings are excluded. Native agent profiles and provider
+it requires the original Safe password. General application settings are excluded.
+Native agent profiles and provider
 credentials saved inside the Safe ARE part of a personal disk backup; use
 Share to exclude known provider credential stores when transferring portable
 work to another user. Review selected content for secrets as well.
@@ -122,8 +124,9 @@ work to another user. Review selected content for secrets as well.
 They cannot choose a path on the host, browse a parent directory or read a
 decrypted mapping. The parent fixes the byte ceiling and transport deadline.
 The media picker can also select a single pinned backup for restore. Copying
-verifies content before the destination is admitted as a new independent
-session; originals are preserved on failure.
+verifies content before the controller authenticates and publishes the restored
+Safe with its original identity. Originals are preserved on failure; portable
+Share imports allocate new identities instead.
 
 ## OnionShare integration
 
@@ -147,20 +150,26 @@ boundary.
 From this directory:
 
 ```sh
-cargo test --locked
+cargo test --locked --release
 cargo clippy --all-targets -- -D warnings
 
-# Portable library only; no Windows endpoints or VM backend
+# Cross-check the shared library and Windows endpoints; this does not run them
 cargo check --locked --lib --target x86_64-pc-windows-msvc
 cargo test --locked --lib
 ```
 
-The repository's `script/oblivion/Dockerfile.transfer` runs the same tests in
-Debian without network access during test execution. Its CI jobs target ARM64
-and x86-64. All test files and names are synthetic.
+The optional laboratory builder `script/oblivion/Dockerfile.transfer` runs the
+package tests in release mode on Debian without network access during execution,
+then exports the copy binaries, logs and source checksums. It includes the local
+manifest dependencies that Cargo resolves even when their Windows code is not
+compiled. The [source-check workflow](../../.github/workflows/oblivion-check.yml)
+runs Cargo directly on its platform runners; it does not invoke this Dockerfile.
+All test files and names are synthetic.
 
 The 512 MiB descriptor-copy test checks the complete stream, receipt and
-replacement-path isolation with a bounded budget for unoptimized CI binaries.
+replacement-path isolation with a bounded deadline. Run `backup_sender` in
+release mode, as the Unix CI jobs do, so debug hashing overhead does not consume
+the transfer deadline.
 File-VM laboratories additionally exercise HTTP interruption/resume, read-only
 device checks, malformed inputs, approval, cancellation and teardown. A sparse
 fixture with a LUKS marker is not a valid encrypted archive; real LUKS and

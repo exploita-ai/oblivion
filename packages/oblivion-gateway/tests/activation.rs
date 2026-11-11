@@ -167,7 +167,7 @@ fn egress_reads_a_full_private_policy_and_denies_unknown_tools_without_logs() {
         .collect::<Vec<_>>();
     let config = json!({
         "transport": {"mode": "tor"}, "session_token": TOKEN,
-        "tools": {"session": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "policy": {"version": 1, "rules": rules}},
+        "tools": {"session": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "policy": {"version": 1, "rules": rules}, "access": "strict"},
     }).to_string();
     assert!(config.len() > 4096 && config.len() < 128 * 1024);
     writeln!(control, "{config}").unwrap();

@@ -44,7 +44,7 @@ fn private(path: &Path, bytes: &[u8]) {
 }
 
 #[test]
-fn existing_model_state_loads_without_transfer_fallback_or_transport_changes() {
+fn model_and_transfer_state_remain_independent_of_each_other_and_transport() {
     let profile = Profile::new();
     let model = state('A');
     let transfer = state('B');
@@ -58,12 +58,8 @@ fn existing_model_state_loads_without_transfer_fallback_or_transport_changes() {
     .unwrap()
     .encode()
     .unwrap();
-    private(&profile.0.join("tor-state"), model.as_str().as_bytes());
+    tor_profile::save(&profile.0, Purpose::Model, &model).unwrap();
     private(&profile.0.join("transport.json"), &transport);
-    private(
-        &profile.0.join("provider.keys.json"),
-        b"synthetic unchanged key archive",
-    );
     assert_eq!(
         tor_profile::load(&profile.0, Purpose::Model)
             .unwrap()
@@ -88,10 +84,6 @@ fn existing_model_state_loads_without_transfer_fallback_or_transport_changes() {
     assert_eq!(
         fs::read(profile.0.join("transport.json")).unwrap(),
         transport.as_slice()
-    );
-    assert_eq!(
-        fs::read(profile.0.join("provider.keys.json")).unwrap(),
-        b"synthetic unchanged key archive"
     );
     tor_profile::save(&profile.0, Purpose::Model, &state('C')).unwrap();
     assert_eq!(
@@ -126,7 +118,7 @@ fn private_pending_writes_are_replaced_and_final_files_stay_private() {
 fn final_symlinks_and_hardlinks_never_disclose_or_overwrite_another_profile() {
     for hardlink in [false, true] {
         let profile = Profile::new();
-        let target = profile.0.join("provider.keys.json");
+        let target = profile.0.join("other-private-file");
         let alias = profile.0.join("onion-tor-state");
         private(&target, b"synthetic secret archive");
         if hardlink {
@@ -180,6 +172,7 @@ fn oversized_nonselective_and_wrong_version_state_are_rejected_without_mutation(
         ),
         format!("{}BWHistoryReadValues 123\n", state('A').as_str()),
         "TorVersion Tor 0.0.0\nLastWritten 2026-10-28 12:00:00\n".into(),
+        "TorVersion Tor 0.4.9.14\nLastWritten 2026-10-28 12:00:00\n".into(),
     ] {
         let profile = Profile::new();
         private(&profile.0.join("onion-tor-state"), content.as_bytes());

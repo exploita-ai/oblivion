@@ -546,14 +546,18 @@ mod tests {
         let diagnostic = b"The agent connection could not be completed.\n";
         let native_exit = bridge(&[(2, diagnostic), (4, &status)]);
         assert_eq!(agent_outcome(native_exit, stale_release(), || panic!("guest exit is known")).unwrap(), 125);
-        let relay_failure = || bridge(&[(2, b""), (4, &status)]);
+        let relay_failure = || bridge(&[(oblivion_wire::agent::RELAY_FAILURE_KIND, b"")]);
         assert_eq!(agent_outcome(relay_failure(), stale_release(), || true).unwrap_err().to_string(),
             "safe_closed_before_agent_exit");
         assert_eq!(agent_outcome(relay_failure(), stale_release(), || false).unwrap(), 125);
         assert_eq!(agent_outcome(relay_failure(), Ok(()), || panic!("release is current")).unwrap(), 125);
-        let malformed = bridge(&[(2, b""), (4, &1i32.to_be_bytes())]);
-        assert_eq!(agent_outcome(malformed, stale_release(), || panic!("response is malformed")).unwrap_err().to_string(),
-            "Invalid agent response");
+        for frames in [
+            vec![(oblivion_wire::agent::RELAY_FAILURE_KIND, &status[..])],
+            vec![(2, &b""[..]), (4, &status[..])],
+        ] {
+            assert_eq!(agent_outcome(bridge(&frames), stale_release(), || panic!("response is malformed")).unwrap_err().to_string(),
+                "Invalid agent response");
+        }
     }
 
     fn parse(values: &[&str]) -> control::Result<Options> {
@@ -638,7 +642,7 @@ mod tests {
     fn closed_ram_children_resolve_to_their_existing_identity() {
         let mut state: State<scope::Slot> = serde_json::from_value(json!({
             "app_open":true,"app_mode":"ram-only","general_present":false,
-            "general_incomplete":false,"general_bytes":8589934592_u64,"recovery_required":false,
+            "general_incomplete":false,"backing_recovery_required":false,"general_bytes":8589934592_u64,"recovery_required":false,
             "sessions":[],"session_titles":{},"open_sessions":[],
             "agent_safes":[{"id":"a".repeat(32),"ephemeral":true,"state":"awaiting-start"},
                 {"id":"b".repeat(32),"ephemeral":false,"state":"awaiting-start"}],

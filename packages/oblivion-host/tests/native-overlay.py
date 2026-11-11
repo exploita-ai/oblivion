@@ -22,6 +22,7 @@ for line in built.stdout.splitlines():
     if value.get("reason") != "compiler-artifact" or value["target"]["name"] not in (
         "oblivion_host",
         "oblivion_cli",
+        "oblivion_wire",
         "libc",
     ):
         continue
@@ -63,8 +64,9 @@ fn main() {
     }
     let result = native_overlay::bridge(
         &mut stream,
-        interactive,
+        interactive.then(size),
         "12345678123442348234123456789abc",
+        "Fixture Safe",
         saved,
         if interactive { Some(oblivion_host::activity::Reporter::current_safe("12345678123442348234123456789abc").unwrap()) } else { None },
     );
@@ -282,7 +284,8 @@ try:
     assert b"HIDDEN_AGENT_OUTPUT" not in drain(master)
     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
     kind, payload = receive(peer)
-    assert kind == 3 and payload == struct.pack(">HH", 30, 100), (kind, payload)
+    # The bridge reserves two host chrome rows outside the guest viewport.
+    assert kind == 3 and payload == struct.pack(">HH", 28, 100), (kind, payload)
     os.write(master, b"xOVERLAY_QUEUED_INPUT")
     returned = waittty(master, b"AGENT_CONTINUED_OFFSCREEN")
     assert returned.count(b"AGENT_CONTINUED_OFFSCREEN") == 1

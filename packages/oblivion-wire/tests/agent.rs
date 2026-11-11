@@ -16,6 +16,7 @@ fn shared_decoder_keeps_partial_frame_state_at_every_byte_boundary() {
     let mut bytes = vec![];
     agent::write_frame(&mut bytes, 1, &[0, 255, b'\n']).unwrap();
     agent::write_frame(&mut bytes, 4, &7i32.to_be_bytes()).unwrap();
+    agent::write_frame(&mut bytes, agent::RELAY_FAILURE_KIND, &[]).unwrap();
     for split in 0..8 {
         let mut decoder = Decoder::default();
         assert!(decoder.read(&mut Ready(&bytes[..split])).unwrap().is_none());
@@ -28,6 +29,7 @@ fn shared_decoder_keeps_partial_frame_state_at_every_byte_boundary() {
             decoder.read(&mut rest).unwrap(),
             Some((4, 7i32.to_be_bytes().to_vec()))
         );
+        assert_eq!(decoder.read(&mut rest).unwrap(), Some((agent::RELAY_FAILURE_KIND, vec![])));
         assert!(decoder.read(&mut rest).unwrap().is_none());
     }
     assert_eq!(

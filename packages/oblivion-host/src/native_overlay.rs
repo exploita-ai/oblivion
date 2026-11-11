@@ -2,7 +2,7 @@
 
 use oblivion_cli::terminal_overlay::{self, Chrome, Keys, Page};
 use oblivion_host::{agent, control};
-use oblivion_wire::agent::RELAY_FAILURE_STATUS;
+use oblivion_wire::agent::RELAY_FAILURE_KIND;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
@@ -192,7 +192,6 @@ fn forward(
     keys.set_viewport(viewport);
     let mut human = oblivion_host::activity::HumanInput::default();
     let mut overlay: Option<Overlay> = None;
-    let mut relay_failure = false;
     loop {
         if let Some(child) = overlay.as_mut() {
             if child.poll()?.is_some() {
@@ -263,15 +262,9 @@ fn forward(
         }
         if polls[0].revents != 0 {
             let (kind, bytes) = agent_channel(agent::read_frame(stream))?;
-            if relay_failure {
-                if kind == 4 && bytes == RELAY_FAILURE_STATUS.to_be_bytes() {
-                    return Err(AgentRelayFailure.into());
-                }
-                return Err("Invalid agent response".into());
-            }
             match kind {
-                2 if bytes.is_empty() => relay_failure = true,
-                1 | 2 => {
+                RELAY_FAILURE_KIND if bytes.is_empty() => return Err(AgentRelayFailure.into()),
+                1 | 2 if !bytes.is_empty() => {
                     if let Some(chrome) = chrome.as_deref_mut() {
                         chrome.process(&bytes);
                         keys.set_mouse_utf8(chrome.mouse_utf8());

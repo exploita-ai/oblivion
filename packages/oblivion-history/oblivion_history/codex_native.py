@@ -33,7 +33,7 @@ def parsed(data):
                 raise ValueError("invalid_codex_rollout")
         offset += len(line)
         positions.append((row.get("ordinal"), offset))
-    if meta.get("cli_version") != VERSIONS["codex"] or meta.get("history_mode", "legacy") not in ("legacy", "paginated"):
+    if meta.get("cli_version") != VERSIONS["codex"] or meta.get("history_mode") not in ("legacy", "paginated"):
         raise ValueError("unsupported_codex_format")
     identifier(meta.get("id"))
     # Safe profiles always use the same /vault roots, so raw byte offsets need no rewrite.

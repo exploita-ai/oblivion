@@ -10,6 +10,12 @@ The current versions are Codex 0.159.2, Claude Code 2.1.302 and OpenCode 2.0.1.
 Unknown versions and incomplete transcripts fail explicitly. There are no beta
 readers or migration aliases.
 
+Codex exports require an explicit `history_mode`. The pinned 0.159.2 client
+serializes that field and defines both `legacy` and `paginated` as native modes;
+the adapter preserves either value without conversion. These upstream enum
+values do not enable old Oblivion archives or a missing-field compatibility
+reader. See the pinned [history-mode enum and session metadata](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/protocol/src/protocol.rs).
+
 `oblivion_history.portable` reads only Codex rollout transcripts and native title
 index, Claude project transcripts, and the OpenCode `session_v2` /
 `session_message` projections. Source profile configuration, login files, provider

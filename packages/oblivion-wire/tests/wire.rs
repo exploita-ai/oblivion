@@ -2,7 +2,7 @@ use oblivion_wire::{agent, control, frame};
 use std::io::{self, Read};
 
 #[test]
-fn control_headers_keep_the_existing_local_and_native_wire_bytes() {
+fn control_headers_use_exact_local_and_native_wire_bytes() {
     let request = control::Request {
         expected_session: None,
         operation: control::Operation::Status,
@@ -29,10 +29,13 @@ fn control_headers_keep_the_existing_local_and_native_wire_bytes() {
 
 #[test]
 fn secret_bytes_and_native_versions_never_enter_local_control_headers() {
-    let base = serde_json::json!({"operation":"unlock", "session":null, "secret_len":70000});
+    let base = serde_json::json!({"operation":"unlock", "session":null, "secret_len":70000, "slot":0});
     let request: control::Request<u8> = serde_json::from_value(base.clone()).unwrap();
     assert_eq!(request.secret_len, 70000);
     assert_eq!(request.slot, 0);
+    let mut missing_slot = base.clone();
+    missing_slot.as_object_mut().unwrap().remove("slot");
+    assert!(serde_json::from_value::<control::Request<u8>>(missing_slot).is_err());
     for name in ["password", "secret", "version", "path", "owner"] {
         let mut value = base.clone();
         value[name] = "unexpected synthetic payload".into();

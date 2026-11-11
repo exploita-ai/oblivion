@@ -38,7 +38,7 @@ class Requests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 self.read(invalid)
 
-    def test_real_channel_marks_relay_failure_before_legacy_exit(self):
+    def test_real_channel_reports_relay_failure_without_an_agent_exit(self):
         sender, receiver = socket.socketpair()
         with sender:
             with receiver:
@@ -50,8 +50,7 @@ class Requests(unittest.TestCase):
                 self.assertEqual(output.read(6), b"ready\n")
                 self.assertEqual(struct.unpack(">BI", output.read(5)), (2, len(diagnostic)))
                 self.assertEqual(output.read(len(diagnostic)), diagnostic)
-                self.assertEqual(struct.unpack(">BI", output.read(5)), (2, 0))
-                self.assertEqual(struct.unpack(">BIi", output.read(9)), (4, 4, 125))
+                self.assertEqual(struct.unpack(">BI", output.read(5)), (7, 0))
                 self.assertEqual(output.read(), b"")
 
 

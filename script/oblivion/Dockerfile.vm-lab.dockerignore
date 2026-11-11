@@ -42,8 +42,6 @@ packages/oblivion-host/*
 !packages/oblivion-host/Cargo.lock
 !packages/oblivion-host/src/
 !packages/oblivion-host/src/**
-!packages/oblivion-host/examples/
-!packages/oblivion-host/examples/**
 !packages/oblivion-host/tests/
 !packages/oblivion-host/tests/**
 !packages/oblivion-host/guest/
@@ -72,8 +70,6 @@ script/oblivion/*
 !script/oblivion/session-identities.sh
 !script/oblivion/run-onion-lab.py
 !script/oblivion/run-onion-file-lab.py
-!script/oblivion/packet_capture.py
-!script/oblivion/onion_recipient.py
 !script/oblivion/test-session-tools.py
 !script/oblivion/session-packages.txt
 !script/oblivion/session-analysis.in

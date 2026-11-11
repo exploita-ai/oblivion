@@ -25,13 +25,9 @@ fn pending_job() -> String { oblivion_host::scope::path("/run/oblivion/transfer.
 struct Job {
     id: String,
     live_media: Option<Purpose>,
-    #[serde(default)]
     recovery: bool,
-    #[serde(default)]
     export: bool,
-    #[serde(default)]
     backup: Option<Backup>,
-    #[serde(default)]
     restore: Option<Restore>,
 }
 
@@ -534,7 +530,7 @@ fn live_media_device(sysfs: &Path, serial: &str, direction: Direction) -> Result
 
 #[cfg(test)]
 mod live_media_device_tests {
-    use super::{live_media_device, wait_export_flush};
+    use super::{Job, live_media_device, wait_export_flush};
     use oblivion_wire::live_media::Direction::{Export, Import};
     use oblivion_wire::live_media::{DETACHED, STOP};
     use std::fs;
@@ -542,6 +538,24 @@ mod live_media_device_tests {
     use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn job_requires_explicit_operation_flags() {
+        let record = serde_json::to_value(Job {
+            id: "a".repeat(32),
+            live_media: None,
+            recovery: false,
+            export: false,
+            backup: None,
+            restore: None,
+        }).unwrap();
+        assert!(serde_json::from_value::<Job>(record.clone()).is_ok());
+        for field in ["recovery", "export"] {
+            let mut incomplete = record.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Job>(incomplete).is_err());
+        }
+    }
 
     struct Tree(PathBuf);
 

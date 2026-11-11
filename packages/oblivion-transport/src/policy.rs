@@ -87,7 +87,6 @@ pub struct Session(String);
 pub struct Tools {
     pub session: Session,
     pub policy: Policy,
-    #[serde(default)]
     pub access: Access,
 }
 

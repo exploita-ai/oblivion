@@ -1,7 +1,7 @@
 # Oblivion private wire
 
 Platform-independent request data and bounded byte framing for Oblivion's private
-controller and agent channels. Linux, macOS and a future Windows frontend use one
+controller and agent channels. Linux, macOS and Windows frontends use one
 control vocabulary. The crate contains no sockets, filesystem access, terminal
 APIs, VM discovery or operating-system dependencies.
 
@@ -17,6 +17,11 @@ at most 65536 raw payload bytes; empty payloads remain valid for stdin EOF. Size
 is the shared guest PTY geometry. Agent launch admission, managed jobs, file
 manifests and OS-specific byte transport retain their domain/platform owners.
 Launch requests and the incremental frame decoder are shared here.
+Agent output frames carry nonempty stdout/stderr data. A relay failure ends the
+stream with kind 7 and an empty payload, separate from the agent's kind-4 exit
+status. The former empty-stderr/exit-125 marker is rejected. Controller headers
+always include their slot, and controller status always includes recovery
+observations; missing values are not inferred from an older payload.
 
 The private runtime bootstrap has one current v2 format: READY, the per-boot
 token, bounded Existing/NewDisk metadata and SET. NewDisk carries only an exact
@@ -32,6 +37,7 @@ cargo test --locked
 cargo check --locked --lib --target x86_64-pc-windows-msvc
 ```
 
-Windows compilation verifies this portable layer only. It does not provide or
-qualify a Windows CLI, Hyper-V runtime, encrypted disk provisioning or terminal
-integration; see [the Windows backend plan](../../docs/WINDOWS.md).
+Windows compilation verifies this portable layer only. The Windows CLI and
+Hyper-V runtime live in their platform packages; their installed integration,
+encrypted disk provisioning and terminal behavior require separate
+qualification. See [the Windows backend](../../docs/WINDOWS.md).

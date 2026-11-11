@@ -3,9 +3,9 @@
 The host sends u32be JSON length followed by a tagged agent or workspace request. Terminal
 is null for pipes or {rows, cols} for a PTY. Frames are u8 kind + u32be length
 + payload. Kinds: stdin=0, stdout=1, stderr=2, resize=3 (u16be rows, cols),
-exit=4 (i32be status), stdin EOF=5, signal=6 (i32be Linux signal number).
-Empty stderr immediately before exit 125 identifies a relay failure. Older
-readers ignore the empty frame and retain the diagnostic and status 125.
+exit=4 (i32be status), stdin EOF=5, signal=6 (i32be Linux signal number),
+relay failure=7 (empty). Relay failure terminates the stream without an agent
+exit status. Stdout and stderr frames always carry nonempty process output.
 """
 from contextlib import contextmanager
 import errno
@@ -268,10 +268,10 @@ def serve(fd):
         run(fd, request(fd))
     except (ValueError, EOFError, OSError):
         # Request data, arguments and subprocess exceptions can contain
-        # secrets. Child output is never emitted in empty frames.
+        # secrets. Send only a fixed diagnostic and the terminal failure frame.
         try:
             os.write(fd, frame(2, b"The agent connection could not be completed.\n")
-                     + frame(2, b"") + frame(4, struct.pack(">i", 125)))
+                     + frame(7, b""))
         except OSError:
             pass
 
