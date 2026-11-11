@@ -267,6 +267,8 @@ pub fn manage(
                 .ok_or_else(|| invalid("file_operation_changed"))?;
             let file = operation.create_file("discarded")?;
             file.sync_all()?;
+            // Read-only record handles reject existing writers on Windows.
+            drop(file);
             operation.sync()?;
             inspect(&root, &target_directory, id, safe, opening, direction)
         }
