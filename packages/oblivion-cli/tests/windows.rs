@@ -50,7 +50,9 @@ fn instance(id: &str, first: bool) -> File {
         .chain(Some(0))
         .collect();
     let identity = Identity::current().unwrap();
-    let descriptor = identity.descriptor().unwrap();
+    // Match the embedded server's explicit caller owner as well as its ACL;
+    // an elevated runner's default owner can otherwise be Administrators.
+    let descriptor = identity.pipe_descriptor().unwrap();
     let attributes = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: descriptor.as_ptr(),
