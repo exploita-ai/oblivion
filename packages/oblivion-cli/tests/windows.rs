@@ -334,7 +334,7 @@ fn files_browser_uses_the_open_safe_slot_and_validates_its_guest_page() {
 #[test]
 fn guest_file_metadata_holds_the_exact_opening_lease_until_explicit_release_even_on_bad_reply() {
     use oblivion_cli::files::Backend;
-    use oblivion_transfer::native_files::{Action, Direction, TransfersQuery};
+    use oblivion_transfer::native_files::{Action, Direction, State, TransfersQuery};
     use oblivion_wire::idle::Opening;
     let (id, mut control) = listener();
     let mut release = instance(&id, false);
@@ -446,19 +446,21 @@ fn guest_file_metadata_holds_the_exact_opening_lease_until_explicit_release_even
         )
         .unwrap_err();
     assert!(!format!("{error:?}").contains("PRIVATE_CANARY"));
-    let error = runtime
+    server.join().unwrap();
+    let area = CopyArea::new();
+    let status = runtime
         .manage(
             &opening,
             "dddddddddddddddddddddddddddddddd",
             Action::Status,
-            Some("C:\\exports"),
+            Some(area.0.to_str().unwrap()),
         )
-        .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "windows_filesystem_endpoint_not_implemented"
-    );
-    server.join().unwrap();
+        .unwrap();
+    status
+        .validate("dddddddddddddddddddddddddddddddd", SAFE, &opening.nonce)
+        .unwrap();
+    assert_eq!(status.state, State::Unknown);
+    assert!(status.receipt.is_none() && !status.can_recover && !status.can_discard);
 }
 
 #[test]
