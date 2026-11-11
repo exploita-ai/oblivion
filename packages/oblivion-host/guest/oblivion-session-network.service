@@ -2,13 +2,12 @@
 Description=Prepare the private session API channel
 ConditionKernelCommandLine=oblivion.network=1
 After=systemd-modules-load.service systemd-udev-trigger.service
-Before=oblivion-conversation.service
 
 [Service]
 Type=oneshot
 Group=1000
 ExecStart=/usr/lib/oblivion/guest/network.sh
-RuntimeDirectory=oblivion-api
+RuntimeDirectory=oblivion-network
 RuntimeDirectoryMode=0750
 RemainAfterExit=yes
 TimeoutStartSec=60
@@ -18,3 +17,6 @@ CapabilityBoundingSet=CAP_NET_ADMIN
 LimitCORE=0
 StandardOutput=null
 StandardError=null
+
+[Install]
+WantedBy=multi-user.target

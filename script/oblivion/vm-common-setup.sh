@@ -5,6 +5,15 @@ printf 'virtio_pci\nvirtio_blk\nvirtio_rng\nsquashfs\next4\nevdev\n' > /etc/init
 if [ "$(dpkg --print-architecture)" = arm64 ]; then
     printf 'gpio_keys\n' >> /etc/initramfs-tools/modules
 fi
+mkdir -p /etc/initramfs-tools/hooks
+cat > /etc/initramfs-tools/hooks/oblivion-virtual-udev <<'EOF'
+#!/bin/sh
+set -eu
+[ "${1:-}" != prereqs ] || exit 0
+# Virtual boot devices use their drivers. The mounted system keeps the udev database.
+rm -f "$DESTDIR/usr/lib/udev/hwdb.bin"
+EOF
+chmod 0755 /etc/initramfs-tools/hooks/oblivion-virtual-udev
 update-initramfs -u -k all
 mkdir -p /etc/systemd/journald.conf.d /etc/systemd/system.conf.d /etc/systemd/logind.conf.d
 # Debian's syslog.conf sorts after oblivion.conf and otherwise reenables forwarding.

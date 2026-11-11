@@ -5,17 +5,44 @@ umask 077
 # A virtio port need not close on the host when its guest process exits.
 # End this disposable VM on failure so the relay's pidfd revokes the copy.
 trap 'umount /target 2>/dev/null || :; /usr/sbin/poweroff -f' EXIT
-role=export
-case "$(blkid -o value -s TYPE /dev/vdb)" in
-    ext4) mount -t ext4 -o rw,nodev,nosuid,noexec /dev/vdb /target ;;
-    vfat)
-        mount -t vfat -o rw,nodev,nosuid,noexec,utf8=1,uid=0,gid=0,fmask=0177,dmask=0077 /dev/vdb /target
-        role=export-portable ;;
-    exfat)
-        mount -t exfat -o rw,nodev,nosuid,noexec,iocharset=utf8,uid=0,gid=0,fmask=0177,dmask=0077 /dev/vdb /target
-        role=export-portable ;;
+filesystem="$(blkid -o value -s TYPE /dev/vdb)"
+case "$filesystem" in
+    ext4) role=export; mode=posix; mount_flags=rw,nodev,nosuid,noexec ;;
+    vfat) role=export-portable; mode=fat32; mount_flags=rw,nodev,nosuid,noexec,utf8=1,uid=0,gid=0,fmask=0177,dmask=0077 ;;
+    exfat) role=export-portable; mode=exfat; mount_flags=rw,nodev,nosuid,noexec,iocharset=utf8,uid=0,gid=0,fmask=0177,dmask=0077 ;;
     *) exit 1 ;;
 esac
+case " $(cat /proc/cmdline) " in
+    *" oblivion.live-export=1 "*)
+        proof=/dev/virtio-ports/oblivion.export-proof
+        tries=0
+        while [ ! -c "$proof" ] && [ "$tries" -lt 100 ]; do
+            tries=$((tries + 1))
+            sleep 0.05
+        done
+        [ -c "$proof" ]
+        exec 3<>/dev/virtio-ports/oblivion.export
+        exec 4<>"$proof"
+        printf 'ready\n' >&3
+        # The controller chooses one endpoint before handing off the raw port.
+        # An aborted guest that did not get a command has not mounted the disk.
+        case "$(dd bs=1 count=1 <&3 2>/dev/null)" in
+            M) set -- live-media-export /target 3600000 "$mode" ;;
+            R) set -- live-media-manage /target 3600000 "$mode" recover ;;
+            D) set -- live-media-manage /target 3600000 "$mode" discard ;;
+            *) exit 1 ;;
+        esac
+        mount -t "$filesystem" -o "$mount_flags" /dev/vdb /target
+        result=0
+        /usr/bin/oblivion-copy "$@" || result=$?
+        umount /target
+        blockdev --flushbufs /dev/vdb
+        printf 'detached\n' >&4
+        trap - EXIT
+        exit "$result"
+        ;;
+esac
+mount -t "$filesystem" -o "$mount_flags" /dev/vdb /target
 exec 3<>/dev/virtio-ports/oblivion.export
 printf 'ready\n' >&3
 case "$(dd bs=1 count=1 <&3 2>/dev/null)" in

@@ -1,11 +1,10 @@
 import { RGBA } from "@opentui/core"
-import { parseThemeDocument, resolveThemeDocument } from "@opencode/theme/tui"
-import { oblivion } from "@opencode/theme/tui/themes"
+import { parseThemeDocument, resolveThemeDocument } from "@oblivion/theme/tui"
+import { oblivion } from "@oblivion/theme/tui/themes"
 
 export const palette = resolveThemeDocument(parseThemeDocument(oblivion), "dark")
 
-// Compatibility names for the host shell. Both applications resolve the same
-// semantic theme; these are not a second independently maintained palette.
+// Resolve semantic colors for both true-color terminals and the Linux console.
 const color = (value: RGBA, index: number) => process.env.TERM === "linux" ? RGBA.fromIndex(index) : value
 export const theme = {
   background: {

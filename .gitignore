@@ -10,7 +10,6 @@ ts-dist
 .turbo
 .typecheck-profiles
 /result
-/opencode.json
 target
 .cache
 tmp/
@@ -18,3 +17,6 @@ logs/
 /artifacts/
 *.bun-build
 tsconfig.tsbuildinfo
+
+__pycache__/
+*.pyc

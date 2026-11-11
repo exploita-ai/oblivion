@@ -1,4 +1,5 @@
-use crate::{invalid, require};
+use crate::file_identity::FileIdentity;
+use crate::{MAX_ENTRIES, invalid, require};
 use std::ffi::{CStr, CString};
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -48,6 +49,41 @@ impl Directory {
 
     pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
         self.0.metadata()
+    }
+
+    pub fn has_space(&self, bytes: u64) -> io::Result<bool> {
+        let mut space = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: the directory descriptor and the output buffer remain live.
+        if unsafe { libc::fstatvfs(self.0.as_raw_fd(), space.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let space = unsafe { space.assume_init() };
+        Ok(u128::from(bytes) <= u128::from(space.f_bavail) * u128::from(space.f_frsize))
+    }
+
+    /// Same currently mounted device, independent of durable filesystem UUID.
+    pub fn same_device(&self, file: &File) -> io::Result<bool> {
+        Ok(self.0.metadata()?.dev() == file.metadata()?.dev())
+    }
+
+    /// Recovery records are receiver-owned regular files, never links or data
+    /// from an agent-controlled publication tree.
+    pub fn record(&self, name: &str, limit: u64) -> io::Result<File> {
+        let file = self.source(name)?;
+        let metadata = file.metadata()?;
+        require(
+            metadata.is_file()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.nlink() == 1
+                && metadata.mode() & 0o077 == 0
+                && metadata.len() <= limit,
+            "unsafe_file_operation_record",
+        )?;
+        Ok(file)
+    }
+
+    pub fn identity(&self) -> io::Result<FileIdentity> {
+        FileIdentity::of(&self.0)
     }
 
     pub fn lock(&self) -> io::Result<()> {
@@ -145,6 +181,72 @@ impl Directory {
         Ok(())
     }
 
+    /// Publish a verified entry without replacing an existing destination,
+    /// including an empty directory created concurrently by the agent.
+    pub fn move_exclusive(
+        &self,
+        from: &str,
+        destination: &Self,
+        to: &str,
+        expected: &FileIdentity,
+    ) -> io::Result<()> {
+        let file = self.source(from)?;
+        require(expected.matches(&file)?, "publication_changed")?;
+        self.rename_exclusive(from, destination, to)
+    }
+
+    pub fn move_file_exclusive(
+        &self,
+        from: &str,
+        destination: &Self,
+        to: &str,
+        expected: &File,
+    ) -> io::Result<()> {
+        let file = self.source(from)?.metadata()?;
+        let expected = expected.metadata()?;
+        require(
+            file.is_file() && file.dev() == expected.dev() && file.ino() == expected.ino(),
+            "publication_changed",
+        )?;
+        self.rename_exclusive(from, destination, to)
+    }
+
+    pub(crate) fn rename_exclusive(
+        &self,
+        from: &str,
+        destination: &Self,
+        to: &str,
+    ) -> io::Result<()> {
+        let from = component(from)?;
+        let to = component(to)?;
+        #[cfg(target_os = "linux")]
+        let result = unsafe {
+            libc::renameat2(
+                self.0.as_raw_fd(),
+                from.as_ptr(),
+                destination.0.as_raw_fd(),
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        let result = unsafe {
+            libc::renameatx_np(
+                self.0.as_raw_fd(),
+                from.as_ptr(),
+                destination.0.as_raw_fd(),
+                to.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let result = return Err(io::Error::from(io::ErrorKind::Unsupported));
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub fn names(&self, limit: usize) -> io::Result<Vec<String>> {
         let mut names = Vec::new();
         self.visit(|name| {
@@ -201,7 +303,7 @@ impl Directory {
     pub fn remove_directory(&self, name: &str) -> io::Result<()> {
         let directory = self.directory(name)?;
         // This tree is receiver-created in a private root, never an arbitrary source.
-        for child in directory.names(4096)? {
+        for child in directory.names(MAX_ENTRIES)? {
             if directory.source(&child)?.metadata()?.is_dir() {
                 directory.remove_directory(&child)?;
                 continue;
@@ -211,6 +313,16 @@ impl Directory {
         self.unlink(name, libc::AT_REMOVEDIR)
     }
 
+    pub fn remove_file(&self, name: &str, expected: &File) -> io::Result<()> {
+        let file = self.source(name)?.metadata()?;
+        let expected = expected.metadata()?;
+        require(
+            file.is_file() && file.dev() == expected.dev() && file.ino() == expected.ino(),
+            "publication_changed",
+        )?;
+        self.unlink(name, 0)
+    }
+
     fn unlink(&self, name: &str, flags: i32) -> io::Result<()> {
         let name = component(name)?;
         if unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), flags) } != 0 {
@@ -218,6 +330,92 @@ impl Directory {
         }
         Ok(())
     }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn file_identity(file: &File) -> io::Result<FileIdentity> {
+    // Linux 6.9+ FS_IOC_GETFSUUID returns the filesystem's complete external
+    // UUID from this descriptor. f_fsid folds ext4's UUID to only 64 bits.
+    #[repr(C)]
+    struct FsUuid {
+        len: u8,
+        uuid: [u8; 16],
+    }
+    let mut uuid = FsUuid {
+        len: 0,
+        uuid: [0; 16],
+    };
+    if unsafe { libc::ioctl(file.as_raw_fd(), libc::_IOR::<FsUuid>(0x15, 0), &mut uuid) } != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "filesystem_identity_unavailable",
+        ));
+    }
+    require((1..=16).contains(&uuid.len), "invalid_filesystem_identity")?;
+    let uuid = uuid.uuid[..usize::from(uuid.len)].to_vec();
+    require(
+        uuid.iter().any(|byte| *byte != 0),
+        "invalid_filesystem_identity",
+    )?;
+    let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(file.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(FileIdentity::Linux {
+        kind: unsafe { stats.assume_init() }.f_type as i64,
+        uuid,
+        inode: file.metadata()?.ino(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn file_identity(file: &File) -> io::Result<FileIdentity> {
+    #[repr(C)]
+    struct Attributes {
+        length: u32,
+        returned: libc::attribute_set_t,
+        uuid: [u8; 16],
+    }
+    let mut request: libc::attrlist = unsafe { std::mem::zeroed() };
+    request.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
+    request.commonattr = libc::ATTR_CMN_RETURNED_ATTRS;
+    request.volattr = libc::ATTR_VOL_INFO | libc::ATTR_VOL_UUID;
+    let mut value: Attributes = unsafe { std::mem::zeroed() };
+    if unsafe {
+        libc::fgetattrlist(
+            file.as_raw_fd(),
+            (&mut request as *mut libc::attrlist).cast(),
+            (&mut value as *mut Attributes).cast(),
+            std::mem::size_of::<Attributes>(),
+            0,
+        )
+    } != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "filesystem_identity_unavailable",
+        ));
+    }
+    require(
+        value.length as usize == std::mem::size_of::<Attributes>()
+            && value.returned.volattr & libc::ATTR_VOL_UUID != 0
+            && value.uuid.iter().any(|byte| *byte != 0),
+        "invalid_filesystem_identity",
+    )?;
+    let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(file.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stats = unsafe { stats.assume_init() };
+    let kind = unsafe { CStr::from_ptr(stats.f_fstypename.as_ptr()) }
+        .to_str()
+        .map_err(|_| invalid("invalid_filesystem_identity"))?
+        .to_owned();
+    Ok(FileIdentity::MacOs {
+        kind,
+        uuid: value.uuid,
+        inode: file.metadata()?.ino(),
+    })
 }
 
 struct DirectoryStream(*mut libc::DIR);
@@ -246,4 +444,118 @@ fn component(name: &str) -> io::Result<CString> {
         "invalid_component",
     )?;
     CString::new(name).map_err(|_| invalid("invalid_component"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Directory;
+    use crate::file_identity::FileIdentity;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn receiver_records_reject_aliases_public_permissions_and_oversized_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "oblivion-record-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let directory = Directory::open(&root).unwrap();
+        let file = directory.create_file("record").unwrap();
+        file.set_len(4).unwrap();
+        assert!(directory.record("record", 4).is_ok());
+        assert!(directory.record("record", 3).is_err());
+        assert!(directory.same_device(&file).unwrap());
+        let identity = FileIdentity::of(&file).unwrap();
+        directory.rename("record", "renamed").unwrap();
+        assert!(
+            identity
+                .matches(&directory.source("renamed").unwrap())
+                .unwrap()
+        );
+        let other = directory.create_file("other").unwrap();
+        assert!(!identity.matches(&other).unwrap());
+        std::fs::hard_link(root.join("renamed"), root.join("alias")).unwrap();
+        assert!(directory.record("renamed", 4).is_err());
+        std::fs::remove_file(root.join("alias")).unwrap();
+        std::fs::set_permissions(root.join("renamed"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        assert!(directory.record("renamed", 4).is_err());
+        symlink(root.join("other"), root.join("link")).unwrap();
+        assert!(directory.record("link", 4).is_err());
+        directory.create_directory("folder").unwrap();
+        assert!(directory.record("folder", 4096).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn private_cleanup_supports_every_valid_transfer_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "oblivion-cleanup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let directory = Directory::open(&root).unwrap();
+        let pending = directory.create_directory("pending").unwrap();
+        for index in 0..4097 {
+            pending.create_file(&format!("file-{index}")).unwrap();
+        }
+        directory.create_file("keep").unwrap();
+        directory.remove_directory("pending").unwrap();
+        assert!(!root.join("pending").exists());
+        assert!(root.join("keep").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn exclusive_move_cannot_replace_an_existing_empty_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "oblivion-exclusive-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let directory = Directory::open(&root).unwrap();
+        directory.create_directory("source").unwrap();
+        directory.create_directory("destination").unwrap();
+        let expected = directory.directory("source").unwrap().identity().unwrap();
+        let other = directory
+            .create_directory("foreign")
+            .unwrap()
+            .identity()
+            .unwrap();
+        assert_eq!(
+            directory
+                .move_exclusive("source", &directory, "unreviewed", &other)
+                .unwrap_err()
+                .to_string(),
+            "publication_changed"
+        );
+        assert!(!root.join("unreviewed").exists());
+        assert_eq!(
+            directory
+                .move_exclusive("source", &directory, "destination", &expected)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert!(root.join("source").is_dir());
+        assert!(root.join("destination").is_dir());
+        directory
+            .move_exclusive("source", &directory, "unused", &expected)
+            .unwrap();
+        assert!(!root.join("source").exists());
+        assert!(root.join("unused").is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

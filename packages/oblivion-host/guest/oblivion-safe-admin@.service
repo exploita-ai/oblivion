@@ -1,0 +1,36 @@
+[Unit]
+Description=Bounded Safe administration without an agent process
+Requires=oblivion-vault.service
+After=oblivion-vault.service dev-virtio\x2dports-%i.device
+BindsTo=dev-virtio\x2dports-%i.device
+
+[Service]
+Type=exec
+# The port is root-private. The helper opens it, then drops to Safe uid1000
+# before parsing requests, reading native stores or starting the offline API.
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I -B /usr/lib/oblivion/guest/safe-admin.py /dev/virtio-ports/%I
+ExecStopPost=/usr/bin/python3 -I -B /usr/lib/oblivion/guest/safe-admin.py --cleanup %I
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+# Preserve SETUID through exec so the helper can drop all privileges after opening the port.
+AmbientCapabilities=CAP_SETUID
+PrivateNetwork=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+ProtectSystem=strict
+ReadWritePaths=/vault/state /vault/workspace /vault/home /vault/config
+ProtectHome=yes
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=512M
+TasksMax=128
+RuntimeMaxSec=90
+TimeoutStopSec=5
+KillMode=control-group
+Restart=no
+StandardInput=null
+StandardOutput=null
+StandardError=null

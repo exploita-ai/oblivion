@@ -2,31 +2,18 @@
 
 This GPL-3.0-or-later component adapts OnionShare 2.7's production Web, Flask,
 Waitress, multipart and archive implementations. It runs as a separate process
-inside the file-transfer boundary, never in the session, model broker or host
-manager. The manager and Linux controller integrate receive/review/import,
-selected-file sharing and closed-session ciphertext sharing. Actual disposable
-Linux hosts with independent public Tor clients have passed receive, approved
+inside the file-transfer boundary, never in a Safe or the host manager. The
+Linux controller retains receive/review/import, selected-file sharing and
+closed-Safe ciphertext sharing through its private control protocol. The current
+1.0 manager and public native CLI do not expose these OnionShare actions.
+Actual disposable Linux hosts with independent public Tor clients have passed receive, approved
 import, reopening, selected-file download, revocation and ephemeral-storage
 checks. Large backups also pass private-wire streaming/resume tests; full public
 backup qualification is tracked in [STATUS.md](../../docs/STATUS.md).
 These laboratories do not establish supported ISO/UTM/KVM/physical-media
 acceptance or reliability on other Tor networks.
 
-## Using OnionShare in beta 2
-
-- In Documents, use **Receive over Tor** to prepare a private receiver. Reveal
-  the temporary access details only when needed, then **Stop receiving and
-  review** before choosing files and approving their import into the session.
-- Select files or folders and use **Share selected over Tor** to publish an
-  approved snapshot. Later changes in the live workspace do not alter that snapshot.
-- The encrypted-session backup flow can share a closed `session.oblivion`
-  volume. The receiver needs its original session password to restore it;
-  that password is not given to the file VM or HTTP worker.
-- Cancel or close/lock the session to revoke the transfer and clean up its
-  auxiliary actors. A cleanup error is surfaced for recovery.
-
-These flows are packaged in the experimental `v0.1.0-beta.2` images; the
-original beta 1 ISO predates them. Ordinary files are limited to 256 MiB and 1,024 entries;
+Ordinary files are limited to 256 MiB and 1,024 entries;
 closed ciphertext backups have a separate size policy. Receiving a large
 backup directly over Tor is not implemented. Full public large-backup transfer,
 supported-candidate acceptance and release hardening remain qualification gates.
@@ -78,7 +65,7 @@ and sizes. `handoff` is receive-only: it freezes HTTP, exits and leaves complete
 files in RAM for the supervisor to reap the unit and seal the intake. The
 supervisor discovers actual files independently; worker paths are not filesystem
 authority. Errors are fixed codes; no upstream request/exception text is sent.
-This protocol is private and does not change OpenCode's public API.
+This protocol is private to the controller and isolated worker.
 
 Received names follow upstream's `secure_filename` normalization. The review
 must show the resulting names. Duplicate/empty normalized names, malformed or
@@ -209,8 +196,8 @@ or descriptor propagation. Independent recipient/authentication and file-copy
 round trips are tested separately. Transfer guard state stays
 separate from the model gateway's profile state;
 a model configured for SOCKS5 must not be reconfigured by an OnionShare action.
-The host store has explicit model/transfer purposes and separate legacy
-`tor-state` / new `onion-tor-state` files. The source owner now loads and
+The host store has explicit model/transfer purposes and separate
+`tor-state` and `onion-tor-state` files. The source owner loads and
 checkpoints transfer guards independently, including after revocation, and
 respects the general vault's writable/ephemeral policy. It never updates a
 model transport, proxy credential or provider key.
@@ -218,14 +205,14 @@ model transport, proxy credential or provider key.
 ## Host owner
 
 The optional root configuration `onion` contains `gateway` and `files` VM
-configurations with the existing VM schema. Missing configuration preserves
-previous behavior. New Live build definitions include both profiles; already
-built/distributed images are unchanged. The
+configurations with the current VM schema. Without that configuration the
+controller rejects OnionShare operations as unavailable. Current image build
+definitions include both profiles. The
 `oblivion-onion-host.service` launches a machine-less NAT actor, the dedicated
 Tor VM and the file VM. Only the NAT actor uses the existing public-uplink UID;
 Tor/file hypervisors have distinct UIDs, private PID/network namespaces and
 AF_UNIX only. The NAT actor has no machine, CPU, kernel or block device, and
-cannot inspect the legacy model hypervisor through its private PID namespace.
+cannot inspect the Safe's model-gateway hypervisor through its private PID namespace.
 The host display keeps UID 1104; gateway/file hypervisors use 1105/1106.
 Actual Linux laboratories check namespaces, egress and actor teardown;
 supported-candidate acceptance remains required.

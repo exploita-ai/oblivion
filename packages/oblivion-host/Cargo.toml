@@ -10,14 +10,28 @@ publish = false
 lab-emulation = []
 
 [dependencies]
+argon2 = { version = "=0.5.3", features = ["zeroize"] }
+base64 = "=0.22.1"
+chacha20poly1305 = "=0.10.1"
+getrandom = "=0.2.17"
+hkdf = "=0.12.4"
+oblivion-cli = { path = "../oblivion-cli" }
+oblivion-bundle = { path = "../oblivion-bundle" }
+oblivion-wire = { path = "../oblivion-wire" }
 oblivion-tor-state = { path = "../oblivion-tor-state" }
 oblivion-transport = { path = "../oblivion-transport" }
+oblivion-share = { path = "../oblivion-share" }
 oblivion-transfer = { path = "../oblivion-transfer" }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-vt100 = { version = "=0.18.1", default-features = false }
+sha2 = "=0.10.9"
+sha2_platform = { package = "sha2", version = "=0.11.0" }
 zeroize = { version = "1.9.1", features = ["serde"] }
+
+[[bin]]
+name = "oblivion"
+path = "src/launcher.rs"
 
 [[bin]]
 name = "oblivion-storage"
@@ -26,14 +40,6 @@ path = "src/main.rs"
 [[bin]]
 name = "oblivion-control"
 path = "src/client.rs"
-
-[[bin]]
-name = "oblivion-manager"
-path = "src/manager.rs"
-
-[[bin]]
-name = "oblivion-console"
-path = "src/console_main.rs"
 
 [[bin]]
 name = "oblivion-display"

@@ -31,6 +31,19 @@ fn fragmented_bidirectional_exchange_completes() {
 }
 
 #[test]
+fn a_fully_closed_peer_keeps_its_buffered_response_readable() {
+    let (stream, mut peer) = UnixStream::pair().unwrap();
+    peer.write_all(b"ready\n").unwrap();
+    drop(peer);
+    let mut response = [0; 6];
+    assert_eq!(Channel::new(&stream, Duration::ZERO).read_exact(&mut response).unwrap_err().kind(), ErrorKind::TimedOut);
+    let mut channel = Channel::new(&stream, Duration::from_secs(2));
+    channel.read_exact(&mut response).unwrap();
+    assert_eq!(&response, b"ready\n");
+    assert_eq!(channel.read_exact(&mut response).unwrap_err().kind(), ErrorKind::UnexpectedEof);
+}
+
+#[test]
 fn continued_progress_does_not_renew_the_exchange() {
     let (stream, peer) = UnixStream::pair().unwrap();
     let worker = std::thread::spawn(move || {

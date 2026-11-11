@@ -2,9 +2,8 @@
 // Uses only the in-memory preview runtime. Never connects to the host controller.
 import { testRender } from "@opentui/solid"
 import { z } from "zod"
-import { App } from "../src/app"
-import { preview } from "../src/preview"
-import { status } from "../src/state"
+import { SafeManager } from "../src/safe-manager"
+import { nativePreview } from "../src/native-control"
 
 const input = z.discriminatedUnion("action", [
   z.object({ action: z.literal("key"), key: z.string().max(32), ctrl: z.boolean(), shift: z.boolean() }),
@@ -16,10 +15,10 @@ let width = 120
 let height = 36
 // Keep async status acquisition outside the synchronous component factory.
 async function mount(locked = false) {
-  const runtime = preview(() => {})
-  if (locked) await runtime.request({ operation: "lock" })
-  const initial = status.parse(JSON.parse(await runtime.request({ operation: "status" })))
-  return testRender(() => <App runtime={runtime} preview initial={initial} />, { width, height, kittyKeyboard: true, exitOnCtrlC: false })
+  const runtime = nativePreview(() => {})
+  if (!locked) await runtime.run(["unlock"])
+  const initial = await runtime.status()
+  return testRender(() => <SafeManager runtime={runtime} preview initial={initial} />, { width, height, kittyKeyboard: true, exitOnCtrlC: false })
 }
 let app = await mount()
 const server = Bun.serve({

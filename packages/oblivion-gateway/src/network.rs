@@ -27,6 +27,47 @@ pub fn offline() -> io::Result<()> {
     apply(&policy)
 }
 
+/// Replace only the base policy while the independent transition barrier is
+/// installed. A whole-ruleset flush would briefly discard that barrier.
+pub fn change_transport(transport: &Transport, offline: bool) -> io::Result<()> {
+    transport.validate().map_err(io::Error::other)?;
+    let mut policy = include_str!("../guest/firewall.nft")
+        .replacen("flush ruleset", "delete table inet oblivion", 1);
+    if offline {
+        policy = policy
+            .replace("type filter hook input priority filter; policy drop;", "type filter hook input priority filter; policy drop;\n        iifname \"outside0\" drop")
+            .replace("type filter hook output priority filter; policy drop;", "type filter hook output priority filter; policy drop;\n        oifname \"outside0\" drop");
+    }
+    match transport {
+        Transport::Tor {} => policy.push_str("add element inet oblivion tor_owners { 1200 }\nadd element inet oblivion tor_connectors { 1201 }\n"),
+        Transport::Socks5 { endpoint, .. } => policy.push_str(&format!("add element inet oblivion proxy4 {{ {} . {} }}\n", endpoint.ip(), endpoint.port())),
+    }
+    apply(&policy)
+}
+
+/// No session data listener exists during the probe. Only infrastructure Tor
+/// and the private connector identity can negotiate the replacement route.
+pub fn transport_probe() -> io::Result<()> {
+    apply("flush chain inet oblivion_rotation input\n\
+        add rule inet oblivion_rotation input iifname \"inside0\" tcp dport 8114 return\n\
+        add rule inet oblivion_rotation input iifname \"inside0\" counter drop\n\
+        flush chain inet oblivion_rotation output\n\
+        add rule inet oblivion_rotation output meta skuid { 1301, 1302 } counter drop\n\
+        add rule inet oblivion_rotation output oifname \"outside0\" meta skuid != { 1200, 1201 } counter drop\n")
+}
+
+/// The verified baseline after removing the transition's separate table.
+/// Obtain it before release so no fallible verification follows reopening.
+pub fn transport_baseline() -> io::Result<Vec<u8>> {
+    let output = Command::new("/usr/sbin/nft")
+        .args(["--stateless", "--numeric", "list", "table", "inet", "oblivion"])
+        .env_clear().stdin(Stdio::null()).stderr(Stdio::null()).output()?;
+    if !output.status.success() || output.stdout.is_empty() || output.stdout.len() > 65536 {
+        return Err(io::Error::other("firewall_verification_failed"));
+    }
+    Ok(output.stdout)
+}
+
 // This barrier precedes conntrack accepts. The supervisor refuses transport
 // policy changes while it is installed; only verified rotation can release it.
 pub fn rotation_block() -> io::Result<()> {
@@ -36,7 +77,7 @@ pub fn rotation_block() -> io::Result<()> {
         add rule inet oblivion_rotation input iifname \"inside0\" counter drop\n\
         add rule inet oblivion_rotation input iifname \"outside0\" counter drop\n\
         add chain inet oblivion_rotation output { type filter hook output priority -20; policy accept; }\n\
-        add rule inet oblivion_rotation output meta skuid { 1201, 1300, 1301, 1302 } counter drop\n\
+        add rule inet oblivion_rotation output meta skuid { 1201, 1301, 1302 } counter drop\n\
         add rule inet oblivion_rotation output oifname \"outside0\" counter drop\n")
 }
 
@@ -47,7 +88,7 @@ pub fn rotation_tor_only() -> io::Result<()> {
         add rule inet oblivion_rotation input iifname \"inside0\" tcp dport 8114 return\n\
         add rule inet oblivion_rotation input iifname \"inside0\" counter drop\n\
         flush chain inet oblivion_rotation output\n\
-        add rule inet oblivion_rotation output meta skuid { 1201, 1300, 1301, 1302 } counter drop\n\
+        add rule inet oblivion_rotation output meta skuid { 1201, 1301, 1302 } counter drop\n\
         add rule inet oblivion_rotation output oifname \"outside0\" meta skuid != 1200 counter drop\n")
 }
 

@@ -1,0 +1,42 @@
+[Unit]
+Description=Receive portable data into a new offline pending Safe
+ConditionKernelCommandLine=oblivion.share=1
+Requires=oblivion-vault.service
+After=oblivion-vault.service dev-%i.device
+BindsTo=dev-%i.device
+
+[Service]
+Type=exec
+User=root
+Group=root
+WorkingDirectory=/
+ExecStart=/usr/bin/python3 -I -B /usr/lib/oblivion/guest/share-channel.py /dev/%I
+RuntimeDirectory=oblivion-share-%i
+RuntimeDirectoryMode=0700
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=512M
+TasksMax=8
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+PrivateNetwork=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/vault
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RuntimeMaxSec=3600
+TimeoutStopSec=5
+KillMode=control-group
+Restart=no
+StandardInput=null
+StandardOutput=null
+StandardError=null

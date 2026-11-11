@@ -9,23 +9,40 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = ["unix-workers"]
+unix-workers = []
+
 [[bin]]
 name = "oblivion-copy"
 path = "src/main.rs"
+required-features = ["unix-workers"]
 
 [[bin]]
 name = "oblivion-copy-relay"
 path = "src/relay-main.rs"
+required-features = ["unix-workers"]
 
 [[bin]]
 name = "oblivion-onion-file"
 path = "src/onion-file-main.rs"
+required-features = ["unix-workers"]
 
 [dependencies]
+icu_casemap = "=2.1.1"
+icu_normalizer = "=2.1.1"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "=0.10.9"
+
+[target.'cfg(windows)'.dependencies]
+oblivion-native-windows = { path = "../oblivion-native-windows" }
+windows-sys = { version = "=0.61.2", features = [
+  "Wdk_Foundation", "Wdk_Storage_FileSystem",
+  "Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Threading", "Win32_System_SystemServices",
+] }
 
 [profile.dev]
 debug = 0

@@ -3,6 +3,7 @@ use crate::vm::{self, Role};
 use oblivion_host::channel::Channel;
 use oblivion_host::transfers::{self, Source, SourceKind, Started, Status};
 use oblivion_transfer::relay::{self, Permit};
+use oblivion_wire::live_media::{DETACHED, Direction, Purpose, STOP};
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
@@ -23,14 +24,24 @@ fn pending_job() -> String { oblivion_host::scope::path("/run/oblivion/transfer.
 #[serde(deny_unknown_fields)]
 struct Job {
     id: String,
-    #[serde(default)]
+    live_media: Option<Purpose>,
     recovery: bool,
-    #[serde(default)]
     export: bool,
-    #[serde(default)]
     backup: Option<Backup>,
-    #[serde(default)]
     restore: Option<Restore>,
+}
+
+impl Job {
+    fn matches_live(&self, id: &str, direction: Direction) -> bool {
+        self.live_media.is_some() && self.id == id && self.export == (direction == Direction::Export)
+    }
+}
+
+fn live_uid(direction: Direction) -> u32 {
+    oblivion_host::scope::uid(match direction {
+        Direction::Import => vm::IMPORT_UID,
+        Direction::Export => vm::EXPORT_UID,
+    })
 }
 
 #[derive(Deserialize, Serialize)]
@@ -115,11 +126,7 @@ fn sources(general: &Path) -> Result<Vec<Source>> {
             path.as_path()
         };
         let serial = fs::read_to_string(disk.join("serial")).unwrap_or_default();
-        let virtio = disk.ancestors().any(|parent| {
-            fs::read_link(parent.join("subsystem"))
-                .ok()
-                .is_some_and(|link| link.ends_with("virtio"))
-        });
+        let virtio = virtio_disk(disk);
         // A virtual drive is opt-in through the supplied import/export profile.
         // Arbitrary internal disks never become eligible merely by being virtio.
         let Some(kind) = SourceKind::detect(
@@ -214,6 +221,18 @@ fn prepare_device(source: &str, general: &Path, export: bool) -> Result<()> {
             ) == source.id,
         "source_changed",
     )?;
+    map_device(&source, export)
+}
+
+fn virtio_disk(disk: &Path) -> bool {
+    disk.ancestors().any(|parent| {
+        fs::read_link(parent.join("subsystem"))
+            .ok()
+            .is_some_and(|link| link.ends_with("virtio"))
+    })
+}
+
+fn map_device(source: &Source, export: bool) -> Result<()> {
     let name = oblivion_host::scope::current().mapping(if export {
         "oblivion-export"
     } else {
@@ -300,13 +319,9 @@ pub fn idle() -> Result<()> {
             && vm::stopped_role(Role::Export)?,
         "transfer_already_running",
     )?;
-    require(
-        !Path::new(&job_path()).exists()
-            && !Path::new(&pending_job()).exists()
-            && !Path::new(&oblivion_host::scope::path(vm::IMPORT_DEVICE)).exists()
-            && !Path::new(&oblivion_host::scope::path(vm::EXPORT_DEVICE)).exists(),
-        "transfer_cleanup_required",
-    )?;
+    for path in [job_path(), pending_job(), oblivion_host::scope::path(vm::IMPORT_DEVICE), oblivion_host::scope::path(vm::EXPORT_DEVICE)] {
+        require(!Path::new(&path).try_exists().map_err(|_| Error("transfer_state_failed"))?, "transfer_cleanup_required")?;
+    }
     Ok(())
 }
 
@@ -321,14 +336,21 @@ fn start_job(
         .as_ref()
         .map(|backup| backup.bytes)
         .or_else(|| restore.as_ref().map(|restore| restore.maximum));
-    let encoded = serde_json::to_vec(&Job {
+    publish_job(&Job {
         id: id.clone(),
+        live_media: None,
         recovery,
         export,
         backup,
         restore,
-    })
-    .map_err(|_| Error("transfer_state_failed"))?;
+    })?;
+    vm::execute("/usr/bin/systemctl", &["start".into(), unit()])?;
+    Ok(Started { id, bytes })
+}
+
+fn publish_job(record: &Job) -> Result<()> {
+    let encoded = serde_json::to_vec(record).map_err(|_| Error("transfer_state_failed"))?;
+    require(!Path::new(&job_path()).exists(), "transfer_already_running")?;
     let mut job = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -336,15 +358,392 @@ fn start_job(
         .custom_flags(libc::O_NOFOLLOW)
         .open(&pending_job())
         .map_err(|_| Error("transfer_state_failed"))?;
-    job.write_all(&encoded)
+    let published = job.write_all(&encoded)
         .and_then(|()| job.sync_all())
-        .map_err(|_| Error("transfer_state_failed"))?;
+        .and_then(|()| fs::rename(pending_job(), job_path()));
     // The storage operation lock serializes starts. Publish only a complete
     // record so interruption cannot leave an undecodable live job.
-    require(!Path::new(&job_path()).exists(), "transfer_already_running")?;
-    fs::rename(&pending_job(), &job_path()).map_err(|_| Error("transfer_state_failed"))?;
-    vm::execute("/usr/bin/systemctl", &["start".into(), unit()])?;
-    Ok(Started { id, bytes })
+    if published.is_err() {
+        fs::remove_file(pending_job()).map_err(|_| Error("transfer_state_failed"))?;
+        return Err(Error("transfer_state_failed"));
+    }
+    Ok(())
+}
+
+/// The live outer helper attached exactly one direction-bound virtio disk. Its
+/// kernel-assigned block device is selected by the reserved serial, not by a
+/// path, numeric device, partition or size supplied by the launcher.
+pub struct LiveDevice {
+    source: Source,
+    file: File,
+}
+
+pub fn wait_live_media(
+    id: &str,
+    direction: Direction,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<LiveDevice> {
+    crate::storage::validate_id(id)?;
+    let serial = format!("obl-{}", &id[..16]);
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        check()?;
+        match live_media_device(Path::new("/sys"), &serial, direction).and_then(open_live_device) {
+            Err(Error("live_media_device_unavailable")) if Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn open_live_device(source: Source) -> Result<LiveDevice> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(!source.read_only)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(format!("/dev/{}", source.name))
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::ENODEV)
+            {
+                Error("live_media_device_unavailable")
+            } else {
+                Error("invalid_live_media_device")
+            }
+        })?;
+    let device = LiveDevice { source, file };
+    verify_live_device(&device)?;
+    Ok(device)
+}
+
+fn verify_live_device(device: &LiveDevice) -> Result<()> {
+    let file = &device.file;
+    let source = &device.source;
+    let info = file
+        .metadata()
+        .map_err(|_| Error("live_media_device_unavailable"))?;
+    let mut read_only: libc::c_int = 0;
+    let mut bytes: u64 = 0;
+    require(
+        info.file_type().is_block_device()
+            && source.id == format!("{}:{}", libc::major(info.rdev()), libc::minor(info.rdev()))
+            && unsafe { libc::ioctl(file.as_raw_fd(), 0x125e, &mut read_only) } == 0
+            && read_only == i32::from(source.read_only)
+            && unsafe { libc::ioctl(file.as_raw_fd(), 0x80081272, &mut bytes) } == 0
+            && bytes == source.bytes,
+        "live_media_device_changed",
+    )
+}
+
+pub fn start_live_media(
+    id: &str,
+    direction: Direction,
+    purpose: Purpose,
+    device: &LiveDevice,
+) -> Result<()> {
+    crate::storage::validate_id(id)?;
+    let current = live_media_device(Path::new("/sys"), &format!("obl-{}", &id[..16]), direction)?;
+    require(
+        current.id == device.source.id
+            && current.name == device.source.name
+            && current.bytes == device.source.bytes
+            && current.read_only == device.source.read_only,
+        "live_media_device_changed",
+    )?;
+    verify_live_device(device)?;
+    require(!live_mapping_present(direction)?, "transfer_cleanup_required")?;
+    let export = direction == Direction::Export;
+    // Publish exact cleanup authority before the first external mutation.
+    publish_job(&Job {
+        id: id.into(),
+        live_media: Some(purpose),
+        recovery: false,
+        export,
+        backup: None,
+        restore: None,
+    })?;
+    map_device(&current, export)?;
+    vm::execute(
+        "/usr/bin/systemctl",
+        &["start".into(), "--no-block".into(), unit()],
+    )
+}
+
+fn live_media_device(sysfs: &Path, serial: &str, direction: Direction) -> Result<Source> {
+    let read_only = direction == Direction::Import;
+    let mut found = None;
+    let entries = fs::read_dir(sysfs.join("class/block"))
+        .map_err(|_| Error("live_media_device_unavailable"))?;
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let Ok(disk) = fs::canonicalize(entry.path()) else {
+            continue;
+        };
+        if !disk.starts_with(sysfs.join("devices"))
+            || !fs::read_to_string(disk.join("serial")).is_ok_and(|value| value.trim() == serial)
+        {
+            continue;
+        }
+        let virtio_block = disk.ancestors().any(|device| {
+            fs::read_link(device.join("subsystem")).is_ok_and(|link| link.ends_with("virtio"))
+                && fs::read_link(device.join("driver")).is_ok_and(|link| link.ends_with("virtio_blk"))
+        });
+        require(
+            found.is_none()
+                && virtio_block
+                && !disk.join("partition").exists()
+                && fs::read_to_string(disk.join("ro"))
+                    .is_ok_and(|value| value.trim() == if read_only { "1" } else { "0" }),
+            "invalid_live_media_device",
+        )?;
+        let name = disk
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| {
+                value.len() <= 64 && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            })
+            .ok_or(Error("invalid_live_media_device"))?;
+        let id =
+            fs::read_to_string(disk.join("dev")).map_err(|_| Error("invalid_live_media_device"))?;
+        let id = id.trim();
+        let valid = id.split_once(':').is_some_and(|(major, minor)| {
+            major.parse::<u32>().is_ok() && minor.parse::<u32>().is_ok()
+        });
+        require(valid, "invalid_live_media_device")?;
+        let bytes = fs::read_to_string(disk.join("size"))
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .and_then(|sectors| sectors.checked_mul(512))
+            .filter(|bytes| *bytes > 0)
+            .ok_or(Error("invalid_live_media_device"))?;
+        found = Some(Source {
+            id: id.into(),
+            name: name.into(),
+            bytes,
+            kind: SourceKind::Virtual,
+            read_only,
+        });
+    }
+    found.ok_or(Error("live_media_device_unavailable"))
+}
+
+#[cfg(test)]
+mod live_media_device_tests {
+    use super::{Job, live_media_device, wait_export_flush};
+    use oblivion_wire::live_media::Direction::{Export, Import};
+    use oblivion_wire::live_media::{DETACHED, STOP};
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixStream;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn job_requires_explicit_operation_flags() {
+        let record = serde_json::to_value(Job {
+            id: "a".repeat(32),
+            live_media: None,
+            recovery: false,
+            export: false,
+            backup: None,
+            restore: None,
+        }).unwrap();
+        assert!(serde_json::from_value::<Job>(record.clone()).is_ok());
+        for field in ["recovery", "export"] {
+            let mut incomplete = record.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Job>(incomplete).is_err());
+        }
+    }
+
+    struct Tree(PathBuf);
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn disk(sysfs: &Path, name: &str, serial: &str, number: &str) -> PathBuf {
+        let device = sysfs.join("devices/pci").join(format!("virtio-{name}"));
+        let disk = device.join("block").join(name);
+        fs::create_dir_all(&disk).unwrap();
+        symlink("/sys/bus/virtio", device.join("subsystem")).unwrap();
+        symlink("/sys/bus/virtio/drivers/virtio_blk", device.join("driver")).unwrap();
+        for (entry, value) in [
+            ("serial", serial),
+            ("ro", "1"),
+            ("size", "2048"),
+            ("dev", number),
+        ] {
+            fs::write(disk.join(entry), format!("{value}\n")).unwrap();
+        }
+        symlink(&disk, sysfs.join("class/block").join(name)).unwrap();
+        disk
+    }
+
+    #[test]
+    fn media_resolves_only_one_exact_virtio_serial_with_the_requested_access() {
+        let id = crate::storage::random_id().unwrap_or_else(|error| panic!("{}", error.0));
+        let root = Tree(std::env::temp_dir().join(format!("oblivion-live-media-{id}")));
+        fs::create_dir_all(root.0.join("class/block")).unwrap();
+        let serial = "obl-1234567890abcdef";
+        let foreign = disk(&root.0, "vda", "oblivion-import", "253:0");
+        let source = disk(&root.0, "vdb", serial, "253:16");
+        assert!(live_media_device(&root.0, "obl-1234567890abcdee", Import).is_err());
+        let selected =
+            live_media_device(&root.0, serial, Import).unwrap_or_else(|error| panic!("{}", error.0));
+        assert_eq!(selected.name, "vdb");
+        assert_eq!(selected.bytes, 1024 * 1024);
+        assert!(live_media_device(&root.0, serial, Export).is_err());
+        fs::write(source.join("ro"), "0").unwrap();
+        assert!(live_media_device(&root.0, serial, Import).is_err());
+        let target = live_media_device(&root.0, serial, Export)
+            .unwrap_or_else(|error| panic!("{}", error.0));
+        assert_eq!(target.id, selected.id);
+        assert!(!target.read_only);
+        fs::write(source.join("ro"), "1").unwrap();
+        fs::write(foreign.join("serial"), serial).unwrap();
+        assert!(live_media_device(&root.0, serial, Import).is_err());
+    }
+
+    #[test]
+    fn live_media_export_flush_requires_exact_sideband_ack_even_after_stop() {
+        for (response, acknowledged) in [
+            (DETACHED.as_slice(), true),
+            (b"copied\n", false),
+            (b"detached", false),
+            (b"", false),
+        ] {
+            let (controller, mut guest) = UnixStream::pair().unwrap();
+            let worker = std::thread::spawn(move || {
+                let mut cancel = [0];
+                guest.read_exact(&mut cancel).unwrap();
+                assert_eq!(cancel, [STOP]);
+                guest.write_all(response).unwrap();
+            });
+            assert_eq!(wait_export_flush(&controller).is_ok(), acknowledged);
+            worker.join().unwrap();
+        }
+    }
+}
+
+const EXPORT_PROOF: &str = "live-media-export.json";
+const EXPORT_FLUSH_GRACE: Duration = Duration::from_secs(18);
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExportProof {
+    id: String,
+    flushed: bool,
+}
+
+fn export_proof(id: &str) -> Result<Option<ExportProof>> {
+    let path = crate::storage::runtime_record(EXPORT_PROOF);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(Error("invalid_live_media_export_proof")),
+        Ok(_) => {}
+    }
+    let mut bytes = Vec::new();
+    crate::storage::trusted_file(&path)?
+        .take(129)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Error("invalid_live_media_export_proof"))?;
+    require(bytes.len() <= 128, "invalid_live_media_export_proof")?;
+    let proof: ExportProof =
+        serde_json::from_slice(&bytes).map_err(|_| Error("invalid_live_media_export_proof"))?;
+    crate::storage::validate_id(&proof.id)?;
+    Ok((proof.id == id).then_some(proof))
+}
+
+fn write_export_proof(id: &str, flushed: bool) -> Result<()> {
+    let proof = ExportProof { id: id.into(), flushed };
+    let bytes = serde_json::to_vec(&proof).map_err(|_| Error("invalid_live_media_export_proof"))?;
+    crate::storage::write_key_file(EXPORT_PROOF, &bytes)
+}
+
+pub fn stop_live_media(id: &str, direction: Direction) -> Result<()> {
+    if let Some(record) = job()? {
+        require(
+            record.matches_live(id, direction),
+            "live_media_worker_changed",
+        )?;
+        stop()?;
+    }
+    // A concurrent authorized Safe close may have reaped this worker already.
+    // Verify all scoped roles and mappings regardless of who performed stop.
+    idle()?;
+    require(!live_mapping_present(direction)?, "transfer_cleanup_required")?;
+    if direction == Direction::Export && let Some(proof) = export_proof(id)? {
+        require(proof.flushed, "live_media_export_cleanup_unconfirmed")?;
+    }
+    Ok(())
+}
+
+fn live_mapping_present(direction: Direction) -> Result<bool> {
+    let name = oblivion_host::scope::current().mapping(match direction {
+        Direction::Import => "oblivion-import",
+        Direction::Export => "oblivion-export",
+    });
+    // The mapper's udev alias may be missing even after the kernel created a
+    // mapping. The kernel name is authoritative for Live cleanup and eject.
+    for entry in fs::read_dir("/sys/block").map_err(|_| Error("transfer_state_failed"))? {
+        let entry = entry.map_err(|_| Error("transfer_state_failed"))?;
+        let filename = entry.file_name();
+        if !filename
+            .to_str()
+            .and_then(|value| value.strip_prefix("dm-"))
+            .is_some_and(|number| {
+                !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        {
+            continue;
+        }
+        let mapped = fs::read_to_string(entry.path().join("dm/name"))
+            .map_err(|_| Error("transfer_state_failed"))?;
+        if mapped.trim() == name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub fn live_media_prepared() -> Result<bool> {
+    Ok(job()?.is_some_and(|job| job.live_media.is_some()))
+}
+
+/// Only the daemon that owns the current reservation can acquire this one
+/// copy descriptor. The second descriptor keeps the worker alive.
+pub fn attach_live_media(
+    id: &str,
+    direction: Direction,
+    purpose: Purpose,
+    deadline: Instant,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<(UnixStream, UnixStream)> {
+    let path = oblivion_host::scope::path(transfers::SOCKET);
+    loop {
+        check()?;
+        require(
+            job()?.is_some_and(|job| job.matches_live(id, direction) && job.live_media == Some(purpose)),
+            "live_media_worker_changed",
+        )?;
+        require(Instant::now() < deadline, "live_media_source_timeout")?;
+        if let Ok(control) =
+            oblivion_host::channel::connect(Path::new(&path), Duration::from_millis(100))
+        {
+            crate::gateway::peer(&control, 0)?;
+            let channel = Channel::new(&control, Duration::from_secs(2));
+            let source = oblivion_host::control::receive_descriptor(&control, &channel)
+                .map_err(|_| Error("transfer_port_unavailable"))?;
+            crate::gateway::peer(&source, live_uid(direction))?;
+            check()?;
+            return Ok((source, control));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 pub fn prepared() -> Result<bool> {
@@ -360,7 +759,23 @@ pub fn prepared() -> Result<bool> {
 }
 
 pub fn stop() -> Result<()> {
-    if !matches!(vm::unit_state(&unit())?.as_str(), "inactive" | "failed") {
+    let record = job().ok().flatten();
+    if let Some(job) = &record && job.live_media.is_some() && job.export {
+        // Reservation revocation has closed the copy holder. The worker can
+        // still cancel the guest receiver and collect its final flush proof.
+        let deadline = Instant::now() + EXPORT_FLUSH_GRACE + Duration::from_secs(2);
+        let path = job_path();
+        while Instant::now() < deadline
+            && export_proof(&job.id).is_ok_and(|proof| proof.is_some_and(|proof| !proof.flushed))
+            && Path::new(&path).exists()
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    // Live admission queues an asynchronous start. A stop must cancel that
+    // exact unit job even if the unit has not entered "activating" yet.
+    if record.is_some_and(|job| job.live_media.is_some())
+        || !matches!(vm::unit_state(&unit())?.as_str(), "inactive" | "failed") {
         vm::execute("/usr/bin/systemctl", &["stop".into(), unit()])?;
     }
     require(
@@ -395,6 +810,13 @@ fn job() -> Result<Option<Job>> {
         "invalid_transfer_state",
     )?;
     require(!(job.export && job.recovery), "invalid_transfer_state")?;
+    if let Some(purpose) = job.live_media {
+        let direction = if job.export { Direction::Export } else { Direction::Import };
+        require(
+            purpose.valid_for(direction) && !job.recovery && job.backup.is_none() && job.restore.is_none(),
+            "invalid_transfer_state",
+        )?;
+    }
     if let Some(backup) = &job.backup {
         require(
             job.export
@@ -426,8 +848,9 @@ fn job() -> Result<Option<Job>> {
 pub fn cleanup() -> Result<()> {
     vm::stop_role(Role::Import, true)?;
     vm::stop_role(Role::Export, true)?;
-    if let Some(job) = job()? {
-        vm::remove_copy_port(&job.id)?;
+    let record = job()?;
+    if let Some(job) = &record {
+        if job.live_media.is_none() { vm::remove_copy_port(&job.id)?; }
         if job.restore.is_some() {
             crate::storage::cleanup_restore(&job.id)?;
         }
@@ -437,6 +860,8 @@ pub fn cleanup() -> Result<()> {
         if Path::new(&format!("/dev/mapper/{name}"))
             .try_exists()
             .map_err(|_| Error("device_check_failed"))?
+            || record.as_ref().is_some_and(|job| job.live_media.is_some() && job.export == (base == "oblivion-export"))
+                && live_mapping_present(if base == "oblivion-export" { Direction::Export } else { Direction::Import })?
         {
             vm::execute(
                 "/usr/sbin/dmsetup",
@@ -444,7 +869,7 @@ pub fn cleanup() -> Result<()> {
             )?;
         }
     }
-    if job()?.is_some() {
+    if record.is_some() {
         fs::remove_file(&job_path()).map_err(|_| Error("transfer_cleanup_failed"))?;
     }
     if Path::new(&pending_job())
@@ -459,6 +884,10 @@ pub fn cleanup() -> Result<()> {
 
 pub fn serve(import: Option<&vm::Config>, export: Option<&vm::Config>, uid: u32) -> Result<()> {
     let job = job()?.ok_or(Error("transfer_not_prepared"))?;
+    if let Some(purpose) = job.live_media {
+        let config = if job.export { export } else { import };
+        return serve_live_media(config.ok_or(Error("transfers_not_configured"))?, &job, purpose);
+    }
     if let Some(restore) = &job.restore {
         let config = import.ok_or(Error("transfers_not_configured"))?;
         config.validate()?;
@@ -578,6 +1007,116 @@ pub fn serve(import: Option<&vm::Config>, export: Option<&vm::Config>, uid: u32)
         .map(|port| relay::peer_process(port).map_err(|_| Error("transfer_owner_failed")))
         .collect::<Result<Vec<_>>>()?;
     relay_job(job, source, destination, owners, uid, None)
+}
+
+fn serve_live_media(config: &vm::Config, job: &Job, purpose: Purpose) -> Result<()> {
+    config.validate()?;
+    let (role, direction) = if job.export {
+        config.start_live_export()?;
+        (Role::Export, Direction::Export)
+    } else {
+        config.start_role(Role::Import)?;
+        (Role::Import, Direction::Import)
+    };
+    let runtime = role.runtime();
+    let port = oblivion_host::channel::connect(
+        &Path::new(&runtime).join("copy.sock"),
+        Duration::from_secs(2),
+    )
+    .map_err(|_| Error("transfer_port_unavailable"))?;
+    let uid = live_uid(direction);
+    let peer = live_peer(&port, uid)?;
+    let owner = relay::peer_process(&File::from(OwnedFd::from(
+        port.try_clone().map_err(|_| Error("transfer_descriptor_failed"))?,
+    )))
+    .map_err(|_| Error("transfer_owner_failed"))?;
+    let proof = if job.export {
+        let proof = oblivion_host::channel::connect(
+            &Path::new(&runtime).join("proof.sock"),
+            Duration::from_secs(2),
+        )
+        .map_err(|_| Error("transfer_port_unavailable"))?;
+        require(live_peer(&proof, uid)? == peer, "invalid_transfer_peer")?;
+        Some(proof)
+    } else {
+        None
+    };
+    vm::resume_transfer(role)?;
+    let mut ready = [0; 6];
+    Channel::new(&port, Duration::from_secs(90))
+        .read_exact(&mut ready)
+        .map_err(|_| Error("transfer_guest_not_ready"))?;
+    require(&ready == b"ready\n", "invalid_transfer_guest")?;
+
+    let path = oblivion_host::scope::path(transfers::SOCKET);
+    let listener = UnixListener::bind(&path).map_err(|_| Error("transfer_socket_failed"))?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        .map_err(|_| Error("transfer_socket_failed"))?;
+    crate::ipc::notify_ready()?;
+    let (control, _) = listener.accept().map_err(|_| Error("transfer_socket_failed"))?;
+    crate::gateway::peer(&control, 0)?;
+    Channel::new(&control, Duration::from_secs(2))
+        .prepare_write()
+        .map_err(|_| Error("transfer_descriptor_failed"))?;
+    if proof.is_some() {
+        // This record precedes the first command which can mount writable
+        // media. A crashed worker leaves an unconfirmed proof behind.
+        write_export_proof(&job.id, false)?;
+    }
+    let command = match purpose {
+        Purpose::Copy => b"M",
+        Purpose::Inspect => b"I",
+        Purpose::Recover => b"R",
+        Purpose::Discard => b"D",
+    };
+    let handoff = Channel::new(&port, Duration::from_secs(2))
+        .write_all(command)
+        .map_err(|_| Error("transfer_guest_not_ready"))
+        .and_then(|()| crate::ipc::send_console(&control, &port));
+    // Only the admitted caller holds the connected copy port after handoff.
+    drop(port);
+    if handoff.is_ok() {
+        let mut control = oblivion_transfer::channel::Channel::new(
+            File::from(OwnedFd::from(control)),
+            Duration::from_secs(transfers::BUDGET_SECONDS),
+        )
+        .map_err(|_| Error("transfer_owner_failed"))?;
+        control.watch(owner);
+        let _ = control.read(&mut [0]);
+    }
+    if let Some(proof) = proof {
+        wait_export_flush(&proof)?;
+        write_export_proof(&job.id, true)?;
+    }
+    handoff
+}
+
+fn live_peer(port: &UnixStream, uid: u32) -> Result<libc::pid_t> {
+    let mut peer: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut length = size_of::<libc::ucred>() as libc::socklen_t;
+    require(
+        unsafe {
+            libc::getsockopt(
+                port.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut peer as *mut libc::ucred).cast(),
+                &mut length,
+            ) == 0
+        } && peer.uid == uid && peer.pid > 0,
+        "invalid_transfer_peer",
+    )?;
+    Ok(peer.pid)
+}
+
+fn wait_export_flush(proof: &UnixStream) -> Result<()> {
+    let mut channel = Channel::new(proof, EXPORT_FLUSH_GRACE);
+    // A completed receiver may already have emitted its proof. Still read it
+    // if the cancellation write fails after the guest closes its side.
+    let _ = channel.write_all(&[STOP]);
+    let mut marker = [0; DETACHED.len()];
+    channel.read_exact(&mut marker).map_err(|_| Error("live_media_export_cleanup_unconfirmed"))?;
+    require(&marker == DETACHED, "live_media_export_cleanup_unconfirmed")
 }
 
 fn relay_job(
@@ -721,6 +1260,7 @@ fn relay_job(
                 owners,
                 remaining,
                 Permit { id: job.id, limits },
+                if job.backup.is_some() { relay::ExportSource::Ciphertext } else { relay::ExportSource::Documents },
             )
             .map_err(|_| Error("transfer_failed"));
         }

@@ -1,49 +1,57 @@
 use crate::channel::Channel;
-use serde::Deserialize;
-use serde_json::json;
-use std::io::{Read, Write};
+use oblivion_cli::controller::{Call, Controller};
+use oblivion_wire::control::{Operation, Request};
+use oblivion_wire::control_client::{self, Framing};
+#[cfg(target_os = "linux")]
+use std::io::Read;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Response {
-    ok: bool,
-    output: String,
-    error: Option<String>,
-}
-
 pub fn protect() -> Result<()> {
-    #[cfg(target_os = "linux")]
     unsafe {
         let limit = libc::rlimit {
             rlim_cur: 0,
             rlim_max: 0,
         };
-        if libc::setrlimit(libc::RLIMIT_CORE, &limit) != 0
-            || libc::prctl(libc::PR_SET_DUMPABLE, 0) != 0
-        {
+        if libc::setrlimit(libc::RLIMIT_CORE, &limit) != 0 {
             return Err("dump_protection_failed".into());
         }
+    }
+    #[cfg(target_os = "linux")]
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } != 0 {
+        return Err("dump_protection_failed".into());
     }
     Ok(())
 }
 
-fn connect(operation: &str, session: Option<&str>, secret: &[u8]) -> Result<UnixStream> {
+fn connect_expected(
+    operation: Operation,
+    session: Option<&str>,
+    secret: &[u8],
+    expected: Option<&str>,
+) -> Result<UnixStream> {
     if secret.len()
-        > if matches!(
+        > if operation == Operation::FamilyPasswordChange {
+            crate::family_rotation::CHANGE_LIMIT
+        } else if operation == Operation::ShareImportBegin {
+            oblivion_share::manifest::MAX_METADATA + 4096
+        } else if matches!(
             operation,
-            "api-keys"
-                | "session-storage"
-                | "egress"
-                | "network-policy"
-                | "transfers"
-                | "onion"
-                | "prepare-usb"
-                | "settings"
-                | "connections"
+            Operation::SessionStorage
+                | Operation::FamilyPasswordRecover
+                | Operation::Egress
+                | Operation::ProxyProfiles
+                | Operation::NetworkPolicy
+                | Operation::Transfers
+                | Operation::Onion
+                | Operation::SafeAccess
+                | Operation::Browse
+                | Operation::ShareExportSourceOpen
+                | Operation::ShareImportOpen
+                | Operation::ShareImportFinish
+                | Operation::BackupImportFinish
         ) {
             4096
         } else {
@@ -71,62 +79,175 @@ fn connect(operation: &str, session: Option<&str>, secret: &[u8]) -> Result<Unix
         }
     }
     let mut channel = Channel::new(&stream, Duration::from_secs(10));
-    let header = serde_json::to_vec(
-        &json!({"operation": operation, "session": session, "secret_len": secret.len(), "slot": crate::scope::current()}),
-    )?;
-    channel.write_all(&(header.len() as u32).to_be_bytes())?;
-    channel.write_all(&header)?;
-    channel.write_all(secret)?;
-    stream.shutdown(std::net::Shutdown::Write)?;
+    let request = Request {
+        operation,
+        session: session.map(str::to_owned),
+        secret_len: secret.len() as u32,
+        slot: crate::scope::current(),
+        expected_session: expected.map(str::to_owned),
+    };
+    control_client::write_request(&mut channel, &request, secret, Framing::Local)
+        .map_err(control_client::Error::into_boxed)?;
+    if !operation.is_attachment() {
+        stream.shutdown(std::net::Shutdown::Write)?;
+    }
     Ok(stream)
 }
 
+/// Real Unix controller adapter used by the shared frontend and existing CLI
+/// boundaries. Explicit remote construction also avoids global environment in
+/// integrations which already own the authenticated runtime endpoint.
+pub struct Client {
+    remote: Option<std::path::PathBuf>,
+}
+
+impl Client {
+    pub fn new() -> Self {
+        match std::env::var_os("OBLIVION_CONTROL_SOCKET") {
+            Some(path) => Self::remote(std::path::PathBuf::from(path)),
+            None => Self { remote: None },
+        }
+    }
+
+    pub fn remote(path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            remote: Some(path.into()),
+        }
+    }
+}
+
+impl Default for Client {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Controller for Client {
+    type Slot = crate::scope::Slot;
+
+    fn request(&mut self, call: Call<'_, Self::Slot>) -> Result<String> {
+        let request = || match self.remote.as_deref() {
+            Some(path) => crate::remote_control::request_operation(
+                path,
+                call.operation,
+                call.session,
+                call.secret,
+                call.expected_session,
+            ),
+            None => request_local(
+                call.operation,
+                call.session,
+                call.secret,
+                call.expected_session,
+            ),
+        };
+        match call.slot {
+            Some(slot) => crate::scope::within(slot, request),
+            None => request(),
+        }
+    }
+}
+
 pub fn request(operation: &str, session: Option<&str>, secret: &[u8]) -> Result<String> {
-    let stream = connect(operation, session, secret)?;
-    response(Channel::new(
-        &stream,
-        Duration::from_secs(if operation == "session-storage" {
-            1800
-        } else {
-            120
-        }),
-    ))
+    Client::new().request(Call {
+        operation: Operation::parse(operation)?,
+        slot: None,
+        session,
+        expected_session: None,
+        secret,
+    })
 }
 
-fn response(channel: Channel<'_>) -> Result<String> {
-    let mut bytes = Vec::new();
-    channel.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 1024 * 1024 {
-        return Err("response_too_large".into());
+pub fn request_for(
+    expected: &str,
+    operation: &str,
+    session: Option<&str>,
+    secret: &[u8],
+) -> Result<String> {
+    Client::new().request(Call {
+        operation: Operation::parse(operation)?,
+        slot: None,
+        session,
+        expected_session: Some(expected),
+        secret,
+    })
+}
+
+fn request_local(
+    operation: Operation,
+    session: Option<&str>,
+    secret: &[u8],
+    expected: Option<&str>,
+) -> Result<String> {
+    let stream = connect_expected(operation, session, secret, expected)?;
+    control_client::read_response(
+        &mut Channel::new(
+            &stream,
+            operation.response_budget(),
+        ),
+        Framing::Local,
+    )
+    .map_err(control_client::Error::into_boxed)
+}
+
+#[cfg(target_os = "linux")]
+pub fn attach_client(operation: &str, expected: &str) -> Result<(UnixStream, UnixStream, String)> {
+    attach_scoped(operation, None, Some(expected), &[])
+}
+
+pub fn attach_export(id: &str) -> Result<(UnixStream, UnixStream, String)> {
+    attach_scoped("share-export-lease", Some(id), None, &[])
+}
+
+pub fn attach_file(opening: &crate::autolock::Opening) -> Result<(UnixStream, UnixStream, String)> {
+    attach_scoped(
+        "file-attach",
+        None,
+        Some(&opening.safe_id),
+        &serde_json::to_vec(opening)?,
+    )
+}
+
+pub fn attach_backup(transaction: &str) -> Result<(UnixStream, UnixStream, String)> {
+    attach_scoped("backup-attach", Some(transaction), None, &[])
+}
+
+#[cfg(target_os = "linux")]
+fn attach_scoped(
+    operation: &str,
+    session: Option<&str>,
+    expected: Option<&str>,
+    secret: &[u8],
+) -> Result<(UnixStream, UnixStream, String)> {
+    if let Some(path) = std::env::var_os("OBLIVION_CONTROL_SOCKET") {
+        let (stream, client) = crate::remote_control::attach_scoped_with_secret(
+            std::path::Path::new(&path),
+            operation,
+            session,
+            expected,
+            secret,
+        )?;
+        return Ok((stream.try_clone()?, stream, client));
     }
-    let response: Response = serde_json::from_slice(&bytes)?;
-    if !response.ok {
-        // Protocol errors are static identifiers, never arbitrary guest text.
-        let error = response.error.filter(|value| {
-            value.len() <= 80 && value.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')
-        });
-        return Err(error
-            .unwrap_or_else(|| "operation_rejected".to_owned())
-            .into());
-    }
-    Ok(response.output)
-}
-
-#[cfg(target_os = "linux")]
-pub fn console() -> Result<UnixStream> {
-    descriptor("console")
-}
-
-#[cfg(target_os = "linux")]
-pub fn terminal() -> Result<UnixStream> {
-    descriptor("terminal")
-}
-
-#[cfg(target_os = "linux")]
-fn descriptor(operation: &str) -> Result<UnixStream> {
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    let stream = connect(operation, None, &[])?;
+    let stream = connect_expected(Operation::parse(operation)?, session, secret, expected)?;
     let channel = Channel::new(&stream, Duration::from_secs(120));
+    let console = receive_descriptor(&stream, &channel)?;
+    // The control connection owns the attachment until EOF, independently of
+    // the passed stream. A vanished launcher releases only this client.
+    let mut client = [0; 32];
+    Channel::new(&stream, Duration::from_secs(10)).read_exact(&mut client)?;
+    if !client
+        .iter()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return Err("invalid_client_identifier".into());
+    }
+    Ok((console, stream, String::from_utf8(client.to_vec())?))
+}
+
+#[cfg(target_os = "linux")]
+pub fn receive_descriptor(stream: &UnixStream, channel: &Channel<'_>) -> Result<UnixStream> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let mut byte = 0u8;
     let mut data = libc::iovec {
         iov_base: (&mut byte as *mut u8).cast(),
@@ -157,17 +278,33 @@ fn descriptor(operation: &str) -> Result<UnixStream> {
         if byte != b'F' || message.msg_flags & libc::MSG_CTRUNC != 0 {
             return Err("console_transfer_failed".into());
         }
-        response(channel)?;
         Ok(UnixStream::from(fd))
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn console() -> Result<UnixStream> {
-    Err("linux_required".into())
+pub fn attach_client(operation: &str, expected: &str) -> Result<(UnixStream, UnixStream, String)> {
+    attach_scoped(operation, None, Some(expected), &[])
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn terminal() -> Result<UnixStream> {
-    Err("linux_required".into())
+fn attach_scoped(
+    operation: &str,
+    session: Option<&str>,
+    expected: Option<&str>,
+    secret: &[u8],
+) -> Result<(UnixStream, UnixStream, String)> {
+    let path = std::env::var_os("OBLIVION_CONTROL_SOCKET").ok_or("native_runtime_required")?;
+    let (stream, client) = crate::remote_control::attach_scoped_with_secret(
+        std::path::Path::new(&path),
+        operation,
+        session,
+        expected,
+        secret,
+    )?;
+    Ok((stream.try_clone()?, stream, client))
+}
+
+pub fn release_agent(client: &str, expected: &str) -> Result<()> {
+    request_for(expected, "agent-release", Some(client), &[]).map(|_| ())
 }

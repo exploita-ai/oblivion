@@ -45,6 +45,7 @@ fn export_receipt_is_withheld_until_detach_and_disconnect_is_not_eject_success()
                     id: ID.into(),
                     limits: LIMITS,
                 },
+                relay::ExportSource::Ciphertext,
             )
         });
         let from = source.0.clone();
@@ -289,6 +290,30 @@ fn mismatched_approval_closes_both_ports_without_authorizing_either_endpoint() {
 }
 
 #[test]
+fn retired_progress_approval_is_rejected_before_authorizing_either_endpoint() {
+    let source = Tree::new();
+    fs::write(source.0.join("document.txt"), CONTENT).unwrap();
+    let selection = Selection::prepare(&source.0, &request().paths, LIMITS).unwrap();
+    for progress in [false, true] {
+        let mut relay = Relay::start();
+        relay.offer(selection.manifest());
+        write_message(
+            &mut relay.control,
+            &serde_json::json!({
+                "id": ID,
+                "manifest_sha256": selection.manifest().sha256(),
+                "progress": progress,
+            }),
+        )
+        .unwrap();
+        assert!(relay.finish().is_err());
+        assert_eq!(relay.source.read(&mut [0]).unwrap(), 0);
+        assert_eq!(relay.destination.read(&mut [0]).unwrap(), 0);
+        assert_eq!(relay.control.read(&mut [0]).unwrap(), 0);
+    }
+}
+
+#[test]
 fn either_owner_death_revokes_a_pending_approval_with_data_ports_still_open() {
     let source = Tree::new();
     fs::write(source.0.join("document.txt"), CONTENT).unwrap();
@@ -406,4 +431,75 @@ fn root_permit_rejects_changed_id_and_increased_limits_before_forwarding() {
         relay.destination.read_to_end(&mut bytes).unwrap();
         assert!(bytes.is_empty());
     }
+}
+
+#[test]
+fn document_collection_exports_through_the_media_relay_with_one_verified_manifest() {
+    let source = Tree::new();
+    fs::create_dir(source.0.join("workspace")).unwrap();
+    fs::create_dir(source.0.join("imports")).unwrap();
+    fs::write(source.0.join("workspace/note.txt"), b"workspace").unwrap();
+    fs::write(source.0.join("imports/note.txt"), b"imports").unwrap();
+    fs::write(source.0.join("workspace/unselected"), b"private").unwrap();
+    let target = Tree::new();
+    let (from, sender) = UnixStream::pair().unwrap();
+    let (to, receiver) = UnixStream::pair().unwrap();
+    let (controller, manager) = UnixStream::pair().unwrap();
+    let (owner_a, alive_a) = UnixStream::pair().unwrap();
+    let (owner_b, alive_b) = UnixStream::pair().unwrap();
+    let relay = std::thread::spawn(move || {
+        relay::export(
+            file(from),
+            file(to),
+            file(controller),
+            vec![owner_a.into(), owner_b.into()],
+            Duration::from_secs(5),
+            relay::Permit {
+                id: ID.into(),
+                limits: LIMITS,
+            },
+            relay::ExportSource::Documents,
+        )
+    });
+    let sender = std::thread::spawn(move || endpoint::documents(&mut channel(sender), &source.0));
+    let destination = target.0.clone();
+    let receiver = std::thread::spawn(move || {
+        let mut receiver = channel(receiver);
+        endpoint::export(
+            &mut receiver,
+            &destination,
+            oblivion_transfer::ExportMode::Posix,
+        )?;
+        receiver.write_all(b"detached\n")
+    });
+    let mut manager = channel(manager);
+    write_message(
+        &mut manager,
+        &OfferRequest {
+            paths: vec!["workspace/note.txt".into(), "imports/note.txt".into()],
+            ..request()
+        },
+    )
+    .unwrap();
+    // Control receives its one existing manifest; only the relay consumes the
+    // additional source plan, and payload remains blocked until this decision.
+    let manifest = Manifest::read(&mut manager, LIMITS).unwrap();
+    assert_eq!(manifest.entries()[0].path(), "selection");
+    assert_eq!(manifest.entries().len(), 3);
+    assert!(fs::read_dir(&target.0).unwrap().next().is_none());
+    write_message(&mut manager, &approval(&manifest)).unwrap();
+    let receipt: Receipt = read_message(&mut manager, 1024).unwrap();
+    assert_eq!(receipt.manifest_sha256, manifest.sha256());
+    assert_eq!(receipt.bytes, 16);
+    sender.join().unwrap().unwrap();
+    receiver.join().unwrap().unwrap();
+    relay.join().unwrap().unwrap();
+    let collection = target.0.join(format!("Oblivion-{ID}/files/selection"));
+    assert_eq!(fs::read(collection.join("note.txt")).unwrap(), b"workspace");
+    assert_eq!(
+        fs::read(collection.join("note (2).txt")).unwrap(),
+        b"imports"
+    );
+    assert_eq!(fs::read_dir(&collection).unwrap().count(), 2);
+    drop((alive_a, alive_b));
 }

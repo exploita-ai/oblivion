@@ -2,7 +2,6 @@ use oblivion_host::scope;
 use crate::storage::{Error, Result, require};
 use oblivion_host::channel::{self, Channel};
 use oblivion_transport::policy::Tools;
-use oblivion_transport::provider::Provider;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
@@ -84,6 +83,9 @@ pub struct Config {
     cpus: u8,
     #[serde(default)]
     accelerator: Accelerator,
+    #[cfg(feature = "lab-emulation")]
+    #[serde(default)]
+    guest_early_console: bool,
 }
 
 impl Config {
@@ -142,65 +144,46 @@ impl Config {
         Ok(())
     }
 
-    pub fn start(
-        &self,
-        token: Option<&str>,
-        provider: Option<Provider>,
-        web_access: &str,
-        tools: Option<Tools>,
-    ) -> Result<()> {
-        require(
-            token.is_some() == provider.is_some(),
-            "invalid_provider_grant",
-        )?;
-        require(
-            matches!(web_access, "strict" | "open"),
-            "invalid_web_access",
-        )?;
-        self.launch(Role::Session, token.is_some(), false, false)?;
-        if let Some(token) = token {
-            let stream = UnixStream::connect(&scope::path("/run/oblivion-session/token.sock"))
-                .map_err(|_| Error("session_channel_unavailable"))?;
-            crate::gateway::peer(&stream, scope::uid(VM_UID))?;
-            crate::gateway::grant(token, tools)?;
-            let mut channel = Channel::new(&stream, Duration::from_secs(60));
-            qmp(Role::Session, "cont")?;
-            let mut ready = [0u8; 6];
-            // Virtio serial can discard bytes before the guest opens its port.
-            // Wait for that opening before sending the one-session token.
-            channel
-                .read_exact(&mut ready)
-                .map_err(|_| Error("session_channel_failed"))?;
-            require(&ready == b"token\n", "invalid_session_ready")?;
-            channel
-                .write_all(token.as_bytes())
-                .map_err(|_| Error("session_channel_failed"))?;
-            channel
-                .write_all(
-                    format!(
-                        "{}\n",
-                        provider.ok_or(Error("invalid_provider_grant"))?.id()
-                    )
-                    .as_bytes(),
-                )
-                .map_err(|_| Error("session_channel_failed"))?;
-            channel
-                .write_all(format!("{web_access}\n").as_bytes())
-                .map_err(|_| Error("session_channel_failed"))?;
-            channel
-                .read_exact(&mut ready)
-                .map_err(|_| Error("session_channel_failed"))?;
-            require(&ready == b"ready\n", "invalid_session_ready")?;
-        }
-        Ok(())
+    pub fn start_agent(&self, token: &str, web_access: &str, tools: Tools) -> Result<()> {
+        require(matches!(web_access, "strict" | "open"), "invalid_web_access")?;
+        self.launch(Role::Session, true, false, false, true, false, false)?;
+        let stream = UnixStream::connect(scope::path("/run/oblivion-session/token.sock"))
+            .map_err(|_| Error("session_channel_unavailable"))?;
+        crate::gateway::peer(&stream, scope::uid(VM_UID))?;
+        crate::gateway::grant(token, Some(tools))?;
+        let mut channel = Channel::new(&stream, Duration::from_secs(60));
+        qmp(Role::Session, "cont")?;
+        let mut ready = [0; 6];
+        channel.read_exact(&mut ready).map_err(|_| Error("session_channel_failed"))?;
+        require(&ready == b"token\n", "invalid_session_ready")?;
+        channel.write_all(format!("{token}native\n{web_access}\n").as_bytes())
+            .map_err(|_| Error("session_channel_failed"))?;
+        channel.read_exact(&mut ready).map_err(|_| Error("session_channel_failed"))?;
+        require(&ready == b"ready\n", "invalid_session_ready")
     }
 
     pub fn start_role(&self, role: Role) -> Result<()> {
-        self.launch(role, false, false, false)
+        self.launch(role, false, false, false, false, false, false)
+    }
+
+    pub fn start_live_export(&self) -> Result<()> {
+        self.launch(Role::Export, false, false, false, false, false, true)
     }
 
     pub fn start_documents(&self) -> Result<()> {
-        self.launch(Role::Session, false, true, false)?;
+        self.start_offline(false, false)
+    }
+
+    pub fn start_agent_offline(&self) -> Result<()> {
+        self.start_offline(true, false)
+    }
+
+    pub fn start_share(&self) -> Result<()> {
+        self.start_offline(false, true)
+    }
+
+    fn start_offline(&self, native: bool, share: bool) -> Result<()> {
+        self.launch(Role::Session, false, true, false, native, share, false)?;
         let stream = UnixStream::connect(&scope::path("/run/oblivion-session/ready.sock"))
             .map_err(|_| Error("session_channel_unavailable"))?;
         crate::gateway::peer(&stream, scope::uid(VM_UID))?;
@@ -216,7 +199,7 @@ impl Config {
     }
 
     pub fn resize_session(&self, target: u64) -> Result<()> {
-        self.launch(Role::Session, false, false, true)?;
+        self.launch(Role::Session, false, false, true, false, false, false)?;
         let stream = UnixStream::connect(&scope::path("/run/oblivion-session/ready.sock"))
             .map_err(|_| Error("session_channel_unavailable"))?;
         crate::gateway::peer(&stream, scope::uid(VM_UID))?;
@@ -234,7 +217,8 @@ impl Config {
         )
     }
 
-    fn launch(&self, role: Role, network: bool, documents: bool, resize: bool) -> Result<()> {
+    fn launch(&self, role: Role, network: bool, documents: bool, resize: bool, native: bool, share: bool, live_export: bool) -> Result<()> {
+        require(!share || matches!(role, Role::Session) && documents && !network && !resize && !native, "invalid_share_launch")?;
         if matches!(role, Role::OnionUplink) {
             require(!network && !documents && !resize, "invalid_onion_launch")?;
             return self.launch_onion_uplink();
@@ -395,7 +379,7 @@ impl Config {
                 "--property=SupplementaryGroups=kvm".to_owned(),
             ]);
         }
-        let (binary, machine, console) = if cfg!(target_arch = "aarch64") {
+        let (binary, machine, uart) = if cfg!(target_arch = "aarch64") {
             ("/usr/bin/qemu-system-aarch64", "virt", "ttyAMA0")
         } else {
             ("/usr/bin/qemu-system-x86_64", "q35", "ttyS0")
@@ -403,8 +387,20 @@ impl Config {
         let console = if matches!(role, Role::Session) {
             "hvc0"
         } else {
-            console
+            uart
         };
+        let serial = if !matches!(role, Role::Session) && cfg!(feature = "lab-emulation") {
+            format!("unix:{}/console.sock,server=on,wait=off", role.runtime())
+        } else { "null".to_owned() };
+        let logging = format!("console={console} quiet loglevel=0 systemd.show_status=false");
+        #[cfg(feature = "lab-emulation")]
+        let (serial, logging) = if self.guest_early_console && matches!(role, Role::Session) {
+            let earlycon = if cfg!(target_arch = "aarch64") { "pl011,mmio32,0x09000000" } else { "uart8250,io,0x3f8,115200" };
+            (
+                format!("unix:{}/early.sock,server=on,wait=off", role.runtime()),
+                format!("console=hvc0 console={uart},115200 earlycon={earlycon} loglevel=7 systemd.show_status=true"),
+            )
+        } else { (serial, logging) };
         let (accelerator, cpu) = match self.accelerator {
             Accelerator::Kvm => ("kvm", "host"),
             #[cfg(feature = "lab-emulation")]
@@ -427,11 +423,11 @@ impl Config {
             "-device".to_owned(), "virtio-rng-pci,rng=rng".to_owned(),
             "-sandbox".to_owned(), "on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny".to_owned(),
             "-qmp".to_owned(), format!("unix:{}/qmp.sock,server=on,wait=off", role.runtime()),
-            // Gateway diagnostics are available only in the separate laboratory
-            // binary; the production gateway never exposes a serial console.
-            "-serial".to_owned(), if !matches!(role, Role::Session) && cfg!(feature = "lab-emulation") { format!("unix:{}/console.sock,server=on,wait=off", role.runtime()) } else { "null".to_owned() },
+            // Diagnostic UARTs exist only in the laboratory binary. Production
+            // has no guest_early_console field and rejects that configuration.
+            "-serial".to_owned(), serial,
             "-kernel".to_owned(), "/kernel".to_owned(), "-initrd".to_owned(), "/initrd".to_owned(),
-            "-append".to_owned(), format!("root=/dev/vda ro rootfstype=squashfs console={console} quiet loglevel=0 systemd.show_status=false panic=-1{}{}{}", if network { " oblivion.network=1" } else { "" }, if documents { " oblivion.documents=1" } else { "" }, if resize { " oblivion.resize=1" } else { "" }),
+            "-append".to_owned(), format!("root=/dev/vda ro rootfstype=squashfs {logging} panic=-1{}{}{}{}{}{}", if network { " oblivion.network=1" } else { "" }, if documents { " oblivion.documents=1" } else { "" }, if resize { " oblivion.resize=1" } else { "" }, if native { " oblivion.native=1" } else { "" }, if share { " oblivion.share=1" } else { "" }, if live_export { " oblivion.live-export=1" } else { "" }),
             "-drive".to_owned(), "file=/root.squashfs,format=raw,if=none,id=root,readonly=on".to_owned(),
             "-device".to_owned(), "virtio-blk-pci,drive=root,serial=oblivion-root".to_owned(),
         ]);
@@ -439,19 +435,13 @@ impl Config {
             args.extend([
                 "-device".to_owned(),
                 "virtio-serial-pci,id=oblivion-serial".to_owned(),
-                // A TUI sends bursts of screen data. Use virtio rather than an
-                // emulated UART, whose per-character I/O stalls large redraws.
+                // The kernel console is separate from dynamically attached
+                // native-agent and workspace streams.
                 "-chardev".to_owned(),
                 "socket,id=console,path=/run/oblivion-session/console.sock,server=on,wait=off"
                     .to_owned(),
                 "-device".to_owned(),
                 "virtconsole,chardev=console,bus=oblivion-serial.0,name=oblivion.console"
-                    .to_owned(),
-                "-chardev".to_owned(),
-                "socket,id=terminal,path=/run/oblivion-session/terminal.sock,server=on,wait=off"
-                    .to_owned(),
-                "-device".to_owned(),
-                "virtconsole,chardev=terminal,bus=oblivion-serial.0,name=oblivion.terminal"
                     .to_owned(),
                 "-drive".to_owned(),
                 "file=/dev/oblivion-session,format=raw,if=none,id=vault,cache=none".to_owned(),
@@ -462,6 +452,14 @@ impl Config {
                 oblivion_host::onion_vm::session_lifetime(std::path::Path::new(&role.runtime()))
                     .map_err(Error)?,
             );
+            if native {
+                args.extend([
+                    "-chardev".to_owned(),
+                    "socket,id=safe-tools,path=/run/oblivion-session/safe-tools.sock,server=on,wait=off".to_owned(),
+                    "-device".to_owned(),
+                    "virtserialport,chardev=safe-tools,bus=oblivion-serial.0,name=oblivion.safe-tools".to_owned(),
+                ]);
+            }
         }
         if matches!(role, Role::Import) {
             args.extend([
@@ -495,6 +493,14 @@ impl Config {
                 "-device".to_owned(),
                 "virtserialport,chardev=copy,name=oblivion.export".to_owned(),
             ]);
+            if live_export {
+                args.extend([
+                    "-chardev".to_owned(),
+                    "socket,id=export-proof,path=/run/oblivion-export-vm/proof.sock,server=on,wait=off".to_owned(),
+                    "-device".to_owned(),
+                    "virtserialport,chardev=export-proof,name=oblivion.export-proof".to_owned(),
+                ]);
+            }
         }
         if matches!(role, Role::Gateway) {
             // Connect the private control channel before the guest opens its
@@ -742,7 +748,12 @@ pub fn stop_role(role: Role, force: bool) -> Result<()> {
         require(stopped_role(role)?, "vm_still_running")?;
         return Ok(());
     }
-    qmp(role, "system_powerdown")?;
+    match qmp(role, "system_powerdown") {
+        Ok(_) => {}
+        // The unit can finish stopping and remove its monitor after the first check.
+        Err(Error("vm_control_unavailable")) if stopped_role(role).unwrap_or(false) => return Ok(()),
+        Err(error) => return Err(error),
+    }
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if stopped_role(role)? {
@@ -783,8 +794,20 @@ pub fn copy_port(id: &str, export: bool) -> Result<UnixStream> {
     session_port(id, if export { "export" } else { "copy" })
 }
 
-pub fn chat_export_port(id: &str) -> Result<UnixStream> {
-    session_port(id, "archive")
+pub fn file_port(id: &str) -> Result<UnixStream> {
+    session_port(id, "file")
+}
+
+pub fn agent_port(id: &str) -> Result<UnixStream> {
+    session_port(id, "agent")
+}
+
+pub fn safe_admin_port(id: &str) -> Result<UnixStream> {
+    session_port(id, "admin")
+}
+
+pub fn share_port(id: &str, import: bool) -> Result<UnixStream> {
+    session_port(id, if import { "share-import" } else { "share-export" })
 }
 
 fn session_port(id: &str, role: &str) -> Result<UnixStream> {

@@ -1,0 +1,11 @@
+systemd (>= 257)
+init-system-helpers (>= 1.65.2)
+python3 (>= 3.13)
+cryptsetup-bin (>= 2.7)
+dmsetup
+e2fsprogs
+util-linux
+mount
+fdisk
+udev
+debconf (>= 1.5) | debconf-2.0

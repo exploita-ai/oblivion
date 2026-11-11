@@ -383,7 +383,10 @@ fn receiver_refuses_unsafe_files_authority_corruption_and_truncation() {
                 }
             }
         }
-        receiver.socket.shutdown(Shutdown::Write).unwrap();
+        // Rejection may close the peer before this test half-closes its end.
+        // The proof below is the absent receipt and failed receiver process.
+        let shutdown = receiver.socket.shutdown(Shutdown::Write);
+        assert!(shutdown.is_ok() || shutdown.is_err_and(|error| error.kind() == std::io::ErrorKind::NotConnected));
         let mut response = Vec::new();
         let closed = receiver.channel.read_to_end(&mut response);
         assert!(

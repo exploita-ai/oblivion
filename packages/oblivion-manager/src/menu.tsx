@@ -1,6 +1,6 @@
 import { Show } from "solid-js"
 import { useTerminalDimensions } from "@opentui/solid"
-import { ActionItem, SelectList } from "@opencode/tui-kit"
+import { ActionItem, SelectList } from "@oblivion/tui-kit"
 import { palette, theme } from "./theme"
 import { ActionBar, type PageAction } from "./action-bar"
 import { PageHeader } from "./page-header"
@@ -11,7 +11,7 @@ export function Menu(props: { title: string; description: string; toolbar?: Page
   const dimensions = useTerminalDimensions()
   const spacious = () => dimensions().width >= 110 && dimensions().height >= 32
   const current = () => props.items[props.selected]
-  return <box flexGrow={1} minHeight={0} flexDirection="column" gap={1}>
+  return <box flexGrow={1} minHeight={0} flexDirection="column" gap={spacious() ? 1 : 0} overflow="hidden">
     <PageHeader title={props.title} description={props.description} />
     <Show when={props.toolbar?.length}><box flexShrink={0} paddingBottom={1} border={["bottom"]} borderColor={theme.border.base}>
       <ActionBar actions={props.toolbar!} focused={props.actionsFocused} disabled={props.disabled} activate={props.focusActions} />

@@ -1,0 +1,30 @@
+#!/bin/sh
+# Only the native launcher supplies this private-runtime boot profile.
+set -eu
+runtime=false
+for argument in $(cat /proc/cmdline); do
+    [ "$argument" != oblivion.runtime=1 ] || runtime=true
+done
+[ "$runtime" = true ] || exit 0
+early=$2
+mkdir -p "$early/oblivion-controller.service.d" "$early/multi-user.target.wants"
+for unit in oblivion-manager.service oblivion-display.service oblivion-seat.service oblivion-terminal.socket oblivion-network-console.service; do
+    ln -s /dev/null "$early/$unit"
+done
+cat > "$early/oblivion-controller.service.d/90-native-runtime.conf" <<'EOF'
+[Unit]
+Requires=oblivion-runtime-prepare.service
+After=oblivion-runtime-prepare.service
+[Service]
+ExecStartPre=
+ExecStartPre=-/usr/bin/oblivion-storage --config /run/oblivion-runtime/controller.json recover
+ExecStart=
+ExecStart=/usr/bin/oblivion-storage --config /run/oblivion-runtime/controller.json serve
+ExecStopPost=
+ExecStopPost=/usr/bin/oblivion-storage --config /run/oblivion-runtime/controller.json recover
+EOF
+for unit in oblivion-runtime-prepare.service oblivion-runtime-auth.service oblivion-control-relay.service; do
+    directory=/usr/lib/systemd/system
+    [ ! -f "/etc/systemd/system/$unit" ] || directory=/etc/systemd/system
+    ln -s "$directory/$unit" "$early/multi-user.target.wants/$unit"
+done

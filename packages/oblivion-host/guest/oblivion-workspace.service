@@ -1,0 +1,26 @@
+[Unit]
+Description=Safe-local tmux workspace
+ConditionKernelCommandLine=oblivion.native=1
+ConditionKernelCommandLine=!oblivion.share=1
+ConditionKernelCommandLine=!oblivion.resize=1
+Requires=oblivion-vault.service
+After=oblivion-vault.service
+RequiresMountsFor=/vault
+
+[Service]
+Type=exec
+User=1000
+Group=1000
+WorkingDirectory=/vault/workspace
+RuntimeDirectory=oblivion-workspace
+RuntimeDirectoryMode=0700
+ExecStart=/usr/lib/oblivion/guest/workspace-server.sh
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+KillMode=control-group
+TimeoutStopSec=5
+StandardInput=null
+StandardOutput=null
+StandardError=null
+Restart=no

@@ -1,8 +1,8 @@
 [Unit]
 Description=Oblivion verified storage recovery
 After=oblivion-controller.service
-Before=oblivion-manager.service
-# Every manager exit must attempt cleanup, including rapid display restarts.
+# Recovery is a controller lifecycle action. Restarting an interface must not
+# stop Safe VMs owned by other attached clients.
 StartLimitIntervalSec=0
 
 [Service]

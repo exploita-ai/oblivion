@@ -1,16 +1,9 @@
 use oblivion_transport::{Metadata, Transport};
+pub use oblivion_transport::egress::Command;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 pub const LIMIT: usize = 4096;
-
-#[derive(Deserialize, Serialize)]
-#[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum Command {
-    Save { transport: Transport },
-    Select { transport: Transport },
-    Saved {},
-}
 
 // Persisted only in the encrypted general profile or in the private tmpfs.
 // No Debug: the transport may contain proxy authentication credentials.
@@ -69,6 +62,8 @@ impl Profile {
     pub fn metadata(&self) -> Metadata {
         self.transport.metadata()
     }
+
+    pub fn transport(&self) -> &Transport { &self.transport }
 
     pub fn into_transport(self) -> Transport {
         self.transport

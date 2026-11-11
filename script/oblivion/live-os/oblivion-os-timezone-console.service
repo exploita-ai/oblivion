@@ -1,0 +1,23 @@
+[Unit]
+Description=Debian time zone configuration
+After=systemd-tmpfiles-setup.service
+Conflicts=getty@tty4.service
+[Service]
+ExecStart=/usr/lib/oblivion/live-os/console.sh timezone
+Restart=always
+RestartSec=2
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty4
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+Environment=HOME=/ TERM=linux LANG=C.UTF-8 LC_ALL=C.UTF-8
+UMask=0077
+NoNewPrivileges=yes
+ProtectHome=yes
+LimitCORE=0
+MemorySwapMax=0
+[Install]
+WantedBy=multi-user.target

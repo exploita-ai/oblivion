@@ -47,35 +47,30 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
     let needs_secret = matches!(
         operation.as_str(),
         "init-general"
-            | "prepare-usb"
             | "unlock"
-            | "unlock-ephemeral"
+            | "unlock-read-only"
             | "create"
             | "rename-session"
             | "debug"
             | "open"
             | "open-documents"
-            | "set-api-key"
-            | "api-keys"
             | "session-storage"
             | "egress"
             | "network-policy"
             | "transfers"
             | "onion"
-            | "settings"
+            | "safe-access"
             | "browse"
     );
     let limit = if matches!(
         operation.as_str(),
-        "api-keys"
-            | "session-storage"
+        "session-storage"
             | "egress"
             | "network-policy"
             | "transfers"
             | "onion"
-            | "settings"
+            | "safe-access"
             | "browse"
-            | "prepare-usb"
     ) {
         4096
     } else {

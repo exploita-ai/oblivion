@@ -1,6 +1,8 @@
 use crate::channel::Channel;
-use crate::endpoint::{Approval, ReceiveRequest, SourceRequest, read_message, write_message};
-use crate::{END, Entry, Limits, Manifest, Receipt, copy_hash, require, validate_id};
+use crate::endpoint::{
+    Approval, ReceiveRequest, SelectionOffer, SourceRequest, read_message, write_message,
+};
+use crate::{END, Limits, Manifest, Receipt, require, validate_id};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::OwnedFd;
@@ -24,8 +26,8 @@ pub struct Permit {
     pub limits: Limits,
 }
 
-/// Selection metadata comes from the same offer that produced the verified
-/// receipt. A later publication cannot silently substitute another selection.
+/// The paths name the staged objects in the verified manifest's selection
+/// order. A later publication can recheck the receipt against those objects.
 pub struct Approved {
     pub receipt: Receipt,
     pub paths: Vec<String>,
@@ -66,7 +68,25 @@ pub fn run_permitted(
     budget: Duration,
     permit: Option<Permit>,
 ) -> io::Result<()> {
-    run_copy(source, destination, control, owners, budget, permit, false)
+    run_copy(
+        source,
+        destination,
+        control,
+        owners,
+        budget,
+        permit,
+        false,
+        false,
+    )
+}
+
+/// The controller chooses the actual source authority. This is never inferred
+/// from peer bytes: Documents adds a reviewed collection plan; closed-volume
+/// backups expose only the independently delegated ciphertext descriptor.
+#[derive(Clone, Copy)]
+pub enum ExportSource {
+    Documents,
+    Ciphertext,
 }
 
 pub fn export(
@@ -76,6 +96,7 @@ pub fn export(
     owners: Vec<OwnedFd>,
     budget: Duration,
     permit: Permit,
+    source_mode: ExportSource,
 ) -> io::Result<()> {
     run_copy(
         source,
@@ -85,6 +106,7 @@ pub fn export(
         budget,
         Some(permit),
         true,
+        matches!(source_mode, ExportSource::Documents),
     )
 }
 
@@ -96,6 +118,7 @@ fn run_copy(
     budget: Duration,
     permit: Option<Permit>,
     external: bool,
+    documents: bool,
 ) -> io::Result<()> {
     let (approved, mut control) = copy(
         source,
@@ -105,6 +128,7 @@ fn run_copy(
         budget,
         permit,
         external,
+        documents,
     )?;
     write_message(&mut control, &approved.receipt)
 }
@@ -120,7 +144,7 @@ pub fn stage(
     budget: Duration,
     permit: Permit,
 ) -> io::Result<Receipt> {
-    stage_selected(source, destination, control, owners, budget, permit)
+    stage_selected(source, destination, control, owners, budget, permit, false)
         .map(|approved| approved.receipt)
 }
 
@@ -131,6 +155,7 @@ pub fn stage_selected(
     owners: Vec<OwnedFd>,
     budget: Duration,
     permit: Permit,
+    documents: bool,
 ) -> io::Result<Approved> {
     copy(
         source,
@@ -140,6 +165,7 @@ pub fn stage_selected(
         budget,
         Some(permit),
         false,
+        documents,
     )
     .map(|(approved, _)| approved)
 }
@@ -152,6 +178,7 @@ fn copy(
     budget: Duration,
     permit: Option<Permit>,
     external: bool,
+    documents: bool,
 ) -> io::Result<(Approved, Channel)> {
     let deadline = Instant::now()
         .checked_add(budget)
@@ -167,15 +194,21 @@ fn copy(
         destination.watch(owner.try_clone()?);
         control.watch(owner);
     }
-    let result =
-        exchange(&mut source, &mut destination, &mut control, permit).and_then(|receipt| {
-            if external {
-                let mut detached = [0; 9];
-                destination.read_exact(&mut detached)?;
-                require(&detached == b"detached\n", "export_not_detached")?;
-            }
-            Ok(receipt)
-        });
+    let result = exchange(
+        &mut source,
+        &mut destination,
+        &mut control,
+        permit,
+        documents,
+    )
+    .and_then(|receipt| {
+        if external {
+            let mut detached = [0; 9];
+            destination.read_exact(&mut detached)?;
+            require(&detached == b"detached\n", "export_not_detached")?;
+        }
+        Ok(receipt)
+    });
     // Release both VM ports before returning a receipt or closing the control
     // connection. The controller must still reap this worker before teardown.
     drop(source);
@@ -188,6 +221,7 @@ fn exchange(
     destination: &mut Channel,
     control: &mut Channel,
     permit: Option<Permit>,
+    documents: bool,
 ) -> io::Result<Approved> {
     let request = loop {
         match read_message::<SourceRequest>(control, 64 * 1024)? {
@@ -213,22 +247,27 @@ fn exchange(
         )?;
     }
     write_message(source, &request)?;
-    let manifest = Manifest::read(source, request.limits)?;
-    manifest.write(control)?;
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Decision {
-        id: String,
-        manifest_sha256: String,
-        #[serde(default)]
-        progress: bool,
-    }
-    let decision: Decision = read_message(control, 1024)?;
-    let progress = decision.progress;
-    let approval = Approval {
-        id: decision.id,
-        manifest_sha256: decision.manifest_sha256,
+    let selection = if documents {
+        let offer: SelectionOffer = read_message(source, 64 * 1024)?;
+        let plan = crate::stream::selection_plan(&request.paths, &offer)?;
+        Some((offer, plan))
+    } else {
+        None
     };
+    let manifest = Manifest::read(source, request.limits)?;
+    let paths = if let Some((offer, plan)) = selection {
+        crate::stream::require_collection(&manifest, &plan, &offer.directories)?;
+        plan.mappings
+            .iter()
+            .filter_map(|mapping| plan.manifest_path(mapping.input_index))
+            .collect()
+    } else {
+        request.paths
+    };
+    // Media control already reviews the complete output manifest and retains
+    // its own source choices; no redundant path/mapping ledger is persisted.
+    manifest.write(control)?;
+    let approval: Approval = read_message(control, 1024)?;
     require(
         approval.id == request.id && approval.manifest_sha256 == manifest.sha256(),
         "offer_not_approved",
@@ -243,69 +282,17 @@ fn exchange(
     destination.read_exact(&mut ready)?;
     require(&ready == b"receive\n", "receiver_not_ready")?;
     write_message(source, &grant.approval)?;
-    {
-        let mut writer = Progress {
-            destination,
-            control,
-            enabled: progress,
-            bytes: 0,
-            last: Instant::now(),
-        };
-        for entry in manifest.entries() {
-            if let Entry::File { size, sha256, .. } = entry {
-                require(
-                    copy_hash(source, &mut writer, *size)? == *sha256,
-                    "content_changed",
-                )?;
-            }
-        }
-    }
-    let mut end = [0; 8];
-    source.read_exact(&mut end)?;
-    require(&end == END, "invalid_transfer_end")?;
+    crate::stream::relay_payload(source, destination, &manifest)?;
     // The receiver cannot publish until every offered file has also passed
     // validation at the relay. There is no payload buffering on the host disk.
     destination.write_all(END)?;
     let receipt: Receipt = read_message(destination, 1024)?;
-    require(
-        receipt.id == request.id
-            && receipt.manifest_sha256 == grant.approval.manifest_sha256
-            && receipt.entries == manifest.entries().len()
-            && receipt.bytes == manifest.bytes(),
-        "invalid_receipt",
-    )?;
+    crate::copy_protocol::verify_receipt(&receipt, &request.id, &manifest)?;
     write_message(source, &receipt)?;
     let mut done = [0; 7];
     source.read_exact(&mut done)?;
     require(&done == b"copied\n", "sender_not_complete")?;
-    Ok(Approved {
-        receipt,
-        paths: request.paths,
-    })
-}
-
-struct Progress<'a> {
-    destination: &'a mut Channel,
-    control: &'a mut Channel,
-    enabled: bool,
-    bytes: u64,
-    last: Instant,
-}
-
-impl Write for Progress<'_> {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        let count = self.destination.write(buffer)?;
-        self.bytes += count as u64;
-        if self.enabled && self.last.elapsed() >= Duration::from_millis(250) {
-            write_message(self.control, &serde_json::json!({"progress": self.bytes}))?;
-            self.last = Instant::now();
-        }
-        Ok(count)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.destination.flush()
-    }
+    Ok(Approved { receipt, paths })
 }
 
 /// Linux 6.5+ pins the process that established this private Unix connection.

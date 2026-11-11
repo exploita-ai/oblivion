@@ -1,90 +1,115 @@
-# Remote inference providers
+# Providers and official clients
 
-Oblivion's local encryption and its provider boundary solve different
-problems. The selected service must receive every prompt, attached document,
-tool result and generated response required for inference. Tor or SOCKS5 can
-change the network path; neither makes that content secret from the provider.
+Oblivion 1.0 runs unmodified Codex, Claude Code and OpenCode 2 in a Safe. Provider
+configuration and authentication belong to the chosen client. There is no
+Oblivion-specific model API adapter or central provider-key broker.
 
-“Zero retention” below summarizes published provider policies. It is not a
-property Oblivion can independently verify, and policies may change after an
-image is released. Review the linked source before submitting sensitive data.
+Authenticate inside the Safe using the client's supported login or API-key
+flow. A desktop profile is not mounted or copied into the guest. Profiles,
+refresh tokens, client databases and API keys saved by the client live inside
+that Safe's encrypted volume. Two agents in the same Safe can access data
+permitted by that guest's user account; different Safes have separate filesystems.
 
-## Abliteration.ai
+For the first ChatGPT login in Codex, choose **Sign in with Device Code** in the
+native client and open the displayed link in a browser outside the Safe, for
+example on your desktop or phone. Browser login uses a `localhost:1455` callback
+inside the Safe; opening its URL on the physical computer does not connect that
+callback to the guest. Device Code uses the client's supported headless flow
+when enabled for your account. An OpenAI API key remains a separate native login
+choice with its own billing. See the [pinned Codex login implementation](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/tui/src/onboarding/auth.rs).
 
-- **Integration:** native provider support.
-- **Endpoint policy:** the production gateway grants only the selected
-  Abliteration endpoint for the chat opening.
-- **Published handling:** its
-  [data-handling policy](https://abliteration.ai/data-handling) says core API
-  prompts, completions and images are processed in memory, are not stored and
-  are not used for training. Operational telemetry and billing metadata are
-  retained.
-- **Boundary:** optional web search or fetch is outside the core API's stated
-  zero-retention boundary.
-- **Account:** the provider's published privacy material describes retained
-  account/billing records and third-party payment processing.
+The explicit CLI login can use the same named Safe:
 
-## Refuseless
+```sh
+oblivion run --name work codex login --device-auth
+oblivion run --safe work codex
+```
 
-- **Integration:** OpenAI-compatible adapter with a fixed provider gateway.
-- **Endpoint policy:** only the configured Refuseless API endpoint is granted
-  for the opening.
-- **Published handling:** its [privacy policy](https://refuseless.com/privacy)
-  says prompts and outputs are not saved or used for training.
-- **Boundary:** Refuseless may route requests to third-party model providers and
-  states that it cannot guarantee every upstream retention policy.
-- **Account and payment:** its [pricing page](https://refuseless.com/pricing)
-  lists card and cryptocurrency payment options. Its public policy does not
-  state an unconditional no-KYC guarantee, so Oblivion does not make one.
+After closing it, use `oblivion run --safe work codex resume --last` to reopen
+that Safe and continue its latest native Codex conversation. Oblivion forwards
+the client arguments unchanged and does not forward an OAuth callback port.
 
-## OpenRouter
+Agent-created children have a controller-managed startup path. It exports only
+the requested client's supported credential from the parent, seals it to the
+family, child and creation request while booting, installs it in the child's
+native store while offline, then starts the saved task. Parent authority is
+checked throughout. Missing, ambiguous or unsupported authentication leaves the
+task waiting for authentication; it does not start anonymously. No whole home,
+agent profile, conversation store, cache or desktop login is copied.
 
-- **Integration:** OpenCode's native OpenRouter adapter.
-- **Mandatory routing:** the Oblivion gateway overwrites each request with
-  `zdr: true`, `data_collection: deny` and `allow_fallbacks: false`.
-- **Fail-closed behavior:** a model with no endpoint eligible for the requested
-  policy fails instead of falling back to a weaker route.
-- **Published handling:** OpenRouter documents
-  [zero-data-retention routing at endpoint level](https://openrouter.ai/docs/guides/features/zdr).
-- **Boundary:** OpenRouter and the selected upstream still process the request.
-  ZDR does not automatically cover optional server-side tools or plugins;
-  Oblivion does not enable those provider features.
+| Client | Credential-only adapters in the current source | Explicit limits |
+| --- | --- | --- |
+| Codex | OpenAI API key or a separately provisioned Codex Access Token | Ordinary ChatGPT OAuth caches are not cloned. Access Tokens represent a ChatGPT Business/Enterprise workspace; they are not Platform API keys. Custom routing is rejected by this adapter. |
+| Claude Code | Anthropic API key or a separately provisioned `claude setup-token` credential | Ordinary `/login` refresh caches are not cloned. Mixed identities, custom routing and authentication helpers need a separate supported adapter. |
+| OpenCode 2 | Selected active API key for a supported built-in integration, including `abliteration-ai`, with an explicit model | OAuth, custom provider routing, ambiguous selection and provider-specific forms are not delegated. Installation uses the pinned native key-connect API on private loopback without provider access. |
 
-## Model limits
+These adapters cover known default native profiles. Per-launch routing/settings
+overrides, native project configuration and unqualified provider plugins are
+refused rather than treated as equivalent to a default provider. This limits
+credential delegation; ordinary `oblivion run` still forwards native arguments.
 
-The chat client and gateway use the same bundled model catalog. Output budgets
-follow the selected model's published output limit, with the client reserving
-room for the prompt in its context window. A large context window does not
-necessarily allow an equally large answer. There is no universal 131k or 256k
-output ceiling.
+These are source adapters, not a qualification of real-provider login, expiry
+or account policy. Subscription delegation may require one-time provisioning
+before children can start without another login. See the official
+[Codex Access Token](https://learn.chatgpt.com/docs/enterprise/access-tokens),
+[Codex concurrent-authentication limits](https://learn.chatgpt.com/docs/auth/ci-cd-auth)
+and [Claude long-lived token](https://code.claude.com/docs/en/authentication#generate-a-long-lived-token)
+documentation. No subscription is silently replaced with API billing. Native
+login remains the fallback; universal managed-OAuth delegation is still an open
+requirement.
 
-The gateway rejects unknown models or budgets above their catalog limits with
-a specific error. OpenRouter availability still depends on an eligible ZDR
-endpoint and the account's access; a catalog entry does not guarantee either.
+Delegation does not make a provider account anonymous or narrow its permissions.
+Expiry, refresh, logout and simultaneous parent/child use require real-provider
+tests before a credential form is declared supported. Delegated secrets remain
+excluded from portable Share data, task text, public status and MCP responses;
+personal encrypted volume backups may still contain saved credentials.
 
-The catalog is `packages/core/src/models-dev/snapshot.txt`. Gateway builds
-extract the supported providers' limits from that file. Update and rebuild
-both client and gateway together when limits change. Oblivion does not contact
-a model catalog service automatically at runtime. Abliteration and Refuseless
-entries are checked against their [model documentation](https://docs.abliteration.ai/models)
-and [published configuration](https://refuseless.com/); preserve these entries
-when refreshing the upstream catalog if they are absent there.
+The client communicates through its Safe's Tor or configured SOCKS5 gateway.
+Open Internet is the default access policy; Strict and Offline remain explicit
+Safe-wide choices. A provider may refuse Tor exits, require interactive login,
+reject credentials or impose its own account conditions. Oblivion must report
+that error without switching to a direct connection or another transport.
 
-## Credential and routing boundary
+Tor conceals the original network address from the destination when correctly
+routed, but it does not conceal the provider account or the request content from
+the provider. End-to-end HTTPS validation remains enabled. Oblivion does not
+intercept TLS to read or rewrite arbitrary model requests.
 
-The provider is selected for a chat opening. The production gateway allowlists
-that provider's endpoint, keeps the real API key inside the gateway VM and gives
-the session only a revocable local capability plus the provider identifier.
-Closing the session revokes the opening-specific grant.
+Client telemetry settings are configured for the pinned clients, and verified
+dedicated collector domains are denied ahead of user rules. This is not a claim
+that all telemetry can be identified: traffic to a collector sharing the model
+API's encrypted destination cannot be distinguished by a hostname-only gateway.
 
-Provider or client-supplied routing fields cannot weaken the mandatory
-OpenRouter ZDR policy. Oblivion never silently falls back to a direct host
-connection or an unreviewed provider. A routing failure is visible to the user
-and the request stops.
+## Official client distribution
 
-## Before choosing a provider
+Images preinstall the pinned official Linux clients so a prepared Safe does not
+need a package download to open its terminal interface. Authentication and remote
+inference still require the provider's supported network access and account.
 
-Check the provider's current policy, jurisdiction, account requirements,
-upstream routing and optional tool behavior. Do not infer that a provider is
-anonymous, no-KYC or zero-retention solely because it accepts cryptocurrency or
-exposes an OpenAI-compatible API.
+[install-agents.json](../script/oblivion/install-agents.json) records package
+identity, official download URL, SHA-512 integrity and a separate distribution
+policy for each client. The image installer verifies the required upstream
+license and notice files against committed SHA-256 hashes before downloading a
+client. It preserves the upstream package and installs the verified notices
+under `/usr/share/doc/oblivion-agents/`. The installed `build-evidence.json`,
+also exported as the image's `client-evidence.json`, records only the clients and
+architecture actually installed, their executable hashes and their notices.
+Package integrity identifies bytes; it does not grant distribution rights.
+
+Codex retains its [Apache-2.0 license](https://github.com/openai/codex/blob/rust-v0.159.2/LICENSE)
+and [upstream notices](https://github.com/openai/codex/blob/rust-v0.159.2/NOTICE).
+OpenCode 2 retains its [MIT license](https://github.com/anomalyco/opencode/blob/v2.0.1/LICENSE),
+including when its platform package has no separate license file.
+Claude Code has [separate terms](https://github.com/anthropics/claude-code/blob/v2.1.302/LICENSE.md)
+and [commercial integration conditions](https://code.claude.com/docs/en/legal-and-compliance#can-customers-offer-claude-code-in-their-products).
+Its client remains unmodified, its native authentication choices remain available,
+and users supply their own accounts with direct provider billing. It is not
+relicensed under Oblivion's MIT license. The recorded policy and notices do not
+replace review of the applicable terms before publishing a candidate.
+
+Provider terms, account restrictions and billing remain those of the native
+clients. See [NOTICE](../NOTICE) for the framework's licensing boundaries.
+
+Local inference, Ollama endpoint integration and managed model downloads are
+explicitly deferred until after Oblivion 1.0. See the
+[roadmap](oblivion1.0-roadmap.md) for that later work.

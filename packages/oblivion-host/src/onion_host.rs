@@ -40,8 +40,25 @@ struct Job {
     id: String,
     session: String,
     ttl_seconds: u16,
-    #[serde(default)]
     backup: bool,
+}
+
+#[cfg(test)]
+mod job_tests {
+    use super::Job;
+
+    #[test]
+    fn job_requires_explicit_backup_mode() {
+        let mut record = serde_json::to_value(Job {
+            id: "a".repeat(32),
+            session: "b".repeat(32),
+            ttl_seconds: 60,
+            backup: false,
+        }).unwrap();
+        assert!(serde_json::from_value::<Job>(record.clone()).is_ok());
+        record.as_object_mut().unwrap().remove("backup");
+        assert!(serde_json::from_value::<Job>(record).is_err());
+    }
 }
 
 #[derive(Deserialize)]
@@ -409,7 +426,7 @@ pub fn serve(config: &Config, uid: u32) -> Result<()> {
     if !job.backup {
         require(
             crate::storage::session_info()?.is_some_and(|(id, mode)| {
-                id == job.session && matches!(mode.as_str(), "documents" | "chat")
+                id == job.session && matches!(mode.as_str(), "documents" | "agent")
             }),
             "session_not_open",
         )?;

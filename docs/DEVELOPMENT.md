@@ -1,859 +1,226 @@
-# Development
+# Developing Oblivion 1.0
 
-Oblivion is built from the same source for two 64-bit architectures. Physical
-boot-media validation is currently performed on amd64 hardware; arm64 is built
-for ARM hardware and compatible virtual machines.
+The default branch is `dev`. The privacy-stack refactor replaces the modified
+coding agent with pinned official clients and a shared controller. Use fresh
+1.0 development installations. There are no beta-format migration readers or
+compatibility launch paths.
 
-## Image architectures
+Use the [repository map](REPOSITORY.md) to distinguish shared runtime, desktop,
+Live, component laboratories and historical records. Builder and inspection
+entrypoints are indexed in [script/oblivion](../script/oblivion/README.md).
 
-| Image | Also called | Intended hosts |
-| --- | --- | --- |
-| `amd64` | `x86_64` | 64-bit Intel and AMD PCs |
-| `arm64` | `aarch64` | Apple Silicon and other 64-bit ARM systems |
+## Source checks
 
-`amd64` is the historical name of the 64-bit x86 instruction set. Intel and AMD
-do not need separate images. 32-bit x86 is not supported.
-
-## Prerequisites
-
-- Bun 1.4.4
-- Docker with Buildx
-- Python 3
-- QEMU for local VM tests
-- sufficient free space for Debian root filesystems and VM disks
-
-Install the JavaScript workspace and run the canonical checks:
+Install the Bun version recorded in `package.json`, then:
 
 ```sh
-bun install --frozen-lockfile --os '*' --cpu '*' --libc '*'
+bun install --frozen-lockfile
 bun run check
 bun run typecheck:tsc
 ```
 
-Run tests from the package that owns them, never from the repository root. Read
-the relevant instructions under `.opencode/skills` before changing tests.
+`check` verifies the pinned Bun version before running lint and the four
+TypeScript workspace checks, including before Turbo can reuse a cache. It does
+not run Rust, Python, Swift, VM or image tests. To execute the Bun type checks
+again instead of reusing their cache, run `bun run typecheck --force`.
 
-## Build images
-
-```sh
-# Intel/AMD 64-bit image
-bun run build:iso
-
-# ARM 64-bit image
-OBLIVION_ARCH=arm64 bun run build:iso
-
-# development image with hardware-debug support
-bun run build:hardware
-```
-
-The resulting images are:
-
-```text
-artifacts/oblivion-beta-iso/image/oblivion-development-amd64.iso
-artifacts/oblivion-arm-iso/image/oblivion-development-arm64.iso
-```
-
-Generated images, VM disks, logs and evidence are written under `artifacts/`
-and are ignored by Git. CI produces per-commit evidence as expiring workflow
-artifacts; generated evidence must not be committed as permanent documentation.
-
-Development images are not release images. They may contain diagnostics,
-temporary access keys or services that must be absent from a public build.
-
-### Persistent session administration
-
-Session-only `sudo` installs into an overlay root backed by the session volume.
-`/usr`, `/etc` and `/var/lib/dpkg` changes persist together. `/tmp`, `/var/tmp`,
-`/var/log` and `/run` remain volatile. The root overlay is assembled in initramfs;
-resize-maintenance boots skip it so ext4 remains unmounted. All other VM roles
-retain their read-only roots. Encrypted session backups include the upper layer.
-
-Qualify this with actual guest services, a local synthetic Debian package,
-clean shutdown/reopen and a second independent volume:
+Run tests from their package directory, never from the repository root:
 
 ```sh
-docker build -f script/oblivion/Dockerfile.vm-lab --target terminal-artifacts \
-  --output type=local,dest=artifacts/session-admin/image .
-python3 script/oblivion/run-terminal-lab.py --image artifacts/session-admin/image \
-  --output artifacts/session-admin/results --admin
+cd packages/oblivion-manager
+bun test --timeout 30000
+
+cd ../oblivion-host
+cargo check --locked --lib --bins
+cargo test --locked --lib --bin oblivion
+
+cd ../oblivion-share
+cargo test --locked --release --test container
 ```
 
-This fixture runs without a NIC and uses plaintext synthetic ext4 backing
-files: it verifies guest package persistence and isolation, not host LUKS or
-physical power-loss guarantees. The production controller supplies an unlocked
-LUKS block instead. A customized upper layer may mask a future base update;
-base upgrades and reset/recovery are separate qualification work.
+The CI workflow records the complete current set of package-local suites. Rust
+image builds and CI pin Rust 1.88.0. Native C/C++ dependencies also need the
+compiler tools listed in that workflow.
 
-### Global gateway policy
-
-The private `settings` action `access` updates the host-owned Open/Strict/Offline
-policy without applying keyboard settings or restarting the session. The chat
-has no mode setting. Legacy profiles without `web_access` remain Strict; new
-profiles default Open. Existing user choices are preserved. Changing a policy
-or rules revokes all in-flight grant streams. Offline also stops OnionShare.
-Open Internet admits every public TCP port through the existing HTTP CONNECT
-proxy. Serialized profiles keep the `open` value; no storage migration is needed.
-The gateway tests require curl and exercise a passive FTP transfer through the
-real tools proxy and policy connector, with a loopback-only SOCKS/FTP fixture.
-Both control and data tunnels must retain remote hostname resolution. The test
-does not qualify public Tor exit policies or an actual external FTP service.
-
-For real supervisor/firewall/SOCKS revocation with a loopback TLS fixture:
+## Manager preview
 
 ```sh
-docker build -f script/oblivion/Dockerfile.vm-lab --target transport-network-artifacts \
-  --output type=local,dest=artifacts/network-access/image .
-python3 script/oblivion/run-transport-lab.py --image artifacts/network-access/image \
-  --output artifacts/network-access/results --tools --fault policy
+bun run dev
 ```
 
-The fixture proves live access-policy changes and denied direct/DNS/UDP traffic
-with two disposable Debian VMs. It does not make real provider requests or
-qualify a public Tor circuit. No diagnostic trust root belongs in a release ISO.
-`run-access-tor-lab.py` accepts the same image/output arguments on Mac and tests
-actual Tor `DisableNetwork` transitions plus firewall rule ordering with a
-restricted QEMU uplink. It deliberately does not bootstrap a public circuit.
+The preview uses local fixture state and does not open a real Safe, authenticate
+to a provider or provision a disk. Renderer fixtures under the manager package
+exercise real production components. Check 80×24 and 160×50, focus without a
+mouse, resize and paste boundaries. An interactive screenshot alone does not
+verify controller state.
 
-### Session tools
+## Build controller and Live images
 
-`script/oblivion/session-packages.txt` declares the session's Debian tools:
-shell/process utilities, Git/ripgrep, curl, jq/SQLite, file/tree/less/nano,
-ZIP/XZ/bzip2 and Poppler PDF tools. Python includes `venv` and its pip bootstrap.
-The default analysis set adds binutils (`strings`, `nm`, `objdump`, `readelf`),
-Binwalk, `xxd`, `hexdump` and `patchelf`. Debian's `python3-standard-imghdr`
-provides `import imghdr` on Python 3.13; it is a module, not a shell command.
-Pwntools (`import pwn`), Ropper and angr are built into an immutable Python
-bundle under `/opt/oblivion-analysis`, exposed to ordinary `python3`. `pwn` and
-`ropper` are also on PATH. Project virtualenvs remain isolated by default; use
-`python3 -m venv --system-site-packages .venv` to reuse the bundled modules.
-`session-analysis.in` pins the requested versions and `session-analysis.lock`
-pins all transitive dependencies and download hashes. Regenerate the lock with
-the `session-analysis-lock-artifacts` Docker target, then test both architectures.
-Build reports and packaged licenses stay with the bundle and its inventory is
-included in `oblivion-tools --json`. Sessions never install this set at startup.
-`gdb`, `ltrace` and `strace` are included for debugging session-owned processes,
-without extra capabilities. GDB symbol downloads and saved history are disabled;
-debuginfod URLs are empty and any explicitly enabled cache remains in RAM.
-All additions are CLI tools or Python libraries; GUI recommendations such as
-Binwalk's pyqtgraph are excluded.
-Node LTS and its bundled npm come from the upstream archives pinned by version
-and architecture-specific SHA-256 in `script/oblivion/session-node.json`.
-The build verifies the hash before extraction and keeps upstream licenses.
-Updating that lock is an explicit source change, never a runtime auto-update.
-
-Run `oblivion-tools` inside a session for its bundled capabilities, or add
-`--json` for paths, Debian versions, Node provenance and npm dependency versions.
-The same generated inventory supplies the agent's configured instructions and
-the static image audit. Tool additions affect the session image, not the host,
-gateway or transfer images. Compilers, language-specific toolchains, browsers
-and office suites are outside this base set.
-
-Both terminal and agent disable shell/REPL/pager/SQLite histories and automatic
-npm audit/update checks; npm disk logs are disabled. Python/npm caches use RAM;
-project dependencies and the npm user prefix stay inside the session volume.
-Python dependencies belong in a project virtualenv. HTTP(S) tools use the
-opening-scoped proxy and session-wide Open Internet / Strict / Offline policy; Node enables native environment-proxy
-support. Other networking libraries still need their own proxy support.
-Pwntools automatic update checks are disabled through `/etc/pwn.conf`, and its
-cache uses the RAM-backed XDG cache. Ropper's default `~/.ropper` cache is inside
-the encrypted session home. Binwalk signature scans work without downloading
-extractors; its optional extraction helpers are not all included.
-
-The `session-tools-test` Docker target exercises actual commands and local TLS/
-proxy fixtures with no external network, an unprivileged user and a read-only
-root. `session-tools-chat-test` additionally checks the real compiled client's
-launcher/configuration. CI runs this integration on ARM64 and amd64. For focused
-analysis checks, `session-analysis-test` exercises the same packages and
-locked bundle with synthetic files, ELF parsing/patching, a small gadget fixture
-and symbolic constraint solving. Run with no network, a read-only root and the
-same RAM-backed `/vault`, `/run` and `/tmp` mounts as `session-tools-test`.
-The debugger tracing test requires the native kernel ABI: amd64 user-mode
-emulation on an ARM Mac can run the binaries but return incorrect ptrace
-registers. Keep this test enabled on the native ARM64 and amd64 CI runners.
-For booted offline acceptance, build `terminal-artifacts` with
-`--build-arg TERMINAL_GUEST=opencode-guest`, then run
-`script/oblivion/run-terminal-lab.py --tools --exports` with its image/output
-arguments. These disposable laboratories do not modify a provisioned VM.
-
-### OnionShare component
-
-`packages/oblivion-onion` contains a separate GPL-3.0-or-later adapter for the
-pinned upstream Web service. Build the `onionshare-test` Docker target and run
-the read-only/nonroot/networkless command in its README. The runtime bundle
-retains dependency versions, download hashes and licenses; no resolver or
-installer runs when starting a transfer. The development-only
-`onionshare-lock-artifacts` target regenerates the Python lock for review.
-Supplemental license source hashes are maintained separately when upstream
-wheels omit the license text. Never replace this with an unpinned pip install.
-
-The `onion-tor-test` target adds actual Tor ownership/service tests with networking
-disabled. Its root fixture needs only SETUID/SETGID/CHOWN/DAC_OVERRIDE/KILL to
-start and reap the daemon as UID 1200; see the CI command. These are fixture
-capabilities, not the HTTP worker's privileges. `onion-control-artifacts`
-exports a separate gateway and diagnostic image for `run-onion-lab.py` with
-Mac ARM64 HVF or explicit Linux TCG. The production unit remains silent; the
-diagnostic image alone adds a root console fixture. It does not replace the
-gateway's production controller or sandbox.
-
-`Dockerfile.transfer` now also exports `oblivion-onion-file`. Build that bundle
-into `artifacts/ci/transfer` before building `onion-file-artifacts` from
-`Dockerfile.vm-lab`, then run `run-onion-file-lab.py --image <directory>
---output <new-directory>` with HVF on Mac ARM64 or explicit `--accelerator tcg`
-on Linux. This uses the actual file-controller, systemd socket activation,
-read-only share bind, Unix/TCP relay and verified copy endpoints on a private
-two-VM wire. It checks ten share/receive/review and failure lifecycles, including raw
-backup streaming and refusal of writable/invalid block fixtures.
-Production and diagnostic peers are separate images; no writable user disk or
-external network is attached. The ARM64 job is registered in CI.
-
-Component tests alone do not establish public reachability. The disposable
-ARM64 host has now additionally passed a real public receive/review/import/
-reopen round trip and selected-file sharing with independent Tor clients.
-Absent/wrong recipient authorization was refused, the approved download
-matched, revocation stopped access and ephemeral use left the general archive
-byte-identical. These are HVF/TCG laboratory results, not supported-candidate
-or physical-media qualification. The deployed ISO remains unchanged; new
-image builds include the transfer profiles. Measure candidate RAM/image costs
-and qualify the normal KVM path before shipping.
-
-The host's selective state store now takes an explicit `Model` or `Transfer`
-purpose. The model keeps its legacy `profile/tor-state` filename; transfers
-use `profile/onion-tor-state` with no fallback. Writes retain private modes,
-atomic rename and directory sync, and the storage controller still enforces
-the general-vault writable/ephemeral policy before saving. No transfer state
-read or write changes `transport.json`, proxy credentials or provider keys.
-The source transfer owner now loads/checkpoints this store every four seconds
-and during revocation. The public laboratory also verifies separate transfer
-guards and an unchanged archive during ephemeral use.
-
-`onion_uplink::arguments` describes QEMU's existing user/stream/hub network
-backend as a machine-less process, with no CPUs, kernel, writable disk or guest
-filesystem. Its Linux launcher now uses the existing uplink identity with a
-private PID namespace; Tor/file VMs use their own UIDs and private PID/network
-namespaces. No new host firewall exception is required. The root owner launches
-all three actors when optional `onion` configuration is present. This is source
-integration, not a deployed or supported-profile-qualified candidate.
-From `packages/oblivion-host`, run:
+With Docker Buildx available:
 
 ```sh
-cargo +1.85.0 test --locked --test tor_profile --test onion_uplink --test onion_vm --test onion --test onion_task --test onion_copy -- --include-ignored
+# Shared private controller for a desktop bundle
+OBLIVION_ARCH=arm64 bun run build:runtime
+
+# Outer Live OS with the matching private controller embedded
+OBLIVION_ARCH=amd64 bun run build:live
+OBLIVION_ARCH=arm64 bun run build:live
 ```
 
-Install the architecture's QEMU executable on PATH for the actual network test.
-It uses the production argument builder, verifies no CPU/block devices through
-QMP and exchanges a fixed DHCP packet only with the emulated local router. It
-does not contact a public destination or establish Tor isolation/readiness.
-Compiler-only suites leave that explicit integration test ignored; a separate
-ARM64/amd64 CI job installs QEMU and runs it. Native Mac results do not prove
-the Linux service sandbox or end-to-end transfer ownership.
+Both commands use `script/oblivion/build-image.sh` and the shared
+`Dockerfile.vm-lab`. The controller target is `controller-runtime-artifacts`;
+the outer Live target is `live-iso-artifacts`. Diagnostic component targets are
+separate. Images contain official agent executables from
+`install-agents.json`, not an agent built from this repository's UI utilities.
 
-The private `onion` operation is not an OpenCode public API. It accepts
-`prepare` (`ttl_seconds` 1–3,600), `status`, `receive` (`client_auth`, canonical
-52-character base32 X25519 public key), `access`, `freeze`, `import`, `stage`, `share` and `cancel`.
-`prepare-backup` separately authorizes a closed-session ciphertext share with
-`id`, `password` and `ttl_seconds`; no filesystem path is accepted.
-Prepare returns before Tor bootstrap completes and publishes no URL. After
-verified readiness, receive acknowledges background file startup; polling
-advances through `starting` and `receiving`. Explicit access returns only the
-private URL; the recipient keeps the corresponding private authorization key.
-The manager now generates that pair in RAM, hides the private key by default
-and sends only the public key to the controller. Reveal is explicit; disposal
-clears the owned raw byte buffer. This is not a promise that JavaScript strings
-or terminal render copies have all been overwritten. The receive view then
-hands off the sealed source to the existing Documents approval/copy UI. Freeze revokes Tor before file review and reaps both network actors;
-`review` waits for the sealed intake acknowledgement. `import` starts the
-existing source and session receiver on private ports, advances through
-`preparing-import` to `copying`, and exposes a manager-owned 0600 socket at
-`/run/oblivion-onion-host/copy.sock`. Its parent allows traversal (0711); the
-root control socket remains root-owned 0600. Only metadata reaches the UI.
-`imported` and its verified receipt follow approved publication and port removal.
-Cancellation joins file/copy workers before final port teardown. Do not supply provider
-keys or arbitrary targets/paths; all commands reject unknown fields. Job files
-contain only operation/session IDs, the mode flag and deadline. New Live builds
-include the optional `onion` VM configuration; previously built candidates are
-not modified. Session-file sharing first requires the existing manifest and
-copy approval; the owner retains the actual approved path order and the file
-VM verifies/seals that snapshot before publication.
+Controller output lives in `artifacts/oblivion-runtime-ARCH/`; outer Live output
+lives in `artifacts/oblivion-stack-ARCH/`. Both retain their ISO, package
+inventories, source hashes, runtime hashes and `SHA256SUMS`. Verify that file before using
+the artifact. No source checksum is a substitute for signed release provenance
+or the acceptance matrix. A build does not qualify nested virtualization.
 
-The `--onion-host` override in `run-vm-lab.py` loads the current fixture,
-controller bundle and production host firewall into a disposable host's RAM.
-It verifies the immutable gateway/file images, opens synthetic LUKS volumes
-and sends transfer commands through the actual manager IPC as UID 1000.
-The nine offline lifecycle checks include private namespaces, no publication
-before verified readiness, cancellation, normal close, owner/session SIGKILL,
-expiry and general lock. They check that every auxiliary PID exits before
-confirmed storage closure, model credential/transport files stay unchanged
-and synthetic password/key/proxy markers are absent from the persistent disk.
-The immutable QEMU root must include the three transfer runtime mount targets.
-Run from the repository root with separately built artifact directories:
+## Native launcher and controller
+
+The Rust package `oblivion-host` builds the CLI and Linux controller.
+`oblivion-native` builds the macOS Virtualization.framework helper;
+`oblivion-native-linux` builds the Linux QEMU/KVM helper for x86_64 and ARM64. A desktop
+installation pairs the CLI, manager, helper and matching runtime image. Do not
+mix a current CLI with an earlier prototype's internal protocol.
+
+The desktop launcher supports explicit runtime install/update/start/stop/recover
+operations. An update must preserve the private persistence disk and refuse
+running owners rather than replacing them in place. Test against disposable
+state directories. Never target a user's existing UTM disk or provisioned boot
+media during automated development checks.
+
+A root-owned `/etc/oblivion/installation.json` marker with `live-launcher` selects
+the outer Live launcher. Both desktop and Live use a headless controller VM;
+there is no direct-controller fallback on external Debian. `install-runtime.sh`
+prepares the trusted inner controller root, not a cross-platform desktop
+installation. Live disk authorization reviews only a dedicated partition on
+the actual boot USB. RAM-only Live runs do not attach that partition.
+
+The development Debian controller package reuses the Live role-asset packer and
+stops before ISO creation:
 
 ```sh
-python3 -B script/oblivion/run-vm-lab.py --onion-host \
-  --image <tui-host-image> --services-bundle <host-artifacts> \
-  --gateway-image <onion-control-artifacts> \
-  --onion-file-image <onion-file-artifacts> --output <new-directory>
+OBLIVION_ARCH=amd64 OBLIVION_DEB_VERSION=1.0.0~dev20261104 bun run build:deb
 ```
 
-Mac ARM64 defaults to HVF for the outer host; nested guests use explicit TCG.
-The x86 CI job selects `--architecture x86_64 --accelerator kvm` and requires
-KVM with no fallback. The laboratory has no uplink unless `--tor-online` is
-explicitly supplied. That option adds the public bootstrap check and external
-packet capture, including the pre-enable barrier; it does not perform a
-sender/recipient transfer or establish production-profile support.
-Both offline and public-bootstrap modes have passed locally on the disposable
-ARM64 HVF/TCG host. The public run confirms zero traffic before enable and
-TCP-only IPv4 afterward. For an explicit public sender/recipient test, build
-`onion-recipient-test` as a Docker image and add:
-
-```sh
---tor-online --onion-recipient <recipient-image> --onion-share
-```
-
-The external caller runs two independent Tor daemons with private RAM state,
-no capabilities and no Docker logging. A private virtio metadata bridge keeps
-access URLs and authorization secrets out of serial logs and evidence. It
-checks absent/wrong/valid authorization, upload, selected-only approved import,
-close/reopen, selected-file download, revocation and ephemeral byte identity.
-`--onion-backup` additionally creates a 512 MiB closed LUKS2 volume and checks
-its authenticated first/last MiB Range downloads and streams the entire
-container into a recipient-side hash, without storing that container in the
-caller's RAM filesystem. This opt-in bulk test has a 65-minute laboratory
-budget; production transfer deadlines remain one hour. Keep
-bootstrap failures and numeric progress in evidence; a later pass does not
-establish reliability on a different network or profile.
-
-## Release branches
-
-All normal development targets `dev`. Promote a fully reviewed commit to
-`main` only when it is a release candidate. GitHub Actions builds both image
-architectures for each `main` push without publishing them.
-
-After the `Oblivion checks` run for that exact `main` commit is green, a `v*`
-tag on the commit rebuilds both architectures and uploads them directly to a
-draft GitHub Release. The Release is made public as a pre-release only after
-both builds and checksum verification succeed. A tag outside `main` is rejected.
-
-Do not manually attach locally built ISOs to a Release. Until signed provenance
-is implemented, published SHA-256 files provide integrity checking rather than
-publisher authentication.
-
-## Run from a virtual machine
-
-Oblivion persistence uses free space after the hybrid ISO on its writable boot
-medium. Mounting the ISO as a read-only virtual DVD is therefore not equivalent
-to booting the complete writable image. Prepare a new sparse raw disk instead:
-
-```sh
-bun run vm:disk -- \
-  --image artifacts/oblivion-beta-iso/image/oblivion-development-amd64.iso \
-  --output artifacts/oblivion-amd64.raw \
-  --size-gib 8
-```
-
-The helper accepts only a new output file and never opens a physical device.
-Attach the resulting raw image as the VM's writable boot disk. The current VM
-profile exposes it as a **USB mass-storage device** so the same persistence path
-used on physical hardware is exercised. Keep it private: after setup it
-contains the encrypted general vault and sessions.
-
-### Nested virtualization is required
-
-The outer Oblivion host starts separate gateway, session and transfer VMs. The
-production controller therefore requires a usable `/dev/kvm` and deliberately
-has no software-emulation fallback. An outer hypervisor must expose nested
-hardware virtualization to Oblivion; booting the manager alone is not a
-successful compatibility result.
-
-| Host and hypervisor | Image | Current expectation |
-| --- | --- | --- |
-| Linux x86_64 with QEMU/KVM and nested KVM | `amd64` | Primary VM target |
-| Linux arm64 with QEMU/KVM and nested KVM | `arm64` | Supported design; hardware validation required |
-| Windows x86_64 with VirtualBox nested VT-x/AMD-V | `amd64` | Supported design; physical validation required |
-| Intel Mac with a hypervisor exposing nested VT-x | `amd64` | Unverified |
-| Apple Silicon M3 or newer, macOS 15+, UTM with Apple Virtualization | `arm64` | Native Mac VM target; nested KVM validated on M4 Pro |
-| Apple Silicon M1/M2 | `arm64` | Manager may boot, but Apple does not expose nested virtualization |
-| Apple Silicon with VirtualBox, VMware, Parallels or UTM's QEMU backend | `arm64` | Full sessions are currently unsupported |
-| Windows on ARM with VirtualBox | `arm64` | Manager may boot, but VirtualBox does not expose nested virtualization to ARM guests |
-
-[Oracle documents](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/AdvancedTopics.html#nested-virt)
-the generic nested-virtualization switch, while its
-[ARM host limitations](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/installation.html#host-arm)
-exclude that setting for ARM guests. A hypervisor without this capability cannot
-run the current production image completely.
-
-### Apple Silicon with UTM
-
-[UTM](https://github.com/utmapp/UTM) is the supported direction for running
-Oblivion natively on Apple Silicon without a project-specific Mac application.
-Use a Mac with an M3 or newer chip and macOS 15 or newer. UTM 4.6 and later
-enable nested virtualization by default for Linux guests using the **Apple
-Virtualization** backend. Do not select UTM's QEMU backend.
-
-Download the ARM64 ISO from the release page and clone this repository for its
-disk-preparation script. Python 3 is sufficient; Bun and Docker are needed only
-when building Oblivion itself. Prepare a new writable virtual boot disk:
-
-```sh
-python3 script/oblivion/prepare-vm-disk.py \
-  --image /path/to/oblivion-arm64.iso \
-  --output /path/to/oblivion-arm64.raw \
-  --size-gib 16
-```
-
-In UTM:
-
-1. Create a new **Virtualize → Linux** VM using Apple Virtualization.
-2. Assign 8 GiB RAM and four CPU cores for sessions and the optional transfer
-   VMs. The earlier chat-only candidate was tested with 4 GiB and two cores;
-   that result does not qualify the expanded transfer profile.
-3. Use UEFI boot. Import `oblivion-arm64.raw` as an **internal VirtIO drive**,
-   writable, with **Use NVMe Interface** disabled. Do not attach the boot image
-   as a removable USB drive. Remove the wizard's unused blank disk.
-4. Use that disk as the boot medium. Persistence uses only the free tail of the
-   disk backing the mounted Oblivion live image, after checking its exact ISO
-   and GPT layout. Other attached disks are never setup targets. This VirtIO
-   persistence support requires an image built with the fix below; beta.2 and
-   earlier images still reject internal boot disks.
-5. Use shared/NAT networking. Enable **Clipboard sharing** for host/guest text
-   copy/paste. Keep shared directories, Rosetta and unnecessary device
-   passthrough disabled. Clipboard sharing is optional and may be disabled for
-   an isolated evaluation; it does not affect Documents import/export.
-6. In **Display**, start with **1440 × 900** and disable **Dynamic Resolution**.
-   This keeps the terminal readable when the VM window fills a Retina display;
-   dynamic resolution can otherwise create a very large terminal grid with tiny
-   text. Adjust the display size with the VM stopped if needed.
-7. Start Oblivion and open a session. A `kvm_required` error means nested
-   virtualization was not exposed and the configuration is unsupported.
-
-UTM's [4.6 release notes](https://github.com/utmapp/UTM/discussions/6715)
-document nested Linux virtualization on macOS 15 with M3 or newer, and its
-[Apple-backend drive documentation](https://docs.getutm.app/settings-apple/drive/)
-states that removable raw images are supported. Apple independently documents
-[M3 as the minimum chip](https://developer.apple.com/documentation/virtualization/vzgenericplatformconfiguration/isnestedvirtualizationsupported)
-for nested virtualization.
-
-**Why an internal VirtIO disk:** UTM has a
-[cached-I/O workaround for Linux disk/memory corruption](https://github.com/utmapp/UTM/pull/5919).
-In UTM 5.0.8 on macOS 15, its dynamic removable-drive path omits that workaround.
-An internal VirtIO disk uses it. A frozen terminal can therefore be a guest
-kernel failure, not a TUI failure. Do not use removable virtual USB as the
-persistent boot disk on this configuration. Physical USB boot is unaffected
-by this Apple virtual-disk issue.
-
-Earlier ARM candidates were exercised with UTM 5.0.8 on an Apple M4 Pro and
-macOS 15.7.3. The test verified an `aarch64` live boot, KVM API version 12, an
-unprivileged nested `aarch64` guest boot, RAM-backed runtime filesystems, no
-swap, LUKS2 creation and wrong-password rejection, and a production Documents
-VM with KVM enabled and no network device. Subsequent kernel crashes invalidate
-any stability qualification of the removable-USB boot profile. Those functional
-results do not establish long-running stability. On 2026-10-30, the internal
-VirtIO replacement passed encrypted setup, wrong-password rejection, three
-session close/reopen cycles and a full power cycle retaining two synthetic
-OpenCode histories, titles, pending input and a document. Twelve keyboard/time
-zone changes and eight display restarts with concurrent status polls also
-passed. The latter required fixes for recovery lock contention and systemd's
-repeated-activation limit. Tor reached 100% bootstrap with verified direct-access
-blocking in 15.5 seconds, then stopped on lock. These are bounded regression
-checks, not a prolonged real-provider workload or a claim about every Apple
-Silicon model or UTM release. The rebuilt ARM64 diagnostic ISO was then booted
-on a fresh internal VirtIO disk, without runtime patches: setup, twelve
-preference changes, close/reopen, a full power cycle and six additional display
-restarts passed. Two histories, pending input and the document remained intact;
-a powered-off scan of the 16 GiB disk found none of their synthetic text markers.
-This marker scan is not a comprehensive proof of zero retention. The old test
-disk was preserved separately. These tests do not replace the complete
-`vm-services-test.py` fixture suite or prolonged provider and physical-media tests.
-
-### QEMU/KVM on Linux
-
-On an x86_64 Linux host with nested KVM enabled:
-
-```sh
-qemu-system-x86_64 \
-  -machine q35,accel=kvm -cpu host -m 4G -smp 2 \
-  -device qemu-xhci,id=xhci \
-  -drive file=artifacts/oblivion-amd64.raw,format=raw,if=none,id=oblivion,cache=none \
-  -device usb-storage,bus=xhci.0,drive=oblivion,bootindex=1 \
-  -nic user,model=virtio-net-pci
-```
-
-The raw image is attached through QEMU's documented
-[USB mass-storage device](https://www.qemu.org/docs/master/system/devices/usb.html)
-rather than as a SATA disk.
-
-For arm64 use `qemu-system-aarch64`, the QEMU `virt` machine, KVM, an AArch64
-UEFI firmware supplied by the host distribution, and the arm64 raw image. The
-guest architecture must match the host architecture for hardware acceleration.
-
-### VirtualBox on x86_64
-
-Use a current VirtualBox 7.2 release on an Intel/AMD Windows or Linux host.
-Python 3 and VirtualBox are sufficient to prepare downloaded images. From a
-checkout of this repository, prepare a new `amd64` boot disk, then convert it
-to a dynamically allocated VDI:
-
-```sh
-python3 script/oblivion/prepare-vm-disk.py \
-  --image /path/to/oblivion-amd64.iso \
-  --output /path/to/oblivion-amd64.raw --size-gib 16
-VBoxManage convertfromraw /path/to/oblivion-amd64.raw \
-  /path/to/oblivion-amd64.vdi --format VDI
-```
-
-On Windows replace `python3` with `py -3`, use Windows file paths, and run
-`VBoxManage.exe` from the VirtualBox installation directory or add it to PATH.
-
-Create a Linux/Debian 64-bit VM with 8 GiB RAM and four virtual CPUs.
-Enable EFI and **Nested VT-x/AMD-V**, add a USB storage controller, and attach
-the VDI to that controller as a writable hard disk. VirtualBox can boot virtual
-USB storage only through EFI. Use NAT networking and a VMSVGA display. No
-physical USB device or outer-host disk needs to be passed through: the VDI is
-the VM's writable boot medium, including free space for encrypted persistence.
-Keep shared folders and drag-and-drop disabled.
-
-For text copy/paste select **Devices → Shared Clipboard → Bidirectional**.
-Leave **Clipboard File Transfers** disabled; documents use Oblivion's explicit
-import/export flow. The amd64 build includes the pinned upstream `VBoxClient`
-clipboard component and uses Debian's guest kernel driver. It does not install
-`VBoxService`, a guest-control service, shared-folder mounts or a runtime
-Guest Additions installer. The corresponding CLI settings are:
-
-```sh
-VBoxManage modifyvm "Oblivion" --nested-hw-virt on --firmware efi
-VBoxManage modifyvm "Oblivion" --clipboard-mode bidirectional \
-  --clipboard-file-transfers disabled --drag-and-drop disabled
-```
-
-The [Oracle clipboard documentation](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/guestadditions.html#guestadd-clipboard)
-and [VBoxManage reference](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/vboxmanage.html)
-describe these switches. A guest that reaches the welcome screen but reports
-`kvm_required` cannot open protected sessions: check firmware virtualization,
-the nested-virtualization setting and conflicts with the Windows hypervisor.
-VirtualBox session/clipboard qualification on Windows remains a separate test;
-do not infer it from ARM64 UTM results.
-
-### Text copy/paste in a VM
-
-Images built from this revision include the clipboard components; no command or package
-installation inside a running Oblivion guest is required. Previously built
-ISOs do not acquire these components by enabling a hypervisor checkbox.
-
-- On the outer Mac, copy/paste uses the normal ⌘C/⌘V shortcuts. In the Oblivion
-  terminal, select visible text and use Ctrl+C; Ctrl+V pastes clipboard text.
-  Super/⌘V is also mapped when the VM forwards that key. UTM may reserve some
-  Mac shortcuts for its own menus, so Ctrl+C/Ctrl+V remain the guest shortcuts.
-- Copy is an explicit selection action. The session VM cannot send clipboard
-  escape sequences to the outer host, and cannot read its clipboard directly.
-- The UTM path uses the standard SPICE broker and a restricted open-source
-  Wayland adapter, with UTF-8 text and a 256 KiB payload limit. Host text is
-  requested lazily on paste. There is no clipboard history, file drag-and-drop,
-  network listener or remote-execution agent.
-- The VirtualBox path runs only its clipboard client. Temporary PID files and
-  display/clipboard state stay in RAM; normal helper output is discarded.
-- On bare metal the hypervisor channel is absent. Local terminal copy/paste
-  remains available. Clipboard sharing in a VM deliberately makes copied text
-  available to its outer OS, whose clipboard history is outside Oblivion.
-
-First-use check: paste harmless accented text from the host into an Oblivion
-input, copy a selected reply back, and repeat after closing/reopening a session.
-Use the normal session close/lock workflow; text copy/paste does not transfer
-session passwords, API keys or documents automatically.
-
-UTM documents the host-side switch and required agent in its
-[clipboard guide](https://docs.getutm.app/guest-support/sharing/clipboard/) and
-[Linux guest-support guide](https://docs.getutm.app/guest-support/linux/).
-
-A fresh ARM64 development ISO has passed bidirectional clipboard acceptance
-on the available UTM Apple-backend Mac with no VM network adapter: physical
-Ctrl+V pasted Mac text into the manager, and selected manager text copied with
-physical Ctrl+C pasted back into macOS. This used a separate unprovisioned
-VM, not a user's archive. Synthetic modifier shortcuts from the UI automation
-arrived as ordinary letters, so the two shortcut checks were confirmed by the
-human tester. The headless Cage/data-control suite and Unix protocol tests run
-separately. The VirtualBox binary/hash/CLI are verified in an amd64 container;
-an actual VirtualBox host/guest round trip is still pending.
-
-Running Oblivion inside another operating system weakens its threat model: the
-host OS and hypervisor can observe the display, input, memory and virtual disk.
-The VM path is for evaluation and development. Booting a verified release image
-directly on dedicated hardware remains the intended high-privacy deployment.
-
-For retention-sensitive tests, fully power off the VM after locking Oblivion;
-do not suspend it, save its RAM state or take memory snapshots. Keep VM files
-outside cloud-synchronized/automatically backed-up folders and protect the
-outer disk. These settings reduce accidental retention but do not prevent the
-outer OS or hypervisor from reading memory, swapping it or recording input and
-display. Oblivion cannot enforce those host policies from inside Debian.
-
-## Disposable audit checks
-
-Use only freshly built, unprovisioned images and disposable synthetic disks.
-Never run destructive fixtures against a user's boot medium or archive.
-The ARM64 Mac probes use QEMU/HVF with a diagnostic initramfs; they do not install
-or change the user's VM and do not qualify physical UEFI boot or nested KVM.
-
-```sh
-python3 script/oblivion/run-live-policy-lab.py \
-  --iso /absolute/path/to/oblivion-arm64.iso \
-  --output artifacts/policy-check
-
-python3 script/oblivion/run-chat-powerloss-lab.py \
-  --iso /absolute/path/to/oblivion-arm64.iso \
-  --output artifacts/chat-crash-check
-```
-
-Output directories must be new. The first probe checks actual host firewall
-packets, service confinement and activation order, then records a runtime
-metadata inventory. The second kills the outer VM after a compiled chat API
-commit, reboots its disposable nested-LUKS disk and checks histories, queued
-input, documents and absence of plaintext markers. It does not simulate the
-physical host losing power. See [qualification results](STATUS.md#disposable-linux-qualification-2026-10-27)
-for the distinct controller/TUI, gateway and live Tor laboratories and their
-remaining target-hardware gates.
-
-## TUI development
-
-To run the coding-agent TUI against the currently elected local OpenCode
-service:
-
-```sh
-bun run dev:live /path/to/project
-```
-
-The host manager lives in `packages/oblivion-manager`. The retained coding-agent
-TUI lives in `packages/tui`. Preserve the OpenCode chat components and use the
-shared semantic theme tokens when extending either interface.
-
-## VM and hardware validation
-
-The scripts under `script/oblivion` build minimal Debian roles and exercise
-storage, transfers, gateway policy, boot and chat startup. CI runs the supported
-QEMU laboratories on both architectures where practical.
-
-The Workspace uses the filtered viewport and guest-only tmux. F6 selects
-Workspace and F7 Documents; Ctrl+Q asks to lock all session processes. Native
-tmux shortcuts are unchanged: Ctrl+B then % / " splits, O changes panes, Z
-zooms, C creates a window, P/N selects the previous/next window, and ? lists
-bindings. A new pane starts a shell; `chat` opens an independent OpenCode TUI.
-The first pane uses `chat --continue` to restore the latest conversation.
-
-`oblivion-chat-server.service` owns the one authenticated loopback server and
-canonical database. Pane-local UI state stays under encrypted XDG state. The
-server password and tmux socket/FIFO stay in /run; output is not journaled.
-Fixed lifecycle hints bypass tmux through that FIFO, without enabling terminal
-passthrough or clipboard escapes. The host still confirms session closure.
-Shells work without a provider in the networkless documents VM; F8 starts chat
-with an explicit warning that this restarts the offline VM and stops its jobs.
-Moving between Workspace and Documents never restarts tmux or its processes.
-
-`test-workspace.py` runs as uid 1000 in an isolated installed session image with
-synthetic /vault data and RAM-only credentials, without external networking. It
-checks two real chat clients sharing one server, distinct conversation views,
-closing one pane, file sharing, reattachment and resizing. Never run this
-fixture against a user's session volume.
-
-Run the real PTY/tmux regression with `python3 script/oblivion/test-session-terminal.py`
-(requires tmux). For actual offline guest/service acceptance on an ARM Mac:
-
-```sh
-docker buildx build --platform linux/arm64 -f script/oblivion/Dockerfile.vm-lab \
-  --target terminal-artifacts --output type=local,dest=artifacts/terminal/image .
-cd packages/oblivion-host
-cargo build --locked --example viewport-probe
-cd ../..
-python3 script/oblivion/run-terminal-lab.py --image artifacts/terminal/image \
-  --output artifacts/terminal/result
-```
-
-The runner uses the production guest terminal service and filtered Rust bridge
-with no virtual NIC or provider key. It checks multiple windows, the process
-view, resize, interruption and a workspace file across clean guest reboot.
-Its disposable ext4 fixture does not qualify the outer LUKS/controller close
-path or the physical live image; those remain separate integration gates.
-For the controller path, build the `artifacts` target with `HOST=export-host`
-and `GUEST=manager-import-guest`, then run `run-vm-lab.py` with the resulting
-image, `--refresh-import-test --terminal-only` and a fresh output directory.
-That focused test uses the actual authenticated descriptor delegation and
-session service, retains a background process through reattachment, verifies
-the QEMU PID is reaped before lock success, and reopens the LUKS workspace.
-
-For file transfers, UTM can attach an additional FAT/exFAT/ext4 data image as USB
-storage. QEMU profiles may instead attach virtio data media with the explicit
-serial `oblivion-import` (always import-only) or `oblivion-export`. Oblivion
-excludes its boot/archive disk and all mounted sources; ordinary internal or
-unmarked virtual disks are not offered. Imports remain read-only inside the
-isolated source VM. The destination picker omits read-only media for export.
-Selecting writable media still requires the normal export confirmation.
-
-Documents also provides `Export chat` and `Export diagnostics`. Chat export
-lists only the current protected session's chats; choose Markdown or OpenCode
-JSON and confirm. The generated file stays under `workspace/chat-exports` and
-is selected for a separate `Export selected` operation. Diagnostic reports
-show their fixed field allowlist before creation under `workspace/diagnostics`.
-Neither operation sends content to a provider or copies it to external media
-automatically. JSON transcripts preserve settled message IDs and data; they do
-not include queued input or in-progress responses and are not session backups.
-
-Session capacity is chosen during creation (512 MiB by default). Use
-`Sessions / Increase storage` for a closed persistent session. The source
-manager shows actual volume sizes and queries used/free space inside the
-active guest. An oversized local-media import offers growth and retries the
-same selection only after verifying its manifest again. Growth reserves a
-complete replacement volume, plus 64 MiB, while keeping the original intact.
-Temporary growth copies appear as cleanup actions in Sessions after a failure.
-
-For the real LUKS growth regression, build the `artifacts` Docker target with
-`HOST=growth-host` and `GUEST=growth-guest`, supplying the compiled client and
-matching build-evidence inputs. Run `run-vm-lab.py --image <output>
---output <fresh-directory>`. It uses only disposable synthetic data, checks
-failed growth admissions, and reopens the same chats/documents after growing
-and locking both encryption layers. This laboratory is separate from the
-user's UTM instance and is not a substitute for its acceptance test.
-
-To exercise the deployed maintenance services as well as Terminal, use the
-same terminal-image command above with `--build-arg TERMINAL_GUEST=opencode-guest`
-and a fresh output directory, then pass `--exports` to `run-terminal-lab.py`.
-This requires the compiled Linux OpenCode binary and its matching build-evidence
-file at the Dockerfile's normal build inputs. The test verifies metadata-only
-RPC, JSON/Markdown creation, diagnostic creation, repeated port-slot reuse and
-boot cleanup of unfinished staging without removing completed exports.
-`test-chat-export.py` additionally exercises a live compiled OpenCode database
-with pending/incomplete messages, UTF-8 and tool content, hostile workspace
-symlinks and owned staging cleanup. It runs with the compiled-client gateway
-laboratory through `vm-gateway-test.py`; no provider calls are involved.
-
-The source manager also exposes `Sessions / Back up` while all sessions are
-closed. It prepares metadata in an offline guest, closes the session mapping,
-then copies only the encrypted LUKS2 volume to explicitly authorized writable
-media as `Oblivion-<operation-id>/files/session.oblivion`. The session password
-is still required; general-vault API keys are excluded. This has separate
-one-file / 1 TiB / one-hour ceilings and does not widen document transfers.
-Preparation is bounded; copying and manifest review can be cancelled. Success
-requires the verified receipt, destination flush/detach and worker cleanup.
-`Sessions / Restore` opens the selected source read-only, browses it through the
-existing paginated picker and copies one encrypted backup after confirmation.
-The password is requested after the source VM has been detached. A separate
-offline VM checks the copied filesystem, versioned metadata and chat database;
-only then is a new session ID published. The original archive/backup are
-preserved. Wrong passwords can be retried without another copy. Cancellation
-discards the new pending copy; a crash after copying may leave an incomplete
-entry that the manager can explicitly discard. A verified copy is never
-published by the transport alone. The receiver receives an empty writable
-descriptor, not access to the general-vault directory. Supported-candidate
-qualification and physical-media acceptance remain pending.
-For the focused real-controller test, build the `export-host` /
-`manager-import-guest` image above and run `run-vm-lab.py` with
-`--refresh-import-test --backup-only` and a fresh output directory. It uses
-synthetic passwords, a 512 MiB LUKS volume, an offline session and disposable
-ext4 media. It also restores that volume as a separate titled session and checks
-wrong-password retry, cancellation, reopened workspace data and unchanged
-sources. The guest used in this test has no chat database; it does not prove
-real-chat restoration or physical USB behavior. The compiled-client inspection
-tests separately check engine compatibility and preservation of SQLite/WAL,
-pending prompts and message IDs without provider requests.
-
-For the combined native database/volume test, select
-`--build-arg GUEST=backup-chat-guest` instead of `manager-import-guest` when
-building the same `export-host` image. Keep the normal compiled-client binary
-and matching build-evidence inputs. Run it with `--refresh-import-test
---backup-only`; the marker prevents accidentally running the ordinary import
-fixture against this guest. This test seeds two settled synthetic conversations
-and pending prompts through OpenCode's API, then compares their IDs, titles,
-messages, inbox records and a shared document after the complete encrypted
-backup/restore path. It also checks unsupported metadata, corrupt SQLite,
-invalid/truncated LUKS volumes and insufficient general-vault space. It makes
-no provider requests. Fault fixtures use a separate disposable 128 MiB session;
-the normal source/restored archives and external source medium are checked for
-unintended changes. The native probe and marker never enter production images.
-
-Writing an image to removable media is intentionally not automated by the
-normal build command. Resolve the target device by stable identity, unmount its
-partitions and verify its size before any destructive write. Never infer a
-removable boot-drive target from a broad device glob.
-
-Physical release-candidate testing must cover at least:
-
-- boot and shutdown on real hardware;
-- persistent and ephemeral flows;
-- wrong-password and interrupted-write recovery;
-- offline Documents without a key or gateway;
-- Tor and SOCKS5 startup, failure and revocation;
-- chat persistence across lock, reboot and reopen;
-- import/export with disconnect and cancellation;
-- absence of debug access in the release profile.
-
-## Source policy
-
-The repository retains the OpenCode packages required by the agent runtime and
-its TUI. Web, desktop, hosted-service, deployment and marketing packages are
-not part of Oblivion. Debian packages are selected by image role; additions
-must have a concrete runtime or build-time owner.
-
-Do not commit secrets, user data, encrypted volumes, traffic captures, generated
-images or local VM state. See [CONTRIBUTING.md](../CONTRIBUTING.md) for repository
-rules.
-
-## Tor rotation laboratory
-
-`tor_rotate` is a native agent tool (not a slash command). Ask the Build agent
-explicitly to use it; Build No Tools cannot call it. Only the current protected
-session is affected. Rotation interrupts its ongoing network operations.
-
-Run the focused client tests from `packages/core`:
-
-```sh
-bun run script/test.ts test/tool-tor-rotate.test.ts test/tool-registry.test.ts
-```
-
-Build and test the actual Linux gateway on a Mac with QEMU installed:
-
-```sh
-docker buildx build --platform linux/arm64 \
-  -f script/oblivion/Dockerfile.vm-lab --target gateway-network-artifacts \
-  --output type=local,dest=artifacts/tor-rotation/network .
-python3 -B script/oblivion/run-rotation-lab.py \
-  --image artifacts/tor-rotation/network \
-  --output artifacts/tor-rotation/run-01
-```
-
-This is an **explicit online test**: disposable VMs contact Tor and
-`https://example.com/`. It uses synthetic capabilities, makes no provider API
-requests and never mounts user session volumes. It checks pre-existing sockets,
-new TCP/DNS attempts during rotation, exit identities, authenticated HTTPS after
-rotation, a deliberately unresponsive Tor controller, recovery without automatic
-reopening and supervisor death. QEMU captures packets outside both VMs; the
-failure test compares outgoing IP packet counts while repeated probes run.
-Remote relays may still send retransmissions to the virtual NIC; the ingress
-firewall drops them during the full block. Tor relay traffic is expected during
-successful reconstruction; the assertion is
-that session application traffic is blocked, not that Tor can rebuild offline.
-The output directory must be new. Linux runners may select `--accelerator tcg`.
-
-For the real multi-session controller path, copy
-`script/oblivion/test-utm-rotation-isolation.py` and
-`script/oblivion/rotation-traffic-probe.py` into a debug live host running the
-updated host, gateway and session images. With the general volume unlocked and
-enough RAM for two additional session/gateway pairs, run as root:
-
-```sh
-python3 -B /tmp/test-utm-rotation-isolation.py \
-  --output /tmp/oblivion-rotation-isolation-01 --rotations 3
-```
-
-This is also an explicit online test against `https://example.com/`. It creates
-two disposable encrypted sessions using generated passwords kept only in RAM;
-it does not open existing volumes or call the model provider. Each session sends
-fresh HTTPS requests and requests over a persistent TLS connection. The test
-rotates A (three times in the command above, observing the real cooldown), then
-disconnects only A's external QEMU link to force rotation
-failure. B must retain its processes and original TLS connection without a
-request error. Restoring A's link must leave its traffic blocked, verified with
-an external-interface packet capture. The test closes and removes its own
-volumes and saves results and captures in the supplied directory. Existing
-sessions remain open; their process identities are checked for changes. Only
-use this script in a debug host, not as a production manager command.
-The report records runtime/script hashes, baseline and per-phase request
-counts, retained-connection continuity, failure phases and cleanup results.
-Baseline failures remain visible; any additional error on B during the
-measurement window fails acceptance. Synthetic test output and encrypted Tor
-uplink captures stay local; no provider requests or user chat content are needed.
+Its install/remove/reinstall fixtures exercise real dpkg with synthetic role
+assets; they do not start a Safe or qualify hardware. See [Debian packaging](DEBIAN.md)
+for exact payloads, dependencies, retained application data and release gates.
+
+## Live and hypervisor tests
+
+The [Live guide](LIVE.md) lists the standard Debian consoles, storage-mode
+selection and the boundary between OS preferences and encrypted Oblivion data.
+
+The Live image can be written to supported writable boot media. The standalone
+`prepare-vm-disk.py` helper can copy a hybrid ISO into a larger new raw virtual
+disk and relocate its GPT backup. It does not modify the input ISO or a physical
+drive. A read-only DVD plus an arbitrary secondary data disk is not currently a
+qualified first-run persistence path.
+
+UTM/VirtualBox evaluation of a Live image is distinct from the native launcher.
+The guest must have the architecture and nested hardware-virtualization support
+required by its inner Safe VMs. Nested Safes have booted on the diagnostic Mac
+Apple Virtualization configuration; this does not qualify a different
+hypervisor, the distribution kernel profile or physical Live media. Do not
+offer TCG as a production fallback.
+
+Keep component fixtures for transfer endpoints, OnionShare, terminal controls
+and the network policy separate from whole-product acceptance. The retired fork
+UI and provider-broker harnesses have been removed; their past results cannot
+qualify current-source images.
+
+## Branch integration and release plan
+
+Plan recorded on 11 November 2026; branch promotion and repository settings have
+not yet been changed. At the initial review, the remote default was `dev`, and
+remote `dev` and `main` both pointed to `d0c0958`, the published beta.3 baseline.
+Local `privacy-stack` was at `f5ed189`, 269 commits ahead with no divergence,
+plus uncommitted work. The runtime, cleanup and planning work is now being
+recorded in separate commits for integration. GitHub had no protections or
+rulesets for the two branches at that review.
+
+| Branch | Intended role |
+| --- | --- |
+| `dev` | Default branch and integration point for current 1.0 work; source checks must pass before integration. |
+| `main` | Qualified release source, advanced by a controlled promotion. It remains at the published baseline until the first 1.0 candidate is qualified. |
+| `privacy-stack` | Temporary integration branch for the product transition. Retire it after its work is integrated into `dev`; do not maintain a third permanent development line. |
+
+Preserve the existing beta tags and releases as historical records. They do not
+imply compatibility readers or continued beta development in the 1.0 tree.
+Do not reset the main branches, force-push the transition or cherry-pick all
+269 commits independently.
+
+1. Review and commit the current work in coherent changes, keeping the existing
+   startup/runtime work distinct from the repository and protocol cleanup.
+   Publish `privacy-stack`, open the integration PR against `dev`, and run the
+   current full CI on that change. Preserve its history with a normal merge or
+   fast-forward rather than squashing or rebasing the entire transition.
+2. Verify CI on the resulting `dev` SHA. Configure required source checks and
+   prevent force-push/deletion of `dev`, `main` and release tags. Require PR
+   review for development integration and a controlled release promotion for
+   `main`. The promotion mechanism must permit preserving the qualified SHA.
+3. Complete the candidate/release path below. Select an immutable SHA **C** from
+   `dev`, record the intended platforms, and build the paired components from
+   C. An RC tag such as `v1.0.0-rc.1` identifies C; every source correction gets
+   a new SHA and RC tag. Do not move an existing tag.
+4. Qualify the installable artifacts and record their digests with the source
+   SHA and applicable acceptance scenarios. The first release includes only
+   qualified platforms; the Mac Apple Silicon track currently has the most
+   installed evidence. Other targets stay experimental until separately
+   qualified. Shared-code checks remain required.
+5. Promote `main` by fast-forward to C, then create the stable tag and publish
+   only the qualified artifacts. If a merge creates another commit **M**, build
+   and verify M instead of describing it as C. Changes to embedded version,
+   signing or packaging also require verification of the resulting artifacts;
+   passing an RC does not authorize replacing its bytes after qualification.
+
+### Candidate and release implementation still required
+
+- **Version/channel contract:** desktop builders and the bundle reader currently
+  require `~dev` and `development_only=true`. Implement one current, consistent
+  contract for development, RC and stable output across producers and readers.
+  A `v1.0.0` tag alone cannot produce a supported stable bundle today.
+- **Candidate authorization:** the image workflow currently accepts only `main`
+  or tags already contained in `main`. Permit draft RCs from recorded `dev`
+  commits; keep stable tags restricted to qualified source on `main`. This must
+  work before promoting the candidate.
+- **Checks and acceptance:** release builds currently depend on source
+  authorization, not the source-check result. Require successful checks for the
+  exact candidate SHA and an acceptance record for each published target before
+  publication. Keep automatic publication disabled while this is unfinished.
+- **Artifact coordination:** reuse `oblivion-desktop.yml` for Mac/Windows,
+  `oblivion-desktop-deb.yml` for Linux desktop, and the image workflow for Live.
+  Connect them to the same candidate/version and selected target list. They are
+  not yet an integrated release pipeline. Publish qualified desktop bundles as
+  well as Live images when that target is selected; the current release workflow
+  uploads only ISO/checksum pairs.
+- **Retention and immutability:** candidate bundles, images, manifests, licenses,
+  checksums and test evidence must remain available through qualification and
+  release. The current seven-day CI artifact retention is insufficient for that
+  record. Do not allow a rerun using `--clobber` to replace published release
+  assets; a changed candidate gets a new identity.
+- **Distribution profile:** close the platform's installation, permission and
+  provenance requirements. Mac builds currently use ad hoc signing; Developer
+  ID, notarization and Gatekeeper remain in the distribution gate described in
+  [Desktop](DESKTOP.md). Keep diagnostic builds distinguishable from the final
+  artifacts.
+
+The ordered functional work and completion criteria are maintained in
+[roadmap section 9](oblivion1.0-roadmap.md#9-lavoro-rimanente).
+
+## Release gate
+
+The release workflow produces draft prereleases and checksummed images. Automatic
+publication is disabled until actual native VM acceptance is recorded for the
+commit and the target platforms being published. Unqualified platforms remain
+experimental and do not automatically block a qualified target. Follow the
+[roadmap](oblivion1.0-roadmap.md) for persistence, login,
+native resume in each original agent, interrupted cleanup, concurrent network isolation, Share,
+resource use and platform acceptance. Use synthetic conversations and credentials
+for fixtures, and clearly separate local protocol checks from real provider or
+public Tor tests.

@@ -2,8 +2,9 @@ import { BoxRenderable } from "@opentui/core"
 import { createSignal, onCleanup, Show } from "solid-js"
 import { Portal, useTerminalDimensions } from "@opentui/solid"
 import { theme } from "./theme"
+import { ActionBar } from "./action-bar"
 
-export function BusyModal(props: { text: string; cancellable?: boolean }) {
+export function BusyModal(props: { text: string; cancellable?: boolean; cancel?: () => void }) {
   const size = useTerminalDimensions()
   const [frame, setFrame] = createSignal(0)
   const frames = ["|", "/", "−", "\\"]
@@ -17,7 +18,7 @@ export function BusyModal(props: { text: string; cancellable?: boolean }) {
         <text width={1} flexShrink={0} fg={theme.feedback.info}>{frames[frame()]}</text>
         <text fg={theme.text.base}>{props.text}</text>
       </box>
-      <Show when={props.cancellable}><text fg={theme.text.muted}>Esc Cancel</text></Show>
+      <Show when={props.cancel} fallback={<Show when={props.cancellable}><text fg={theme.text.muted}>Esc Cancel</text></Show>}>{(cancel) => <ActionBar actions={[{ title: "Cancel", key: "Esc", run: cancel() }]} />}</Show>
     </box>
   </box></Portal>
 }

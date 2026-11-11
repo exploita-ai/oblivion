@@ -1,0 +1,41 @@
+[Unit]
+Description=Private controller tools for this Safe
+ConditionKernelCommandLine=oblivion.native=1
+ConditionKernelCommandLine=!oblivion.resize=1
+Requires=oblivion-vault.service
+BindsTo=dev-virtio\x2dports-oblivion.safe\x2dtools.device
+After=oblivion-vault.service dev-virtio\x2dports-oblivion.safe\x2dtools.device
+RequiresMountsFor=/vault
+
+[Service]
+Type=exec
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -B /usr/lib/oblivion/guest/safe-tools-relay.py
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+DevicePolicy=closed
+DeviceAllow=/dev/virtio-ports/oblivion.safe-tools rw
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+LimitCORE=0
+MemorySwapMax=0
+MemoryMax=64M
+TasksMax=8
+KillMode=control-group
+TimeoutStopSec=5
+Restart=no
+StandardInput=null
+StandardOutput=null
+StandardError=null

@@ -1,5 +1,6 @@
+pub mod egress;
 pub mod policy;
-pub mod provider;
+pub mod proxy_profiles;
 
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -22,6 +23,17 @@ pub enum Transport {
 pub struct Authentication {
     pub username: Zeroizing<String>,
     pub password: Zeroizing<String>,
+}
+
+impl Authentication {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        for secret in [&self.username, &self.password] {
+            if !(1..=255).contains(&secret.len()) || secret.chars().any(char::is_control) {
+                return Err("invalid_proxy_authentication");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -47,7 +59,7 @@ impl Transport {
             authentication,
         } = self
         {
-            // The first transport supports literal IPv4 only. It cannot target
+            // The gateway receives a pinned IPv4 endpoint. It cannot target
             // local Tor, the inside link, multicast or an unspecified address.
             let octets = endpoint.ip().octets();
             if endpoint.port() == 0
@@ -59,11 +71,7 @@ impl Transport {
                 return Err("invalid_proxy_endpoint");
             }
             if let Some(authentication) = authentication {
-                for secret in [&authentication.username, &authentication.password] {
-                    if !(1..=255).contains(&secret.len()) || secret.chars().any(char::is_control) {
-                        return Err("invalid_proxy_authentication");
-                    }
-                }
+                authentication.validate()?;
             }
         }
         Ok(())

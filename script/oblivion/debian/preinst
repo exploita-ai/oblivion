@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+case "$1" in
+    install|upgrade)
+        if [ -r /proc/swaps ]; then
+            active=$(sed '1d' /proc/swaps)
+            if [ -n "$active" ]; then
+                echo 'The private Oblivion controller requires swap already disabled. Installation never changes host swap.' >&2
+                exit 1
+            fi
+        fi
+        ;;
+esac

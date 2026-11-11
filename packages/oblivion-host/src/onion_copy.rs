@@ -96,6 +96,7 @@ fn copy(
             id,
             limits: transfers::limits(),
         },
+        exporting,
     )?;
     Ok(Completed {
         approved,

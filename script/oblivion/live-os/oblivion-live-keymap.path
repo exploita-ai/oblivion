@@ -1,0 +1,7 @@
+[Unit]
+Description=Watch Debian keyboard preferences
+[Path]
+PathChanged=/etc/default/keyboard
+Unit=oblivion-live-keymap.service
+[Install]
+WantedBy=multi-user.target

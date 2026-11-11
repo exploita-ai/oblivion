@@ -39,7 +39,7 @@ pub enum Architecture {
 pub enum Session {
     Locked,
     Documents,
-    Chat,
+    Agent,
     Starting,
     Recovery,
 }

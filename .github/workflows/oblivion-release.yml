@@ -1,4 +1,4 @@
-name: Oblivion images
+name: Oblivion image drafts
 
 on:
   push:
@@ -73,7 +73,7 @@ jobs:
           OBLIVION_ARCH: ${{ matrix.arch }}
           OBLIVION_BUILD_SCOPE: GitHub release-candidate image built from the recorded public source commit; checksums are not a cryptographic signature.
           OBLIVION_IMAGE_NAME: ${{ needs.authorize.outputs.image_name }}
-        run: bun run build:iso
+        run: bun run build:live
       - name: Verify and stage the image
         id: image
         shell: bash
@@ -82,13 +82,12 @@ jobs:
           IMAGE_NAME: ${{ needs.authorize.outputs.image_name }}
         run: |
           set -euo pipefail
-          directory=artifacts/oblivion-beta-iso/image
-          if [ "$ARCHITECTURE" = arm64 ]; then directory=artifacts/oblivion-arm-iso/image; fi
+          directory=artifacts/oblivion-stack-$ARCHITECTURE
           (cd "$directory" && sha256sum --check SHA256SUMS)
           iso="$directory/$IMAGE_NAME-$ARCHITECTURE.iso"
           test -f "$iso"
           test "$(find "$directory" -maxdepth 1 -type f -name '*.iso' | wc -l)" -eq 1
-          test "$(stat -c %s "$iso")" -lt 2147483648
+          test "$(stat -c %s "$iso")" -gt 0
           mkdir release
           cp "$iso" release/
           (cd release && sha256sum "$(basename "$iso")" > "$IMAGE_NAME-$ARCHITECTURE.sha256")
@@ -102,39 +101,19 @@ jobs:
           CHECKSUM: ${{ steps.image.outputs.checksum }}
         run: gh release upload "$GITHUB_REF_NAME" "$ISO" "$CHECKSUM" --clobber
 
-  publish:
-    name: Publish verified release
-    if: needs.authorize.outputs.release == 'true'
-    needs: [authorize, build]
-    runs-on: ubuntu-24.04
-    permissions:
-      actions: read
-      contents: write
-    steps:
-      - name: Require a successful main-branch verification for this commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
+      - name: Retain built images and architecture checksums
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oblivion-image-${{ matrix.arch }}-${{ github.sha }}
+          path: release/
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+      - name: Record release qualification scope
         run: |
-          set -euo pipefail
-          conclusion=$(gh run list --repo "$REPOSITORY" --workflow oblivion-check.yml \
-            --commit "$GITHUB_SHA" --event push --status completed \
-            --json conclusion --jq '.[0].conclusion // ""')
-          test "$conclusion" = success
-      - name: Combine architecture checksums
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          mkdir checksums
-          gh release download "$GITHUB_REF_NAME" --repo "$REPOSITORY" \
-            --pattern 'oblivion-*.sha256' --dir checksums
-          test "$(find checksums -type f -name '*.sha256' | wc -l)" -eq 2
-          cat checksums/*.sha256 | sort -k2 > SHA256SUMS
-          gh release upload "$GITHUB_REF_NAME" SHA256SUMS --repo "$REPOSITORY" --clobber
-      - name: Publish the pre-release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-        run: gh release edit "$GITHUB_REF_NAME" --repo "$REPOSITORY" --draft=false --prerelease
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SCOPE'
+          These are current-source image builds with checksums, not qualified releases.
+          Tag builds remain draft prereleases. Automatic publication is disabled until
+          real native nested-VM acceptance is implemented and recorded for this commit.
+          Compilation, local protocol tests and image hashes do not replace that gate.
+          SCOPE

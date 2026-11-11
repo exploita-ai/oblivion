@@ -1,0 +1,56 @@
+[package]
+name = "oblivion-native-windows"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[dependencies]
+oblivion-bundle = { path = "../oblivion-bundle" }
+oblivion-wire = { path = "../oblivion-wire" }
+sha2 = "=0.10.9"
+getrandom = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = "1.9.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+  "Wdk_Foundation",
+  "Wdk_Storage_FileSystem",
+  "Win32_Foundation",
+  "Win32_Globalization",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_Storage_Vhd",
+  "Win32_System_HostComputeSystem",
+  "Win32_System_Console",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Environment",
+  "Win32_System_IO",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Pipes",
+  "Win32_System_Services",
+  "Win32_System_StationsAndDesktops",
+  "Win32_System_Registry",
+  "Win32_System_SystemInformation",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+  "Win32_System_WindowsProgramming",
+  "Win32_Networking_WinSock",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_System_HostComputeNetwork",
+  "Win32_System_Com",
+  "Win32_UI_Controls_Dialogs",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[[bin]]
+name = "oblivion-vm"
+path = "src/main.rs"

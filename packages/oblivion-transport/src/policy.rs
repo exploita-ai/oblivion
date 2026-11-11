@@ -3,6 +3,19 @@ use std::net::IpAddr;
 
 pub const RULE_LIMIT: usize = 128;
 
+// Dedicated collectors verified for the pinned official clients. Match exact
+// hosts on every port, ahead of caller rules and Open Internet defaults.
+// Codex 0.159.2: codex-rs/otel/src/config.rs and feedback/src/lib.rs at
+// https://github.com/openai/codex/tree/rust-v0.159.2/codex-rs
+// Claude Code 2.1.302: vendor binary constants, with metrics/error reporting
+// documented at https://code.claude.com/docs/en/data-usage.
+const TELEMETRY_COLLECTORS: &[&str] = &[
+    "ab.chatgpt.com",
+    "o33249.ingest.us.sentry.io",
+    "http-intake.logs.us5.datadoghq.com",
+    "o1158394.ingest.us.sentry.io",
+];
+
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Access {
@@ -10,6 +23,13 @@ pub enum Access {
     #[default]
     Strict,
     Offline,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Command {
+    pub mode: Access,
+    pub save: bool,
 }
 
 impl Access {
@@ -67,7 +87,6 @@ pub struct Session(String);
 pub struct Tools {
     pub session: Session,
     pub policy: Policy,
-    #[serde(default)]
     pub access: Access,
 }
 
@@ -258,6 +277,9 @@ impl Policy {
     }
 
     pub fn matched(&self, session: &Session, destination: &Destination) -> Option<Action> {
+        if TELEMETRY_COLLECTORS.contains(&destination.host.as_str()) {
+            return Some(Action::Deny);
+        }
         self.rules
             .iter()
             .filter(|rule| {
@@ -365,6 +387,71 @@ fn special(address: IpAddr) -> bool {
                 || segments[0] == 0x2002
                 || (segments[..3] == [0x2620, 0x4f, 0x8000])
                 || (segments[0] == 0x3fff && segments[1] < 0x1000)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Access, Action, Destination, Policy, Rule, Session, Tools};
+
+    #[test]
+    fn dedicated_collectors_are_denied_in_every_mode_even_with_an_explicit_allow() {
+        for host in [
+            "ab.chatgpt.com",
+            "o33249.ingest.us.sentry.io",
+            "http-intake.logs.us5.datadoghq.com",
+            "o1158394.ingest.us.sentry.io",
+        ] {
+            for port in [80, 443, 65535] {
+                for access in [Access::Open, Access::Strict, Access::Offline] {
+                    let session = Session::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+                    let mut policy = Policy::default();
+                    policy
+                        .put(Rule::new(host.into(), port, Action::Allow, None).unwrap())
+                        .unwrap();
+                    let tools = Tools {
+                        session,
+                        policy,
+                        access,
+                    };
+                    let destination =
+                        Destination::new(&format!("{}.", host.to_ascii_uppercase()), port).unwrap();
+                    assert_eq!(tools.decision(&destination), Action::Deny);
+                    assert_eq!(
+                        tools.policy.matched(&tools.session, &destination),
+                        Some(Action::Deny)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn collector_blocks_do_not_expand_to_provider_origins_documentation_or_other_tenants() {
+        let tools = Tools {
+            session: Session::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+            policy: Policy::default(),
+            access: Access::Open,
+        };
+        for host in [
+            "api.openai.com",
+            "chatgpt.com",
+            "auth.openai.com",
+            "api.anthropic.com",
+            "claude.ai",
+            "docs.sentry.io",
+            "sentry.io",
+            "o1234.ingest.us.sentry.io",
+            "docs.datadoghq.com",
+            "api.datadoghq.com",
+            "ab.chatgpt.com.example.org",
+            "other.ab.chatgpt.com",
+        ] {
+            assert_eq!(
+                tools.decision(&Destination::new(host, 443).unwrap()),
+                Action::Allow
+            );
         }
     }
 }

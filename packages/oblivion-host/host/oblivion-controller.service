@@ -1,7 +1,7 @@
 [Unit]
+ConditionKernelCommandLine=oblivion.runtime=1
 Description=Oblivion protected storage controller
 After=local-fs.target
-Wants=oblivion-manager.service
 StartLimitIntervalSec=0
 
 [Service]

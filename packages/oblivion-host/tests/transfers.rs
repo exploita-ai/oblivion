@@ -25,11 +25,20 @@ fn only_usb_or_explicitly_named_virtio_media_are_eligible() {
 }
 
 #[test]
-fn media_metadata_is_compatible_and_preserves_read_only_status() {
-    let previous: Source =
-        serde_json::from_str(r#"{"id":"8:16","name":"sdb","bytes":1048576}"#).unwrap();
-    assert!(matches!(previous.kind, SourceKind::Usb));
-    assert!(!previous.read_only);
+fn media_metadata_requires_explicit_kind_and_read_only_status() {
+    for incomplete in [
+        r#"{"id":"8:16","name":"sdb","bytes":1048576}"#,
+        r#"{"id":"8:16","name":"sdb","bytes":1048576,"kind":"usb"}"#,
+        r#"{"id":"8:16","name":"sdb","bytes":1048576,"read_only":false}"#,
+    ] {
+        assert!(serde_json::from_str::<Source>(incomplete).is_err());
+    }
+    let source: Source = serde_json::from_str(
+        r#"{"id":"8:16","name":"sdb","bytes":1048576,"kind":"usb","read_only":false}"#,
+    )
+    .unwrap();
+    assert!(matches!(source.kind, SourceKind::Usb));
+    assert!(!source.read_only);
     let source: Source = serde_json::from_str(
         r#"{"id":"252:32","name":"vdc","bytes":1048576,"kind":"virtual","read_only":true}"#,
     )

@@ -1,6 +1,6 @@
 # Contributing to Oblivion
 
-Oblivion combines a Debian live image, encrypted storage, isolated VMs, a network gateway, and an OpenCode-derived coding agent. Changes at one boundary can invalidate assumptions at another, so contributions should be narrow, testable, and explicit about the threat model.
+Oblivion combines a native launcher, a Debian Live image, encrypted storage, isolated Safes, a network gateway, and unmodified official coding agents. Changes at one boundary can invalidate assumptions at another, so contributions should be narrow, testable, and explicit about the threat model.
 
 ## Before opening a pull request
 
@@ -10,6 +10,13 @@ Oblivion combines a Debian live image, encrypted storage, isolated VMs, a networ
 4. Never use real credentials, user conversations, captured production traffic, or private documents as fixtures.
 
 The default branch is `dev`. Use a short branch name of at most three hyphen-separated words and conventional commit titles such as `fix(gateway): revoke stale grants`.
+
+The 1.0 source supports fresh installations, with one current command and data
+format at each boundary. Remove replaced implementations and their compatibility
+readers, aliases, tests and dependencies together. Older internal payloads must
+not acquire missing fields through compatibility defaults. Reject unknown
+formats without mutating them. Current-format crash recovery and the native
+formats emitted by the pinned official agents remain supported.
 
 ## Development setup
 
@@ -35,13 +42,16 @@ The VM and image tests are under `script/oblivion`. Many need Docker, QEMU, hard
 
 ## Agent and TUI changes
 
-The retained `@opencode/*` packages are the coding-agent runtime, not unused upstream baggage. Preserve their dependency direction and the existing OpenTUI interaction model.
+The TypeScript workspaces contain Oblivion's OpenTUI manager, scoped MCP server,
+and retained theme/UI utilities. Run package-local tests and use semantic theme
+tokens. Changes to public theme roles must cover light, dark and custom defaults.
 
-- Prefer `bun run dev:live [directory]` for live TUI work.
-- Read the matching testing guide in `.opencode/skills` before changing tests.
-- Run `bun run generate` from `packages/client` after changing the public Protocol or Server `HttpApi`.
-- Do not edit generated client files directly.
-- Use semantic theme tokens rather than raw colors or unrelated status tokens.
+The official agent executables are pinned in
+`script/oblivion/install-agents.json`. Do not fork their implementations, rewrite
+their arguments or introduce compatibility readers for retired prototypes.
+Changes to the native-history Share adapters need real native-format fixtures
+for the pinned clients and an explicit statement of records or relationships
+that cannot transfer. Each client retains its own history and resume format.
 
 ## Privacy requirements
 
@@ -54,7 +64,7 @@ A change is incomplete if it works only on the happy path. Include relevant fail
 - removable media disappearing during a transfer;
 - secrets in argv, environment variables, logs, diagnostics, core dumps, and temporary files.
 
-Do not add a direct-network fallback. Do not mount session filesystems on the host. Do not make debug access part of a release image.
+Do not add a direct-network fallback. Do not mount Safe filesystems on the host. Do not make debug access part of a release image.
 
 ## Pull requests
 
@@ -68,6 +78,8 @@ Keep the description short and concrete:
 
 UI changes should include screenshots at 80×24 and a larger terminal. Storage and network changes should include machine-readable evidence where the existing suites already produce it.
 
-## Upstream OpenCode changes
+## Upstream and third-party code
 
-When possible, keep generic agent improvements suitable for OpenCode separate from Oblivion-specific policy. Preserve the upstream MIT notices and document substantial imported updates in the pull request.
+Preserve upstream licenses, notices and provenance when importing or updating
+components. Keep official agent binaries unmodified and retain their licenses.
+New product behavior belongs in the Oblivion stack and its explicit adapters.

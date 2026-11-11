@@ -16,7 +16,6 @@ pub enum Purpose {
 impl Purpose {
     fn filename(self) -> &'static str {
         match self {
-            // Retain compatibility with existing model gateway profiles.
             Self::Model => "tor-state",
             Self::Transfer => "onion-tor-state",
         }

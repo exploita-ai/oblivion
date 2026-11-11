@@ -28,3 +28,4 @@ unzip
 xxd
 xz-utils
 zip
+zstd

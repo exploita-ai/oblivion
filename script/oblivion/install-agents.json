@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "agents": {
+    "codex": {
+      "version": "0.159.2",
+      "architectures": {
+        "arm64": {
+          "package": "@openai/codex",
+          "version": "0.159.2-linux-arm64",
+          "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.159.2-linux-arm64.tgz",
+          "integrity": "sha512-Pm0W2PnFeTEqPx+AOIwgOVB4dBtY24cuD0tx1hjCor60CbSAT7WBPZVNUINSrTCDrMndvQC67p71ZEz+gmPPkA==",
+          "executable": "vendor/aarch64-unknown-linux-musl/bin/codex"
+        },
+        "amd64": {
+          "package": "@openai/codex",
+          "version": "0.159.2-linux-x64",
+          "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.159.2-linux-x64.tgz",
+          "integrity": "sha512-RrCZ1X52wpa1lOsXtCtSyhjOFdQPh7LH5Ccv8HsKmd/2UXbUwxXFqWXFK3JzatquUNGtW/TLox5Y7qVOGkV0/Q==",
+          "executable": "vendor/x86_64-unknown-linux-musl/bin/codex"
+        }
+      },
+      "distribution": {
+        "category": "permissive",
+        "license": "Apache-2.0",
+        "package_license": "Apache-2.0",
+        "conditions": [
+          "include-license-and-notices",
+          "retain-copyright"
+        ],
+        "notices": [
+          {
+            "path": "codex-0.159.2/LICENSE",
+            "source": "https://raw.githubusercontent.com/openai/codex/rust-v0.159.2/LICENSE",
+            "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc"
+          },
+          {
+            "path": "codex-0.159.2/NOTICE",
+            "source": "https://raw.githubusercontent.com/openai/codex/rust-v0.159.2/NOTICE",
+            "sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915"
+          }
+        ]
+      }
+    },
+    "claude": {
+      "version": "2.1.302",
+      "architectures": {
+        "arm64": {
+          "package": "@anthropic-ai/claude-code-linux-arm64",
+          "version": "2.1.302",
+          "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-arm64/-/claude-code-linux-arm64-2.1.302.tgz",
+          "integrity": "sha512-eRgp1cK2oSC7vK1/Dha9EsfSxNb6b/LyduzBxRW02c0X+C6xtyAzeGMmRobQSNuTazRxsr/Cf2/l4Sf/LMgxCA==",
+          "executable": "claude"
+        },
+        "amd64": {
+          "package": "@anthropic-ai/claude-code-linux-x64",
+          "version": "2.1.302",
+          "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.302.tgz",
+          "integrity": "sha512-+d4RUq3E3K+3/J4MysB3z4QXA4rkDNt70VYpTLE6kJCnUe/Z6SB8VJsVJG/NV4bECrvkxkLHjXk+vrgBstfZkw==",
+          "executable": "claude"
+        }
+      },
+      "distribution": {
+        "category": "commercial-native",
+        "license": "LicenseRef-Anthropic-Claude-Code",
+        "package_license": "SEE LICENSE IN LICENSE.md",
+        "conditions": [
+          "commercial-terms-apply",
+          "unmodified-native-client",
+          "native-authentication-methods-preserved",
+          "end-user-owned-provider-credentials",
+          "direct-provider-billing",
+          "no-usage-resale-or-intermediation",
+          "no-implied-endorsement"
+        ],
+        "notices": [
+          {
+            "path": "claude-2.1.302/LICENSE.md",
+            "source": "https://raw.githubusercontent.com/anthropics/claude-code/v2.1.302/LICENSE.md",
+            "sha256": "728158fd1037143fad6907e8fa34804177e598b7326519503fe83cafdef849e6"
+          }
+        ],
+        "terms_url": "https://www.anthropic.com/legal/commercial-terms",
+        "integration_url": "https://code.claude.com/docs/en/legal-and-compliance"
+      }
+    },
+    "opencode2": {
+      "version": "2.0.1",
+      "architectures": {
+        "arm64": {
+          "package": "@opencode/cli-linux-arm64",
+          "version": "2.0.1",
+          "url": "https://registry.npmjs.org/@opencode/cli-linux-arm64/-/cli-linux-arm64-2.0.1.tgz",
+          "integrity": "sha512-1mXYCVKJwYfcotPF5KW5lPxGaWrlfEu+HXsSNXDeR6v04lmCVVdF8o7gDzMRxuavfcZMTZNJ0jl/Ix0wJCav9A==",
+          "executable": "bin/opencode"
+        },
+        "amd64": {
+          "package": "@opencode/cli-linux-x64-baseline",
+          "version": "2.0.1",
+          "url": "https://registry.npmjs.org/@opencode/cli-linux-x64-baseline/-/cli-linux-x64-baseline-2.0.1.tgz",
+          "integrity": "sha512-zekoKBEO8ultl397UzVElyo0iTGW7/3dVJPYyKnqrX0esOcDrAXf/AfOiM6K6LLfMLQ7XCFs8L+EsQrQbeFsSQ==",
+          "executable": "bin/opencode"
+        }
+      },
+      "distribution": {
+        "category": "permissive",
+        "license": "MIT",
+        "package_license": "MIT",
+        "conditions": [
+          "include-license-and-notices",
+          "retain-copyright"
+        ],
+        "notices": [
+          {
+            "path": "opencode2-2.0.1/LICENSE",
+            "source": "https://raw.githubusercontent.com/anomalyco/opencode/v2.0.1/LICENSE",
+            "sha256": "625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b"
+          }
+        ]
+      }
+    }
+  }
+}

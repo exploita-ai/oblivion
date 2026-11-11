@@ -121,15 +121,68 @@ fn exposure_without_final_marker_and_missing_publication_are_preserved() {
 }
 
 #[test]
-fn legacy_publication_without_a_ledger_is_never_treated_as_private() {
+fn an_interrupted_receipt_is_private_only_before_publication() {
     let inbox = Tree::new();
     let published = Tree::new();
-    DirBuilder::new()
-        .mode(0o750)
-        .create(published.0.join(ID))
-        .unwrap();
-    assert_eq!(inventory(&inbox, &published)[0].state, State::Available);
-    assert!(recovery::execute(&inbox.0, &published.0, Request::Discard { id: ID.into() }).is_err());
+    let manifest = received(&inbox);
+    let receipt = inbox.0.join(ID).join("receipt.json");
+    let pending = inbox.0.join(ID).join("receipt.pending");
+    fs::rename(&receipt, &pending).unwrap();
+    assert_eq!(inventory(&inbox, &published)[0].state, State::Private);
+    fs::rename(&pending, &receipt).unwrap();
+    publish(&inbox.0, &published.0, ID, &manifest).unwrap();
+    fs::rename(&receipt, &pending).unwrap();
+    for request in [
+        Request::List { after: None },
+        Request::Discard { id: ID.into() },
+    ] {
+        assert_eq!(
+            recovery::execute(&inbox.0, &published.0, request)
+                .err()
+                .unwrap()
+                .to_string(),
+            "invalid_publication_record"
+        );
+    }
+    assert_eq!(
+        fs::read(published.0.join(ID).join("files/note")).unwrap(),
+        b"original"
+    );
+    assert!(pending.exists());
+}
+
+#[test]
+fn publications_without_the_current_receiving_record_are_rejected_without_changes() {
+    for mode in [0o700, 0o750] {
+        let inbox = Tree::new();
+        let published = Tree::new();
+        DirBuilder::new()
+            .mode(mode)
+            .create(published.0.join(ID))
+            .unwrap();
+        fs::write(published.0.join(ID).join("note"), b"unrecognized publication").unwrap();
+        for request in [
+            Request::List { after: None },
+            Request::Discard { id: ID.into() },
+        ] {
+            assert_eq!(
+                recovery::execute(&inbox.0, &published.0, request)
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                "invalid_publication_record"
+            );
+            assert_eq!(
+                fs::read(published.0.join(ID).join("note")).unwrap(),
+                b"unrecognized publication"
+            );
+            assert_eq!(
+                fs::metadata(published.0.join(ID)).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+            assert!(!inbox.0.join(ID).exists());
+        }
+    }
 }
 
 #[test]

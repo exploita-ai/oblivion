@@ -20,7 +20,7 @@ table inet oblivion {
         ct state invalid counter drop
         iifname "lo" accept
         ct state established,related accept
-        iifname "inside0" ip saddr 10.88.0.2 ip daddr 10.88.0.1 tcp dport { 8111, 8112, 8113, 8114 } ct state new counter accept
+        iifname "inside0" ip saddr 10.88.0.2 ip daddr 10.88.0.1 tcp dport { 8112, 8113, 8114 } ct state new counter accept
         counter drop
     }
     chain forward {
@@ -32,17 +32,17 @@ table inet oblivion {
         meta nfproto ipv6 counter drop
         ct state invalid counter drop
         # Explicit external proxy exception, limited to its connector UID,
-        # address and port. No guest or API process may use this raw endpoint.
+        # address and port. No guest or proxy process may use this raw endpoint.
         oifname "outside0" meta skuid 1201 ip daddr . tcp dport @proxy4 counter accept
         # Deny every other LAN/host/metadata endpoint, including for Tor.
         oifname "outside0" ip daddr @reserved4 counter drop
         ct state established,related accept
-        # API, tool proxy and Privacy Web may reach only the local policy-controlled
+        # Tool proxy and Privacy Web may reach only the local policy-controlled
         # connector. Root uses its private Unix control socket, not TCP.
-        oifname "lo" meta skuid { 1300, 1301, 1302 } ip daddr 127.0.0.1 tcp dport 9051 counter accept
+        oifname "lo" meta skuid { 1301, 1302 } ip daddr 127.0.0.1 tcp dport 9051 counter accept
         oifname "lo" meta skuid @tor_connectors ip daddr 127.0.0.1 tcp dport 9050 counter accept
         oifname "outside0" meta skuid @tor_owners meta l4proto tcp counter accept
-        meta skuid { 1200, 1201, 1300, 1301, 1302 } counter drop
+        meta skuid { 1200, 1201, 1301, 1302 } counter drop
         counter drop
     }
 }

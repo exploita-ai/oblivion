@@ -1,7 +1,6 @@
 use oblivion_gateway::egress::Tools;
 use oblivion_transport::Transport;
 use oblivion_transport::policy::Access;
-use oblivion_transport::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -19,11 +18,13 @@ const FRAME_LIMIT: usize = 512 * 1024;
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "kebab-case", deny_unknown_fields)]
 enum Request {
-    Configure {
-        provider: Provider,
-        api_key: Zeroizing<String>,
+    ConfigureTools {
         #[serde(default)]
         transport: Transport,
+    },
+    TransportChange {
+        transport: Transport,
+        state: Option<String>,
     },
     Grant {
         token: Zeroizing<String>,
@@ -76,35 +77,34 @@ pub fn run() -> io::Result<()> {
     }
     unsafe { libc::umask(0o077) };
     let mut channel = Channel::open()?;
-    let mut api = None;
+    let mut grant = None;
     // This handshake contains no operational secrets and precedes configuration.
-    channel.write(b"{\"ready\":true,\"version\":1}", &mut api)?;
-    let result = serve(&mut channel, &mut api);
-    if let Some(mut api) = api.take() {
-        api.stop()?;
+    channel.write(b"{\"ready\":true,\"version\":1}", &mut grant)?;
+    let result = serve(&mut channel, &mut grant);
+    if let Some(mut grant) = grant.take() {
+        grant.stop()?;
     }
     if result.is_err() {
         // Failures close the current grant before reporting anything. A broken
         // control channel cannot be reattached to reuse this VM's credential.
-        let _ = channel.write(b"{\"ok\":false,\"error\":\"control_failed\"}", &mut api);
+        let _ = channel.write(b"{\"ok\":false,\"error\":\"control_failed\"}", &mut grant);
     }
     result
 }
 
-fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
-    let mut key = None;
-    let mut provider = None;
+fn serve(channel: &mut Channel, grant: &mut Option<Grant>) -> io::Result<()> {
     let mut transport = None;
     let mut tor = None;
     let mut firewall = None;
     let mut access = Access::Strict;
+    let mut transport_blocked = false;
     loop {
-        if let Some(grant) = api.as_mut() {
-            if grant.poll_rotation(provider, key.as_deref().map(String::as_str), transport.as_ref(), tor.as_ref())? {
+        if let Some(grant) = grant.as_mut() {
+            if !transport_blocked && grant.poll_rotation(transport.as_ref(), tor.as_ref())? {
                 firewall = Some(crate::network::snapshot()?);
             }
         }
-        let bytes = channel.read(api)?;
+        let bytes = channel.read(grant)?;
         let request: Request =
             serde_json::from_slice(&bytes).map_err(|_| io::Error::other("invalid_request"))?;
         drop(bytes);
@@ -112,8 +112,8 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
         match request {
             Request::TorInitialize { state } => {
                 if tor.is_some()
-                    || api.is_some()
-                    || key.is_none()
+                    || grant.is_some()
+                    || transport.is_none()
                     || !matches!(transport, Some(Transport::Tor {}))
                 {
                     return Err(io::Error::other("invalid_tor_initialization"));
@@ -132,7 +132,7 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
             }
             Request::TorSnapshot { stop } => {
                 if stop {
-                    if let Some(mut current) = api.take() {
+                    if let Some(mut current) = grant.take() {
                         current.stop()?;
                     }
                 }
@@ -156,41 +156,54 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                                 .ok_or_else(|| io::Error::other("tor_not_initialized"))?
                                 .bootstrapped()?,
                     })?,
-                    api,
+                    grant,
                 )?;
                 continue;
             }
-            Request::Configure {
-                provider: selected_provider,
-                api_key,
-                transport: selected,
-            } => {
-                if key.is_some()
-                    || !(16..=4096).contains(&api_key.len())
-                    || !api_key.bytes().all(|byte| byte.is_ascii_graphic())
-                {
+            Request::ConfigureTools { transport: selected } => {
+                if transport.is_some() {
                     return Err(io::Error::other("invalid_configuration"));
                 }
                 crate::network::configure(&selected)?;
                 firewall = Some(crate::network::snapshot()?);
                 transport = Some(selected);
-                provider = Some(selected_provider);
-                key = Some(api_key);
+            }
+            Request::TransportChange { transport: selected, state } => {
+                if transport.is_none() {
+                    return Err(io::Error::other("not_configured"));
+                }
+                transport_blocked = true;
+                let result = change_transport(grant, &mut tor, &selected, access, state.as_deref());
+                if result.is_err() {
+                    // A failed route is an explicit latched state. The same
+                    // private control channel can retry without replacing the
+                    // VM or its point-to-point NIC socket.
+                    crate::network::rotation_block()?;
+                    if let Some(grant) = grant.as_mut() {
+                        grant.blocked = true;
+                        if let Some(mut plane) = grant.plane.take() { plane.stop()?; }
+                    }
+                    if let Some(tor) = &tor { let _ = tor.disable(); }
+                } else {
+                    transport_blocked = false;
+                }
+                transport = Some(selected);
+                firewall = Some(crate::network::snapshot()?);
+                channel.write(&serde_json::to_vec(&Reply {
+                    ok: result.is_ok(), configured: true, active: grant.is_some(),
+                })?, grant)?;
+                continue;
             }
             Request::Grant { token, tools, rotation_allowed } => {
-                if api.is_some()
+                if transport_blocked || grant.is_some()
                     || token.len() != 64
                     || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
                 {
                     return Err(io::Error::other("invalid_grant"));
                 }
-                let key = key
-                    .as_ref()
-                    .ok_or_else(|| io::Error::other("not_configured"))?;
                 let transport = transport
                     .as_ref()
                     .ok_or_else(|| io::Error::other("not_configured"))?;
-                let provider = provider.ok_or_else(|| io::Error::other("not_configured"))?;
                 if matches!(transport, Transport::Tor {}) && tor.is_none() {
                     return Err(io::Error::other("tor_not_initialized"));
                 }
@@ -198,27 +211,25 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                 if access == Access::Offline {
                     return Err(io::Error::other("offline_grant_denied"));
                 }
-                *api = Some(Grant::start(
-                    provider,
-                    key,
+                *grant = Some(Grant::start(
                     &token,
                     transport,
                     tools,
                 )?);
-                api.as_mut().unwrap().rotation_allowed = rotation_allowed;
+                grant.as_mut().unwrap().rotation_allowed = rotation_allowed;
             }
             Request::RotationAllowed { allowed } => {
-                let grant = api.as_mut().ok_or_else(|| io::Error::other("grant_required"))?;
+                let grant = grant.as_mut().ok_or_else(|| io::Error::other("grant_required"))?;
                 if grant.blocked { return Err(io::Error::other("rotation_recovery_required")); }
                 grant.rotation_allowed = allowed;
             }
             Request::Policy { tools } => {
                 // An explicit failed rotation stays latched; a mode change must
                 // not replace its firewall with a permissive transport policy.
-                if api.as_ref().is_some_and(|grant| grant.blocked) {
+                if transport_blocked || grant.as_ref().is_some_and(|grant| grant.blocked) {
                     return Err(io::Error::other("rotation_recovery_required"));
                 }
-                let mut previous = api
+                let mut previous = grant
                     .take()
                     .ok_or_else(|| io::Error::other("grant_required"))?;
                 previous.stop()?;
@@ -238,18 +249,15 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                 }
                 firewall = Some(crate::network::snapshot()?);
                 access = tools.access;
-                *api = Some(Grant::start(
-                    provider.ok_or_else(|| io::Error::other("not_configured"))?,
-                    key.as_ref()
-                        .ok_or_else(|| io::Error::other("not_configured"))?,
+                *grant = Some(Grant::start(
                     &previous.token,
                     transport,
                     Some(tools),
                 )?);
-                api.as_mut().unwrap().rotation_allowed = previous.rotation_allowed;
+                grant.as_mut().unwrap().rotation_allowed = previous.rotation_allowed;
             }
             Request::Revoke {} | Request::Shutdown {} => {
-                if let Some(mut current) = api.take() {
+                if let Some(mut current) = grant.take() {
                     current.stop()?;
                     // Destroy a latched gateway instead of allowing a later
                     // grant to mistake its blocked ruleset for a ready route.
@@ -270,7 +278,7 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                     .as_ref()
                     .ok_or_else(|| io::Error::other("not_configured"))?;
                 let progress = tor.as_ref().and_then(|tor| tor.progress().ok());
-                let ready = access != Access::Offline && !api.as_ref().is_some_and(|grant| grant.blocked)
+                let ready = !transport_blocked && access != Access::Offline && !grant.as_ref().is_some_and(|grant| grant.blocked)
                     && match transport {
                         Transport::Tor {} => progress == Some(100),
                         Transport::Socks5 { .. } => Process::start(
@@ -285,7 +293,7 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
                     &serde_json::to_vec(
                         &serde_json::json!({"ready": ready, "isolated": isolated, "tor_progress": progress}),
                     )?,
-                    api,
+                    grant,
                 )?;
                 continue;
             }
@@ -293,15 +301,89 @@ fn serve(channel: &mut Channel, api: &mut Option<Grant>) -> io::Result<()> {
         channel.write(
             &serde_json::to_vec(&Reply {
                 ok: true,
-                configured: key.is_some() && provider.is_some(),
-                active: api.is_some(),
+                configured: transport.is_some(),
+                active: grant.is_some(),
             })?,
-            api,
+            grant,
         )?;
         if shutdown {
             return Ok(());
         }
     }
+}
+
+fn change_transport(
+    grant: &mut Option<Grant>,
+    tor: &mut Option<crate::tor::Tor>,
+    selected: &Transport,
+    access: Access,
+    state: Option<&str>,
+) -> io::Result<()> {
+    // This table precedes established connections. It stays installed across
+    // process teardown, base-policy replacement and transport verification.
+    crate::network::rotation_block()?;
+    if let Some(grant) = grant.as_mut() {
+        grant.blocked = true;
+        if grant.pending.take().is_some() {
+            grant.rotation.control.as_mut().ok_or_else(|| io::Error::other("rotation_control_missing"))?.write_all(b"U")?;
+        }
+        if let Some(mut plane) = grant.plane.take() { plane.stop()?; }
+    }
+    let deadline = Instant::now() + Duration::from_secs(90);
+    if let Some(tor) = tor.as_ref() {
+        tor.disable()?;
+        while !tor.drained()? {
+            if Instant::now() >= deadline { return Err(io::Error::other("transport_drain_timeout")); }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    crate::network::change_transport(selected, access == Access::Offline)?;
+    if matches!(selected, Transport::Tor {}) && tor.is_none() {
+        let state = state.map(oblivion_tor_state::State::parse).transpose()
+            .map_err(|_| io::Error::other("invalid_tor_state"))?;
+        *tor = Some(crate::tor::Tor::initialize(state)?);
+    }
+    if access != Access::Offline {
+        crate::network::transport_probe()?;
+        match selected {
+            Transport::Tor {} => {
+                let tor = tor.as_ref().ok_or_else(|| io::Error::other("tor_not_initialized"))?;
+                tor.enable()?;
+                let mut circuit = None;
+                loop {
+                    if Instant::now() >= deadline { return Err(io::Error::other("transport_bootstrap_timeout")); }
+                    if tor.bootstrapped()? {
+                        if let Some(id) = circuit {
+                            if tor.circuit_ready(id, &Default::default())? { break; }
+                        } else {
+                            circuit = Some(tor.build_circuit()?);
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+            Transport::Socks5 { .. } => {
+                Process::start(Role::Probe, Zeroizing::new(serde_json::to_vec(
+                    &serde_json::json!({"probe": selected}),
+                )?))?;
+            }
+        }
+    }
+    let barrier = crate::network::snapshot()?;
+    if let Some(grant) = grant.as_mut() {
+        grant.plane = Some(Plane::start(&grant.token, selected, grant.policy.as_ref())?);
+    }
+    if !crate::network::isolated(&barrier)? { return Err(io::Error::other("isolation_lost")); }
+    let baseline = crate::network::transport_baseline()?;
+    crate::network::rotation_release()?;
+    // All verification precedes the atomic release. Only in-memory assignments
+    // follow it, so a later diagnostic failure cannot turn a completed change
+    // into a reported failed transition with an open data plane.
+    if let Some(grant) = grant.as_mut() {
+        grant.normal_firewall = baseline;
+        grant.blocked = false;
+    }
+    Ok(())
 }
 
 struct Grant {
@@ -325,7 +407,6 @@ struct PendingRotation {
 }
 
 struct Plane {
-    api: Process,
     egress: Process,
     tools: Option<Process>,
     web: Process,
@@ -333,13 +414,11 @@ struct Plane {
 
 impl Grant {
     fn start(
-        provider: Provider,
-        key: &str,
         token: &str,
         transport: &Transport,
         tools: Option<Tools>,
     ) -> io::Result<Self> {
-        let plane = Plane::start(provider, key, token, transport, tools.as_ref())?;
+        let plane = Plane::start(token, transport, tools.as_ref())?;
         let rotation = Process::start(Role::Rotation, Zeroizing::new(serde_json::to_vec(
             &serde_json::json!({"session_token": token}),
         )?))?;
@@ -350,7 +429,7 @@ impl Grant {
         })
     }
 
-    fn poll_rotation(&mut self, provider: Option<Provider>, key: Option<&str>, transport: Option<&Transport>, tor: Option<&crate::tor::Tor>) -> io::Result<bool> {
+    fn poll_rotation(&mut self, transport: Option<&Transport>, tor: Option<&crate::tor::Tor>) -> io::Result<bool> {
         let control = self.rotation.control.as_mut().ok_or_else(|| io::Error::other("rotation_control_missing"))?;
         let mut request = [0u8];
         let received = unsafe { libc::recv(control.as_raw_fd(), request.as_mut_ptr().cast(), 1, libc::MSG_DONTWAIT) };
@@ -417,8 +496,7 @@ impl Grant {
             if !tor.circuit_ready(pending.circuit.unwrap(), &self.previous_exits)? { return Ok(false); }
             if !crate::network::isolated(&self.rotation_firewall)? { return Err(io::Error::other("isolation_lost")); }
             self.plane = Some(Plane::start(
-                provider.ok_or_else(|| io::Error::other("not_configured"))?,
-                key.ok_or_else(|| io::Error::other("not_configured"))?, &self.token,
+                &self.token,
                 transport.ok_or_else(|| io::Error::other("not_configured"))?, self.policy.as_ref(),
             )?);
             if !crate::network::isolated(&self.rotation_firewall)? { return Err(io::Error::other("isolation_lost")); }
@@ -475,10 +553,9 @@ impl Grant {
 }
 
 impl Plane {
-    fn start(provider: Provider, key: &str, token: &str, transport: &Transport, tools: Option<&Tools>) -> io::Result<Self> {
+    fn start(token: &str, transport: &Transport, tools: Option<&Tools>) -> io::Result<Self> {
         #[derive(Serialize)]
         struct EgressCredentials<'a> {
-            provider: Provider,
             transport: &'a Transport,
             session_token: &'a str,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -487,26 +564,9 @@ impl Plane {
         let egress = Process::start(
             Role::Egress,
             Zeroizing::new(serde_json::to_vec(&EgressCredentials {
-                provider,
                 transport,
                 session_token: token,
                 tools,
-            })?),
-        )?;
-        #[derive(Serialize)]
-        struct ApiCredentials<'a> {
-            provider: Provider,
-            api_key: &'a str,
-            session_token: &'a str,
-            socks: &'static str,
-        }
-        let api = Process::start(
-            Role::Api,
-            Zeroizing::new(serde_json::to_vec(&ApiCredentials {
-                provider,
-                api_key: key,
-                session_token: token,
-                socks: "127.0.0.1:9051",
             })?),
         )?;
         #[derive(Serialize)]
@@ -533,7 +593,6 @@ impl Plane {
             })?),
         )?;
         Ok(Self {
-            api,
             egress,
             tools,
             web,
@@ -544,28 +603,24 @@ impl Plane {
         // Try every closure even if one fails. Process::drop also prevents a
         // startup error from leaving the other service or its sockets alive.
         self.egress.control.take();
-        self.api.control.take();
         self.web.control.take();
         if let Some(tools) = &mut self.tools { tools.control.take(); }
         let deadline = Instant::now() + Duration::from_secs(5);
         let egress = self.egress.stop_until(deadline);
         let tools = self.tools.as_mut().map(|tools| tools.stop_until(deadline)).transpose();
         let web = self.web.stop_until(deadline);
-        let api = self.api.stop_until(deadline);
         tools?;
         web?;
-        api?;
         egress
     }
 
     fn exited(&mut self) -> io::Result<bool> {
         Ok(self.tools.as_mut().map(|tools| tools.child.try_wait()).transpose()?.flatten().is_some()
-            || self.web.child.try_wait()?.is_some() || self.api.child.try_wait()?.is_some() || self.egress.child.try_wait()?.is_some())
+            || self.web.child.try_wait()?.is_some() || self.egress.child.try_wait()?.is_some())
     }
 }
 
 enum Role {
-    Api,
     Egress,
     Tools,
     Web,
@@ -581,7 +636,6 @@ struct Process {
 impl Process {
     fn start(role: Role, mut bytes: Zeroizing<Vec<u8>>) -> io::Result<Self> {
         let (program, uid, ip, port) = match role {
-            Role::Api => ("/usr/bin/oblivion-api", 1300, [10, 88, 0, 1], 8111u16),
             Role::Egress => ("/usr/bin/oblivion-egress", 1201, [127, 0, 0, 1], 9051u16),
             Role::Tools => ("/usr/bin/oblivion-tools", 1301, [10, 88, 0, 1], 8112u16),
             Role::Web => ("/usr/bin/oblivion-web", 1302, [10, 88, 0, 1], 8113u16),
@@ -649,14 +703,14 @@ impl Process {
                 Ok(())
             });
         }
-        let mut api = Self {
+        let mut grant = Self {
             child: command.spawn()?,
             control: Some(control),
         };
         drop(inherited);
         drop(listener);
         bytes.push(b'\n');
-        let channel = api
+        let channel = grant
             .control
             .as_mut()
             .ok_or_else(|| io::Error::other("missing_control"))?;
@@ -666,7 +720,7 @@ impl Process {
         if &ready != b"{\"ready\":true}\n" {
             return Err(io::Error::other("invalid_ready"));
         }
-        Ok(api)
+        Ok(grant)
     }
 
     fn stop(&mut self) -> io::Result<()> {
@@ -751,11 +805,11 @@ impl Channel {
         &self,
         events: i16,
         deadline: Option<Instant>,
-        api: &mut Option<Grant>,
+        grant: &mut Option<Grant>,
     ) -> io::Result<()> {
         loop {
-            if let Some(api) = api {
-                if api.exited()? {
+            if let Some(grant) = grant {
+                if grant.exited()? {
                     return Err(io::Error::other("grant_process_exited"));
                 }
             }
@@ -793,10 +847,10 @@ impl Channel {
         &mut self,
         mut bytes: &mut [u8],
         deadline: Option<Instant>,
-        api: &mut Option<Grant>,
+        grant: &mut Option<Grant>,
     ) -> io::Result<()> {
         while !bytes.is_empty() {
-            self.wait(libc::POLLIN, deadline, api)?;
+            self.wait(libc::POLLIN, deadline, grant)?;
             match self.file.read(bytes) {
                 Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
                 Ok(size) => bytes = &mut bytes[size..],
@@ -807,26 +861,26 @@ impl Channel {
         Ok(())
     }
 
-    fn read(&mut self, api: &mut Option<Grant>) -> io::Result<Zeroizing<Vec<u8>>> {
+    fn read(&mut self, grant: &mut Option<Grant>) -> io::Result<Zeroizing<Vec<u8>>> {
         let mut header = [0; 4];
-        self.read_bytes(&mut header[..1], None, api)?;
+        self.read_bytes(&mut header[..1], None, grant)?;
         let deadline = Some(Instant::now() + Duration::from_secs(5));
-        self.read_bytes(&mut header[1..], deadline, api)?;
+        self.read_bytes(&mut header[1..], deadline, grant)?;
         let length = u32::from_be_bytes(header) as usize;
         if !(1..=FRAME_LIMIT).contains(&length) {
             return Err(io::Error::other("invalid_frame_length"));
         }
         let mut bytes = Zeroizing::new(vec![0; length]);
-        self.read_bytes(&mut bytes, deadline, api)?;
+        self.read_bytes(&mut bytes, deadline, grant)?;
         Ok(bytes)
     }
 
-    fn write(&mut self, bytes: &[u8], api: &mut Option<Grant>) -> io::Result<()> {
+    fn write(&mut self, bytes: &[u8], grant: &mut Option<Grant>) -> io::Result<()> {
         let header = (bytes.len() as u32).to_be_bytes();
         let deadline = Some(Instant::now() + Duration::from_secs(5));
         for mut chunk in [header.as_slice(), bytes] {
             while !chunk.is_empty() {
-                self.wait(libc::POLLOUT, deadline, api)?;
+                self.wait(libc::POLLOUT, deadline, grant)?;
                 match self.file.write(chunk) {
                     Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
                     Ok(size) => chunk = &chunk[size..],

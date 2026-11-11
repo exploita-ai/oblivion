@@ -4,16 +4,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends cargo rustc gcc
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /transfer
 COPY packages/oblivion-transfer/Cargo.toml packages/oblivion-transfer/Cargo.lock ./
+# Cargo resolves target-specific path dependencies even for a Linux build.
+COPY packages/oblivion-native-windows/Cargo.toml /oblivion-native-windows/Cargo.toml
+COPY packages/oblivion-native-windows/src/ /oblivion-native-windows/src/
+COPY packages/oblivion-bundle/Cargo.toml /oblivion-bundle/Cargo.toml
+COPY packages/oblivion-bundle/src/ /oblivion-bundle/src/
+COPY packages/oblivion-wire/Cargo.toml /oblivion-wire/Cargo.toml
+COPY packages/oblivion-wire/src/ /oblivion-wire/src/
 RUN cargo fetch --locked
 COPY packages/oblivion-transfer/src/ src/
 COPY packages/oblivion-transfer/tests/ tests/
 RUN --network=none mkdir /evidence \
-    && (cargo test --locked --offline > /evidence/tests.log 2>&1 || { cat /evidence/tests.log; exit 1; }) \
+    && (cargo test --locked --offline --release > /evidence/tests.log 2>&1 || { cat /evidence/tests.log; exit 1; }) \
     && cat /evidence/tests.log \
     && (cargo build --locked --offline --release --bins > /evidence/build.log 2>&1 || { cat /evidence/build.log; exit 1; }) \
     && cp target/release/oblivion-copy target/release/oblivion-copy-relay target/release/oblivion-onion-file /evidence/ \
     && rustc --version > /evidence/rustc.txt \
     && find Cargo.toml Cargo.lock src tests -type f -print0 | sort -z | xargs -0 sha256sum > /evidence/sources.sha256 \
+    && find /oblivion-native-windows/Cargo.toml /oblivion-native-windows/src \
+        /oblivion-bundle/Cargo.toml /oblivion-bundle/src \
+        /oblivion-wire/Cargo.toml /oblivion-wire/src \
+        -type f -print0 | sort -z | xargs -0 sha256sum > /evidence/dependency-sources.sha256 \
     && cd /evidence && sha256sum * > SHA256SUMS
 
 FROM scratch AS artifacts

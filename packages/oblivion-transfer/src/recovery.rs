@@ -147,22 +147,22 @@ fn inspect(root: &Directory, target: &Directory, id: &str) -> io::Result<Record>
         transaction.is_some() || publication.is_some(),
         "copy_not_found",
     )?;
+    // receive_at syncs the inbox and receipt before publish can expose files.
+    // A publication without its transaction is not a current recovery record.
+    let transaction = transaction.ok_or_else(|| invalid("invalid_publication_record"))?;
+    transaction.require_private()?;
     let mut receipt = None;
-    let mut committed = false;
-    if let Some(transaction) = transaction {
-        transaction.require_private()?;
-        if let Some(file) = private_file(&transaction, "receipt.json", 1024)? {
-            let saved: Receipt =
-                serde_json::from_reader(file).map_err(|_| invalid("invalid_receipt"))?;
-            validate_receipt(&saved, id)?;
-            receipt = Some(saved);
-        }
-        committed = private_file(&transaction, "published", 0)?.is_some();
-        require(
-            !committed || receipt.is_some(),
-            "invalid_publication_record",
-        )?;
+    if let Some(file) = private_file(&transaction, "receipt.json", 1024)? {
+        let saved: Receipt =
+            serde_json::from_reader(file).map_err(|_| invalid("invalid_receipt"))?;
+        validate_receipt(&saved, id)?;
+        receipt = Some(saved);
     }
+    let committed = private_file(&transaction, "published", 0)?.is_some();
+    require(
+        receipt.is_some() || (!committed && publication.is_none()),
+        "invalid_publication_record",
+    )?;
     let state = match publication {
         Some(publication) => {
             let metadata = publication.metadata()?;
@@ -181,8 +181,8 @@ fn inspect(root: &Directory, target: &Directory, id: &str) -> io::Result<Record>
             } else if committed {
                 State::Published
             } else {
-                // Legacy imports or interruption after exposure, before the
-                // durable marker. Do not infer success from names or hashes.
+                // Interruption after exposure, before the durable marker.
+                // Do not infer success from names or hashes.
                 State::Available
             }
         }

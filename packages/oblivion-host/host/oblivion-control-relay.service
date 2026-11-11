@@ -1,0 +1,39 @@
+[Unit]
+Description=Oblivion private native launcher transport
+Requires=oblivion-controller.service oblivion-runtime-auth.service
+After=oblivion-controller.service oblivion-runtime-auth.service
+ConditionVirtualization=vm
+ConditionKernelCommandLine=oblivion.runtime=1
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=1000
+Group=1000
+ExecStart=/usr/bin/python3 /usr/lib/oblivion/control-relay.py
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=5
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_VSOCK
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+StandardInput=null
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

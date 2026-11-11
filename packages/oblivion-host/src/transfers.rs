@@ -40,16 +40,13 @@ pub struct Source {
     pub id: String,
     pub name: String,
     pub bytes: u64,
-    #[serde(default)]
     pub kind: SourceKind,
-    #[serde(default)]
     pub read_only: bool,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceKind {
-    #[default]
     Usb,
     Virtual,
 }

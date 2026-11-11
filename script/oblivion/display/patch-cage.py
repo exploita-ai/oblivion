@@ -65,7 +65,7 @@ seat_reload_keymap(struct cg_seat *seat)
 	xkb_keymap_unref(map);
 	xkb_context_unref(context);
 	if (!applied || generation == 0) return;
-	FILE *ack = fopen("/run/oblivion-display/keymap-applied", "w");
+	FILE *ack = fopen("/run/oblivion-keymap-applied", "w");
 	if (ack) {
 		fprintf(ack, "%ju\n", (uintmax_t)generation);
 		fclose(ack);

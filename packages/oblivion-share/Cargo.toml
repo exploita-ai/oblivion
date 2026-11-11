@@ -1,0 +1,24 @@
+[package]
+name = "oblivion-share"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[dependencies]
+age = { version = "=0.12.1", default-features = false }
+oblivion-transfer = { path = "../oblivion-transfer" }
+oblivion-wire = { path = "../oblivion-wire" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "=0.10.9"
+zeroize = "1.9.1"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false

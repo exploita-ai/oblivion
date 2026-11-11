@@ -64,7 +64,20 @@ impl<'a> Channel<'a> {
     // Also used around the single-byte SCM_RIGHTS transfer. Its following
     // metadata response shares this Channel's deadline.
     pub fn prepare_read(&self) -> io::Result<()> {
-        self.stream.set_read_timeout(Some(self.remaining()?))
+        let result = self.stream.set_read_timeout(Some(self.remaining()?));
+        #[cfg(target_os = "macos")]
+        if result.as_ref().is_err_and(|error| error.raw_os_error() == Some(libc::EINVAL)) {
+            use std::os::fd::AsRawFd;
+            let mut event = libc::pollfd { fd: self.stream.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            // Darwin rejects SO_RCVTIMEO once the peer has closed, including
+            // when a complete valid response remains queued. Drain it or read
+            // EOF only after verifying that hangup; live peers keep deadlines.
+            if unsafe { libc::poll(&mut event, 1, 0) } > 0
+                && event.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                return Ok(());
+            }
+        }
+        result
     }
 
     pub fn prepare_write(&self) -> io::Result<()> {
