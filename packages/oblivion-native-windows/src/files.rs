@@ -12,12 +12,12 @@ use std::ptr::{null, null_mut};
 use std::sync::Arc;
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT, NtFlushBuffersFileEx, NtOpenFile,
+    FILE_DIRECTORY_FILE, NtFlushBuffersFileEx, NtOpenFile,
 };
 use windows_sys::Win32::Foundation::GENERIC_WRITE;
 use windows_sys::Win32::Foundation::{
     ERROR_SHARING_VIOLATION, GENERIC_READ, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
-    OBJ_CASE_INSENSITIVE, UNICODE_STRING,
+    OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, UNICODE_STRING,
 };
 use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
@@ -29,9 +29,10 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
-    FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
-    FILE_TYPE_DISK, FileDispositionInfo, FileIdInfo, FileRenameInfo, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW, OPEN_EXISTING,
+    FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
+    FILE_TRAVERSE, FILE_TYPE_DISK, FileDispositionInfo, FileIdInfo, FileRenameInfoEx,
+    FileStandardInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType,
+    GetFinalPathNameByHandleW, OPEN_EXISTING,
     READ_CONTROL, SetFileInformationByHandle, WRITE_DAC,
 };
 use windows_sys::Win32::Storage::Vhd::{
@@ -44,6 +45,9 @@ use windows_sys::Win32::Storage::Vhd::{
 };
 use windows_sys::Win32::System::HostComputeSystem::{HcsGrantVmAccess, HcsRevokeVmAccess};
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+use windows_sys::Win32::System::WindowsProgramming::{
+    FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
+};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const MAX_DISK: u64 = 1024 * GIB;
@@ -273,25 +277,32 @@ struct Pinned {
     id: FileId,
     size: u64,
     role: Role,
-    parents: Vec<(String, File, FileId)>,
+    parents: Vec<Parent>,
+}
+
+struct Parent {
+    path: String,
+    file: File,
+    id: FileId,
+    traverse: bool,
 }
 
 /// The path-taking SDK must keep the reviewed directory objects in place.
 /// This guard grants no authority to an existing leaf and never creates one.
 pub(crate) struct CreationParent {
     path: String,
-    parents: Vec<(String, File, FileId)>,
+    parents: Vec<Parent>,
 }
 
 impl CreationParent {
     pub(crate) fn open(path: &str, identity: &Identity) -> Result<Self> {
         let parent = Self::ancestors(path)?;
-        permissions(
+        directory_permissions(
             &parent
                 .parents
                 .last()
                 .ok_or(Error("runtime_parent_required"))?
-                .1,
+                .file,
             identity.sid(),
             true,
         )?;
@@ -321,7 +332,7 @@ impl CreationParent {
             .parents
             .last()
             .ok_or(Error("invalid_runtime_asset_path"))?;
-        Directory::open(&parent.0, identity, true)?.sync()?;
+        Directory::open(&parent.path, identity, true)?.sync()?;
         self.verify()
     }
 }
@@ -425,7 +436,7 @@ struct DirectoryPin {
     path: String,
     file: File,
     id: FileId,
-    ancestors: Vec<(String, File, FileId)>,
+    ancestors: Vec<Parent>,
     parent: Option<Directory>,
 }
 
@@ -443,7 +454,7 @@ impl Directory {
     /// private ACLs are not software authority. Root and every leaf still pass
     /// the ordinary immutable owner/DACL and file-identity boundary below.
     pub(crate) fn open_published(path: &str, caller: &Identity) -> Result<(Self, Identity)> {
-        let ancestors = pin_parents_access(path, open_traverse)?;
+        let ancestors = pin_parents_access(path, true)?;
         let file = open_raw(path, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?;
         let (id, _) = inspect(&file, path, true)?;
         let owner = crate::security::file_owner(&file)?;
@@ -505,7 +516,7 @@ impl Directory {
         let ancestors = pin_parents(path)?;
         let file = open_raw(path, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?;
         let (id, _) = inspect(&file, path, true)?;
-        permissions(&file, identity.sid(), private)?;
+        directory_permissions(&file, identity.sid(), private)?;
         Ok(Self(Arc::new(DirectoryPin {
             path: path.into(),
             file,
@@ -526,6 +537,15 @@ impl Directory {
 
     pub(crate) fn path(&self) -> &str {
         &self.0.path
+    }
+
+    pub(crate) fn require_traversal(&self, storage: &Identity, reader: &Identity) -> Result<()> {
+        self.verify()?;
+        crate::security::file_permissions(
+            &self.0.file,
+            storage.sid(),
+            crate::security::FilePolicy::PrivateDirectory(Some(reader.sid())),
+        )
     }
 
     pub(crate) fn verify(&self) -> Result<()> {
@@ -584,7 +604,7 @@ impl Directory {
         self.verify()?;
         let file = open_raw(&path, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?;
         let (id, _) = inspect(&file, &path, true)?;
-        permissions(&file, identity.sid(), private)?;
+        directory_permissions(&file, identity.sid(), private)?;
         Ok(Self(Arc::new(DirectoryPin {
             path,
             file,
@@ -597,7 +617,7 @@ impl Directory {
     pub(crate) fn create_child(&self, name: &str, identity: &Identity) -> Result<Self> {
         let path = self.child_path(name)?;
         self.verify()?;
-        permissions(&self.0.file, identity.sid(), true)?;
+        directory_permissions(&self.0.file, identity.sid(), true)?;
         create_directory(&path, identity)?;
         self.child(name, identity, true)
     }
@@ -655,7 +675,7 @@ impl Directory {
     pub(crate) fn create_file(&self, name: &str, identity: &Identity) -> Result<Asset> {
         let path = self.child_path(name)?;
         self.verify()?;
-        permissions(&self.0.file, identity.sid(), true)?;
+        directory_permissions(&self.0.file, identity.sid(), true)?;
         let descriptor = identity.file_descriptor()?;
         let attributes = SECURITY_ATTRIBUTES {
             nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -859,7 +879,11 @@ impl Mutation {
             if inspect(&file, path, directory)?.0 != expected {
                 return Err(Error("runtime_asset_changed"));
             }
-            permissions(&file, identity.sid(), private)?;
+            if directory {
+                directory_permissions(&file, identity.sid(), private)?;
+            } else {
+                permissions(&file, identity.sid(), private)?;
+            }
             Ok(file)
         };
         let guard = open(READ_CONTROL | FILE_READ_ATTRIBUTES)?;
@@ -874,7 +898,13 @@ impl Mutation {
         let mut storage = vec![0usize; size.div_ceil(size_of::<usize>())];
         let rename = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
         unsafe {
-            (*rename).Anonymous.ReplaceIfExists = replace;
+            // The replaced record stays pinned through publication. Ordinary
+            // FileRenameInfo rejects an open target even with share-delete.
+            (*rename).Anonymous.Flags = if replace {
+                FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS
+            } else {
+                0
+            };
             (*rename).RootDirectory = null_mut();
             (*rename).FileNameLength = (name.len() * 2) as u32;
             std::ptr::copy_nonoverlapping(
@@ -886,7 +916,7 @@ impl Mutation {
         if unsafe {
             SetFileInformationByHandle(
                 self.file.as_raw_handle(),
-                FileRenameInfo,
+                FileRenameInfoEx,
                 rename.cast(),
                 size as u32,
             )
@@ -923,7 +953,11 @@ fn software_acl(
 ) -> Result<()> {
     // Only an already private, storage-owned object can become published code.
     // The owner is retained; the descriptor grants the client read/execute only.
-    permissions(original, storage.sid(), true)?;
+    if directory {
+        directory_permissions(original, storage.sid(), true)?;
+    } else {
+        permissions(original, storage.sid(), true)?;
+    }
     let file = open_raw(
         path,
         READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES,
@@ -972,16 +1006,11 @@ fn create_directory(path: &str, identity: &Identity) -> Result<()> {
     Ok(())
 }
 
-fn pin_parents(path: &str) -> Result<Vec<(String, File, FileId)>> {
-    pin_parents_access(path, |parent| {
-        open_raw(parent, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)
-    })
+fn pin_parents(path: &str) -> Result<Vec<Parent>> {
+    pin_parents_access(path, false)
 }
 
-fn pin_parents_access(
-    path: &str,
-    open: impl Fn(&str) -> Result<File>,
-) -> Result<Vec<(String, File, FileId)>> {
+fn pin_parents_access(path: &str, traverse: bool) -> Result<Vec<Parent>> {
     if !crate::config::drive_file(path) {
         return Err(Error("invalid_runtime_asset_path"));
     }
@@ -991,9 +1020,22 @@ fn pin_parents_access(
         paths.push(path[..index + 3].to_owned());
     }
     for parent in paths {
-        let file = open(&parent)?;
-        let (id, _) = inspect(&file, &parent, true)?;
-        parents.push((parent, file, id));
+        let file = if traverse {
+            open_traverse(&parent)?
+        } else {
+            open_raw(&parent, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?
+        };
+        let id = if traverse {
+            traverse_identity(&file, &parent)?
+        } else {
+            inspect(&file, &parent, true)?.0
+        };
+        parents.push(Parent {
+            path: parent,
+            file,
+            id,
+            traverse,
+        });
     }
     Ok(parents)
 }
@@ -1011,25 +1053,63 @@ fn open_traverse(path: &str) -> Result<File> {
     let attributes = OBJECT_ATTRIBUTES {
         Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
         ObjectName: &name,
-        Attributes: OBJ_CASE_INSENSITIVE,
+        Attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
         ..Default::default()
     };
     let mut status = IO_STATUS_BLOCK::default();
     let mut handle = null_mut();
-    if unsafe {
+    let result = unsafe {
         NtOpenFile(
             &mut handle,
             FILE_TRAVERSE,
             &attributes,
             &mut status,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
-            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
+            FILE_DIRECTORY_FILE,
         )
-    } != 0
-    {
+    };
+    if result != 0 {
+        #[cfg(test)]
+        eprintln!(
+            "NtOpenFile traverse failed: status={result:#010x}, depth={}",
+            path.matches('\\').count()
+        );
         return Err(Error("runtime_directory_traverse_unavailable"));
     }
     Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+fn traverse_identity(file: &File, path: &str) -> Result<FileId> {
+    // Standard and ID information need no READ_ATTRIBUTES. Reparse points are
+    // rejected by open_traverse instead of querying privileged basic metadata.
+    let mut info = FILE_STANDARD_INFO::default();
+    let mut id = FILE_ID_INFO::default();
+    if unsafe { GetFileType(file.as_raw_handle()) } != FILE_TYPE_DISK
+        || unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileStandardInfo,
+                (&mut info as *mut FILE_STANDARD_INFO).cast(),
+                size_of::<FILE_STANDARD_INFO>() as u32,
+            )
+        } == 0
+        || !info.Directory
+        || unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileIdInfo,
+                (&mut id as *mut FILE_ID_INFO).cast(),
+                size_of::<FILE_ID_INFO>() as u32,
+            )
+        } == 0
+    {
+        return Err(Error("runtime_directory_identity_unavailable"));
+    }
+    inspect_path(file, path)?;
+    Ok(FileId {
+        volume: id.VolumeSerialNumber,
+        file: id.FileId.Identifier,
+    })
 }
 
 pub(crate) fn published_file_identity(path: &str) -> Result<(u64, [u8; 16])> {
@@ -1038,9 +1118,17 @@ pub(crate) fn published_file_identity(path: &str) -> Result<(u64, [u8; 16])> {
     Ok((id.volume, id.file))
 }
 
-fn verify_parents(parents: &[(String, File, FileId)]) -> Result<()> {
-    for (path, file, id) in parents {
-        if inspect(file, path, true)?.0 != *id {
+fn verify_parents(parents: &[Parent]) -> Result<()> {
+    for parent in parents {
+        let id = if parent.traverse {
+            // Keep the original no-delete pin while checking that the current
+            // path still names it and has not acquired a reparse point.
+            let current = open_traverse(&parent.path)?;
+            traverse_identity(&current, &parent.path)?
+        } else {
+            inspect(&parent.file, &parent.path, true)?.0
+        };
+        if id != parent.id {
             return Err(Error("runtime_asset_changed"));
         }
     }
@@ -1124,6 +1212,17 @@ fn inspect(file: &File, path: &str, directory: bool) -> Result<(FileId, u64)> {
     {
         return Err(Error("regular_runtime_asset_required"));
     }
+    inspect_path(file, path)?;
+    Ok((
+        FileId {
+            volume: id.VolumeSerialNumber,
+            file: id.FileId.Identifier,
+        },
+        ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64,
+    ))
+}
+
+fn inspect_path(file: &File, path: &str) -> Result<()> {
     let mut resolved = vec![0u16; 32768];
     let count = unsafe {
         GetFinalPathNameByHandleW(
@@ -1144,13 +1243,7 @@ fn inspect(file: &File, path: &str, directory: bool) -> Result<(FileId, u64)> {
     {
         return Err(Error("runtime_asset_path_alias"));
     }
-    Ok((
-        FileId {
-            volume: id.VolumeSerialNumber,
-            file: id.FileId.Identifier,
-        },
-        ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64,
-    ))
+    Ok(())
 }
 
 fn read_at(pinned: &Pinned, offset: u64, bytes: &mut [u8]) -> Result<()> {
@@ -1174,6 +1267,18 @@ fn permissions(file: &File, owner_sid: &str, private: bool) -> Result<()> {
         owner_sid,
         if private {
             crate::security::FilePolicy::Private
+        } else {
+            crate::security::FilePolicy::Immutable
+        },
+    )
+}
+
+fn directory_permissions(file: &File, owner_sid: &str, private: bool) -> Result<()> {
+    crate::security::file_permissions(
+        file,
+        owner_sid,
+        if private {
+            crate::security::FilePolicy::PrivateDirectory(None)
         } else {
             crate::security::FilePolicy::Immutable
         },
@@ -1351,7 +1456,13 @@ mod tests {
     }
 
     fn acl(path: &str, identity: &Identity, extra: &str) {
-        let file = open_raw(path, READ_CONTROL | WRITE_DAC | WRITE_OWNER, false, false).unwrap();
+        let file = open_raw(
+            path,
+            READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+            false,
+            std::fs::metadata(path).unwrap().is_dir(),
+        )
+        .unwrap();
         let text = format!("O:{}{}{}", identity.sid(), identity.sddl(), extra);
         let mut descriptor = null_mut();
         assert_ne!(
@@ -1397,6 +1508,141 @@ mod tests {
             },
             0
         );
+    }
+
+    #[test]
+    fn private_directory_traversal_is_exact_noninheriting_and_never_private_file_execute() {
+        let area = Area::new();
+        let identity = Identity::current().unwrap();
+        let caller = Identity::from_sid("S-1-5-21-100000001-100000002-100000003-1001").unwrap();
+        let other = Identity::from_sid("S-1-5-21-100000001-100000002-100000003-1002").unwrap();
+        let path = area.0.to_str().unwrap();
+        let old = super::Directory::open(path, &identity, true).unwrap();
+        assert!(old.require_traversal(&identity, &caller).is_err());
+        drop(old);
+        acl(path, &identity, &format!("(A;;0x20;;;{})", caller.sid()));
+        let directory = super::Directory::open(path, &identity, true).unwrap();
+        directory.require_traversal(&identity, &caller).unwrap();
+        assert!(directory.require_traversal(&identity, &other).is_err());
+        let file = area.file(
+            "private",
+            b"private",
+            &identity,
+            &format!("(A;;0x20;;;{})", caller.sid()),
+        );
+        let file = open_raw(&file, READ_CONTROL | super::FILE_READ_ATTRIBUTES, false, false).unwrap();
+        assert!(crate::security::file_permissions(
+            &file,
+            identity.sid(),
+            crate::security::FilePolicy::Private
+        )
+        .is_err());
+        assert!(crate::security::file_permissions(
+            &file,
+            identity.sid(),
+            crate::security::FilePolicy::PrivateDirectory(None)
+        )
+        .is_err());
+        drop((directory, file));
+        for ace in [
+            format!("(A;;0x21;;;{})", caller.sid()),
+            format!("(A;;0xa0;;;{})", caller.sid()),
+            format!("(A;;0x20020;;;{})", caller.sid()),
+            format!("(A;;GX;;;{})", caller.sid()),
+            format!("(A;OI;0x20;;;{})", caller.sid()),
+            format!("(A;CI;0x20;;;{})", caller.sid()),
+            format!("(A;OICIIO;0x20;;;{})", caller.sid()),
+        ] {
+            acl(path, &identity, &ace);
+            assert!(super::Directory::open(path, &identity, true).is_err(), "{ace}");
+        }
+        acl(
+            path,
+            &identity,
+            &format!("(A;;0x20;;;{})(A;;0x20;;;{})", caller.sid(), other.sid()),
+        );
+        let directory = super::Directory::open(path, &identity, true).unwrap();
+        assert!(directory.require_traversal(&identity, &caller).is_err());
+    }
+
+    #[test]
+    fn atomic_asset_replacement_keeps_identity_guards_and_refuses_unrelated_read_pins() {
+        let area = Area::new();
+        let identity = Identity::current().unwrap();
+        let directory = super::Directory::open(area.0.to_str().unwrap(), &identity, true).unwrap();
+        let mut previous = directory.create_file("record", &identity).unwrap();
+        previous.writer().write_all(b"old record").unwrap();
+        previous.finish().unwrap();
+        let old = previous.identity();
+        let mut pending = directory.create_file("pending", &identity).unwrap();
+        pending.writer().write_all(b"new record").unwrap();
+        pending.finish().unwrap();
+        assert!(pending.move_to(&directory, "record", &identity).is_err());
+        assert_eq!(std::fs::read(area.path("record")).unwrap(), b"old record");
+        let pending = directory.asset("pending", &identity, true).unwrap();
+        let pin = directory.asset("record", &identity, true).unwrap();
+        assert_eq!(
+            pending.replace(previous, &identity).err().unwrap().0,
+            "runtime_software_in_use"
+        );
+        assert_eq!(std::fs::read(area.path("record")).unwrap(), b"old record");
+        drop(pin);
+        let previous = directory.asset("record", &identity, true).unwrap();
+        let pending = directory.asset("pending", &identity, true).unwrap();
+        let current = pending.replace(previous, &identity).unwrap();
+        assert_ne!(current.identity(), old);
+        current.verify().unwrap();
+        assert_eq!(std::fs::read(area.path("record")).unwrap(), b"new record");
+        assert!(!std::path::Path::new(&area.path("pending")).exists());
+    }
+
+    #[test]
+    fn traverse_only_parents_keep_identity_and_deny_rename_without_basic_metadata() {
+        let area = Area::new();
+        let path = area.0.to_str().unwrap();
+        let file = super::open_traverse(path).unwrap();
+        let expected = super::traverse_identity(&file, path).unwrap();
+        let readable =
+            open_raw(path, READ_CONTROL | super::FILE_READ_ATTRIBUTES, true, true).unwrap();
+        assert!(expected == super::inspect(&readable, path, true).unwrap().0);
+        drop(readable);
+        let parents = super::pin_parents_access(&area.path("future"), true).unwrap();
+        super::verify_parents(&parents).unwrap();
+        assert!(std::fs::rename(&area.0, area.0.with_extension("moved")).is_err());
+        assert!(
+            super::open_traverse(&area.file("file", b"file", &Identity::current().unwrap(), ""))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn published_software_rejects_a_real_junction_in_its_ancestors() {
+        let area = Area::new();
+        let identity = Identity::current().unwrap();
+        let directory = super::Directory::open(area.0.to_str().unwrap(), &identity, true).unwrap();
+        let actual = directory.create_child("actual", &identity).unwrap();
+        let published = actual.create_child("published", &identity).unwrap();
+        let admitted = super::Directory::open_published(published.path(), &identity).unwrap();
+        admitted.0.verify().unwrap();
+        let link = area.path("junction");
+        let result = std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J", &link, actual.path()])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            super::Directory::open_published(&format!(r"{link}\published"), &identity)
+                .err()
+                .unwrap()
+                .0,
+            "runtime_directory_traverse_unavailable"
+        );
+        std::fs::remove_dir(&link).unwrap();
+        admitted.0.verify().unwrap();
     }
 
     #[test]

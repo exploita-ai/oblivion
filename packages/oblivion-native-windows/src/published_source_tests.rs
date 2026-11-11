@@ -7,7 +7,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
@@ -16,14 +16,15 @@ use windows_sys::Win32::Security::{
     SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, TOKEN_DUPLICATE, TOKEN_QUERY,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, DELETE, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
+    CreateDirectoryW, DELETE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, READ_CONTROL,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 struct Area(PathBuf);
 
 impl Area {
-    fn private(storage: &Identity) -> Self {
+    fn traversable(storage: &Identity, caller: &Identity) -> Self {
         let mut random = [0; 16];
         getrandom::getrandom(&mut random).unwrap();
         let suffix = random
@@ -36,17 +37,24 @@ impl Area {
             PathBuf::from(temp.strip_prefix(r"\\?\").unwrap_or(temp))
                 .join(format!("oblivion-published-source-{suffix}")),
         );
-        let descriptor = storage.file_descriptor().unwrap();
+        Self::directory(&area.0, storage, caller);
+        area
+    }
+
+    fn directory(path: &Path, storage: &Identity, caller: &Identity) -> Directory {
+        let descriptor = storage.traversal_for(caller).unwrap();
         let attributes = SECURITY_ATTRIBUTES {
             nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: descriptor.as_ptr(),
             bInheritHandle: 0,
         };
         assert_ne!(
-            unsafe { CreateDirectoryW(wide(area.text()).as_ptr(), &attributes) },
+            unsafe { CreateDirectoryW(wide(path.to_str().unwrap()).as_ptr(), &attributes) },
             0
         );
-        area
+        let directory = Directory::open(path.to_str().unwrap(), storage, true).unwrap();
+        directory.require_traversal(storage, caller).unwrap();
+        directory
     }
 
     fn text(&self) -> &str {
@@ -136,7 +144,7 @@ fn ordinary_user_can_verify_published_software_without_reading_private_catalog_o
     let caller = Identity::current().unwrap();
     let storage = Identity::administrators().unwrap();
     let fixture = Fixture::version("restricted-published-source");
-    let area = Area::private(&storage);
+    let area = Area::traversable(&storage, &caller);
     let catalog = Directory::open(area.text(), &storage, true).unwrap();
     let mut record = catalog.create_file("installation.json", &storage).unwrap();
     record
@@ -148,7 +156,7 @@ fn ordinary_user_can_verify_published_software_without_reading_private_catalog_o
     let mut volume = data.create_file("data.vhdx", &storage).unwrap();
     volume.writer().write_all(b"private data fixture").unwrap();
     volume.finish().unwrap();
-    let releases = catalog.create_child("releases", &storage).unwrap();
+    let releases = Area::directory(&area.0.join("releases"), &storage, &caller);
     let destination = format!(r"{}\release", releases.path());
     let published = fixture
         .open()
@@ -182,6 +190,23 @@ fn ordinary_user_can_verify_published_software_without_reading_private_catalog_o
             .kind(),
         ErrorKind::PermissionDenied
     );
+    for directory in [&area.0, &area.0.join("releases")] {
+        assert_eq!(
+            std::fs::read_dir(directory).err().unwrap().kind(),
+            ErrorKind::PermissionDenied
+        );
+        for access in [FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, READ_CONTROL] {
+            assert_eq!(
+                OpenOptions::new()
+                    .access_mode(access)
+                    .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+                    .open(directory)
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::PermissionDenied
+            );
+        }
+    }
     assert!(Directory::open(area.text(), &storage, true).is_err());
     let verified = VerifiedBundle::launcher(&launcher, &source, &caller).unwrap();
     assert_eq!(verified.id(), bundle_id);

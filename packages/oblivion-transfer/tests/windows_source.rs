@@ -297,12 +297,15 @@ fn invalid_native_paths_and_preparation_cancel_never_produce_a_selection() {
     let mut checks = 0;
     let result = SourceSelection::prepare(&[path.clone()], limits(), &mut || {
         checks += 1;
+        assert!(checks <= 5, "cancelled preparation must not retry");
         if checks >= 5 {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
         }
         Ok(())
     });
-    assert!(result.is_err());
+    let error = result.err().unwrap();
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert_eq!(error.to_string(), "cancelled");
     assert_eq!(checks, 5);
     assert_eq!(fs::metadata(path).unwrap().len(), 2 * 1024 * 1024);
     let folder = tree.0.join("folder");

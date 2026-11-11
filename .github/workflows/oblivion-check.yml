@@ -384,7 +384,15 @@ jobs:
           (cd packages/oblivion-transport && cargo test --locked --test commands)
       - name: Exercise gateway activation and revocation over local sockets
         working-directory: packages/oblivion-gateway
-        run: cargo test --locked --features lab-emulation --test activation
+        run: |
+          cargo test --locked --features lab-emulation --test activation --no-run
+          # The real entrypoints require no swap even for local protocol tests.
+          # Configure only this disposable GitHub runner, after compilation.
+          cat /proc/swaps
+          sudo swapoff -a
+          test "$(wc -l < /proc/swaps)" -eq 1
+          test "$(id -u)" -ne 0
+          cargo test --locked --features lab-emulation --test activation
       - name: Exercise all local Unix transfer contracts
         working-directory: packages/oblivion-transfer
         run: |

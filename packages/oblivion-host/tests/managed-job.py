@@ -146,14 +146,15 @@ class Managed(unittest.TestCase):
         child = "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print('ready',flush=True); time.sleep(60)"
         parent = "import subprocess,sys,time; child=subprocess.Popen([sys.executable,'-u','-c'," + repr(child) + "]); time.sleep(60)"
         process = subprocess.Popen([sys.executable,"-B","-u","-c",parent],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,start_new_session=True)
-        try:
-            self.assertEqual(process.stdout.readline(),b"ready\n")
-            job.stop(process)
+        with process.stdout:
+            try:
+                self.assertEqual(process.stdout.readline(),b"ready\n")
+            finally:
+                # Stop once: after EOF, Darwin can retain a zombie-only group
+                # and a redundant killpg then fails with EPERM.
+                job.stop(process)
             self.assertTrue(select.select([process.stdout],[],[],2)[0])
             self.assertEqual(process.stdout.read(1),b"")
-        finally:
-            job.stop(process)
-            process.stdout.close()
 
     def test_future_manifest_is_not_replaced(self):
         target = self.target()

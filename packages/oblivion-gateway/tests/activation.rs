@@ -61,6 +61,24 @@ impl Drop for Process {
 }
 
 fn launch_binary(binary: &str) -> (Process, UnixStream, SocketAddr) {
+    #[cfg(target_os = "linux")]
+    {
+        // The real entrypoints reject these environments before reading the
+        // private frame; do not mistake that failure for payload validation.
+        assert_ne!(
+            unsafe { libc::geteuid() },
+            0,
+            "activation fixtures must run as an unprivileged user"
+        );
+        assert_eq!(
+            std::fs::read_to_string("/proc/swaps")
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "activation fixtures require swap disabled in the test environment"
+        );
+    }
     let (control, inherited) = UnixStream::pair().unwrap();
     control
         .set_read_timeout(Some(Duration::from_secs(10)))

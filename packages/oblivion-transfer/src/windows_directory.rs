@@ -74,7 +74,7 @@ impl Directory {
             )
         };
         if handle == INVALID_HANDLE_VALUE {
-            return Err(os_error());
+            return Err(os_error("CreateFileW"));
         }
         let mut directory = Self::new(unsafe { File::from_raw_handle(handle) }, None, identity)?;
         for name in path[3..].split('\\').filter(|name| !name.is_empty()) {
@@ -259,7 +259,7 @@ impl Directory {
             )
         };
         if result < 0 {
-            return Err(nt_error(result));
+            return Err(nt_error("NtCreateFile", result));
         }
         require(!handle.is_null(), "native_file_open_failed")?;
         let file = unsafe { File::from_raw_handle(handle) };
@@ -324,15 +324,16 @@ impl Directory {
             )
         } == 0
         {
-            return Err(os_error());
+            return Err(os_error("LockFileEx"));
         }
         *held = Some(file);
         Ok(())
     }
 
     pub fn sync(&self) -> io::Result<()> {
+        // An empty native name reopens RootDirectory itself; "." is not normalized.
         let file = self.relative(
-            ".",
+            "",
             FILE_GENERIC_READ | FILE_GENERIC_WRITE,
             FILE_OPEN,
             FILE_DIRECTORY_FILE,
@@ -347,7 +348,7 @@ impl Directory {
             unsafe { NtFlushBuffersFileEx(file.as_raw_handle(), 0, null(), 0, &mut status) };
         if result != 0 {
             return Err(io::Error::new(
-                nt_error(result).kind(),
+                nt_error("NtFlushBuffersFileEx", result).kind(),
                 "native_directory_sync_failed",
             ));
         }
@@ -442,7 +443,10 @@ impl Directory {
             )
         };
         if result != 0 {
-            return Err(nt_error(result));
+            return Err(nt_error(
+                "NtSetInformationFile(FileRenameInformation)",
+                result,
+            ));
         }
         Ok(())
     }
@@ -463,7 +467,7 @@ impl Directory {
     }
     pub fn visit(&self, mut visitor: impl FnMut(&CStr) -> io::Result<()>) -> io::Result<()> {
         let file = self.relative(
-            ".",
+            "",
             FILE_GENERIC_READ,
             FILE_OPEN,
             FILE_DIRECTORY_FILE,
@@ -485,7 +489,7 @@ impl Directory {
                 if io::Error::last_os_error().raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
                     return Ok(());
                 }
-                return Err(os_error());
+                return Err(os_error("GetFileInformationByHandleEx(DirectoryInfo)"));
             }
             class = FileIdBothDirectoryInfo;
             let mut offset = 0;
@@ -597,7 +601,7 @@ fn same_file(left: &File, right: &File) -> io::Result<bool> {
             )
         } == 0
         {
-            return Err(os_error());
+            return Err(os_error("GetFileInformationByHandleEx(FileIdInfo)"));
         }
     }
     Ok(
@@ -619,7 +623,10 @@ fn mark_delete(file: &File) -> io::Result<()> {
         )
     };
     if result != 0 {
-        return Err(nt_error(result));
+        return Err(nt_error(
+            "NtSetInformationFile(FileDispositionInformation)",
+            result,
+        ));
     }
     Ok(())
 }
@@ -638,7 +645,7 @@ fn information(file: &File) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
     )?;
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
-        return Err(os_error());
+        return Err(os_error("GetFileInformationByHandle"));
     }
     require(
         info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE) == 0,
@@ -713,7 +720,7 @@ pub(crate) fn file_identity(file: &File) -> io::Result<FileIdentity> {
         )
     } == 0
     {
-        return Err(os_error());
+        return Err(os_error("GetFileInformationByHandleEx(FileIdInfo)"));
     }
     require(
         guid != [0; 16] && info.FileId.Identifier != [0; 16],
@@ -743,15 +750,51 @@ fn wide(value: &str) -> Vec<u16> {
 fn native_error(_: oblivion_native_windows::Error) -> io::Error {
     invalid("native_file_permissions_unavailable")
 }
-fn os_error() -> io::Error {
+struct FilesystemError {
+    operation: &'static str,
+    status: Option<i32>,
+    code: i32,
+}
+impl std::fmt::Debug for FilesystemError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FilesystemError")
+            .field("operation", &self.operation)
+            .field(
+                "ntstatus",
+                &self.status.map(|status| format!("0x{:08x}", status as u32)),
+            )
+            .field("win32", &self.code)
+            .finish()
+    }
+}
+impl std::fmt::Display for FilesystemError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Keep the public error code stable; Debug retains path-free diagnostics.
+        formatter.write_str("native_filesystem_operation_failed")
+    }
+}
+impl std::error::Error for FilesystemError {}
+
+fn os_error(operation: &'static str) -> io::Error {
+    let error = io::Error::last_os_error();
     io::Error::new(
-        io::Error::last_os_error().kind(),
-        "native_filesystem_operation_failed",
+        error.kind(),
+        FilesystemError {
+            operation,
+            status: None,
+            code: error.raw_os_error().unwrap_or_default(),
+        },
     )
 }
-fn nt_error(status: i32) -> io::Error {
+fn nt_error(operation: &'static str, status: i32) -> io::Error {
+    let code = unsafe { RtlNtStatusToDosError(status) } as i32;
     io::Error::new(
-        io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32).kind(),
-        "native_filesystem_operation_failed",
+        io::Error::from_raw_os_error(code).kind(),
+        FilesystemError {
+            operation,
+            status: Some(status),
+            code,
+        },
     )
 }

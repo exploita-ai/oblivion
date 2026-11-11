@@ -144,13 +144,15 @@ pub fn parse(args: &[String]) -> Result<CopyCommand> {
             None => CopyInput::Upload(sources),
         }
     } else {
-        selection::validate_paths(&selected)?;
+        // Shared selections also admit absolute host sources. Safe exports
+        // accept only logical paths within their two public roots.
         if selected
             .iter()
             .any(|path| !matches!(path.split('/').next(), Some("workspace" | "imports")))
         {
             return Err("Export paths must be under workspace or imports".into());
         }
+        selection::validate_paths(&selected)?;
         match device {
             Some(device) => {
                 validate_device(&device)?;

@@ -50,7 +50,9 @@ fn instance(id: &str, first: bool) -> File {
         .chain(Some(0))
         .collect();
     let identity = Identity::current().unwrap();
-    let descriptor = identity.descriptor().unwrap();
+    // Match the embedded server's explicit caller owner as well as its ACL;
+    // an elevated runner's default owner can otherwise be Administrators.
+    let descriptor = identity.pipe_descriptor().unwrap();
     let attributes = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: descriptor.as_ptr(),
@@ -334,7 +336,7 @@ fn files_browser_uses_the_open_safe_slot_and_validates_its_guest_page() {
 #[test]
 fn guest_file_metadata_holds_the_exact_opening_lease_until_explicit_release_even_on_bad_reply() {
     use oblivion_cli::files::Backend;
-    use oblivion_transfer::native_files::{Action, Direction, TransfersQuery};
+    use oblivion_transfer::native_files::{Action, Direction, State, TransfersQuery};
     use oblivion_wire::idle::Opening;
     let (id, mut control) = listener();
     let mut release = instance(&id, false);
@@ -446,19 +448,21 @@ fn guest_file_metadata_holds_the_exact_opening_lease_until_explicit_release_even
         )
         .unwrap_err();
     assert!(!format!("{error:?}").contains("PRIVATE_CANARY"));
-    let error = runtime
+    server.join().unwrap();
+    let area = CopyArea::new();
+    let status = runtime
         .manage(
             &opening,
             "dddddddddddddddddddddddddddddddd",
             Action::Status,
-            Some("C:\\exports"),
+            Some(area.0.to_str().unwrap()),
         )
-        .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "windows_filesystem_endpoint_not_implemented"
-    );
-    server.join().unwrap();
+        .unwrap();
+    status
+        .validate("dddddddddddddddddddddddddddddddd", SAFE, &opening.nonce)
+        .unwrap();
+    assert_eq!(status.state, State::Unknown);
+    assert!(status.receipt.is_none() && !status.can_recover && !status.can_discard);
 }
 
 #[test]
@@ -989,9 +993,11 @@ fn complete_windows_import_command_sends_only_selected_manifest_and_verified_pay
     std::fs::write(&source, b"abc").unwrap();
     std::fs::write(area.0.join("not-selected.txt"), b"do not transmit").unwrap();
     let (id, mut data) = listener();
-    let mut release = instance(&id, false);
+    let release_id = id.clone();
     let server = std::thread::spawn(move || {
         copy_preflight(&mut data);
+        // A second available instance could accept a preflight Status request.
+        let mut release = instance(&release_id, false);
         let dispatch: Value = read_message(&mut data, 8192).unwrap();
         assert_eq!(
             dispatch,
@@ -1066,9 +1072,11 @@ fn complete_windows_export_command_publishes_recovers_and_never_reports_denied_r
     for refused in [false, true] {
         let area = CopyArea::new();
         let (id, mut data) = listener();
-        let mut release = instance(&id, false);
+        let release_id = id.clone();
         let server = std::thread::spawn(move || {
             copy_preflight(&mut data);
+            // A second available instance could accept a preflight Status request.
+            let mut release = instance(&release_id, false);
             let dispatch: Value = read_message(&mut data, 4096).unwrap();
             assert_eq!(dispatch, json!({"operation":"export"}));
             let offer: OfferRequest = read_message(&mut data, 65536).unwrap();

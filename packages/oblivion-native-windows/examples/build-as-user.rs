@@ -18,6 +18,7 @@ fn main() {
 
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod windows {
+    use oblivion_native_windows::security::Identity;
     use std::fs::File;
     use std::io;
     use std::mem::{size_of, size_of_val};
@@ -25,22 +26,30 @@ mod windows {
     use std::path::Path;
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::{
-        DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+        DUPLICATE_SAME_ACCESS, DuplicateHandle, GENERIC_ALL, HANDLE, INVALID_HANDLE_VALUE,
+        WAIT_OBJECT_0,
     };
     use windows_sys::Win32::Security::{
-        CreateRestrictedToken, CreateWellKnownSid, DISABLE_MAX_PRIVILEGE, GetTokenInformation,
-        SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES, SetTokenInformation, TOKEN_ADJUST_DEFAULT,
-        TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenOwner,
-        TokenUser, WinBuiltinAdministratorsSid,
+        CreateRestrictedToken, CreateWellKnownSid, DISABLE_MAX_PRIVILEGE,
+        GetSecurityDescriptorDacl, GetTokenInformation, SECURITY_ATTRIBUTES, SECURITY_MAX_SID_SIZE,
+        SID_AND_ATTRIBUTES, SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY,
+        TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
+        TokenDefaultDacl, TokenOwner, TokenUser, WinBuiltinAdministratorsSid,
     };
     use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    use windows_sys::Win32::System::StationsAndDesktops::{
+        CloseDesktop, CloseWindowStation, CreateDesktopW, CreateWindowStationW,
+        GetProcessWindowStation, GetThreadDesktop, HDESK, HWINSTA, SetProcessWindowStation,
+        SetThreadDesktop,
+    };
     use windows_sys::Win32::System::Threading::{
         CREATE_NO_WINDOW, CreateProcessAsUserW, DeleteProcThreadAttributeList,
-        EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess, INFINITE,
-        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcessToken,
-        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
-        STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
+        EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetCurrentThreadId, GetExitCodeProcess,
+        INFINITE, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+        OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
+        STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
     };
+    use windows_sys::Win32::UI::WindowsAndMessaging::CWF_CREATE_ONLY;
 
     pub fn run() -> Result<u32, Box<dyn std::error::Error>> {
         let mut args = std::env::args_os().skip(1);
@@ -169,10 +178,44 @@ mod windows {
             },
             "Set restricted token owner",
         )?;
+        // TokenOwner and TokenDefaultDacl are independent. New process/thread
+        // and synchronization objects must remain usable without Administrators.
+        let descriptor = Identity::current()
+            .and_then(|identity| identity.descriptor())
+            .map_err(io::Error::other)?;
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut dacl = TOKEN_DEFAULT_DACL::default();
+        require(
+            unsafe {
+                GetSecurityDescriptorDacl(
+                    descriptor.as_ptr(),
+                    &mut present,
+                    &mut dacl.DefaultDacl,
+                    &mut defaulted,
+                ) != 0
+            },
+            "Read caller default DACL",
+        )?;
+        if present == 0 || dacl.DefaultDacl.is_null() {
+            return Err(io::Error::other("Caller default DACL is missing"));
+        }
+        require(
+            unsafe {
+                SetTokenInformation(
+                    restricted.as_raw_handle(),
+                    TokenDefaultDacl,
+                    (&dacl as *const TOKEN_DEFAULT_DACL).cast(),
+                    size_of::<TOKEN_DEFAULT_DACL>() as u32,
+                ) != 0
+            },
+            "Set restricted token default DACL",
+        )?;
         Ok(restricted)
     }
 
     fn launch(token: &OwnedHandle, executable: &[u16], command: &mut [u16]) -> io::Result<u32> {
+        let mut desktop = PrivateDesktop::create()?;
         let input = File::open("NUL")?;
         let stdin = inheritable(input.as_raw_handle())?;
         let stdout = inheritable(unsafe { GetStdHandle(STD_OUTPUT_HANDLE) })?;
@@ -217,6 +260,7 @@ mod windows {
         startup.StartupInfo.hStdInput = handles[0];
         startup.StartupInfo.hStdOutput = handles[1];
         startup.StartupInfo.hStdError = handles[2];
+        startup.StartupInfo.lpDesktop = desktop.name.as_mut_ptr();
         startup.lpAttributeList = attributes.0;
         let mut child = PROCESS_INFORMATION::default();
         require(
@@ -237,6 +281,10 @@ mod windows {
             },
             "Start PowerShell with restricted token",
         )?;
+        eprintln!(
+            "build-as-user: CreateProcessAsUser succeeded, child PID {}",
+            child.dwProcessId
+        );
         let process = unsafe { OwnedHandle::from_raw_handle(child.hProcess) };
         drop(unsafe { OwnedHandle::from_raw_handle(child.hThread) });
         drop(attributes);
@@ -250,7 +298,94 @@ mod windows {
             unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) != 0 },
             "Read restricted PowerShell exit code",
         )?;
+        eprintln!("build-as-user: restricted PowerShell exited with {code:#010x}");
         Ok(code)
+    }
+
+    // A hosted runner's station can depend on its enabled Administrators SID.
+    // Give USER32 a separate noninteractive station and desktop whose explicit
+    // DACL admits the unchanged caller SID, without changing the runner's ACLs.
+    // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw
+    struct PrivateDesktop {
+        desktop: HDESK,
+        station: HWINSTA,
+        name: Vec<u16>,
+    }
+
+    impl PrivateDesktop {
+        fn create() -> io::Result<Self> {
+            let descriptor = Identity::current()
+                .and_then(|identity| identity.descriptor())
+                .map_err(io::Error::other)?;
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor.as_ptr(),
+                bInheritHandle: 0,
+            };
+            let mut random = [0u8; 16];
+            getrandom::getrandom(&mut random)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            let station = format!(
+                "OblivionBuild-{}-{:032x}",
+                std::process::id(),
+                u128::from_le_bytes(random)
+            );
+            let name = format!("{station}\\build")
+                .encode_utf16()
+                .chain([0])
+                .collect();
+            let station: Vec<u16> = station.encode_utf16().chain([0]).collect();
+            let original = unsafe { GetProcessWindowStation() };
+            require(!original.is_null(), "Read runner window station")?;
+            let original_desktop = unsafe { GetThreadDesktop(GetCurrentThreadId()) };
+            require(!original_desktop.is_null(), "Read runner desktop")?;
+            let station = unsafe {
+                CreateWindowStationW(station.as_ptr(), CWF_CREATE_ONLY, GENERIC_ALL, &attributes)
+            };
+            require(!station.is_null(), "Create private build window station")?;
+            let mut result = Self {
+                desktop: null_mut(),
+                station,
+                name,
+            };
+            require(
+                unsafe { SetProcessWindowStation(result.station) != 0 },
+                "Select private build window station",
+            )?;
+            result.desktop = unsafe {
+                CreateDesktopW(
+                    windows_sys::core::w!("build"),
+                    null(),
+                    null(),
+                    0,
+                    GENERIC_ALL,
+                    &attributes,
+                )
+            };
+            // Preserve the create error before restoring the process station.
+            let created = require(!result.desktop.is_null(), "Create private build desktop");
+            require(
+                unsafe { SetProcessWindowStation(original) != 0 },
+                "Restore runner window station",
+            )?;
+            require(
+                unsafe { SetThreadDesktop(original_desktop) != 0 },
+                "Restore runner desktop",
+            )?;
+            created?;
+            Ok(result)
+        }
+    }
+
+    impl Drop for PrivateDesktop {
+        fn drop(&mut self) {
+            unsafe {
+                if !self.desktop.is_null() {
+                    CloseDesktop(self.desktop);
+                }
+                CloseWindowStation(self.station);
+            }
+        }
     }
 
     struct Attributes(LPPROC_THREAD_ATTRIBUTE_LIST);

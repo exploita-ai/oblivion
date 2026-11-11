@@ -314,7 +314,13 @@ struct CheckedRead<'a> {
 
 impl Read for CheckedRead<'_> {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        (self.check)()?;
+        // Cancellation is terminal; read_exact retries Interrupted I/O errors.
+        (self.check)().map_err(|error| {
+            if error.kind() == io::ErrorKind::Interrupted {
+                return io::Error::other(error);
+            }
+            error
+        })?;
         self.file.read(output)
     }
 }

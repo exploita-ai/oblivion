@@ -1,5 +1,6 @@
-//! Private kernel objects are granted only to the actual process user and
-//! LocalSystem. Configuration never supplies either an SID or an ACL.
+//! Private file data stays with its storage principal and LocalSystem. Managed
+//! catalog directories admit explicit, noninheriting traversal for their users.
+//! Configuration never supplies either an SID or an ACL.
 use crate::{Error, Result};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::null_mut;
@@ -17,16 +18,19 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use windows_sys::Win32::Foundation::{GENERIC_EXECUTE, GENERIC_READ};
 use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, AclSizeInformation,
-    DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetLengthSid, INHERIT_ONLY_ACE,
-    IsValidAcl, IsValidSecurityDescriptor, OWNER_SECURITY_INFORMATION, PSID, SID,
+    DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetLengthSid, GetSecurityDescriptorControl,
+    INHERIT_ONLY_ACE, IsValidAcl, IsValidSecurityDescriptor, OWNER_SECURITY_INFORMATION, PSID,
+    SE_DACL_PROTECTED, SID,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_CREATE_PIPE_INSTANCE, FILE_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_ALL_ACCESS, FILE_CREATE_PIPE_INSTANCE, FILE_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_STANDARD_INFO, FILE_TRAVERSE, FileStandardInfo, GetFileInformationByHandleEx,
 };
 use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
 use windows_sys::Win32::System::SystemServices::{
@@ -161,6 +165,20 @@ impl Identity {
         descriptor(&format!(
             "O:{}D:P(A;;GA;;;SY)(A;;GA;;;{})(A;;GRGX;;;{})",
             self.sid, self.sid, reader.sid
+        ))
+    }
+
+    /// This ACE applies only to the directory itself. It grants no listing,
+    /// metadata, DACL or inherited access to the private files below it.
+    pub(crate) fn traversal_for(&self, reader: &Self) -> Result<Descriptor> {
+        if trusted_sid(reader.sid(), self.sid()) {
+            return self.file_descriptor();
+        }
+        descriptor(&format!(
+            "O:{}{}(A;;0x{FILE_TRAVERSE:x};;;{})",
+            self.sid,
+            self.sddl(),
+            reader.sid
         ))
     }
 
@@ -380,15 +398,32 @@ impl Drop for Security {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub enum FilePolicy {
+pub enum FilePolicy<'a> {
     Private,
+    /// Generic directory users admit only traversal grants. Installation binds
+    /// the exact expected recipient and requires its grant with Some(sid).
+    PrivateDirectory(Option<&'a str>),
     Immutable,
     ControlledDestination,
 }
 
-/// Runtime assets retain their existing policy. Only explicit document export
-/// destinations trust the host Administrators group in addition to User/SYSTEM.
-pub fn file_permissions(file: &File, owner_sid: &str, policy: FilePolicy) -> Result<()> {
+/// File data and directory traversal use separate policies: FILE_TRAVERSE and
+/// FILE_EXECUTE share a bit, so directory grants must never admit private files.
+pub fn file_permissions(file: &File, owner_sid: &str, policy: FilePolicy<'_>) -> Result<()> {
+    let directory = matches!(policy, FilePolicy::PrivateDirectory(_));
+    if directory {
+        let mut info = FILE_STANDARD_INFO::default();
+        if unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileStandardInfo,
+                (&mut info as *mut FILE_STANDARD_INFO).cast(),
+                size_of::<FILE_STANDARD_INFO>() as u32,
+            )
+        } == 0 || !info.Directory {
+            return Err(Error("private_runtime_directory_required"));
+        }
+    }
     let mut owner = null_mut();
     let mut acl = null_mut();
     let mut descriptor = null_mut();
@@ -412,7 +447,9 @@ pub fn file_permissions(file: &File, owner_sid: &str, policy: FilePolicy) -> Res
         || unsafe { IsValidSecurityDescriptor(descriptor.0) } == 0
         || acl.is_null()
         || unsafe { IsValidAcl(acl) } == 0
-        || !(if policy == FilePolicy::ControlledDestination {
+        || !(if policy == FilePolicy::ControlledDestination
+            || matches!(policy, FilePolicy::PrivateDirectory(Some(_)))
+        {
             sid_text(owner)? == owner_sid
         } else {
             trusted_sid(&sid_text(owner)?, owner_sid)
@@ -420,7 +457,33 @@ pub fn file_permissions(file: &File, owner_sid: &str, policy: FilePolicy) -> Res
     {
         return Err(Error("private_runtime_file_required"));
     }
-    for (sid, mask) in allowed_masks(acl)? {
+    if directory {
+        let mut control = 0;
+        let mut revision = 0;
+        if unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) } == 0
+            || control & SE_DACL_PROTECTED == 0
+        {
+            return Err(Error("private_runtime_directory_required"));
+        }
+    }
+    let masks = allowed_masks(acl, directory)?;
+    if let FilePolicy::PrivateDirectory(Some(reader)) = policy {
+        let mut expected = BTreeMap::from([
+            (owner_sid.to_owned(), FILE_ALL_ACCESS),
+            ("S-1-5-18".to_owned(), FILE_ALL_ACCESS),
+        ]);
+        if !trusted_sid(reader, owner_sid) {
+            expected.insert(reader.to_owned(), FILE_TRAVERSE);
+        }
+        if masks.len() != expected.len()
+            || masks
+                .iter()
+                .any(|(sid, mask)| expected.remove(sid) != Some(*mask))
+        {
+            return Err(Error("runtime_directory_traverse_policy_mismatch"));
+        }
+    }
+    for (sid, mask) in masks {
         if trusted_sid(&sid, owner_sid)
             || policy == FilePolicy::ControlledDestination && sid == "S-1-5-32-544"
         {
@@ -428,7 +491,11 @@ pub fn file_permissions(file: &File, owner_sid: &str, policy: FilePolicy) -> Res
         }
         // Standard read/execute rights are sufficient for shared immutable
         // assets. Unknown rights and every mutation/ownership grant fail closed.
-        let read_only = FILE_GENERIC_READ | GENERIC_READ | GENERIC_EXECUTE | FILE_EXECUTE;
+        let read_only = if directory {
+            FILE_TRAVERSE
+        } else {
+            FILE_GENERIC_READ | GENERIC_READ | GENERIC_EXECUTE | FILE_EXECUTE
+        };
         if mask != 0 && (policy == FilePolicy::Private || mask & !read_only != 0) {
             return Err(Error("private_runtime_file_required"));
         }
@@ -471,7 +538,7 @@ pub(crate) fn pipe_permissions(pipe: HANDLE, expected: &Identity) -> Result<()> 
     if !same_user && !matches!(owner.as_str(), "S-1-5-18" | "S-1-5-32-544") {
         return Err(Error("untrusted_runtime_peer"));
     }
-    for (sid, mask) in allowed_masks(acl)? {
+    for (sid, mask) in allowed_masks(acl, false)? {
         if matches!(sid.as_str(), "S-1-5-18" | "S-1-5-32-544") || same_user && sid == expected.sid {
             continue;
         }
@@ -564,7 +631,7 @@ pub(crate) fn service_permissions(service: HANDLE, expected: &Identity) -> Resul
     {
         return Err(Error("broker_service_permissions_invalid"));
     }
-    for (sid, mask) in allowed_masks(acl)? {
+    for (sid, mask) in allowed_masks(acl, false)? {
         if matches!(sid.as_str(), "S-1-5-18" | "S-1-5-32-544") {
             continue;
         }
@@ -575,7 +642,10 @@ pub(crate) fn service_permissions(service: HANDLE, expected: &Identity) -> Resul
     Ok(())
 }
 
-fn allowed_masks(acl: *mut windows_sys::Win32::Security::ACL) -> Result<Vec<(String, u32)>> {
+fn allowed_masks(
+    acl: *mut windows_sys::Win32::Security::ACL,
+    exact_directory: bool,
+) -> Result<Vec<(String, u32)>> {
     let mut masks = Vec::new();
     let mut info = ACL_SIZE_INFORMATION::default();
     if unsafe {
@@ -595,6 +665,11 @@ fn allowed_masks(acl: *mut windows_sys::Win32::Security::ACL) -> Result<Vec<(Str
             return Err(Error("runtime_file_permissions_unavailable"));
         }
         let header = unsafe { &*raw.cast::<ACE_HEADER>() };
+        if exact_directory
+            && (header.AceFlags != 0 || header.AceType as u32 != ACCESS_ALLOWED_ACE_TYPE)
+        {
+            return Err(Error("private_runtime_directory_required"));
+        }
         if header.AceFlags as u32 & INHERIT_ONLY_ACE != 0 {
             continue;
         }
@@ -709,7 +784,7 @@ mod tests {
                 0
             );
             assert_ne!(present, 0);
-            let allowed = allowed_masks(acl).unwrap();
+            let allowed = allowed_masks(acl, false).unwrap();
             let mask = allowed
                 .iter()
                 .find(|(sid, _)| sid == client.sid())
@@ -742,7 +817,7 @@ mod tests {
             },
             0
         );
-        let allowed = allowed_masks(acl).unwrap();
+        let allowed = allowed_masks(acl, false).unwrap();
         let mask = allowed
             .iter()
             .find(|(sid, _)| sid == client.sid())

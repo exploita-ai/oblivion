@@ -32,3 +32,6 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_System_Pipes", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects",
   "Win32_System_Threading",
 ] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse"] }
