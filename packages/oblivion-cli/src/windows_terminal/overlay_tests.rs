@@ -6,10 +6,14 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::System::Console::{
     ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleCP,
-    GetConsoleOutputCP, GetNumberOfConsoleInputEvents, INPUT_RECORD, KEY_EVENT, SetConsoleCP,
-    SetConsoleMode, SetConsoleOutputCP, WriteConsoleInputW,
+    GetConsoleOutputCP, GetNumberOfConsoleInputEvents, INPUT_RECORD, KEY_EVENT, LEFT_ALT_PRESSED,
+    LEFT_CTRL_PRESSED, SHIFT_PRESSED, SetConsoleCP, SetConsoleMode, SetConsoleOutputCP,
+    WriteConsoleInputW,
 };
 use windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    MAPVK_VK_TO_VSC, MapVirtualKeyW, VkKeyScanW,
+};
 
 #[test]
 fn windows_console_handoff_stops_reader_and_discards_panel_input() {
@@ -129,13 +133,33 @@ fn settings(terminal: &Terminal) -> (u32, u32, u32, u32) {
 }
 
 fn key(virtual_key: u16, unit: u16) -> INPUT_RECORD {
+    // Exercise VT translation with complete keyboard events from the active
+    // layout, including the virtual key, scan code and modifier state.
+    let mapping = if virtual_key == 0 {
+        unsafe { VkKeyScanW(unit) }
+    } else {
+        virtual_key as i16
+    };
+    assert_ne!(mapping, -1, "fixture character has no keyboard mapping");
     let mut record = INPUT_RECORD::default();
     record.EventType = KEY_EVENT as u16;
     let key = unsafe { &mut record.Event.KeyEvent };
     key.bKeyDown = 1;
     key.wRepeatCount = 1;
-    key.wVirtualKeyCode = virtual_key;
+    key.wVirtualKeyCode = mapping as u16 & 0xff;
+    assert_ne!(key.wVirtualKeyCode, 0);
+    key.wVirtualScanCode =
+        unsafe { MapVirtualKeyW(key.wVirtualKeyCode as u32, MAPVK_VK_TO_VSC) } as u16;
+    assert_ne!(key.wVirtualScanCode, 0);
     key.uChar.UnicodeChar = unit;
+    key.dwControlKeyState = [
+        (0x100, SHIFT_PRESSED),
+        (0x200, LEFT_CTRL_PRESSED),
+        (0x400, LEFT_ALT_PRESSED),
+    ]
+    .into_iter()
+    .filter(|(flag, _)| mapping & flag != 0)
+    .fold(0, |state, (_, flag)| state | flag);
     record
 }
 
