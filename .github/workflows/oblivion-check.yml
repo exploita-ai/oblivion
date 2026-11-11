@@ -41,7 +41,7 @@ jobs:
         working-directory: packages/oblivion-transfer
         run: |
           cargo check --locked --lib --target x86_64-pc-windows-msvc
-          cargo test --locked --lib --test file_consent --test windows_source --test windows_destination
+          cargo test --locked --no-default-features --lib --test file_consent --test windows_source --test windows_destination
       - name: Compile and exercise shared frontend commands, run and proxy grammar
         working-directory: packages/oblivion-cli
         run: |
@@ -250,6 +250,9 @@ jobs:
       - name: Verify the common desktop bundle manifest
         working-directory: packages/oblivion-bundle
         run: cargo test --locked
+      - uses: ./.github/actions/setup-bun
+      - name: Build the MCP source input for native bundle pairing
+        run: bun run --cwd packages/oblivion-tools build
       - name: Verify native bundle pairing and distribution inventory
         run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
       - name: Verify pinned official agent notices and installed inventory offline
@@ -478,6 +481,9 @@ jobs:
       - name: Verify the common desktop bundle manifest
         working-directory: packages/oblivion-bundle
         run: cargo test --locked
+      - uses: ./.github/actions/setup-bun
+      - name: Build the MCP source input for native bundle pairing
+        run: bun run --cwd packages/oblivion-tools build
       - name: Verify native bundle pairing and distribution inventory
         run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
       - name: Verify pinned official agent notices and installed inventory offline

@@ -13,6 +13,12 @@ receivers use native name, ACL and reparse-point checks. VM startup and runtime
 authorization belong to the native backend, not this copy engine. Compiling for
 Windows MSVC does not qualify an installed Windows transfer.
 
+The default `unix-workers` feature builds the controller/guest executables.
+Windows uses the library and its native endpoints. Run their package-local
+tests with `cargo test --locked --no-default-features --lib --test file_consent
+--test windows_source --test windows_destination`; disabling the worker feature
+prevents Cargo from building Unix executables alongside those integration tests.
+
 The `oblivion-copy` endpoint uses an inherited private descriptor, a monotonic
 transport deadline, approval bound to the offered manifest and a verified
 receipt. Separate send/receive processes have been exercised through VM

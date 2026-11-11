@@ -9,17 +9,24 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = ["unix-workers"]
+unix-workers = []
+
 [[bin]]
 name = "oblivion-copy"
 path = "src/main.rs"
+required-features = ["unix-workers"]
 
 [[bin]]
 name = "oblivion-copy-relay"
 path = "src/relay-main.rs"
+required-features = ["unix-workers"]
 
 [[bin]]
 name = "oblivion-onion-file"
 path = "src/onion-file-main.rs"
+required-features = ["unix-workers"]
 
 [dependencies]
 icu_casemap = "=2.1.1"
