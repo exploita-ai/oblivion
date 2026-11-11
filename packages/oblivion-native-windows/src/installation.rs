@@ -1847,8 +1847,10 @@ mod native {
         struct Area(Root);
         impl Area {
             fn new() -> Self {
+                let temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+                let temp = temp.to_str().unwrap().strip_prefix(r"\\?\").unwrap();
                 let root = Root::at(
-                    &std::env::temp_dir()
+                    &std::path::Path::new(temp)
                         .join(format!("oblivion-install-{}", random_id().unwrap())),
                 )
                 .unwrap();

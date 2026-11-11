@@ -1727,8 +1727,9 @@ mod tests {
     struct Area(PathBuf);
     impl Area {
         fn new() -> Self {
-            let path =
-                std::env::temp_dir().join(format!("oblivion-supervision-{}", random_id().unwrap()));
+            let temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+            let temp = temp.to_str().unwrap().strip_prefix(r"\\?\").unwrap();
+            let path = PathBuf::from(temp).join(format!("oblivion-supervision-{}", random_id().unwrap()));
             let name: Vec<_> = path
                 .to_str()
                 .unwrap()

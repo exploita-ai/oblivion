@@ -189,7 +189,7 @@ fn ordinary_user_can_verify_published_software_without_reading_private_catalog_o
     assert!(OpenOptions::new().write(true).open(verified.cli()).is_err());
     drop(restricted);
 
-    // Only the new, ordinary-user admission remains alive. Its metadata-only
+    // Only the new, ordinary-user admission remains alive. Its traverse-only
     // ancestor handles must still deny deletion/rename even to an administrator.
     assert!(
         OpenOptions::new()

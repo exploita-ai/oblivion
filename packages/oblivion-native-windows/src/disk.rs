@@ -483,6 +483,7 @@ mod windows_tests {
         let runtime = "0123456789abcdef0123456789abcdef";
         let disk = create(&stage, runtime, 4 * GIB, &identity).unwrap();
         let expected = disk.evidence().unwrap().file_identity();
+        assert!(std::fs::rename(&stage, area.path("replacement.vhdx")).is_err());
         let disk = disk.publish(&destination, &identity).unwrap();
         let evidence = disk.evidence().unwrap();
         evidence.verify().unwrap();
@@ -493,6 +494,7 @@ mod windows_tests {
         drop(disk);
         let disk = resume(&destination, runtime, 4 * GIB, expected, &identity).unwrap();
         assert_eq!(disk.evidence().unwrap().file_identity(), expected);
+        assert!(std::fs::rename(&destination, area.path("replacement.vhdx")).is_err());
         drop(disk);
 
         let mut wrong = expected;

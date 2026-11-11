@@ -10,10 +10,14 @@ use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
-use windows_sys::Wdk::Storage::FileSystem::NtFlushBuffersFileEx;
+use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT, NtFlushBuffersFileEx, NtOpenFile,
+};
 use windows_sys::Win32::Foundation::GENERIC_WRITE;
 use windows_sys::Win32::Foundation::{
     ERROR_SHARING_VIOLATION, GENERIC_READ, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    OBJ_CASE_INSENSITIVE, UNICODE_STRING,
 };
 use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
@@ -25,8 +29,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
-    FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
-    FileDispositionInfo, FileIdInfo, FileRenameInfo, GetFileInformationByHandle,
+    FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+    FILE_TYPE_DISK, FileDispositionInfo, FileIdInfo, FileRenameInfo, GetFileInformationByHandle,
     GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW, OPEN_EXISTING,
     READ_CONTROL, SetFileInformationByHandle, WRITE_DAC,
 };
@@ -435,11 +439,11 @@ pub(crate) struct Asset {
 
 impl Directory {
     /// Published software, unlike the private catalog, is readable by its user.
-    /// Ancestors need only metadata handles to prevent deletion/renaming; their
+    /// Ancestors need only traversal handles to prevent deletion/renaming; their
     /// private ACLs are not software authority. Root and every leaf still pass
     /// the ordinary immutable owner/DACL and file-identity boundary below.
     pub(crate) fn open_published(path: &str, caller: &Identity) -> Result<(Self, Identity)> {
-        let ancestors = pin_parents_access(path, 0)?;
+        let ancestors = pin_parents_access(path, open_traverse)?;
         let file = open_raw(path, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)?;
         let (id, _) = inspect(&file, path, true)?;
         let owner = crate::security::file_owner(&file)?;
@@ -969,10 +973,15 @@ fn create_directory(path: &str, identity: &Identity) -> Result<()> {
 }
 
 fn pin_parents(path: &str) -> Result<Vec<(String, File, FileId)>> {
-    pin_parents_access(path, READ_CONTROL | FILE_READ_ATTRIBUTES)
+    pin_parents_access(path, |parent| {
+        open_raw(parent, READ_CONTROL | FILE_READ_ATTRIBUTES, true, true)
+    })
 }
 
-fn pin_parents_access(path: &str, access: u32) -> Result<Vec<(String, File, FileId)>> {
+fn pin_parents_access(
+    path: &str,
+    open: impl Fn(&str) -> Result<File>,
+) -> Result<Vec<(String, File, FileId)>> {
     if !crate::config::drive_file(path) {
         return Err(Error("invalid_runtime_asset_path"));
     }
@@ -982,11 +991,45 @@ fn pin_parents_access(path: &str, access: u32) -> Result<Vec<(String, File, File
         paths.push(path[..index + 3].to_owned());
     }
     for parent in paths {
-        let file = open_raw(&parent, access, true, true)?;
+        let file = open(&parent)?;
         let (id, _) = inspect(&file, &parent, true)?;
         parents.push((parent, file, id));
     }
     Ok(parents)
+}
+
+fn open_traverse(path: &str) -> Result<File> {
+    // CreateFile adds SYNCHRONIZE even for an access mask of zero. Native
+    // traversal avoids requesting catalog contents, attributes or its DACL.
+    // Unlike an attribute-only open, FILE_TRAVERSE participates in sharing.
+    let mut encoded = wide(&format!(r"\??\{path}"));
+    let name = UNICODE_STRING {
+        Length: ((encoded.len() - 1) * 2) as u16,
+        MaximumLength: (encoded.len() * 2) as u16,
+        Buffer: encoded.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        ObjectName: &name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        ..Default::default()
+    };
+    let mut status = IO_STATUS_BLOCK::default();
+    let mut handle = null_mut();
+    if unsafe {
+        NtOpenFile(
+            &mut handle,
+            FILE_TRAVERSE,
+            &attributes,
+            &mut status,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
+        )
+    } != 0
+    {
+        return Err(Error("runtime_directory_traverse_unavailable"));
+    }
+    Ok(unsafe { File::from_raw_handle(handle) })
 }
 
 pub(crate) fn published_file_identity(path: &str) -> Result<(u64, [u8; 16])> {
@@ -1013,14 +1056,10 @@ impl Pinned {
 
     fn pin(path: &str, role: Role) -> Result<Self> {
         let parents = pin_parents(path)?;
-        // Metadata-only data-file access lets HCS choose its own VHDX sharing
-        // mode. Signature reads are short-lived, identity-checked handles.
-        let access = if role == Role::Data {
-            READ_CONTROL | FILE_READ_ATTRIBUTES
-        } else {
-            GENERIC_READ | READ_CONTROL
-        };
-        let file = open_raw(path, access, role == Role::Data, false)?;
+        // Attribute-only handles do not participate in Windows share checks.
+        // Retain read access so deny-delete pins the VHDX too; share writes
+        // with its owner, but require every opener to preserve this read pin.
+        let file = open_raw(path, GENERIC_READ | READ_CONTROL, role == Role::Data, false)?;
         let (id, size) = inspect(&file, path, false)?;
         let pinned = Self {
             path: path.to_owned(),
@@ -1251,7 +1290,9 @@ mod tests {
             let mut bytes = [0; 16];
             getrandom::getrandom(&mut bytes).unwrap();
             let name: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-            let path = std::env::temp_dir().join(format!("oblivion-files-{name}"));
+            let temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+            let temp = temp.to_str().unwrap().strip_prefix(r"\\?\").unwrap();
+            let path = PathBuf::from(temp).join(format!("oblivion-files-{name}"));
             super::create_directory(path.to_str().unwrap(), &Identity::current().unwrap()).unwrap();
             Self(path)
         }

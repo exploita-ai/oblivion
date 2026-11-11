@@ -833,12 +833,16 @@ pub(crate) mod tests {
         INVALID_HANDLE_VALUE, LocalFree,
     };
     use windows_sys::Win32::Security::Authorization::{
-        ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_KERNEL_OBJECT,
+        ConvertStringSidToSidW, GetSecurityInfo, SE_KERNEL_OBJECT,
     };
-    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+        GetSecurityDescriptorControl, SE_DACL_PROTECTED,
+    };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
+        CreateFileW, FILE_ALL_ACCESS, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
     };
+    use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 
     pub(crate) fn name(purpose: Purpose) -> String {
@@ -931,6 +935,7 @@ pub(crate) mod tests {
         );
         assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
         let mut descriptor = null_mut();
+        let mut acl = null_mut();
         assert_eq!(
             unsafe {
                 GetSecurityInfo(
@@ -939,33 +944,51 @@ pub(crate) mod tests {
                     DACL_SECURITY_INFORMATION,
                     null_mut(),
                     null_mut(),
-                    null_mut(),
+                    &mut acl,
                     null_mut(),
                     &mut descriptor,
                 )
             },
             0
         );
-        let mut text = null_mut();
-        let mut length = 0;
+        let mut control = 0;
+        let mut revision = 0;
         assert_ne!(
-            unsafe {
-                ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                    descriptor,
-                    1,
-                    DACL_SECURITY_INFORMATION,
-                    &mut text,
-                    &mut length,
-                )
-            },
+            unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) },
             0
         );
-        let sddl =
-            String::from_utf16(unsafe { std::slice::from_raw_parts(text, (length - 1) as usize) })
-                .unwrap();
-        assert_eq!(sddl, Identity::current().unwrap().sddl());
+        assert_ne!(control & SE_DACL_PROTECTED, 0);
+        assert!(!acl.is_null());
+        let identity = Identity::current().unwrap();
+        let mut expected = vec!["S-1-5-18"];
+        if identity.sid() != "S-1-5-18" {
+            expected.push(identity.sid());
+        }
+        assert_eq!(unsafe { (*acl).AceCount } as usize, expected.len());
+        for (index, sid) in expected.into_iter().enumerate() {
+            let mut raw = null_mut();
+            assert_ne!(unsafe { GetAce(acl, index as u32, &mut raw) }, 0);
+            let ace = unsafe { &*raw.cast::<ACCESS_ALLOWED_ACE>() };
+            assert_eq!(u32::from(ace.Header.AceType), ACCESS_ALLOWED_ACE_TYPE);
+            assert_eq!(ace.Header.AceFlags, 0);
+            assert_eq!(ace.Mask, FILE_ALL_ACCESS);
+            let sid = sid.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+            let mut expected_sid = null_mut();
+            assert_ne!(
+                unsafe { ConvertStringSidToSidW(sid.as_ptr(), &mut expected_sid) },
+                0
+            );
+            assert_ne!(
+                unsafe {
+                    EqualSid(std::ptr::addr_of!(ace.SidStart).cast_mut().cast(), expected_sid)
+                },
+                0
+            );
+            unsafe {
+                LocalFree(expected_sid);
+            }
+        }
         unsafe {
-            LocalFree(text.cast());
             LocalFree(descriptor);
         }
         let same_name = String::from_utf16(&endpoint.name[..endpoint.name.len() - 1]).unwrap();

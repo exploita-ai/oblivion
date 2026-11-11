@@ -445,7 +445,9 @@ mod native {
                     .iter()
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<String>();
-                let path = std::env::temp_dir().join(format!("oblivion-resources-{suffix}"));
+                let temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+                let temp = temp.to_str().unwrap().strip_prefix(r"\\?\").unwrap();
+                let path = PathBuf::from(temp).join(format!("oblivion-resources-{suffix}"));
                 let descriptor = identity.file_descriptor().unwrap();
                 let attributes = SECURITY_ATTRIBUTES {
                     nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
