@@ -5,7 +5,7 @@ use oblivion_native_linux::{
     qemu::{Qmp, SerialGuard, arguments},
 };
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::Shutdown;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
@@ -450,6 +450,9 @@ token[:] = bytes(32)
 #[test]
 fn guest_relay_rejects_wrong_token_and_plain_v1_frames_before_controller_access() {
     let root = Directory::new();
+    let controller_path = root.0.join("controller.sock");
+    let controller = UnixListener::bind(&controller_path).unwrap();
+    controller.set_nonblocking(true).unwrap();
     let guest_root =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../oblivion-host/host/control-relay.py");
     let script = r#"
@@ -472,14 +475,24 @@ relay.serve_client(socket.socket(fileno=0), bytearray(range(32)), sys.argv[2])
         let mut child = Command::new("python3")
             .args(["-I", "-c", script])
             .arg(&guest_root)
-            .arg(root.0.join("no-controller.sock"))
+            .arg(&controller_path)
             .stdin(Stdio::from(OwnedFd::from(guest)))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
         host.write_all(&payload).unwrap();
-        assert_eq!(host.read(&mut [0; 1]).unwrap(), 0);
+        // Rejecting a frame can close the socket with unread bytes, which
+        // Linux reports as a reset instead of EOF. Neither permits a reply.
+        match host.read(&mut [0; 1]) {
+            Ok(0) => {}
+            Err(error) if error.kind() == ErrorKind::ConnectionReset => {}
+            result => panic!("unauthenticated relay did not close without a reply: {result:?}"),
+        }
         assert!(child.wait().unwrap().success());
+        assert!(
+            matches!(controller.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock),
+            "unauthenticated relay contacted the controller"
+        );
     }
 }
