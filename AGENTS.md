@@ -1,21 +1,21 @@
-- After changing the public Protocol or Server `HttpApi`, run `bun run generate` from `packages/client`. Do not edit generated client files directly.
-- Keep runtime dependencies directed from Schema to Core and Protocol, then from Core and Protocol to Server. Client runtime code may depend on Schema and Protocol but never Core or Server; `sdk` composes Client, Core, and Server.
+- This is the Oblivion 1.0 privacy stack: native launchers and Debian Live both start a headless controller VM, which owns isolated Safe VMs and gateways. The former OpenCode fork and its `core`, `server`, `client`, `protocol`, `schema`, `sdk`, `cli` and `tui` packages are no longer present. OpenCode 2 is a pinned, unmodified guest executable alongside Codex and Claude Code.
+- Keep shared Rust wire and transport types independent of controller and launcher implementations. `oblivion-cli` owns portable frontend behavior; `oblivion-host` composes the Unix launcher and Linux controller. The TypeScript manager calls the native launcher; `theme` and `tui-kit` remain reusable UI dependencies. When changing a native command or payload, update its Rust producers/consumers, the affected manager or MCP boundary schemas, and contract tests together. There is no generated OpenCode HTTP client in this tree.
 - This repository does not use Changesets. Do not add `.changeset` files; follow the Oblivion release workflow instead.
 - The default branch is `dev`. Base branches and worktrees on `origin/dev`, target PRs at `dev`, and diff against `origin/dev` unless told otherwise.
+- Support fresh Oblivion 1.0 installations only. Keep one current implementation of each command, protocol and stored format. Remove replaced readers, aliases, migration paths and their tests/dependencies in the same change; do not retain beta compatibility or silently supply fields missing from an older internal payload. Reject unsupported formats without modifying their data. Preserve crash recovery for the current format and the native formats actually emitted by the pinned official clients.
 
-## Live TUI Testing
+## Manager Preview and Runtime Testing
 
-- Run `bun run dev:live` from a development worktree to test its TUI against the currently elected `opencode` background server and live sessions.
-- Pass a directory after the script when needed, for example `bun run dev:live /path/to/project`.
-- The script discovers the server with `opencode service status`, injects its private local credential from `opencode service get password`, and uses the `dev` TUI storage channel so tabs and other client-local state match the installed client.
-- Prefer `dev:live` over plain `bun run dev` for this workflow. An implicit managed-service connection may replace the live server when the worktree client version differs; explicit `--server` warns and continues without replacing it.
+- Run `bun run dev` from the repository root for the manager's in-memory preview. Run `bun run --cwd packages/oblivion-manager preview:ui` for its local browser framebuffer harness. Both render production components with fixture state; neither verifies a real Safe or provider connection.
+- For real runtime testing, use a matching launcher, manager, native helper and controller image with disposable development state. Follow `docs/DEVELOPMENT.md`, `docs/DESKTOP.md` and `docs/ACCEPTANCE.md`; distinguish component checks from actual platform acceptance.
+- Use `.opencode/skills/oblivion-dev/SKILL.md` for the current development workflow. The old `dev:live` script and shared OpenCode service workflow do not exist here.
 
 ## TUI Stories
 
-- When a user asks for a TUI story, add a fixture-driven story under `packages/tui/src/feature-plugins/system/storybook` and register it in `index.tsx`.
+- When a user asks for a TUI story, extend the manager's fixture preview under `packages/oblivion-manager` using `nativePreview` and the existing `script/preview-ui.tsx` harness. There is no separate legacy storybook registry.
 - Render the real production component rather than a visual copy. Keep submissions and other side effects local to the story so it is safe to explore repeatedly.
-- Expose the meaningful state dimensions through story keybindings and list them in `StoryFooter`; include a reset command when combinations can leave the fixture in a confusing state.
-- Run a specific story with `OPENCODE_STORY=<story-id> bun run dev:live` from the development worktree, and exercise narrow and wide terminal sizes when layout is relevant.
+- Expose meaningful state dimensions through visible preview controls or keybindings, and include a reset command when combinations can leave the fixture in a confusing state.
+- Exercise 80×24 and 160×50 terminal sizes when layout is relevant. Keep preview-only controls out of production flows.
 
 ## TUI Theme Tokens
 
@@ -51,7 +51,6 @@ Examples: `fix(tui): simplify thinking toggle styling`, `docs: update contributi
 - Use Bun APIs when possible, like `Bun.file()`
 - Rely on type inference when possible; avoid explicit type annotations or interfaces unless necessary for exports or clarity
 - Prefer functional array methods (flatMap, filter, map) over for loops; use type guards on filter to maintain type inference downstream
-- In `src/config`, follow the existing self-export pattern at the top of the file (for example `export * as ConfigAgent from "./agent.js"`) when adding a new config module.
 - In Effect generators, bind services to named variables before calling methods. Do not use nested service yields such as `yield* (yield* Foo.Service).bar()`.
 
 Reduce total variable count by inlining when a value is only used once.
@@ -81,9 +80,9 @@ const { a, b } = obj
 ### Imports
 
 - Never alias imports. Do not use `import { foo as bar } from "..."` or renamed imports like `resolve as pathResolve`.
-- Never use type-position `import("...")` references such as `Schema.declare<import("@opencode/plugin/effect/plugin").Plugin["effect"]>`. Only when two imports genuinely collide on a name and no other option exists, an aliased type import (`import type { Plugin as PluginDefinition } from "..."`) is permitted as a last resort — still strongly preferred not to.
+- Never use type-position `import("...")` references. Only when two imports genuinely collide on a name and no other option exists, an aliased type import (`import type { Plugin as PluginDefinition } from "..."`) is permitted as a last resort — still strongly preferred not to.
 - Never use star imports. Do not use `import * as Foo from "..."` or `import type * as Foo from "..."`.
-- If a namespace-style value is needed, import the module's own exported namespace by name, for example `import { Project } from "@opencode/core/project"`, then reference `Project.ID`.
+- If a namespace-style value is needed, import the module's own exported namespace by name.
 - Prefer dynamic imports for heavy modules that are only needed in selected code paths, especially in startup-sensitive entrypoints. Destructure dynamic import bindings near the top of the narrowest scope that needs them so they read like normal imports. Avoid inline chains such as `await import("./module").then((mod) => mod.value())` or `(await import("./module")).value()`. Keep branch-specific imports inside the branch that needs them to preserve lazy loading.
 
 ### Variables
@@ -165,25 +164,21 @@ const table = sqliteTable("session", {
 
 - Avoid mocks as much as possible, you shouldn't be using globalThis.\* at all unless it's the only option.
 - Test actual implementation, do not duplicate logic into tests
-- Tests cannot run from repo root (guard: `do-not-run-tests-from-root`); run from package directories such as `packages/core`.
+- Tests cannot run from repo root (guard: `do-not-run-tests-from-root`); run from package directories such as `packages/oblivion-manager` or `packages/oblivion-host`.
 - Before writing or changing tests, read the matching skill in `.opencode/skills`: `unit-tests` for Bun tests or `tui-tests` for OpenTUI renderer tests. They cover what has made tests slow or flaky in CI.
+- Run Rust checks and tests from the affected crate with `cargo check --locked` and the applicable `cargo test --locked` targets; use `.github/workflows/oblivion-check.yml` for platform dependencies and the exact suite. Run native-history Python tests from `packages/oblivion-history` with `python3 -m unittest discover -s tests -p 'test_*.py'`.
 
 ## Checks
 
-- Run `bun run check` from the repository root as the canonical full lint and type-check verification.
-- During focused iteration, run `bun typecheck` from the affected package directory (for example, `packages/core`). Never run `tsc` directly.
+- Run `bun run check` from the repository root as the canonical full TypeScript lint and type-check verification. It does not check Rust, Python, native helpers or built images; run the checks applicable to those changes as well.
+- During focused iteration, run `bun typecheck` from the affected TypeScript package directory (for example, `packages/oblivion-manager`). Never run `tsc` directly.
 - Local `typecheck` scripts use `bun check`. CI and package publishing run `typecheck:tsc`, which uses the official TypeScript compiler (`@typescript/native`). When the two disagree, `tsc` is the source of truth; reproduce with `bun run typecheck:tsc` from the package directory.
 - `bun check` aims to match TypeScript 7.1, not the `7.0.2` that `process.versions.typescript` reports (oven-sh/bun#46536). When `bun check` and `tsc` from the pinned `@typescript/native` report different errors, file a minimal, dependency-free repro at https://github.com/oven-sh/bun/issues, with the output of both. `bun check` writes no declaration files, so declaration-emit errors such as TS5088 or TS2883 are expected to appear only in `tsc`; do not report those.
 
-## Session Core
+## Runtime and Native Agent Boundaries
 
-- Keep durable events minimal: record irreducible new facts and do not repeat state derivable by folding the ordered aggregate history. Enrich projections and read models with previous or derived state when consumers need self-contained views.
-- Keep durable prompt admission separate from model execution. `Session.prompt(...)` publishes `session.inbox.enqueued`, whose projection inserts one durable `session_inbox` row, before scheduling advisory `SessionExecution.wake(sessionID)` unless `resume: false` requests admit-only behavior. Delivery publishes `session.inbox.delivered`; its projection consumes the inbox row and inserts the visible message in the same transaction. `session_inbox` stores only unconsumed work.
-- Reusing a Session ID adopts the existing Session. Reusing a user or synthetic inbox item ID is idempotent when Session and type match: the first admission wins and the retried payload, metadata, and delivery mode are ignored, whether the item is still pending or already delivered (reconciled from the projected message without retained enqueue history). Cross-Session or cross-type reuse fails. Control items keep their operation-specific conflict behavior.
-- Keep `SessionExecution` process-global and Session-ID based. Its local implementation owns the process-local Session coordinator and discovers placement through `SessionStore` plus `LocationServiceMap.get(session.location)` only when a drain starts; no layer should take a Session ID. Interruption targets the active process-local ownership chain for that Session; interruption of a known but idle or locally unowned Session is a no-op, while the public API rejects an unknown Session.
-- Keep `SessionRunner`, model resolution, tool registry, permissions, and filesystem Location-scoped. Omitted `Location.workspaceID` means implicit-local placement; explicit workspace identity remains reserved for future placement semantics.
-- Each step is one explicit `llm.stream` call that continues from reloaded history. Do not add an in-memory tool loop.
-- Keep local Session drains process-local until clustering is implemented. `SessionRunCoordinator` joins explicit same-Session resumes, coalesces prompt wakeups, and allows different Sessions to run concurrently. A write-ahead execution claim marks a process-local busy period for restart recovery: terminal completion, failure, or user interruption releases it, while shutdown interruption and process death preserve it. Startup recovery resumes claimed top-level Sessions with durable per-execution attempt accounting. The claim is a recovery marker, not clustered ownership, fencing, or an exactly-once guarantee.
-- Keep delivery vocabulary explicit. Prompts steer by default. At safe step boundaries, steered compaction takes priority up to the first steered move control; other steers retain enqueue order. At an idle boundary, steers take priority; otherwise exactly one queued item delivers before the runner reevaluates continuation. Inbox items may be cancelled or changed between queue and steer before delivery. Promoting new user input resets the selected agent's step allowance; a batch of steers resets it once.
-- One step is one logical LLM call; its durable record covers only the model-visible span. Do not write "provider turn", and do not use bare "turn" for a single call: "turn" is reserved for the future assistant-turn unit containing all steps from prompt promotion until the session would go idle.
-- Keep event replay ownership separate from clustered Session execution ownership.
+- Keep desktop and Live on the shared controller-VM path. Live boot/storage integration and native desktop helpers are distinct current platform adapters, not competing generations of the product.
+- Run pinned official Codex, Claude Code and OpenCode 2 executables unmodified. Preserve native argv, terminal behavior, authentication and per-agent conversation formats. Oblivion manages isolation and explicit capabilities, not an in-process model loop.
+- Keep each Safe's native histories independent. `packages/oblivion-history` supports reviewed same-agent Share transfers. Do not reintroduce the retired shared-history catalog, synchronization or cross-agent conversion prototype.
+- Keep Safe filesystems inside Safe VMs. Host/controller operations use the existing bounded control and transfer boundaries; do not add a direct-network fallback or mount Safe filesystems on the host.
+- Keep fixtures synthetic and runtime checks isolated from personal archives, credentials and boot media. Preserve the distinction between diagnostic/laboratory images and production artifacts; generated output belongs in ignored `artifacts/`.

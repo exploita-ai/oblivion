@@ -96,7 +96,8 @@ Safe. The canonical catalog, sync/projection workers, cross-agent deletion
 protocol, history leases and Claude admission hook have been removed. Official
 clients launch directly with their encrypted native profiles. Share preserves
 the originating agent and native conversation formats; it never populates the
-other clients. Retained experimental evidence is in [HISTORY](HISTORY.md).
+other clients. The retired prototype's design and experimental evidence remain
+in Git history; they are not maintained 1.0 documentation.
 
 Live now packages a launcher OS separately from the headless controller image.
 Both Live and desktop use that controller VM. Live persistent data is a reviewed,

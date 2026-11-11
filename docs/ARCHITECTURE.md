@@ -60,8 +60,9 @@ without allocating a second request. Retry needs a confirmed failed or cancelled
 job and explicit confirmation; completed and unknown outcomes are not retryable.
 After an interrupted command the UI reads authoritative status before reporting
 an outcome. Back leaves the job running, and normal inactivity locking still
-applies. Opening the native client does not submit the saved task. Automatic
-startup on child creation remains in implementation.
+applies. Opening the native client does not submit the saved task. Child creation
+can schedule the saved task through the scoped credential-delegation path below;
+installed-VM and real-provider qualification remain open.
 A same-capability password rewrap preserves access; changing the family secret
 requires resealing pending tasks as part of the rotation transaction.
 

@@ -11,6 +11,13 @@ Oblivion combines a native launcher, a Debian Live image, encrypted storage, iso
 
 The default branch is `dev`. Use a short branch name of at most three hyphen-separated words and conventional commit titles such as `fix(gateway): revoke stale grants`.
 
+The 1.0 source supports fresh installations, with one current command and data
+format at each boundary. Remove replaced implementations and their compatibility
+readers, aliases, tests and dependencies together. Older internal payloads must
+not acquire missing fields through compatibility defaults. Reject unknown
+formats without mutating them. Current-format crash recovery and the native
+formats emitted by the pinned official agents remain supported.
+
 ## Development setup
 
 Oblivion pins Bun in `package.json`.
@@ -42,8 +49,9 @@ tokens. Changes to public theme roles must cover light, dark and custom defaults
 The official agent executables are pinned in
 `script/oblivion/install-agents.json`. Do not fork their implementations, rewrite
 their arguments or introduce compatibility readers for retired prototypes.
-Changes to the canonical history adapters need real native-format fixtures and
-an explicit statement of which provider records cannot transfer.
+Changes to the native-history Share adapters need real native-format fixtures
+for the pinned clients and an explicit statement of records or relationships
+that cannot transfer. Each client retains its own history and resume format.
 
 ## Privacy requirements
 

@@ -1,38 +1,32 @@
 ---
 name: effect
-description: Work with Effect v4 TypeScript code in this repo
+description: Work on the Effect v4 schemas used by Oblivion's terminal theme package. Use when editing Effect imports or schema decoding in this repository.
 ---
 
-# Effect
+# Effect schemas
 
-This codebase uses Effect for typed, composable TypeScript services, schemas, and workflows.
+The maintained Effect usage is in `packages/theme/src/tui/schema.ts` and
+`packages/theme/src/tui/resolve.ts`. The old Effect HTTP server, service layers
+and `packages/core` test helpers are no longer part of Oblivion. Do not introduce
+those patterns merely because this dependency remains.
 
-## Source Of Truth
+Check the pinned `effect` version in root `package.json` and the installed
+package's source/types before choosing APIs; older v2/v3 examples are not the
+contract. `.opencode/references/effect`, if present, is optional local research,
+not a tracked dependency or automatically the same version. Verify its version
+before relying on it; do not clone an unpinned upstream tree as routine setup.
 
-Use the current Effect v4 source, not memory or older Effect v2/v3 examples.
+Follow the existing synchronous `Schema` definitions and boundary decoders.
+Validate unknown theme documents once, then pass typed values into resolution.
+Do not add Effect runtimes, service layers, unchecked casts or `any` to solve a
+synchronous parsing problem. If effectful work is actually needed, keep its
+scope explicit and follow the root style rules.
 
-1. If `.opencode/references/effect` is missing, clone `https://github.com/Effect-TS/effect` there. Do this in the project, not in the skill folder.
-2. Search `.opencode/references/effect` for exact APIs, examples, tests, and naming patterns before answering or implementing Effect-specific code.
-3. Also inspect existing repo code for local house style before introducing new patterns.
-4. Prefer answers and implementations backed by specific source files or nearby repo examples.
+Theme roles are semantic. When extending the public token surface, update the
+schema, types, defaults and resolution together, and verify light, dark and
+custom-theme fallback behavior with the affected production component. See
+root `AGENTS.md` and the [TUI testing skill](../tui-tests/SKILL.md).
 
-## Guidelines
-
-- Prefer current Effect v4 APIs and project-local patterns over old blog posts, examples, or package-memory guesses.
-- Use `Effect.gen(function* () { ... })` for multi-step workflows.
-- Use `Effect.fn("Name")` or `Effect.fnUntraced(...)` for named effects when adding reusable service methods or important workflows.
-- Prefer Effect `Schema` for API and domain data shapes. Use branded schemas for IDs and `Schema.TaggedErrorClass` for typed domain errors when modeling new error surfaces.
-- Keep HTTP handlers thin: decode input, read request context, call services, and map transport errors. Put business rules in services.
-- In Effect service code, prefer Effect-aware platform abstractions and dependencies over ad hoc promises where the surrounding code already does so.
-- Keep layer composition explicit. Avoid broad hidden provisioning that makes missing dependencies hard to see.
-- In tests, prefer the repo's existing Effect test helpers and live tests for filesystem, git, child process, locks, or timing behavior.
-- Do not introduce `any`, non-null assertions, unchecked casts, or older Effect APIs just to satisfy types.
-- Do not answer from memory. Verify against `.opencode/references/effect` or nearby code first.
-
-## Testing Patterns
-
-- Use `testEffect(...)` from `packages/core/test/lib/effect.ts` for tests that exercise Effect services, layers, runtime context, scoped resources, or platform integrations.
-- Use `it.live(...)` for filesystem, git repositories, HTTP servers, sockets, child processes, locks, real time, and other live platform behavior.
-- Run tests from package directories such as `packages/core`; never run package tests from the repo root.
-- Prefer explicit test layers over ad hoc managed runtimes. Keep dependency provisioning visible in the test file.
-- Use scoped fixtures and finalizers for resources that must be cleaned up, including temporary directories, flags, databases, fibers, servers, and global state.
+From `packages/theme`, run `bun typecheck`; use `bun run typecheck:tsc` when
+investigating a compiler disagreement. Run relevant tests from their package
+directories. There is no `testEffect` or `it.live` repository helper to import.

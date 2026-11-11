@@ -275,13 +275,16 @@ Local inference is deferred until after 1.0.
 
 ## Platform status
 
+The first 1.0 release will include only platforms that pass their acceptance
+gates. Other targets remain experimental and are qualified separately.
+
 | Environment | Current source status |
 | --- | --- |
 | **Debian Live, amd64 / arm64** | Image build path retained for the shared stack; new 1.0 images still need end-to-end qualification. |
 | **Debian controller package, amd64 / arm64** | Development `.deb` source and package lifecycle fixtures implemented for the trusted controller layer. Real-role and hardware acceptance remain open. |
-| **Linux desktop, x86_64** | Native headless QEMU/KVM helper implemented; actual hardware acceptance remains open. |
-| **macOS, Apple Silicon** | Native Virtualization.framework helper implemented. Inner Safe KVM boots currently fail in qualification on the test Mac; not a supported release yet. |
-| **Windows** | HCS backend, command entrypoint, manager target, verified bundles and initial setup implemented in source. Local file payloads, privilege broker, software lifecycle and platform qualification remain open. See [Windows](docs/WINDOWS.md). |
+| **Linux desktop, x86_64 / ARM64** | Native headless QEMU/KVM helper implemented; actual hardware acceptance remains open. |
+| **macOS, Apple Silicon** | Native Virtualization.framework helper and nested Safes exercised on the diagnostic Mac build. The distribution profile and full installed-product acceptance remain open. |
+| **Windows** | HCS backend, command entrypoint, manager, Files endpoints, privilege broker and software lifecycle implemented in source. Experimental; installed Hyper-V, permission and platform qualification remain open. See [Windows](docs/WINDOWS.md). |
 
 Hardware virtualization is required. There is no automatic software-emulation
 fallback. Emulator-only development tests do not qualify a platform.
@@ -294,16 +297,20 @@ Use the Bun version pinned in [package.json](package.json):
 bun install --frozen-lockfile
 bun run check
 
-# Build a current-source development image; Docker is required
-OBLIVION_ARCH=amd64 bun run build:iso
-OBLIVION_ARCH=arm64 bun run build:iso
+# Build the private controller shared by desktop and Live; Docker is required
+OBLIVION_ARCH=arm64 bun run build:runtime
+
+# Build the outer bootable Live OS, including its matching controller
+OBLIVION_ARCH=amd64 bun run build:live
+OBLIVION_ARCH=arm64 bun run build:live
 
 # Build the development package for the trusted Debian controller layer
 OBLIVION_ARCH=amd64 OBLIVION_DEB_VERSION=1.0.0~dev20261104 bun run build:deb
 ```
 
-The ISO and inventories are written under `artifacts/oblivion-stack-ARCH/`.
-Verify `SHA256SUMS` there. Checksums detect damaged files; they are not signed
+Controller output is written under `artifacts/oblivion-runtime-ARCH/`; the outer
+Live ISO and inventories go under `artifacts/oblivion-stack-ARCH/`.
+Verify `SHA256SUMS` in the selected output. Checksums detect damaged files; they are not signed
 release provenance. CI builds draft prereleases and does not automatically
 publish an image as a qualified release.
 
@@ -311,7 +318,10 @@ The [Debian package guide](docs/DEBIAN.md) covers dependencies, installation and
 data-preserving removal for a dedicated controller or Debian runtime VM.
 Native desktop packaging also needs the platform launcher and headless helper.
 For terminal workflows and platform-specific commands, see the
-[CLI reference](docs/CLI.md).
+[CLI reference](docs/CLI.md). The [repository map](docs/REPOSITORY.md) identifies
+the shared runtime, desktop and Live components, historical documents and
+generated artifacts; the [development guide](docs/DEVELOPMENT.md) explains
+checks and preview workflows.
 
 Contributions should target `dev`, use synthetic fixtures and document the trust
 boundary affected by a change. See [CONTRIBUTING.md](CONTRIBUTING.md), the

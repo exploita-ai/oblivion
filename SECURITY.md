@@ -1,6 +1,10 @@
 # Security policy
 
-Oblivion is early-beta security software. It has not received an independent audit and should not yet be trusted with high-risk or irreplaceable secrets.
+Oblivion 1.0 is security software under development. Published 0.x images belong
+to the previous Live-only product; this policy describes the current source.
+It has not received an independent audit and should not yet be trusted with
+high-risk or irreplaceable secrets. Installed-product qualification is tracked
+in the [acceptance matrix](docs/ACCEPTANCE.md).
 
 ## Reporting a vulnerability
 
@@ -10,34 +14,42 @@ Include the affected commit or image hash, architecture, reproduction steps, exp
 
 ## Security model
 
-Oblivion is designed to reduce persistent local traces and to isolate each protected session from the host and from other sessions.
+Oblivion is designed to reduce persistent local traces and isolate each Safe's
+filesystem, processes and network from other Safes. Multiple agent sessions in
+one Safe deliberately share its files and native client profiles.
 
-The intended boundaries of the current live implementation are:
+The intended boundaries of the current desktop and Live implementation are:
 
-- an immutable Debian live root with volatile runtime paths;
-- a general LUKS2 vault for host preferences and credentials;
-- a different LUKS2 volume and password for every persistent session;
-- one active session VM and volume at a time;
-- an offline Documents VM with no network device or provider credential;
-- a dedicated gateway VM for Tor or an explicit SOCKS5 proxy;
+- a native launcher managing a headless Debian controller VM on desktop and Live;
+- immutable guest base images with volatile runtime paths;
+- a general LUKS2 archive for the Safe catalog, application settings and saved proxy profiles;
+- a separate LUKS2 volume and data key for each persistent Safe; family members can share an unlock password;
+- concurrent Safe VMs with separate filesystems, opening identities and resource limits;
+- offline Documents access without a network device, preserving the Safe's existing encrypted contents;
+- a dedicated gateway for each online Safe, using Tor or an explicit SOCKS5 proxy;
 - deny-by-default direct egress and explicit per-opening grants;
-- no session filesystem mounted on the host;
+- no Safe filesystem mounted by the controller or external operating system;
+- native agent profiles and credentials inside the Safe, with explicit supported credential-only delegation to a child;
+- reviewed file copies through private streams, with no shared host folders;
 - no production SSH, remote shell, diagnostic console, or synthetic certificate authority.
 
 An implementation defect that crosses one of these boundaries is in scope.
 
-The [remote-API beta plan](docs/ARCHITECTURE.md#remote-api-beta-plan) retains
-Debian as the host, booted directly or inside a supported outer VM. It retains
-the gateway, session and transfer VM boundaries and Linux encrypted storage.
-Native ports and replacement of these boundaries are outside the active plan.
-Local inference is deferred; the remote-API milestone is not air-gapped or
-proof of host integrity.
+The [current architecture](docs/ARCHITECTURE.md) uses the same Debian controller,
+Safe, gateway and transfer boundaries behind native macOS, Linux and Windows
+backends. Their qualification levels differ. Live presents only a reviewed data
+partition to the controller; ephemeral Live runs do not attach that persistent
+partition. Local inference is deferred beyond 1.0. Remote-provider operation is
+not air-gapped or proof of host integrity.
 
 ## Important limitations
 
-Encryption protects data at rest only after the relevant volume is locked. While a session is active, its data exists in guest memory and is accessible to the running guest, host kernel, and physical machine.
+Encryption protects data at rest only after the relevant volume is locked. While
+a Safe is active, its data exists in guest memory and is accessible to the
+running guest and the trusted controller, outer operating system and hypervisor.
 
-Virtualized use additionally trusts the outer operating system and hypervisor.
+Desktop use trusts the outer operating system and hypervisor. A bare-metal Live
+boot leaves the machine's installed desktop operating system inactive.
 Debian's tmpfs/no-swap policy cannot prevent outer-host swap, dumps, display
 capture or saved VM memory. Snapshots and suspend files may retain plaintext
 and unlocked keys after a volume is closed. The qualified VM profile must
@@ -47,22 +59,29 @@ clipboard/export actions release the selected data to their destination.
 
 Cloud inference is not air-gapped. The configured provider receives the prompt, selected context, tool results, and response. Tor or SOCKS5 changes the network path; it does not hide submitted content from the provider.
 
-Oblivion cannot defend against compromised firmware, malicious hardware, physical capture of an unlocked machine, display or keyboard interception, or an unknown vulnerability in Debian, QEMU, Linux, cryptsetup, Tor, OpenCode, or another dependency.
+Oblivion cannot defend against compromised firmware, malicious hardware,
+physical capture of an unlocked machine, display or keyboard interception, or
+an unknown vulnerability in its operating systems, hypervisors, cryptsetup,
+Tor, official agent clients or other dependencies.
 
-The permission UI of the coding agent is not the security sandbox. Isolation comes from the session VM, device model, filesystem boundary, gateway, and host policy.
+The permission UI of the coding agent is not the security sandbox. Isolation
+comes from the Safe VM, device model, filesystem boundary, gateway and controller
+policy. Personal encrypted-volume backups may contain saved agent credentials;
+portable Share excludes known credential stores but cannot remove arbitrary
+secrets written into selected conversations or files.
 
 ## In scope
 
-- plaintext session or credential data written outside the intended encrypted volume;
+- plaintext Safe or credential data written outside the intended encrypted volume;
 - secrets in logs, crash dumps, process arguments, environment dumps, or temporary files;
-- access from one protected session to another;
-- host mounting or exposing a session filesystem;
+- access from one Safe to another outside explicit scoped operations;
+- the controller or external operating system mounting or exposing a Safe filesystem;
 - direct guest egress, DNS leaks, or fallback around the selected transport;
-- reuse of revoked API keys or session grants;
+- reuse of revoked opening grants or delegated capabilities;
 - release images containing debug access or laboratory trust anchors;
 - path traversal or boundary escape in document import/export;
 - persistence changes made by ephemeral mode;
-- bypass of the one-session-at-a-time invariant.
+- stale cleanup, grants or jobs affecting a different Safe opening or a reused VM slot.
 
 ## Usually out of scope
 

@@ -68,12 +68,12 @@ First build the **private controller ISO** and its evidence from the current
 source tree. This is distinct from the outer bootable Live ISO:
 
 ```sh
-OBLIVION_ARCH=arm64 sh script/oblivion/build-runtime.sh
+OBLIVION_ARCH=arm64 bun run build:runtime
 ```
 
 Use `arm64` for Apple Silicon or ARM64 Linux and `amd64` for x86_64 Linux.
 An older controller ISO or the outer Live ISO is refused as bundle input even
-when its checksums are internally consistent. `build-stack.sh` builds the outer
+when its checksums are internally consistent. `bun run build:live` builds the outer
 Live launcher OS with this same controller image embedded.
 
 ```sh
