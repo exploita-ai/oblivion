@@ -41,13 +41,14 @@ def copy_bundle(source, target, platform):
     if len(encoded) > 1024 * 1024:
         raise ValueError("Bundle manifest exceeds 1 MiB")
     manifest = json.loads(encoded)
-    if (manifest["format"] != "oblivion-desktop" or manifest["version"] != 1
-            or manifest["development_only"] is not True or manifest["platform"] != platform
+    if (manifest["format"] != "oblivion-desktop" or type(manifest["version"]) is not int or manifest["version"] != 2
+            or "development_only" in manifest or manifest["platform"] != platform
             or manifest["backend"] != "qemu-kvm" or manifest["bundle_id"] != bundle.bundle_identity(manifest)
             or manifest["assets"] != "lib/manager" or manifest["runtime"] != BOOT
             or manifest["control_protocol"] != 1
             or not re.fullmatch(r"[0-9a-f]{64}", manifest["source_sha256"])):
         raise ValueError("Bundle identity or platform does not match the package")
+    bundle.release.validate(manifest["channel"], manifest["product_version"])
     entries = manifest["files"]
     if not 1 <= len(entries) <= 1024:
         raise ValueError("Invalid bundle inventory size")
@@ -100,7 +101,7 @@ def shared_dependencies(root, binaries, architecture, machine):
     (root / "debian/control").write_text(
         "Source: oblivion-desktop\nSection: utils\nPriority: optional\n"
         "Maintainer: Oblivion development <development@example.invalid>\n\n"
-        "Package: oblivion-desktop\nArchitecture: any\nDescription: development desktop launcher\n",
+        "Package: oblivion-desktop\nArchitecture: any\nDescription: desktop launcher\n",
         encoding="ascii",
     )
     command = ["dpkg-shlibdeps", "-O", *("-e" + str(path) for path in binaries)]
@@ -113,13 +114,14 @@ def shared_dependencies(root, binaries, architecture, machine):
 def evidence(destination, manifest, architecture, revision, dirty):
     destination.mkdir(parents=True)
     inputs = {
-        "format": "oblivion-desktop-debian-build", "version": 1, "architecture": architecture,
-        "revision": revision, "dirty": dirty, "development_only": True,
+        "format": "oblivion-desktop-debian-build", "version": 2, "architecture": architecture,
+        "revision": revision, "dirty": dirty, "channel": manifest["channel"],
+        "product_version": manifest["product_version"],
         "bundle_id": manifest["bundle_id"], "source_sha256": manifest["source_sha256"],
     }
     (destination / "inputs.json").write_text(json.dumps(inputs, sort_keys=True, indent=2) + "\n", encoding="ascii")
     paths = [HERE / name for name in (*PACKAGE_FILES, "build-package.py")]
-    paths += [HERE.parent / name for name in ("build-desktop-deb.sh", "bundle-native.py", "Dockerfile.vm-lab", "Dockerfile.vm-lab.dockerignore")]
+    paths += [HERE.parent / name for name in ("build-desktop-deb.sh", "bundle-native.py", "bundle-version.py", "Dockerfile.vm-lab", "Dockerfile.vm-lab.dockerignore")]
     helper = REPO / "packages/oblivion-native-linux"
     paths += [helper / "Cargo.toml", helper / "Cargo.lock"]
     paths += [path for path in (helper / "src").rglob("*") if not path.is_dir()]
@@ -129,10 +131,9 @@ def evidence(destination, manifest, architecture, revision, dirty):
     )
 
 
-def build(source, architecture, version, revision, dirty, output):
+def build(source, architecture, channel, version, revision, dirty, output):
     os.umask(0o022)
-    if not re.fullmatch(r"[0-9][0-9A-Za-z.+:~\-]{0,63}", version) or "~dev" not in version:
-        raise ValueError("Use an explicit development version containing ~dev")
+    bundle.release.validate(channel, version)
     if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", revision):
         raise ValueError("Expected a source commit ID")
     subprocess.run(["dpkg", "--validate-version", version], check=True)
@@ -150,8 +151,8 @@ def build(source, architecture, version, revision, dirty, output):
         root = work / "package"
         staged = root / "usr/lib/oblivion-desktop"
         manifest, native = copy_bundle(source, staged, platform)
-        if manifest["product_version"] != version:
-            raise ValueError("Bundle and desktop package versions differ")
+        if manifest["product_version"] != version or manifest["channel"] != channel:
+            raise ValueError("Bundle and desktop package channels or versions differ")
         library_dependencies = shared_dependencies(
             work, [staged / name for name in (*BINARIES, native)], architecture, machine,
         )
@@ -170,7 +171,7 @@ def build(source, architecture, version, revision, dirty, output):
             "Recommends: python3-gi, gir1.2-gtk-4.0 (>= 4.6)\n"
             f"Conflicts: oblivion-stack\nInstalled-Size: {size}\n"
             "Homepage: https://github.com/exploita-ai/oblivion\n"
-            "Description: Development launcher for the Oblivion desktop privacy runtime\n"
+            "Description: Launcher for the Oblivion desktop privacy runtime\n"
             " Runs the paired controller in a private headless QEMU/KVM virtual machine.\n",
             encoding="ascii",
         )
@@ -188,11 +189,12 @@ if __name__ == "__main__":
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--architecture", choices=ARCHITECTURES, required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--channel", required=True)
     parser.add_argument("--revision", required=True)
     parser.add_argument("--dirty", choices=("true", "false"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
-        build(args.source, args.architecture, args.version, args.revision, args.dirty == "true", args.output)
+        build(args.source, args.architecture, args.channel, args.version, args.revision, args.dirty == "true", args.output)
     except (OSError, ValueError, TypeError, KeyError, subprocess.CalledProcessError) as error:
         parser.exit(1, str(error) + "\n")

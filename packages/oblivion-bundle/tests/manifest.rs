@@ -1,9 +1,9 @@
-use oblivion_bundle::{File, MAX_MANIFEST, Manifest, relative, target};
+use oblivion_bundle::{Channel, File, MAX_MANIFEST, Manifest, relative, target};
 use serde_json::{Value, json};
 
 const SOURCE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const WINDOWS: &str = "windows-x86_64";
-const GOLDEN: &[u8] = include_bytes!("fixtures/windows-v1.json");
+const GOLDEN: &[u8] = include_bytes!("fixtures/windows-v2.json");
 fn fixture() -> Manifest {
     Manifest::decode(GOLDEN, Some(SOURCE), WINDOWS).unwrap()
 }
@@ -29,11 +29,11 @@ fn validate(manifest: &Manifest) -> Result<Manifest, &'static str> {
 }
 
 #[test]
-fn current_v1_canonical_identity_matches_the_python_json_contract() {
+fn current_v2_canonical_identity_matches_the_python_json_contract() {
     let manifest = fixture();
     assert_eq!(
         manifest.bundle_id,
-        "081025f668032d7283778108b30e9ed563e67fd0a74ad70ad3c49812e8b72b80"
+        "7b76285774381bc9014f62361172212054f656f950c559179eaa1fa9957b693d"
     );
     assert_eq!(manifest.identity().unwrap(), manifest.bundle_id);
     assert_eq!(
@@ -41,6 +41,182 @@ fn current_v1_canonical_identity_matches_the_python_json_contract() {
         serde_json::to_value(&manifest).unwrap()
     );
     manifest.binding().unwrap().validate().unwrap();
+}
+
+#[test]
+fn each_channel_requires_its_canonical_product_version() {
+    for (channel, version) in [
+        (Channel::Dev, "1.0.0~dev1.abcdef012345"),
+        (Channel::Dev, "0.0.0~dev12.0123456789ab"),
+        (Channel::Rc, "1.0.0~rc1"),
+        (Channel::Rc, "10.20.30~rc123"),
+        (Channel::Stable, "1.0.0"),
+        (Channel::Stable, "0.0.0"),
+    ] {
+        let mut manifest = fixture();
+        manifest.product_version = version.into();
+        for candidate in [Channel::Dev, Channel::Rc, Channel::Stable] {
+            manifest.channel = candidate;
+            refresh(&mut manifest);
+            assert_eq!(
+                validate(&manifest).is_ok(),
+                candidate == channel,
+                "{candidate:?}: {version}"
+            );
+        }
+    }
+}
+
+#[test]
+fn malformed_versions_are_rejected_even_with_a_matching_identity() {
+    for (channel, versions) in [
+        (
+            Channel::Stable,
+            &[
+                "",
+                "1",
+                "1.0",
+                "1.0.0.0",
+                ".0.0",
+                "1..0",
+                "1.0.",
+                "01.0.0",
+                "1.00.0",
+                "1.0.01",
+                "-1.0.0",
+                "+1.0.0",
+                "1e1.0.0",
+                "1:1.0.0",
+                "1.0.0+build",
+                "1.0.0-rc1",
+                "1.0.0\n",
+                "1.0.0 ",
+                "١.0.0",
+            ][..],
+        ),
+        (
+            Channel::Rc,
+            &[
+                "1.0.0~rc",
+                "1.0.0~rc0",
+                "1.0.0~rc01",
+                "1.0.0~rc-1",
+                "1.0.0~rc+1",
+                "1.0.0~rc1.0",
+                "1.0.0~RC1",
+                "1.0.0~rc1~rc2",
+                "01.0.0~rc1",
+                "1.0.0~rc١",
+            ][..],
+        ),
+        (
+            Channel::Dev,
+            &[
+                "1.0.0~dev-fixture",
+                "1.0.0~dev1",
+                "1.0.0~dev.abcdef012345",
+                "1.0.0~dev0.abcdef012345",
+                "1.0.0~dev01.abcdef012345",
+                "1.0.0~dev-1.abcdef012345",
+                "1.0.0~dev+1.abcdef012345",
+                "1.0.0~dev1.abcdef01234",
+                "1.0.0~dev1.abcdef0123456",
+                "1.0.0~dev1.ABCDEF012345",
+                "1.0.0~dev1.ghijkl012345",
+                "1.0.0~dev1.abcdef012345.extra",
+                "1.0.0~DEV1.abcdef012345",
+                "1.0.00~dev1.abcdef012345",
+                "1.0.0~dev١.abcdef012345",
+            ][..],
+        ),
+    ] {
+        for version in versions {
+            let mut manifest = fixture();
+            manifest.channel = channel;
+            manifest.product_version = (*version).into();
+            refresh(&mut manifest);
+            assert_eq!(
+                validate(&manifest).err(),
+                Some("desktop_bundle_does_not_match_this_build"),
+                "{channel:?}: {version:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_version_limit_is_64_ascii_bytes_for_every_channel() {
+    for (channel, suffix) in [
+        (Channel::Dev, ".0.0~dev1.abcdef012345"),
+        (Channel::Rc, ".0.0~rc1"),
+        (Channel::Stable, ".0.0"),
+    ] {
+        let mut manifest = fixture();
+        manifest.channel = channel;
+        manifest.product_version = format!("{}{suffix}", "1".repeat(64 - suffix.len()));
+        refresh(&mut manifest);
+        validate(&manifest).unwrap();
+        manifest.product_version.insert(0, '1');
+        refresh(&mut manifest);
+        assert!(validate(&manifest).is_err());
+    }
+}
+
+#[test]
+fn channel_is_required_exact_and_part_of_the_canonical_identity() {
+    let mut value: Value = serde_json::from_slice(GOLDEN).unwrap();
+    value.as_object_mut().unwrap().remove("channel");
+    assert_eq!(
+        Manifest::decode(&serde_json::to_vec(&value).unwrap(), Some(SOURCE), WINDOWS).err(),
+        Some("invalid_desktop_bundle")
+    );
+    for channel in [
+        json!("beta"),
+        json!("DEV"),
+        json!("development"),
+        json!(null),
+        json!(1),
+        json!({"dev": null}),
+        json!(["dev"]),
+    ] {
+        value["channel"] = channel;
+        assert_eq!(
+            Manifest::decode(&serde_json::to_vec(&value).unwrap(), Some(SOURCE), WINDOWS).err(),
+            Some("invalid_desktop_bundle")
+        );
+    }
+    let mut manifest = fixture();
+    manifest.channel = Channel::Stable;
+    assert_ne!(manifest.identity().unwrap(), manifest.bundle_id);
+    manifest.product_version = "1.0.0".into();
+    assert!(validate(&manifest).is_err());
+    refresh(&mut manifest);
+    validate(&manifest).unwrap();
+    manifest.product_version = "1.0.1".into();
+    assert!(validate(&manifest).is_err());
+}
+
+#[test]
+fn prior_manifest_versions_and_the_removed_development_field_are_rejected() {
+    let mut manifest = fixture();
+    manifest.version = 1;
+    refresh(&mut manifest);
+    assert_eq!(
+        validate(&manifest).err(),
+        Some("desktop_bundle_does_not_match_this_build")
+    );
+    let mut value: Value = serde_json::from_slice(GOLDEN).unwrap();
+    value["development_only"] = json!(true);
+    assert_eq!(
+        Manifest::decode(&serde_json::to_vec(&value).unwrap(), Some(SOURCE), WINDOWS).err(),
+        Some("invalid_desktop_bundle")
+    );
+    value["version"] = json!(1);
+    value.as_object_mut().unwrap().remove("channel");
+    assert_eq!(
+        Manifest::decode(&serde_json::to_vec(&value).unwrap(), Some(SOURCE), WINDOWS).err(),
+        Some("invalid_desktop_bundle")
+    );
 }
 
 #[test]

@@ -78,7 +78,7 @@ class DesktopBundle(unittest.TestCase):
             target.write_bytes(b"asset fixture")
         binary = self.root / "binary"
         binary.write_bytes(b"executable fixture")
-        return argparse.Namespace(prepared=prepared, platform=platform, product_version="1.0.0~dev-fixture",
+        return argparse.Namespace(prepared=prepared, platform=platform, channel="dev", product_version="1.0.0~dev1.abcdef012345",
                                   cli=binary, helper=binary, manager=binary, manager_assets=assets, output=self.root / "bundle")
 
     def runtime(self):
@@ -134,7 +134,6 @@ class DesktopBundle(unittest.TestCase):
 
     def test_assembly_manifest_identity_and_complete_inventory(self):
         args = self.prepared()
-        args.product_version = "1:0.0~dev-fixture"
         builder.assemble(args)
         manifest = json.loads((args.output / "bundle.json").read_text())
         identity = manifest.pop("bundle_id")
@@ -148,7 +147,9 @@ class DesktopBundle(unittest.TestCase):
             self.assertEqual(item["bytes"], file.stat().st_size)
             self.assertEqual(item["executable"], bool(file.stat().st_mode & 0o111))
         self.assertEqual(manifest["source_sha256"], builder.digest(args.output / "evidence/runtime/host-sources.sha256"))
-        self.assertTrue(manifest["development_only"])
+        self.assertEqual(manifest["version"], 2)
+        self.assertEqual(manifest["channel"], "dev")
+        self.assertNotIn("development_only", manifest)
         self.assertTrue((args.output / "install.sh").is_file())
 
     def test_assembly_rejects_symlink(self):
@@ -198,17 +199,29 @@ class DesktopBundle(unittest.TestCase):
             builder.assemble(args)
         self.assertFalse(args.output.exists())
 
-    def test_assembly_rejects_non_development_version(self):
-        args = self.prepared()
-        args.product_version = "1.0.0"
-        with self.assertRaisesRegex(ValueError, "~dev"):
-            builder.assemble(args)
+    def test_all_channels_assemble_and_share_the_rust_canonical_contract(self):
+        golden = json.loads((REPO / "packages/oblivion-bundle/tests/fixtures/windows-v2.json").read_bytes())
+        self.assertEqual(builder.bundle_identity(golden), golden["bundle_id"])
+        self.assertEqual(golden["version"], 2)
+        builder.release.validate(golden["channel"], golden["product_version"])
+        for channel, version in (("dev", "1.0.0~dev1.abcdef012345"), ("rc", "1.0.0~rc1"), ("stable", "1.0.0")):
+            with self.subTest(channel=channel):
+                args = self.prepared()
+                args.channel, args.product_version = channel, version
+                builder.assemble(args)
+                manifest = json.loads((args.output / "bundle.json").read_bytes())
+                self.assertEqual((manifest["version"], manifest["channel"], manifest["product_version"]), (2, channel, version))
+                self.assertNotIn("development_only", manifest)
+                self.assertEqual(builder.bundle_identity(manifest), manifest["bundle_id"])
+                shutil.rmtree(args.output)
 
     def test_assembly_rejects_version_outside_reader_bounds(self):
-        for version in ("1.0~dev_underscore", "1~dev" + "a" * 60):
-            args = self.prepared()
-            args.product_version = version
-            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "development version"):
+        for channel, version in (("dev", "1.0.0"), ("rc", "1.0.0~dev1.abcdef012345"),
+                                 ("stable", "1.0.0~rc1"), ("unknown", "1.0.0"),
+                                 ("dev", "1.0~dev_underscore"), ("stable", "1" * 61 + ".0.0")):
+            # Missing build inputs ensure validation precedes filesystem access.
+            args = argparse.Namespace(channel=channel, product_version=version)
+            with self.subTest(channel=channel, version=version), self.assertRaisesRegex(ValueError, "invalid_bundle_channel_or_version"):
                 builder.assemble(args)
 
     def test_linux_arm64_assembly_keeps_the_native_library_architecture(self):

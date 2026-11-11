@@ -6,6 +6,7 @@ The outer ARM64 Live OS needs the KVM_CAP_ARM_EL2 UAPI introduced in Linux
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -152,15 +153,20 @@ def verify(root, role, initrd=None, architecture=None):
 
 
 def verify_controller(bundle, architecture):
+    spec = importlib.util.spec_from_file_location('bundle_version', Path(__file__).with_name('bundle-version.py'))
+    release = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(release)
     record_path = 'evidence/runtime/hypervisor-kernel.json'
     image_path = 'runtime/controller.iso'
     kernel_path = 'runtime/kernel'
     initrd_path = 'runtime/initrd'
     manifest = json.loads((bundle / 'bundle.json').read_text())
     platform = 'linux-arm64' if architecture == 'arm64' else 'linux-x86_64'
-    if (manifest['format'] != 'oblivion-desktop' or manifest['version'] != 1 or manifest['platform'] != platform
+    if (manifest['format'] != 'oblivion-desktop' or type(manifest['version']) is not int or manifest['version'] != 2
+            or 'development_only' in manifest or manifest['platform'] != platform
             or manifest['runtime'] != {'image': image_path, 'kernel': kernel_path, 'initrd': initrd_path}):
         raise ValueError('embedded_controller_bundle_role_or_architecture_mismatch')
+    release.validate(manifest['channel'], manifest['product_version'])
     hashes = {}
     for name in (record_path, image_path, kernel_path, initrd_path):
         entries = [item for item in manifest['files'] if item['path'] == name]
