@@ -38,9 +38,11 @@ systemctl mask NetworkManager-wait-online.service e2scrub_reap.service e2scrub_a
 printf 'loop\ndm_crypt\nkvm\nvsock\nvmw_vsock_virtio_transport\n' > /etc/modules-load.d/oblivion-runtime.conf
 # Ephemeral Safe volumes reserve space in /run. Raise its tmpfs ceiling while
 # leaving actual allocations subject to the controller's memory admission.
-printf 'MODULES=most\nCOMPRESS=gzip\nRESUME=none\nRUNSIZE=40%%\n' > /etc/initramfs-tools/conf.d/oblivion
-# Preserve VirtIO and explicitly include the same amd64 controller's Hyper-V
-# storage/network/vsock modules. Built-in drivers need no archive entry.
+printf '%s\n' 'MODULES=list' 'COMPRESS=gzip' 'RESUME=none' 'RUNSIZE=40%' > /etc/initramfs-tools/conf.d/oblivion
+# The common image already lists VirtIO PCI, block, and SquashFS. The controller
+# boots its read-only ISO over virtual storage and mounts a live root overlay.
+printf '%s\n' virtio_mmio isofs loop overlay >> /etc/initramfs-tools/modules
+# Keep the amd64 controller's modular Hyper-V drivers in the archive as well.
 python3 -B /tmp/hypervisor-kernel.py initramfs-modules / --role controller >> /etc/initramfs-tools/modules
 update-initramfs -u -k all
 ln -sf /usr/lib/systemd/system/multi-user.target /etc/systemd/system/default.target

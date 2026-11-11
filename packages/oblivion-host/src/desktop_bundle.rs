@@ -3,8 +3,9 @@
 use crate::control::Result;
 pub(crate) use oblivion_bundle::{Binding, File, Runtime};
 use oblivion_bundle::{MAX_MANIFEST, Manifest, hash};
-use sha2::{Digest, Sha256};
+use sha2_platform::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -245,7 +246,11 @@ pub(crate) fn digest(path: &Path) -> Result<String> {
         }
         result.update(&buffer[..count]);
     }
-    Ok(format!("{:x}", result.finalize()))
+    let mut hex = String::with_capacity(64);
+    for byte in result.finalize() {
+        write!(&mut hex, "{byte:02x}")?;
+    }
+    Ok(hex)
 }
 
 fn open(path: &Path) -> Result<fs::File> {
@@ -275,6 +280,7 @@ fn owned(metadata: &fs::Metadata, directory: bool, root_owned: bool) -> Result<(
 pub(crate) mod tests {
     use super::*;
     use oblivion_bundle::relative;
+    use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
 
     pub(crate) struct Fixture {

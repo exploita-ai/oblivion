@@ -468,12 +468,10 @@ ARG TARGETARCH
 ARG MANAGER_BINARY=artifacts/oblivion-manager/bun-linux-x64/oblivion-manager
 ARG MANAGER_ASSETS=artifacts/oblivion-manager/bun-linux-x64/assets
 RUN case "$TARGETARCH" in arm64|amd64) ;; *) exit 1;; esac \
-    && sed -i 's/^Components: main$/Components: main non-free-firmware/' /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
     live-boot live-boot-initramfs-tools cryptsetup-bin dmsetup fdisk \
     $(if [ "$TARGETARCH" = arm64 ]; then printf qemu-system-arm; else printf qemu-system-x86; fi) \
-    python3 network-manager wpasupplicant iproute2 nftables console-setup-mini kbd tzdata xkb-data \
-    firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211 firmware-mediatek \
+    python3 network-manager iproute2 nftables console-setup-mini kbd tzdata xkb-data \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=compiler /bundle/oblivion-storage /bundle/oblivion-control /bundle/oblivion-copy /usr/bin/
 COPY ${MANAGER_BINARY} /usr/bin/oblivion-manager
