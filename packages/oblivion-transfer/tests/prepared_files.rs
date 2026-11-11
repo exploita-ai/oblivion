@@ -242,20 +242,28 @@ fn prepared_upload_retains_the_reviewed_selection_and_counts_only_document_bytes
 fn upload_preparation_checks_real_cancellation_during_hash_reads() {
     let source = Tree::new();
     fs::write(source.0.join("large"), vec![b'a'; 4 * 1024 * 1024]).unwrap();
-    let mut checks = 0;
-    let prepared = stream::PreparedUpload::prepare(
-        &[source.0.join("large")],
-        context(Direction::Import),
-        &mut || {
-            checks += 1;
-            if checks >= 7 {
-                return Err(io::Error::from(io::ErrorKind::BrokenPipe));
-            }
-            Ok(())
-        },
-    );
-    assert_eq!(prepared.err().unwrap().kind(), io::ErrorKind::BrokenPipe);
-    assert_eq!(checks, 7);
+    for (kind, expected) in [
+        (io::ErrorKind::BrokenPipe, io::ErrorKind::BrokenPipe),
+        (io::ErrorKind::Interrupted, io::ErrorKind::Other),
+    ] {
+        let mut checks = 0;
+        let prepared = stream::PreparedUpload::prepare(
+            &[source.0.join("large")],
+            context(Direction::Import),
+            &mut || {
+                checks += 1;
+                assert!(checks <= 7, "cancelled preparation must not retry");
+                if checks >= 7 {
+                    return Err(io::Error::new(kind, "cancelled"));
+                }
+                Ok(())
+            },
+        );
+        let error = prepared.err().unwrap();
+        assert_eq!(error.kind(), expected);
+        assert_eq!(error.to_string(), "cancelled");
+        assert_eq!(checks, 7);
+    }
     assert_eq!(fs::read_dir(&source.0).unwrap().count(), 1);
 }
 #[test]
