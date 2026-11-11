@@ -10,10 +10,10 @@ describes source checks and the acceptance boundary.
 | Entry point | Output and prerequisites |
 | --- | --- |
 | `OBLIVION_ARCH=arm64 bun run build:runtime` | Private controller ISO and evidence in `artifacts/oblivion-runtime-arm64/`; Bun and Docker Buildx |
-| `OBLIVION_ARCH=arm64 bun run build:live` | Outer Live ISO in `artifacts/oblivion-stack-arm64/`, with the matching controller embedded; Bun and Docker Buildx |
-| `build-native.sh` | macOS/Linux desktop bundle paired to a prebuilt controller; native compiler tools and explicit development version/runtime paths |
-| `build-native-windows.ps1` | Windows x64 build inputs or a paired bundle; native MSVC environment and pinned tools |
-| `build-desktop-deb.sh` | Linux desktop `.deb`, including launcher/helper/controller; explicit `OBLIVION_DEB_VERSION` |
+| `OBLIVION_ARCH=arm64 bun run build:live` | Outer Live ISO in `artifacts/oblivion-stack-arm64/`, with the matching controller embedded; explicit `OBLIVION_BUNDLE_CHANNEL` / `OBLIVION_DESKTOP_VERSION`, Bun and Docker Buildx |
+| `build-native.sh` | macOS/Linux desktop bundle paired to a prebuilt controller; native compiler tools and explicit channel, version and runtime paths |
+| `build-native-windows.ps1` | Windows x64 build inputs or a paired bundle; native MSVC environment, pinned tools and explicit channel/version |
+| `build-desktop-deb.sh` | Linux desktop `.deb`, including launcher/helper/controller; explicit `OBLIVION_BUNDLE_CHANNEL` / `OBLIVION_DEB_VERSION` |
 | `bun run build:deb` | Development `.deb` for the trusted controller; explicit `OBLIVION_DEB_VERSION` |
 | `bun run vm:disk -- --help` | Help for preparing a new raw VM disk from a hybrid ISO; does not write physical drives |
 

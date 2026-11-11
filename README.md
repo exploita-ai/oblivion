@@ -301,6 +301,8 @@ bun run check
 OBLIVION_ARCH=arm64 bun run build:runtime
 
 # Build the outer bootable Live OS, including its matching controller
+export OBLIVION_BUNDLE_CHANNEL=dev
+export OBLIVION_DESKTOP_VERSION="1.0.0~dev1.$(git rev-parse --short=12 HEAD)"
 OBLIVION_ARCH=amd64 bun run build:live
 OBLIVION_ARCH=arm64 bun run build:live
 
@@ -311,7 +313,7 @@ OBLIVION_ARCH=amd64 OBLIVION_DEB_VERSION=1.0.0~dev20261104 bun run build:deb
 Controller output is written under `artifacts/oblivion-runtime-ARCH/`; the outer
 Live ISO and inventories go under `artifacts/oblivion-stack-ARCH/`.
 Verify `SHA256SUMS` in the selected output. Checksums detect damaged files; they are not signed
-release provenance. CI builds draft prereleases and does not automatically
+release provenance. Tagged image builds remain drafts and do not automatically
 publish an image as a qualified release.
 
 The [Debian package guide](docs/DEBIAN.md) covers dependencies, installation and

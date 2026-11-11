@@ -63,6 +63,8 @@ With Docker Buildx available:
 OBLIVION_ARCH=arm64 bun run build:runtime
 
 # Outer Live OS with the matching private controller embedded
+export OBLIVION_BUNDLE_CHANNEL=dev
+export OBLIVION_DESKTOP_VERSION="1.0.0~dev1.$(git rev-parse --short=12 HEAD)"
 OBLIVION_ARCH=amd64 bun run build:live
 OBLIVION_ARCH=arm64 bun run build:live
 ```
@@ -179,31 +181,34 @@ Do not reset the main branches, force-push the transition or cherry-pick all
    signing or packaging also require verification of the resulting artifacts;
    passing an RC does not authorize replacing its bytes after qualification.
 
-### Candidate and release implementation still required
+### Candidate builds and remaining release gates
 
-- **Version/channel contract:** desktop builders and the bundle reader currently
-  require `~dev` and `development_only=true`. Implement one current, consistent
-  contract for development, RC and stable output across producers and readers.
-  A `v1.0.0` tag alone cannot produce a supported stable bundle today.
-- **Candidate authorization:** the image workflow currently accepts only `main`
-  or tags already contained in `main`. Permit draft RCs from recorded `dev`
-  commits; keep stable tags restricted to qualified source on `main`. This must
-  work before promoting the candidate.
-- **Checks and acceptance:** release builds currently depend on source
-  authorization, not the source-check result. Require successful checks for the
-  exact candidate SHA and an acceptance record for each published target before
-  publication. Keep automatic publication disabled while this is unfinished.
+- **Version/channel contract:** all desktop producers/readers and the embedded
+  Live bundle use manifest v2 with required `dev`, `rc` or `stable` metadata.
+  The old manifest and `development_only` field are rejected. See the exact
+  [version grammar and local build commands](DESKTOP.md#build).
+- **Candidate authorization:** the three distribution workflows use the same
+  ref-to-version resolver and source gate. RC tags must name source contained
+  in `dev`; stable tags must name source contained in `main`. Tagged builds
+  require a successful push/manual `Oblivion checks` run for the exact source
+  SHA, with nonempty, entirely successful jobs. Branch builds remain `dev`.
+- **Acceptance and publication:** source checks do not qualify an artifact.
+  Record acceptance and distribution evidence for each target and resulting
+  digest before publication. Live tag builds remain drafts; RC drafts are
+  prereleases, stable drafts are not. Automatic publication remains disabled.
 - **Artifact coordination:** reuse `oblivion-desktop.yml` for Mac/Windows,
   `oblivion-desktop-deb.yml` for Linux desktop, and the image workflow for Live.
-  Connect them to the same candidate/version and selected target list. They are
-  not yet an integrated release pipeline. Publish qualified desktop bundles as
+  Run the desktop workflows on the same candidate tag used for Live; they now
+  resolve the same channel/version. A unified selected-target pipeline remains
+  open. Publish qualified desktop bundles as
   well as Live images when that target is selected; the current release workflow
   uploads only ISO/checksum pairs.
 - **Retention and immutability:** candidate bundles, images, manifests, licenses,
   checksums and test evidence must remain available through qualification and
-  release. The current seven-day CI artifact retention is insufficient for that
-  record. Do not allow a rerun using `--clobber` to replace published release
-  assets; a changed candidate gets a new identity.
+  release. Distribution artifacts now have 90-day retention. The Live uploader
+  accepts only drafts and never replaces an existing asset; changed candidates
+  need a new identity. Long-term retention of qualified evidence and desktop
+  release uploads remain to be completed.
 - **Distribution profile:** close the platform's installation, permission and
   provenance requirements. Mac builds currently use ad hoc signing; Developer
   ID, notarization and Gatekeeper remain in the distribution gate described in

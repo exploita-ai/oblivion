@@ -5,14 +5,30 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: oblivion-desktop-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  metadata:
+    name: Resolve and authorize bundle metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      channel: ${{ steps.bundle.outputs.channel }}
+      product_version: ${{ steps.bundle.outputs.product_version }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/bundle-metadata
+        id: bundle
+
   controller:
     name: Build private controller (${{ matrix.arch }})
+    needs: metadata
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
@@ -57,13 +73,13 @@ jobs:
         with:
           name: oblivion-controller-${{ matrix.arch }}-${{ github.sha }}
           path: artifacts/oblivion-controller-transfer-${{ matrix.arch }}/
-          retention-days: 7
+          retention-days: 90
           if-no-files-found: error
           compression-level: 0
 
   macos:
-    name: Build Apple Silicon development bundle
-    needs: controller
+    name: Build Apple Silicon bundle
+    needs: [metadata, controller]
     runs-on: macos-15
     timeout-minutes: 90
     steps:
@@ -88,9 +104,12 @@ jobs:
           cp artifacts/oblivion-controller-transfer-arm64/server.mjs packages/oblivion-tools/dist/server.mjs
       - name: Build, archive and verify the paired bundle
         shell: bash
+        env:
+          OBLIVION_BUNDLE_CHANNEL: ${{ needs.metadata.outputs.channel }}
+          OBLIVION_DESKTOP_VERSION: ${{ needs.metadata.outputs.product_version }}
         run: |
           set -euo pipefail
-          version="1.0.0~dev${GITHUB_RUN_NUMBER}.${GITHUB_SHA:0:12}"
+          version="$OBLIVION_DESKTOP_VERSION"
           name="oblivion-$version-darwin-arm64"
           bundle="$PWD/artifacts/oblivion-desktop-darwin-arm64/$name"
           OBLIVION_DESKTOP_VERSION="$version" \
@@ -124,16 +143,16 @@ jobs:
         with:
           name: oblivion-desktop-darwin-arm64-${{ github.sha }}
           path: artifacts/oblivion-desktop-upload/
-          retention-days: 7
+          retention-days: 90
           if-no-files-found: error
           compression-level: 0
       - name: Record acceptance scope
         run: |
-          echo 'These are paired development artifacts. Apple signing is ad hoc. Installed use, nested VM acceptance and redistribution remain separate gates.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'These are paired artifacts with explicit channel metadata. Apple signing is ad hoc. Installed use, nested VM acceptance and redistribution remain separate gates.' >> "$GITHUB_STEP_SUMMARY"
 
   windows:
-    name: Build Windows x64 development bundle
-    needs: controller
+    name: Build Windows x64 bundle
+    needs: [metadata, controller]
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -158,6 +177,9 @@ jobs:
           }
       - name: Build and archive the paired bundle
         shell: pwsh
+        env:
+          OBLIVION_BUNDLE_CHANNEL: ${{ needs.metadata.outputs.channel }}
+          OBLIVION_DESKTOP_VERSION: ${{ needs.metadata.outputs.product_version }}
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
@@ -166,7 +188,7 @@ jobs:
           if (-not $visualStudio) { throw 'Visual Studio with x64 MSVC tools is required.' }
           & (Join-Path $visualStudio 'Common7/Tools/Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 
-          $version = "1.0.0~dev$env:GITHUB_RUN_NUMBER.$($env:GITHUB_SHA.Substring(0, 12))"
+          $version = $env:OBLIVION_DESKTOP_VERSION
           $name = "oblivion-$version-windows-x86_64"
           $env:OBLIVION_DESKTOP_VERSION = $version
           $env:OBLIVION_DESKTOP_OUTPUT = Join-Path $env:GITHUB_WORKSPACE "artifacts/oblivion-desktop-windows-x86_64/$name"
@@ -211,10 +233,10 @@ jobs:
         with:
           name: oblivion-desktop-windows-x86_64-${{ github.sha }}
           path: artifacts/oblivion-desktop-upload/
-          retention-days: 7
+          retention-days: 90
           if-no-files-found: error
           compression-level: 0
       - name: Record acceptance scope
         shell: pwsh
         run: |
-          'These are paired unsigned development artifacts. Installed setup, nested Hyper-V acceptance and redistribution remain separate gates.' >> $env:GITHUB_STEP_SUMMARY
+          'These are paired unsigned artifacts with explicit channel metadata. Installed setup, nested Hyper-V acceptance and redistribution remain separate gates.' >> $env:GITHUB_STEP_SUMMARY
