@@ -1041,7 +1041,7 @@ fn open_traverse(path: &str) -> Result<File> {
     };
     let mut status = IO_STATUS_BLOCK::default();
     let mut handle = null_mut();
-    if unsafe {
+    let result = unsafe {
         NtOpenFile(
             &mut handle,
             FILE_TRAVERSE,
@@ -1050,8 +1050,13 @@ fn open_traverse(path: &str) -> Result<File> {
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             FILE_DIRECTORY_FILE,
         )
-    } != 0
-    {
+    };
+    if result != 0 {
+        #[cfg(test)]
+        eprintln!(
+            "NtOpenFile traverse failed: status={result:#010x}, depth={}",
+            path.matches('\\').count()
+        );
         return Err(Error("runtime_directory_traverse_unavailable"));
     }
     Ok(unsafe { File::from_raw_handle(handle) })
