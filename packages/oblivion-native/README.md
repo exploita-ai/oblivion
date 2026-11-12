@@ -9,7 +9,7 @@ packages/oblivion-native/build.sh
 packages/oblivion-native/.build/release/oblivion-vm capabilities
 ```
 
-`capabilities` prints a JSON object with `version`, `backend`, `virtualization`, `nested` and `supported`. The build script applies the virtualization entitlement with an ad hoc development signature. Release distribution needs the project's signed and notarized artifacts.
+`capabilities` prints a JSON object with `version`, `backend`, `virtualization`, `nested` and `supported`. The build script applies the virtualization entitlement with an ad hoc signature. The first Mac release uses the [CLI distribution profile](../../docs/MACOS-DISTRIBUTION.md), which requires clean-install acceptance under the host's normal protections. Developer ID signing and notarization are optional for a later distribution profile; the bootstrap does not change macOS security policy.
 
 Only the owning Oblivion supervisor starts a runtime. The private invocation is
 `oblivion-vm run --config CONFIG --lifetime-fd 3`, with descriptor 3 inherited as

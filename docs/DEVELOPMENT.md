@@ -78,7 +78,7 @@ separate. Images contain official agent executables from
 Controller output lives in `artifacts/oblivion-runtime-ARCH/`; outer Live output
 lives in `artifacts/oblivion-stack-ARCH/`. Both retain their ISO, package
 inventories, source hashes, runtime hashes and `SHA256SUMS`. Verify that file before using
-the artifact. No source checksum is a substitute for signed release provenance
+the artifact. No source checksum is a substitute for release provenance
 or the acceptance matrix. A build does not qualify nested virtualization.
 
 ## Native launcher and controller
@@ -141,16 +141,27 @@ qualify current-source images.
 The privacy stack is integrated into the default `dev` branch through
 [PR #1](https://github.com/exploita-ai/oblivion/pull/1), preserving its history;
 [PR #2](https://github.com/exploita-ai/oblivion/pull/2) adds the release-channel
-contract. Candidate tag `v1.0.0-rc.1` names
-`0b65cac9b17d488a7524a7058606a587e3ec7fdf`, whose nine source-check jobs passed in
-[run 43119099699](https://github.com/exploita-ai/oblivion/actions/runs/43119099699).
-The RC1 desktop builds succeeded. Its Live images also built and verified, but
-the release upload exceeded the per-asset size limit. The delivery contract
-below addresses that packaging/upload boundary without changing payload bytes.
-These are build and component results, not installed-artifact or VM acceptance.
+contract, and [PR #3](https://github.com/exploita-ai/oblivion/pull/3) fixes delivery
+of large assets. Candidate tag `v1.0.0-rc.2` names
+`eb6f97a1b2e56ba6494d0f03c35c530666605af3`, whose nine source-check jobs passed in
+[run 43124658498](https://github.com/exploita-ai/oblivion/actions/runs/43124658498).
+All RC2 desktop, Debian and Live build/upload jobs succeeded; the draft
+prerelease contains 18 assets. RC1 remains an earlier immutable candidate with
+incomplete Live delivery. The delivery contract below addresses its upload
+failure and filename normalization without changing the staged payload bytes.
+
+The [RC2 Mac qualification record](qualification/RC2-MACOS.md) identifies the
+downloaded archive and bundle, exact-source CI and observed runtime tests.
+Apple VZ, archive and nested Safe checks, three cold restarts and a backup
+restore use the actual RC2 components with two fresh disposable archives in
+the existing macOS account. The stop/idle-shutdown failure found during testing
+has a source correction, `1d5cbb7`, with a passing local regression; its CI and
+new-bundle acceptance remain pending. RC2 is unchanged. These results do not
+complete clean-account installation, provider, privacy or distribution
+acceptance.
 
 `main` remains at `d0c0958da6e8fdfb78c80a3dc9d6025ec8950cd3`, the published
-`v0.1.0-beta.3` baseline. RC1 exists; no stable 1.0 tag has been created and no
+`v0.1.0-beta.3` baseline. RC2 exists; no stable 1.0 tag has been created and no
 1.0 artifact has been qualified. Repository settings have not been changed:
 branch protections and release-tag rules remain planned. GitHub had no
 protections or rulesets for `dev` and `main` at the initial review.
@@ -225,10 +236,14 @@ Remaining work:
   candidates need a new identity. Long-term retention of qualified evidence
   remains to be completed.
 - **Distribution profile:** close the platform's installation, permission and
-  provenance requirements. Mac builds currently use ad hoc signing; Developer
-  ID, notarization and Gatekeeper remain in the distribution gate described in
-  [Desktop](DESKTOP.md). Keep diagnostic builds distinguishable from the final
-  artifacts.
+  provenance requirements. The 12 November 2026 decision selects a Mac CLI
+  bootstrap (`curl | bash`) for the first release. Developer ID and notarization
+  are optional for a later signed distribution, rather than mandatory gates
+  for that CLI profile. Download, installation and launch must still be tested
+  on a clean account with default macOS protections; the installer must neither
+  disable Gatekeeper nor remove quarantine. Acceptance can depend on host
+  policy. See [Mac distribution](MACOS-DISTRIBUTION.md) and keep diagnostic
+  builds distinguishable from final artifacts.
 
 The ordered functional work and completion criteria are maintained in
 [roadmap section 9](oblivion1.0-roadmap.md#9-lavoro-rimanente).

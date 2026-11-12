@@ -411,9 +411,11 @@ inspect the retained files before retrying from the original bundle's
 Linux hosts must already provide QEMU/KVM and the access required by the
 native backend. Consult the [Linux helper requirements](../packages/oblivion-native-linux/README.md)
 and [macOS helper requirements](../packages/oblivion-native/README.md).
-macOS helper signing is ad hoc for development. Developer ID signing,
-notarization, and Gatekeeper acceptance remain release gates; this build
-does not bypass quarantine or Gatekeeper.
+macOS uses the native CLI installation path with checksummed release bundles.
+Current helper signatures are ad hoc. Developer ID signing and notarization
+are optional distribution improvements; the installer does not remove quarantine
+or change Gatekeeper policy. See the [macOS bootstrap, publication status and
+qualification requirements](MACOS-DISTRIBUTION.md).
 
 ## Bundle evidence and acceptance gates
 
