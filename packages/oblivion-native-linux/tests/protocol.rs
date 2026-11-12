@@ -131,7 +131,20 @@ fn private_unix_endpoint_checks_uid_permissions_and_election() {
     );
     assert!(endpoint.accept().unwrap().is_some());
     endpoint.stop_admission();
-    assert!(UnixStream::connect(&path).is_err());
+    assert!(endpoint.accept().unwrap().is_none());
+    // Parallel subprocess fixtures can retain the CLOEXEC listener between
+    // fork and exec; logical admission above must still stop immediately.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match UnixStream::connect(&path) {
+            Err(error) if error.kind() == ErrorKind::ConnectionRefused => break,
+            Err(error) => panic!("unexpected connection failure after admission stopped: {error}"),
+            Ok(_) => {
+                assert!(Instant::now() < deadline, "listener survived admission shutdown");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
     assert!(Endpoint::bind(&path).is_err());
     drop(endpoint);
     assert!(!path.exists());
