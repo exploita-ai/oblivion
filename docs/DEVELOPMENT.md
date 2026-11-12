@@ -138,19 +138,20 @@ qualify current-source images.
 
 ## Branch integration and release plan
 
-Integration completed on 11 November 2026 at 22:40:50 UTC:
-[PR #1](https://github.com/exploita-ai/oblivion/pull/1) merged `privacy-stack`
-normally into `dev`, preserving its history. The resulting `dev` baseline is
-`8b7e19f759c2bb7ad01778ff507290fecc13a11d`, containing the current 1.0 source.
-Before the merge, all nine jobs in
-[Oblivion checks run 43112852901](https://github.com/exploita-ai/oblivion/actions/runs/43112852901)
-passed on PR head `9acf29b5d8a7b670494bba3e786f48a14a120cc1`. This is source and
-component evidence, not installed-artifact or VM acceptance; the resulting
-`dev` SHA still needs its own successful source checks for candidate selection.
+The privacy stack is integrated into the default `dev` branch through
+[PR #1](https://github.com/exploita-ai/oblivion/pull/1), preserving its history;
+[PR #2](https://github.com/exploita-ai/oblivion/pull/2) adds the release-channel
+contract. Candidate tag `v1.0.0-rc.1` names
+`0b65cac9b17d488a7524a7058606a587e3ec7fdf`, whose nine source-check jobs passed in
+[run 43119099699](https://github.com/exploita-ai/oblivion/actions/runs/43119099699).
+The RC1 desktop builds succeeded. Its Live images also built and verified, but
+the release upload exceeded the per-asset size limit. The delivery contract
+below addresses that packaging/upload boundary without changing payload bytes.
+These are build and component results, not installed-artifact or VM acceptance.
 
 `main` remains at `d0c0958da6e8fdfb78c80a3dc9d6025ec8950cd3`, the published
-`v0.1.0-beta.3` baseline. No RC or stable 1.0 tag has been created and no 1.0
-artifact has been qualified. Repository settings have not been changed:
+`v0.1.0-beta.3` baseline. RC1 exists; no stable 1.0 tag has been created and no
+1.0 artifact has been qualified. Repository settings have not been changed:
 branch protections and release-tag rules remain planned. GitHub had no
 protections or rulesets for `dev` and `main` at the initial review.
 
@@ -167,7 +168,7 @@ force-pushing the transition.
 
 Remaining work:
 
-1. Verify CI on the resulting `dev` SHA. Configure required source checks and
+1. Require successful CI on each selected source SHA. Configure required source checks and
    prevent force-push/deletion of `dev`, `main` and release tags. Require PR
    review for development integration and a controlled release promotion for
    `main`. The promotion mechanism must permit preserving the qualified SHA.
@@ -191,7 +192,9 @@ Remaining work:
 - **Version/channel contract:** all desktop producers/readers and the embedded
   Live bundle use manifest v2 with required `dev`, `rc` or `stable` metadata.
   The old manifest and `development_only` field are rejected. See the exact
-  [version grammar and local build commands](DESKTOP.md#build).
+  [version grammar and local build commands](DESKTOP.md#build). Product versions
+  such as `1.0.0~rc1` remain unchanged inside the payload; delivery filenames
+  replace `~` with `-` without rebuilding or modifying its bytes.
 - **Candidate authorization:** the three distribution workflows use the same
   ref-to-version resolver and source gate. RC tags must name source contained
   in `dev`; stable tags must name source contained in `main`. Tagged builds
@@ -199,21 +202,28 @@ Remaining work:
   SHA, with nonempty, entirely successful jobs. Branch builds remain `dev`.
 - **Acceptance and publication:** source checks do not qualify an artifact.
   Record acceptance and distribution evidence for each target and resulting
-  digest before publication. Live tag builds remain drafts; RC drafts are
+  digest before publication. Tagged builds remain drafts; RC drafts are
   prereleases, stable drafts are not. Automatic publication remains disabled.
 - **Artifact coordination:** reuse `oblivion-desktop.yml` for Mac/Windows,
   `oblivion-desktop-deb.yml` for Linux desktop, and the image workflow for Live.
-  Run the desktop workflows on the same candidate tag used for Live; they now
-  resolve the same channel/version. A unified selected-target pipeline remains
-  open. Publish qualified desktop bundles as
-  well as Live images when that target is selected; the current release workflow
-  uploads only ISO/checksum pairs.
+  Run the Live workflow's draft-preparation job for the candidate tag before
+  uploading desktop results for that tag. All three workflows use the same
+  channel/version and upload to that existing draft through the shared
+  uploader. It verifies draft and prerelease status and refuses existing asset
+  names. A unified pipeline for the selected targets remains open; desktop
+  upload itself is implemented. Publish only qualified targets.
+- **Delivery sizes:** files above 1900 MiB are split into raw `.part01`,
+  `.part02`, … segments. Each delivery includes the full file's `.sha256`;
+  split deliveries also include `.parts.sha256` and `.reassemble.txt` with
+  ordered `cat`/`copy /b` and full-hash verification instructions. Reassembly
+  restores the original bytes. See [download and reassembly](DESKTOP.md#download-and-reassemble-delivery-assets).
 - **Retention and immutability:** candidate bundles, images, manifests, licenses,
   checksums and test evidence must remain available through qualification and
-  release. Distribution artifacts now have 90-day retention. The Live uploader
-  accepts only drafts and never replaces an existing asset; changed candidates
-  need a new identity. Long-term retention of qualified evidence and desktop
-  release uploads remain to be completed.
+  release. Every distribution workflow retains its staged delivery files in CI
+  for 90 days before attempting release upload, so upload failure does not lose
+  the completed build. Uploads never replace assets or publish a draft; changed
+  candidates need a new identity. Long-term retention of qualified evidence
+  remains to be completed.
 - **Distribution profile:** close the platform's installation, permission and
   provenance requirements. Mac builds currently use ad hoc signing; Developer
   ID, notarization and Gatekeeper remain in the distribution gate described in

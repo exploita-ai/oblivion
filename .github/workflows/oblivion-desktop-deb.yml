@@ -31,6 +31,9 @@ jobs:
     needs: metadata
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
+    permissions:
+      contents: write
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -55,7 +58,6 @@ jobs:
           printf 'DESKTOP_DEB_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
           OBLIVION_DEB_VERSION="$version" sh script/oblivion/build-desktop-deb.sh
       - name: Verify the package and checksum
-        id: package
         shell: bash
         env:
           ARCHITECTURE: ${{ matrix.arch }}
@@ -67,18 +69,19 @@ jobs:
           test "$(dpkg-deb -f "$directory/$package" Package)" = oblivion-desktop
           test "$(dpkg-deb -f "$directory/$package" Architecture)" = "$ARCHITECTURE"
           test "$(dpkg-deb -f "$directory/$package" Version)" = "$DESKTOP_DEB_VERSION"
-          printf 'deb=%s\n' "$directory/$package" >> "$GITHUB_OUTPUT"
-          printf 'checksum=%s\n' "$directory/$package.sha256" >> "$GITHUB_OUTPUT"
+          python3 -B script/oblivion/release-assets.py --input "$directory/$package" --output release
       - name: Retain desktop package and checksum
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: oblivion-desktop-deb-${{ matrix.arch }}-${{ github.sha }}
-          path: |
-            ${{ steps.package.outputs.deb }}
-            ${{ steps.package.outputs.checksum }}
+          path: release/
           retention-days: 90
           if-no-files-found: error
           compression-level: 0
+      - uses: ./.github/actions/upload-bundle-release
+        with:
+          channel: ${{ needs.metadata.outputs.channel }}
+          directory: release
       - name: Record acceptance scope
         run: |
           echo 'These are desktop packages for the recorded source and channel. They are not automatically published releases. Checksums do not qualify package installation, Polkit/KVM access, nested guest boot or redistribution.' >> "$GITHUB_STEP_SUMMARY"

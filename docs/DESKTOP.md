@@ -60,8 +60,13 @@ builds the Linux packages. Select the same source tag in each workflow to build
 matching RC or stable versions. Branch builds use the development channel.
 Tagged RC source must be contained in `dev`; stable source must be contained in
 `main`. Both require a successful integration check run for that exact commit,
-with all jobs successful. Artifacts are retained for 90 days; these workflows
-do not publish desktop releases automatically.
+with all jobs successful. Delivery files are retained in CI for 90 days before
+any release upload. For a tagged build, both desktop workflows upload to the
+existing draft prepared by the [Live image workflow](../.github/workflows/oblivion-release.yml)
+for that same tag. Run its draft-preparation job first. The shared uploader
+requires the correct RC/stable prerelease status, refuses published releases
+and existing asset names, and never publishes the draft. A release-upload
+failure therefore leaves the successful build available in CI.
 
 Build on the matching host platform. Install the Bun version pinned in root
 `package.json`, Rust and its cached locked dependencies, and the native compiler
@@ -103,6 +108,12 @@ digits, and the complete version is at most 64 ASCII characters. Local builders
 validate the pair; they do not attest source authorization or qualification.
 `script/oblivion/bundle-version.py resolve` owns the workflow ref-to-version
 mapping. The same contract applies to the bundle embedded in Live.
+
+The internal product version keeps `~`, including `bundle.json`, the launcher
+version and Debian package metadata. Delivery filenames replace `~` with `-`:
+product version `1.0.0~rc1` produces a name such as
+`oblivion-1.0.0-rc1-darwin-arm64.tar`. This renames the outer file only; the
+archive, package or image payload is unchanged.
 
 Output defaults to
 `artifacts/oblivion-desktop-PLATFORM/VERSION`; `OBLIVION_DESKTOP_OUTPUT` can
@@ -163,21 +174,42 @@ python3 -B script/oblivion/native-bundle/host-sources.py \
   packages/oblivion-host --scripts script/oblivion
 ```
 
+## Download and reassemble delivery assets
+
+Delivery files up to 1900 MiB are provided whole with `<file>.sha256`. Larger
+files are split into consecutive raw byte parts named `<file>.part01`,
+`<file>.part02`, and so on. They also include `<file>.sha256` for the complete
+file, `<file>.parts.sha256` for the parts, and `<file>.reassemble.txt` with the
+exact commands for that download. This applies to desktop tar/ZIP archives,
+Debian packages and Live ISOs.
+
+Download all parts and sidecars into one directory. The reconstructed output
+file must not already exist. Follow `.reassemble.txt`: Linux/macOS use `cat`
+with the explicit ordered part list, then verify the complete SHA-256 with
+`sha256sum --check` or `shasum -a 256 --check`. Their instructions also verify
+the part checksums before concatenation. Windows uses `copy /b` in `cmd.exe`
+and verifies the completed file with PowerShell `Get-FileHash`. Parts are not
+separate archives or bootable images. Verify the complete file before
+extracting, installing or writing it to media; then use the normal instructions
+below. Reconstruction preserves the original payload bytes.
+
 ## Install and update on macOS and Linux
 
 Use a bundle produced from trusted source. A checksum identifies contents;
 it is not a publisher signature.
 
-For an Apple Silicon Actions artifact, verify the sidecar next to the tar file,
-then extract the tar with its executable modes intact.
+For an Apple Silicon delivery, first reassemble it if split, verify the sidecar
+next to the tar file, then extract it with its executable modes intact. The
+archive's root directory retains the internal product version. For example:
 
 ```sh
-shasum -a 256 --check oblivion-VERSION-darwin-arm64.tar.sha256
-tar -xf oblivion-VERSION-darwin-arm64.tar
-sh oblivion-VERSION-darwin-arm64/install.sh
+shasum -a 256 --check 'oblivion-1.0.0-rc1-darwin-arm64.tar.sha256'
+tar -xf 'oblivion-1.0.0-rc1-darwin-arm64.tar'
+sh 'oblivion-1.0.0~rc1-darwin-arm64/install.sh'
 ```
 
-Replace `VERSION` with the version in the downloaded filename.
+Use the versions recorded in your download: the delivery name uses `-rc1`,
+while the unchanged directory inside the tar uses `~rc1`.
 
 ```sh
 sh /path/to/bundle/install.sh
@@ -212,12 +244,14 @@ On a compatible Debian host, install the desktop package with APT,
 then run the normal command as your own user.
 
 ```sh
-sudo apt install ./oblivion-desktop_1.0.0~rc1_amd64.deb
+sudo apt install ./oblivion-desktop_1.0.0-rc1_amd64.deb
 oblivion
 # Or go straight to an agent in a new Safe.
 oblivion run codex
 ```
 
+Use the complete, checksum-verified delivery file; reassemble parts first when
+present. Its Debian `Version` remains `1.0.0~rc1` despite the delivery filename.
 APT installs QEMU and the host dependencies and exposes `/usr/bin/oblivion`.
 The first launch verifies the root-owned bundle and prepares a private copy for
 the current user. When the KVM devices require membership in Debian's `kvm`
@@ -250,6 +284,8 @@ OBLIVION_ARCH=amd64 OBLIVION_BUNDLE_CHANNEL=rc OBLIVION_DEB_VERSION=1.0.0~rc1 \
 ```
 
 The package and checksum are written to `artifacts/oblivion-desktop-deb-<arch>/`.
+Local builder filenames retain the product version; CI stages the normalized
+delivery name and, when needed, its parts before retention and release upload.
 The manual [Debian desktop workflow](../.github/workflows/oblivion-desktop-deb.yml)
 builds both architectures with the channel/version selected by the source ref. The package embeds the
 verified controller image and build inventory. Installed APT, Polkit and
@@ -257,11 +293,13 @@ nested-VM acceptance on target hosts remains open.
 
 ## Windows development setup and maintenance
 
-The Windows Actions artifact contains the bundle ZIP and its SHA-256 sidecar.
-Extract the ZIP into a new private folder on a local NTFS volume. The ZIP
+The Windows delivery contains the bundle ZIP and its SHA-256 sidecar, or raw
+parts with reassembly instructions. Reassemble and verify the complete ZIP
+first when split. Extract it into a new private folder on a local NTFS volume. The ZIP
 carries the files and manifest. Windows assigns permissions on extraction.
 The following commands use the built-in Windows PowerShell as your regular
-user. Set `$archive` to the downloaded ZIP beside its checksum file.
+user. Set `$archive` to the complete ZIP beside its checksum file; `VERSION` in
+its delivery filename uses `-rcN`, while the manifest keeps `~rcN`.
 
 ```powershell
 & {

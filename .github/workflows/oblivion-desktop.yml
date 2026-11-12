@@ -82,6 +82,9 @@ jobs:
     needs: [metadata, controller]
     runs-on: macos-15
     timeout-minutes: 90
+    permissions:
+      contents: write
+      actions: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -138,14 +141,19 @@ jobs:
             shasum -a 256 "$name.tar" > "$name.tar.sha256"
             shasum -a 256 --check "$name.tar.sha256"
           )
+          python3 -B script/oblivion/release-assets.py --input "$delivery/$name.tar" --output artifacts/oblivion-desktop-delivery
       - name: Retain the Apple Silicon archive and checksum
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: oblivion-desktop-darwin-arm64-${{ github.sha }}
-          path: artifacts/oblivion-desktop-upload/
+          path: artifacts/oblivion-desktop-delivery/
           retention-days: 90
           if-no-files-found: error
           compression-level: 0
+      - uses: ./.github/actions/upload-bundle-release
+        with:
+          channel: ${{ needs.metadata.outputs.channel }}
+          directory: artifacts/oblivion-desktop-delivery
       - name: Record acceptance scope
         run: |
           echo 'These are paired artifacts with explicit channel metadata. Apple signing is ad hoc. Installed use, nested VM acceptance and redistribution remain separate gates.' >> "$GITHUB_STEP_SUMMARY"
@@ -155,6 +163,9 @@ jobs:
     needs: [metadata, controller]
     runs-on: windows-2022
     timeout-minutes: 90
+    permissions:
+      contents: write
+      actions: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -228,14 +239,19 @@ jobs:
           $pack | python -B - $bundle $archive
           $sha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           [IO.File]::WriteAllText("$archive.sha256", "$sha256  $name.zip`n")
+          python -B script/oblivion/release-assets.py --input $archive --output artifacts/oblivion-desktop-delivery
       - name: Retain the Windows archive and checksum
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: oblivion-desktop-windows-x86_64-${{ github.sha }}
-          path: artifacts/oblivion-desktop-upload/
+          path: artifacts/oblivion-desktop-delivery/
           retention-days: 90
           if-no-files-found: error
           compression-level: 0
+      - uses: ./.github/actions/upload-bundle-release
+        with:
+          channel: ${{ needs.metadata.outputs.channel }}
+          directory: artifacts/oblivion-desktop-delivery
       - name: Record acceptance scope
         shell: pwsh
         run: |

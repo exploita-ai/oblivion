@@ -1,0 +1,31 @@
+name: Upload verified bundle delivery files
+description: Attach retained candidate files to an existing matching draft without replacing assets
+inputs:
+  channel:
+    description: Resolved bundle channel
+    required: true
+  directory:
+    description: Directory staged by release-assets.py and retained in Actions
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Require a matching draft and upload its delivery files
+      if: inputs.channel != 'dev'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CHANNEL: ${{ inputs.channel }}
+        DIRECTORY: ${{ inputs.directory }}
+      run: |
+        set -euo pipefail
+        case "$CHANNEL" in
+          rc) expected='true true' ;;
+          stable) expected='true false' ;;
+          *) exit 1 ;;
+        esac
+        actual=$(gh release view "$GITHUB_REF_NAME" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"')
+        test "$actual" = "$expected" || { echo 'A matching draft release is required.' >&2; exit 1; }
+        files=("$DIRECTORY"/*)
+        for file in "${files[@]}"; do test -f "$file"; done
+        gh release upload "$GITHUB_REF_NAME" "${files[@]}"
