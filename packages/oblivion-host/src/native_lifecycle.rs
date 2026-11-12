@@ -1299,6 +1299,73 @@ mod tests {
     }
 
     #[test]
+    fn explicit_stop_waits_for_owned_backend_after_idle_shutdown_interrupts_lock() {
+        let fixture = Fixture::new(Phase::Ready);
+        let mut owner = Client::new();
+        fixture.owner(owner.identity(), None, false);
+        let listener = UnixListener::bind(&fixture.registry.socket).unwrap();
+        fs::set_permissions(&fixture.registry.socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let (idle_sent, idle_received) = mpsc::channel();
+        let (lock_sent, lock_received) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let remote = thread::spawn(move || {
+            let request = |expected| {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut prefix = [0; 4];
+                stream.read_exact(&mut prefix).unwrap();
+                let mut header = vec![0; u32::from_be_bytes(prefix) as usize];
+                stream.read_exact(&mut header).unwrap();
+                assert_eq!(serde_json::from_slice::<serde_json::Value>(&header).unwrap()["operation"], expected);
+                stream
+            };
+            let mut idle = request("shutdown-idle");
+            idle_sent.send(()).unwrap();
+            // The guest has accepted idle shutdown and closes the explicit
+            // stop's lock request before returning any lock acknowledgement.
+            drop(request("lock"));
+            lock_sent.send(()).unwrap();
+            wait.recv().unwrap();
+            let bytes = br#"{"ok":true,"output":"","error":null}"#;
+            idle.write_all(&(bytes.len() as u32).to_be_bytes()).unwrap();
+            idle.write_all(bytes).unwrap();
+        });
+        let registry = Registry {
+            root: fixture.registry.root.clone(),
+            socket: fixture.registry.socket.clone(),
+            runtime_id: fixture.registry.runtime_id.clone(),
+        };
+        let identity = fixture.generation.supervisor.clone().unwrap();
+        let generation = fixture.generation.id.clone();
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf started > \"$1\"; while [ ! -f \"$2\" ]; do sleep 0.01; done", "backend"])
+            .arg(fixture.root.join("backend-started"))
+            .arg(fixture.root.join("backend-exit"));
+        let supervisor = thread::spawn(move || {
+            supervise_backend(&registry, &identity, &generation, command)
+                .map_err(|error| error.to_string())
+        });
+        fixture.wait_for(|| fixture.root.join("backend-started").exists());
+        owner.close();
+        idle_received.recv_timeout(Duration::from_secs(3)).unwrap();
+        let settings = fixture.settings();
+        let (completed, completion) = mpsc::channel();
+        let stopping = thread::spawn(move || {
+            completed.send(super::super::stop_runtime(&settings).map_err(|error| error.to_string())).unwrap();
+        });
+        lock_received.recv_timeout(Duration::from_secs(3)).unwrap();
+        let early = completion.recv_timeout(Duration::from_millis(150));
+        assert!(fixture.registry.active().is_err());
+        fs::write(fixture.root.join("backend-exit"), b"exit").unwrap();
+        release.send(()).unwrap();
+        remote.join().unwrap();
+        supervisor.join().unwrap().unwrap();
+        stopping.join().unwrap();
+        assert!(matches!(early, Err(mpsc::RecvTimeoutError::Timeout)), "stop returned before owned backend exit: {early:?}");
+        completion.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
+        assert!(stop_disconnected(&fixture.settings(), &fixture.generation.id).unwrap());
+    }
+
+    #[test]
     fn recovery_clears_unknown_generation_only_after_verified_supervisor_exit() {
         let fixture = Fixture::new(Phase::Recovery);
         assert!(fixture.registry.active().is_err());

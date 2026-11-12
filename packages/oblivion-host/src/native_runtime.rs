@@ -6,7 +6,7 @@ mod live;
 mod identity;
 #[path = "native_lifecycle.rs"]
 mod lifecycle;
-use crate::control::{self, Result};
+use crate::control::Result;
 use crate::desktop_bundle::{self, Binding, Bundle};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -2259,31 +2259,35 @@ fn try_lock(file: &PrivateLock) -> Result<bool> {
 
 pub fn stop() -> Result<()> {
     let settings = prepare_connection()?;
+    stop_runtime(&settings)
+}
+
+fn stop_runtime(settings: &Settings) -> Result<()> {
     // A replacement backend must not acquire this socket between the lock and shutdown RPCs.
     let startup = private_lock(&sidecar(&settings.control_socket, ".startup.lock"))?;
     if !try_lock(&startup)? {
         return Err("Runtime startup or shutdown is in progress. Retry after it completes.".into());
     }
-    let generation = lifecycle::begin_stop(&settings)?;
-    if lifecycle::stop_disconnected(&settings, &generation)? {
+    let generation = lifecycle::begin_stop(settings)?;
+    if lifecycle::stop_disconnected(settings, &generation)? {
         return Ok(());
     }
-    let (error, locked) = match control::request("lock", None, &[]) {
-        Ok(_) => match control::request("shutdown-runtime", None, &[]) {
-            Ok(_) => return lifecycle::stopped(&settings, &generation),
-            Err(error) => (error, true),
+    let error = match crate::remote_control::request(&settings.control_socket, "lock", None, &[], None) {
+        Ok(_) => match crate::remote_control::request(&settings.control_socket, "shutdown-runtime", None, &[], None) {
+            Ok(_) => return lifecycle::stopped(settings, &generation),
+            Err(error) => error,
         },
-        Err(error) => (error, false),
+        Err(error) => error,
     };
     let disconnected = error.downcast_ref::<std::io::Error>().is_some_and(|error| {
-        matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused)
-            || locked && error.kind() == std::io::ErrorKind::UnexpectedEof
+        matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::UnexpectedEof)
     });
     if disconnected {
-        // systemd may close the relay before the shutdown acknowledgement is sent.
+        // Idle shutdown can close the relay before even the lock reply. EOF
+        // alone proves nothing; the same owned generation must fully exit.
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            if lifecycle::stop_disconnected(&settings, &generation)? {
+            if lifecycle::stop_disconnected(settings, &generation)? {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(100));
