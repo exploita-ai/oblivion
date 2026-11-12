@@ -259,6 +259,7 @@ jobs:
         run: |
           python3 -B script/oblivion/test-bundle-version.py
           python3 -B script/oblivion/test-release-assets.py
+          python3 -B script/oblivion/test-install.py
       - name: Verify native bundle pairing and distribution inventory
         run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
       - name: Verify pinned official agent notices and installed inventory offline
@@ -502,6 +503,7 @@ jobs:
         run: |
           python3 -B script/oblivion/test-bundle-version.py
           python3 -B script/oblivion/test-release-assets.py
+          python3 -B script/oblivion/test-install.py
       - name: Verify native bundle pairing and distribution inventory
         run: PYTHONDONTWRITEBYTECODE=1 python3 script/oblivion/native-bundle/test-bundle.py
       - name: Verify pinned official agent notices and installed inventory offline
