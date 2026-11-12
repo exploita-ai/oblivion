@@ -39,6 +39,10 @@ previous Live-only product and its modified OpenCode client. They do not contain
 this launcher. The [roadmap](docs/oblivion1.0-roadmap.md) records implementation
 progress, open issues and release acceptance gates.
 
+The first Mac distribution uses a [command-line bootstrap](docs/MACOS-DISTRIBUTION.md)
+for Apple Silicon. Its `curl | bash` installation path is implemented on `dev`;
+the public 1.0 installer and qualified release assets are not published yet.
+
 On a prepared installation, the first new-Safe launch guides you through
 encrypted-storage setup and unlock. `--ephemeral` starts in RAM without opening
 the persistent archive. An existing `--safe` request never creates a replacement
